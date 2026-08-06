@@ -9,7 +9,7 @@
 - `docs/PROJECT_IMPLEMENTATION_PLAN.md`：完整实施计划与验收条件
 - `docs/PROJECT_GAP_ANALYSIS.md`：已完成、缺失和 P0/P1 问题
 
-Spike replay 回测入口已经可运行；测试网执行、持仓退出和账本闭环尚未完成，
+Spike replay 回测入口已经可运行；测试网执行、持仓退出和运行时账本闭环尚未完成，
 不应直接启动正式账户。
 
 ## 目录约定
@@ -19,7 +19,7 @@ Spike replay 回测入口已经可运行；测试网执行、持仓退出和账�
 - `scripts/`：回测、部署和验证脚本
 - `docs/`：架构、策略和运维文档
 - `Dockerfile`：统一应用镜像
-- `compose.yaml`：正式服务编排
+- `compose.yaml`：默认服务编排
 - `compose.test.yaml`：隔离测试编排
 
 ## Docker 工作流
@@ -43,7 +43,8 @@ docker compose -f compose.yaml ps
 历史行情数据不随代码仓迁移，回测时通过 Compose 挂载的 `data/` 目录提供。
 
 当前已修复 testnet URL 隔离、行情订阅刷新和 combined stream 解包，并有回归测试。
-执行恢复、保护退出和启动对账仍未完成，因此不要填入正式账户 API Key。
+执行恢复基础（WAL、未知提交单次恢复和风险阻塞）已经实现；后台持续查单、完整启动对账、
+保护退出和真实测试网闭环仍未完成，因此不要填入正式账户 API Key。
 
 Spike replay 示例（历史 Parquet 数据需预先放入 `data/market/`）：
 

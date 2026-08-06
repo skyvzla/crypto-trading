@@ -35,7 +35,7 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 | 行情客户端 | Binance WebSocket 客户端、aggTrade/Kline 解析器 | P0 已修复，待外部集成验证 |
 | 行情聚合 | aggTrade 到 `Bar1s` 的内存聚合器 | 已实现基础逻辑 |
 | 行情分发 | Redis Pub/Sub、Kline latest Hash | 已通过真实 Redis 服务级集成 |
-| 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新路由已修复，待断线恢复验证 |
+| 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新与断线重连已有自动化验证，待进程重启恢复和外部长时间验证 |
 | 执行客户端 | Binance REST、签名、限速、User Data Stream | 基础客户端已实现 |
 | 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory 审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成 |
 | 风控 | 总持仓价值、币种数量、杠杆上限、未知订单币种阻塞 | 仅最小基础能力 |
@@ -87,9 +87,8 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- `SUBMIT_UNKNOWN` 后台轮询、重启恢复编排和风险门禁接线
-- 启动对账
-- User Stream 回执处理基础调度（线程回调回主事件循环、重连去重、停止取消）
+- `SUBMIT_UNKNOWN` 后台轮询和完整重启恢复编排
+- 完整启动对账
 - 迟到回报处理
 
 ### 3.6 数据质量检查已加强（2026-08-06）
@@ -152,8 +151,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - Spike 部分成交、保护性退出、盈利管理、完整已平仓 PnL
 - subcategory 关闭后的实时轮询、订单关联和撤销接线；策略核心已暴露全局新入场准入开关
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
-- Binance HTTP/WS 重连和 User Stream 对账
-- Compose 全服务健康与 testnet 端点隔离
+- Binance 外部 HTTP/WS 长时间运行和完整 User Stream 对账
+- Binance Futures testnet 真实外部执行；Compose 全服务健康与 testnet 配置隔离已验证
 - 外部 DuckDB 历史数据上的新平台端到端回测
 
 ## 6. 明确不做
@@ -165,7 +164,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 ## 7. 需要用户确认的决策
 
-1. 是否保留现有 PostgreSQL、Redis、FastAPI、Compose 和“执行层为库”的技术方案？
+1. 现有 PostgreSQL、Redis、FastAPI、Compose 和“执行层为库”已作为当前实现基线，是否冻结为 V1 技术方案？
 2. V1 挂单失败或撤销后是否允许本轮重挂？
 3. Campaign 是否采用“逐币种状态对象 + 全局协调器只允许一个交易状态”？
 4. 部分成交、手续费、滑点、同秒事件、未平仓结算采用什么回测口径？
@@ -177,18 +176,18 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 ## 8. 当前代码状态总结（2026-08-07 更新）
 
-| 模块 | 状态 | 可用性 | 备注 |
-|---|---|---|---|
-| 信号检测逻辑 | ✅ 已冻结 | 90% | 参数与实验脚本对齐，消除未来数据泄漏 |
-| 三档挂单 | ✅ 已修复 | 90% | `range(3)` 修复，价格计算正确 |
-| 数据连续性检查 | ✅ 已实现 | 80% | 5s/60s 窗口检查，缺行情层级标记 |
-| 订单幂等 | ✅ 已实现 | 75% | `placed_client_order_ids` 与订单 WAL 已有，需接入真实提交恢复 |
-| 失效撤单 | ✅ 已实现 | 70% | `_cancel_signal_orders()` 正确撤单 |
-| Campaign | ⚠️ 已有全局准入锁和首成交时钟 | 40% | 缺退出、恢复与持久化 |
-| 持仓管理 | ⚠️ D-007 已实现 | 25% | 保护退出、盈利管理和完整已平仓 PnL 待确认 |
-| 环境解耦 | ✅ 依赖最小账户协议 | 70% | 缺 testnet/live 账户适配器 |
-| 账本查询 | ✅ PostgreSQL CRUD/PnL/API | 85% | Binance 订单/成交回报可原子幂等入账；缺运行时回调、Campaign 和仓位接线 |
-| Web V1 | ✅ 账本、PnL、状态、subcategory | 80% | 缺身份权限和浏览器视觉验收 |
+| 模块 | 状态 | 备注 |
+|---|---|---|
+| 信号检测逻辑 | 已冻结 | 参数与实验脚本对齐，消除未来数据泄漏 |
+| 三档挂单 | 已修复 | `range(3)` 修复，价格计算正确 |
+| 数据连续性检查 | 已实现 | 5s/60s 窗口检查及行情层质量门禁已接入 |
+| 订单幂等 | 部分完成 | `placed_client_order_ids`、订单 WAL 和单次启动恢复已有，缺后台恢复编排 |
+| 失效撤单 | replay 已实现 | `_cancel_signal_orders()` 正确撤单；实时撤单竞态待验证 |
+| Campaign | 部分完成 | 已有全局准入锁和首成交时钟，缺退出、恢复与持久化 |
+| 持仓管理 | 部分完成 | D-007 已实现；保护退出、盈利管理和完整已平仓 PnL 待确认 |
+| 环境解耦 | 部分完成 | 已依赖最小账户协议，缺 testnet/live 账户适配器 |
+| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API 和订单/成交原子入账已有，缺运行时回调、Campaign 和仓位接线 |
+| Web V1 | 部分完成 | 账本、PnL、状态、subcategory 已有，缺身份权限和浏览器视觉验收 |
 
 **Phase 0 剩余工作**：
 - 固定案例已完成 4/5（无成交、三档全成交、失效/TTL、冷却）；部分成交待撮合口径确认
@@ -196,5 +195,5 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 **Phase 1 剩余项**：
 - 真实 Binance testnet 流的外部连通和长时间运行验证
-- Redis Pub/Sub 断流检测和告警（Redis/WS readiness 已接入 `/health`）
-- 数据质量状态传递给实时策略
+- 外部告警通道和进程重启后的订阅恢复
+- 待确认的监听租约规则
