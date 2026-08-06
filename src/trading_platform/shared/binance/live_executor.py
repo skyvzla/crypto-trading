@@ -14,6 +14,7 @@ from trading_platform.shared.execution_recovery import (
     Resolution,
     SubmitUnknownResolver,
 )
+from trading_platform.shared.risk import RiskGuard
 
 from .rest_client import BinanceRestClient
 
@@ -28,12 +29,14 @@ class BinanceOrderExecutor:
         *,
         account_id: str,
         now_ms: Callable[[], int] | None = None,
+        risk_guard: RiskGuard | None = None,
     ):
         self.rest_client = rest_client
         self.wal = wal
         self.account_id = account_id
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._resolver = SubmitUnknownResolver(wal, rest_client)
+        self.risk_guard = risk_guard
 
     async def submit(
         self,
@@ -45,11 +48,12 @@ class BinanceOrderExecutor:
         existing = self.wal.recover_latest().get(intent.client_order_id)
         if existing is not None:
             if existing.record_type == "intent":
-                return self.wal.record_submit_unknown(
+                return self._record_unknown(
                     existing,
-                    recorded_at=self._now_ms(),
                     error="recovered_unresolved_intent",
                 )
+            if existing.status == "SUBMIT_UNKNOWN":
+                self._block_unknown(existing)
             return existing
 
         intent_record = self.wal.record_intent(
@@ -68,9 +72,8 @@ class BinanceOrderExecutor:
                 reduce_only=reduce_only,
             )
         except (httpx.TimeoutException, RuntimeError) as exc:
-            return self.wal.record_submit_unknown(
+            return self._record_unknown(
                 intent_record,
-                recorded_at=self._now_ms(),
                 error=f"submit_timeout:{type(exc).__name__}",
             )
 
@@ -81,21 +84,65 @@ class BinanceOrderExecutor:
                 recorded_at=self._now_ms(),
             )
         except ValueError:
-            return self.wal.record_submit_unknown(
+            return self._record_unknown(
                 intent_record,
-                recorded_at=self._now_ms(),
                 error="unknown_submit_response_status",
             )
 
     async def resolve_submit_unknown(self, record: OrderWALRecord) -> Resolution:
         """对一个未知提交执行一次查单；未解析时保持未知。"""
-        return await self._resolver.resolve_once(record, recorded_at=self._now_ms())
+        result = await self._resolver.resolve_once(record, recorded_at=self._now_ms())
+        self._refresh_symbol_risk(record.symbol)
+        return result
 
     async def resolve_recovered_unknowns_once(self) -> dict[str, Resolution]:
         """启动时对 WAL 中的未知提交各查询一次，不执行循环或重下单。"""
         results: dict[str, Resolution] = {}
         for client_order_id, record in self.wal.recover_latest().items():
+            if record.record_type == "intent":
+                record = self._record_unknown(
+                    record,
+                    error="recovered_unresolved_intent",
+                )
             if record.status != "SUBMIT_UNKNOWN":
                 continue
+            self._block_unknown(record)
             results[client_order_id] = await self.resolve_submit_unknown(record)
         return results
+
+    def _record_unknown(
+        self,
+        record: OrderWALRecord,
+        *,
+        error: str,
+    ) -> OrderWALRecord:
+        unknown = self.wal.record_submit_unknown(
+            record,
+            recorded_at=self._now_ms(),
+            error=error,
+        )
+        self._block_unknown(unknown)
+        return unknown
+
+    def _block_unknown(self, record: OrderWALRecord) -> None:
+        if self.risk_guard is not None:
+            self.risk_guard.block_symbol(
+                record.symbol,
+                f"SUBMIT_UNKNOWN:{record.client_order_id}",
+            )
+
+    def _refresh_symbol_risk(self, symbol: str) -> None:
+        if self.risk_guard is None:
+            return
+        remains_unknown = any(
+            record.symbol == symbol
+            and (
+                record.record_type == "intent"
+                or record.status == "SUBMIT_UNKNOWN"
+            )
+            for record in self.wal.recover_latest().values()
+        )
+        if remains_unknown:
+            self.risk_guard.block_symbol(symbol, "SUBMIT_UNKNOWN pending")
+        else:
+            self.risk_guard.unblock_symbol(symbol)

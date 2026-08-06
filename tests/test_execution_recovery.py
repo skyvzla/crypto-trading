@@ -11,6 +11,7 @@ from trading_platform.shared.execution_recovery import (
     OrderWAL,
     SubmitUnknownResolver,
 )
+from trading_platform.shared.risk import RiskConfig, RiskGuard
 
 
 def make_intent(client_order_id: str = "cid-1") -> OrderIntent:
@@ -160,11 +161,13 @@ async def test_live_executor_transport_failure_stays_unknown_and_does_not_resubm
         post_order=AsyncMock(side_effect=submit_error),
         query_order=AsyncMock(),
     )
+    guard = RiskGuard("account-1", RiskConfig())
     executor = BinanceOrderExecutor(
         rest,
         OrderWAL(tmp_path / "orders.jsonl"),
         account_id="account-1",
         now_ms=iter([1000, 1001]).__next__,
+        risk_guard=guard,
     )
 
     first = await executor.submit(make_intent())
@@ -173,6 +176,7 @@ async def test_live_executor_transport_failure_stays_unknown_and_does_not_resubm
     assert first.status == "SUBMIT_UNKNOWN"
     assert second == first
     assert rest.post_order.await_count == 1
+    assert "BTCUSDT" in guard.blocked_symbols
 
 
 @pytest.mark.asyncio
@@ -214,11 +218,13 @@ async def test_live_executor_resolves_each_recovered_unknown_once(tmp_path):
             ]
         ),
     )
+    guard = RiskGuard("account-1", RiskConfig())
     executor = BinanceOrderExecutor(
         rest,
         wal,
         account_id="account-1",
         now_ms=iter([2000, 2001]).__next__,
+        risk_guard=guard,
     )
 
     results = await executor.resolve_recovered_unknowns_once()
@@ -229,3 +235,51 @@ async def test_live_executor_resolves_each_recovered_unknown_once(tmp_path):
     latest = wal.recover_latest()
     assert latest["cid-1"].status == "NEW"
     assert latest["cid-2"].status == "SUBMIT_UNKNOWN"
+    assert "BTCUSDT" in guard.blocked_symbols
+
+
+@pytest.mark.asyncio
+async def test_live_executor_unblocks_symbol_after_last_unknown_is_resolved(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(make_intent(), account_id="account-1", recorded_at=1000)
+    unknown = wal.record_submit_unknown(intent, recorded_at=1001, error="timeout")
+    rest = Mock(
+        post_order=AsyncMock(),
+        query_order=AsyncMock(return_value={"orderId": 42, "status": "NEW"}),
+    )
+    guard = RiskGuard("account-1", RiskConfig())
+    guard.block_symbol("BTCUSDT", "SUBMIT_UNKNOWN pending")
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        now_ms=lambda: 2000,
+        risk_guard=guard,
+    )
+
+    result = await executor.resolve_submit_unknown(unknown)
+
+    assert result.resolved is True
+    assert "BTCUSDT" not in guard.blocked_symbols
+
+
+@pytest.mark.asyncio
+async def test_startup_recovery_converts_bare_intent_to_blocking_unknown(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    wal.record_intent(make_intent(), account_id="account-1", recorded_at=1000)
+    rest = Mock(post_order=AsyncMock(), query_order=AsyncMock(return_value=None))
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        now_ms=iter([2000, 2001]).__next__,
+        risk_guard=guard,
+    )
+
+    result = await executor.resolve_recovered_unknowns_once()
+
+    assert result["cid-1"].reason == "order_not_found"
+    assert wal.recover_latest()["cid-1"].status == "SUBMIT_UNKNOWN"
+    assert "BTCUSDT" in guard.blocked_symbols
+    rest.post_order.assert_not_awaited()
