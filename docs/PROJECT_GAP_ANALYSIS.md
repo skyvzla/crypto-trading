@@ -10,8 +10,8 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
 执行，以及执行回报到账本的事务闭环尚未完成。
 
-当前本地全量测试为 `64 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`69 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `71 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`76 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明 Binance testnet
@@ -101,8 +101,13 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 - 缺口或断线时不触发信号
 
 **仍缺失**（Phase 1 数据层范围）：
-- Redis Pub/Sub 断流检测与告警
-- 数据质量标记传递到策略层
+- Redis Pub/Sub 消费端断流检测与告警
+- 策略实时消费 `/quality` 状态并将其接入开仓门禁
+
+**已补齐**（2026-08-07）：
+- `/health` 和 `/quality` 暴露逐流质量、连接代次和降级原因
+- WebSocket 重连后先进入 `awaiting_data`，aggTrade/Kline 缺口、重复和乱序会粘性降级
+- 降级期间停止继续发布不完整行情；未实现未经确认的 REST 回补或对账
 
 **已修复**（2026-08-06）：新代码中的 `range(1,4)` bug 已改为 `range(3)`，与实验脚本对齐。
 
@@ -124,7 +129,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时；⏳ 恢复与终态 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
 | **执行恢复** | WAL、`SUBMIT_UNKNOWN` 查询确认、启动对账、迟到回报 | Phase 3 |
-| **持仓退出** | 保护单、止损、止盈、900 秒规则、盈利管理、最终结算 | Phase 2/3 |
+| **持仓退出** | ✅ D-007 900 秒非正收益退出；保护单、止损、止盈、盈利管理、最终结算 | Phase 2/3 |
 | **风控** | 单币、账户、保证金、杠杆、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | subcategory、低频发现扫描、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/数据集缺失拒绝/窗口缺口门禁/未平仓 MTM；⏳ 部分成交、滑点、同秒顺序最终口径 | Phase 2 |
@@ -136,15 +141,15 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`64 passed, 5 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`69 passed`
+- `uv run --extra dev pytest -q`：`71 passed, 5 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`76 passed`
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过
 
 尚未验证：
 
-- Spike 部分成交、完整失效场景、持仓退出和已平仓 PnL
+- Spike 部分成交、保护性退出、盈利管理、完整已平仓 PnL
 - subcategory 关闭后策略实时轮询并撤销未成交入场单
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance HTTP/WS 重连和 User Stream 对账
@@ -180,7 +185,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 订单幂等 | ✅ 已实现 | 70% | `placed_client_order_ids` 幂等集合，需 WAL |
 | 失效撤单 | ✅ 已实现 | 70% | `_cancel_signal_orders()` 正确撤单 |
 | Campaign | ⚠️ 已有全局准入锁和首成交时钟 | 40% | 缺退出、恢复与持久化 |
-| 持仓管理 | ❌ 完全缺失 | 0% | Phase 2/3，规则待确认 |
+| 持仓管理 | ⚠️ D-007 已实现 | 25% | 保护退出、盈利管理和完整已平仓 PnL 待确认 |
 | 环境解耦 | ✅ 依赖最小账户协议 | 70% | 缺 testnet/live 账户适配器 |
 | 账本查询 | ✅ PostgreSQL CRUD/PnL/API | 80% | 缺 Campaign 和执行回报接线 |
 | Web V1 | ✅ 账本、PnL、状态、subcategory | 80% | 缺身份权限和浏览器视觉验收 |
