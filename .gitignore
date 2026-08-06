@@ -1,0 +1,17 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.codegraph/
+build/
+dist/
+*.egg-info/
+data/
+logs/
+reports/*
+!reports/active_alt100_final.csv
+!reports/dynamic_final_run1/
+!reports/dynamic_final_run1/**

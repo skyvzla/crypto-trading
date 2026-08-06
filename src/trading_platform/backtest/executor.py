@@ -1,0 +1,149 @@
+"""
+回测执行层
+
+模拟交易所订单接口，无网络调用，立即返回。
+"""
+import logging
+from decimal import Decimal
+from typing import TYPE_CHECKING
+
+from trading_platform.shared.events import Order, OrderIntent
+
+if TYPE_CHECKING:
+    from .engine import BacktestEngine
+
+logger = logging.getLogger(__name__)
+
+
+class BacktestExecutor:
+    """
+    回测执行层
+
+    职责：
+    1. 模拟下单（内存订单簿）
+    2. 模拟撤单（立即生效）
+    3. 无网络调用
+
+    与实盘差异：
+    - 无网络延迟
+    - 订单立即进入 NEW 状态
+    - 撤单立即生效
+    """
+
+    def __init__(self, engine: 'BacktestEngine', account_id: str = 'backtest'):
+        """
+        Args:
+            engine: 回测引擎实例
+            account_id: 账户ID
+        """
+        self.engine = engine
+        self.account_id = account_id
+        self._order_counter = 0
+
+    def place_order(self, order_intent: OrderIntent) -> Order:
+        """
+        下单（立即返回，不调用真实API）
+
+        Args:
+            order_intent: 下单意图
+
+        Returns:
+            订单对象
+        """
+        # 生成订单ID
+        self._order_counter += 1
+        order_id = f"order_{self._order_counter}_{self.engine.virtual_time_ms}"
+
+        # 创建订单对象
+        order = Order(
+            order_id=order_id,
+            client_order_id=order_intent.client_order_id,
+            account_id=self.account_id,
+            symbol=order_intent.symbol,
+            side=order_intent.side,
+            type='LIMIT',
+            price=order_intent.price,
+            quantity=order_intent.quantity,
+            status='NEW',
+            created_at=self.engine.virtual_time_ms,
+            ttl_ms=order_intent.ttl_ms,
+            strategy_id=order_intent.strategy_id,
+            trigger_reason=order_intent.trigger_reason,
+            filled_quantity=Decimal('0')
+        )
+
+        # 加入引擎订单簿
+        self.engine.orders[order.order_id] = order
+        self.engine.order_records.append(order)
+
+        logger.debug(
+            f"Order placed: {order.symbol} {order.side} "
+            f"{order.quantity}@{order.price} ttl={order.ttl_ms}ms"
+        )
+
+        return order
+
+    def cancel_order(self, order_id: str) -> bool:
+        """
+        撤单（立即生效）
+
+        Args:
+            order_id: 订单ID
+
+        Returns:
+            是否撤单成功
+        """
+        order = self.engine.orders.get(order_id)
+
+        if not order:
+            logger.warning(f"Order not found: {order_id}")
+            return False
+
+        if order.status != 'NEW':
+            logger.warning(
+                f"Order {order_id} cannot be cancelled, "
+                f"status={order.status}"
+            )
+            return False
+
+        # 立即生效
+        order.status = 'CANCELLED'
+        order.cancel_time = self.engine.virtual_time_ms
+
+        logger.debug(f"Order cancelled: {order_id}")
+        return True
+
+    def cancel_symbol_orders(self, symbol: str) -> int:
+        """
+        撤销某币种的所有活跃订单
+
+        Args:
+            symbol: 币种符号
+
+        Returns:
+            撤销的订单数量
+        """
+        cancelled_count = 0
+
+        for order in list(self.engine.orders.values()):
+            if order.symbol == symbol and order.status == 'NEW':
+                if self.cancel_order(order.order_id):
+                    cancelled_count += 1
+
+        return cancelled_count
+
+    def cancel_all_orders(self) -> int:
+        """
+        撤销所有活跃订单
+
+        Returns:
+            撤销的订单数量
+        """
+        cancelled_count = 0
+
+        for order in list(self.engine.orders.values()):
+            if order.status == 'NEW':
+                if self.cancel_order(order.order_id):
+                    cancelled_count += 1
+
+        return cancelled_count

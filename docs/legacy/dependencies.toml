@@ -1,0 +1,35 @@
+"""
+pyproject.toml 扩展 - 新增 trading_platform 依赖
+需要手动合并到主 pyproject.toml
+"""
+
+# 新增依赖（添加到 [project.dependencies]）
+dependencies = [
+    # ... 现有依赖 ...
+    "fastapi>=0.100.0",
+    "uvicorn[standard]>=0.23.0",
+    "psycopg[binary]>=3.1.0",
+    "redis>=5.0.0",
+    "httpx>=0.24.0",
+    "websocket-client>=1.6.0",
+    "pandas>=2.0.0",
+    "pyarrow>=12.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+# 可选依赖（用于回测分析）
+[project.optional-dependencies]
+backtest = [
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "scipy>=1.11.0",
+]
+
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.1.0",
+]

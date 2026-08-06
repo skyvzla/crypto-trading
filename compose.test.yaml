@@ -1,0 +1,9 @@
+services:
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    command: ["uv", "run", "pytest", "-q"]
+    environment:
+      PYTHONPATH: /app/src

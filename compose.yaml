@@ -1,0 +1,158 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_DATABASE:-trading_platform}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./src/trading_platform/ledger/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - trading_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    networks:
+      - trading_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  market:
+    build: &app_build
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    command: ["python", "-m", "trading_platform.market"]
+    init: true
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MARKET_HOST: 0.0.0.0
+      MARKET_PORT: 8000
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  ledger:
+    build: *app_build
+    command: ["python", "-m", "trading_platform.ledger"]
+    init: true
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_DATABASE: ${DB_DATABASE:-trading_platform}
+      LEDGER_HOST: 0.0.0.0
+      LEDGER_PORT: 8001
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  strategy_kline:
+    build: *app_build
+    command: ["python", "-m", "trading_platform.strategies.kline.main"]
+    init: true
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_DATABASE: ${DB_DATABASE:-trading_platform}
+      STRATEGY_ACCOUNT_ID: ${STRATEGY_ACCOUNT_ID:-account_a}
+      STRATEGY_MARKET_API_URL: http://market:8000
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      market:
+        condition: service_healthy
+    restart: unless-stopped
+
+  strategy_tick:
+    build: *app_build
+    command: ["python", "-m", "trading_platform.strategies.tick.main"]
+    init: true
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_DATABASE: ${DB_DATABASE:-trading_platform}
+      STRATEGY_ACCOUNT_ID: ${STRATEGY_ACCOUNT_ID_2:-account_b}
+      STRATEGY_MARKET_API_URL: http://market:8000
+      BINANCE_API_KEY: ${BINANCE_API_KEY_2:-}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET_2:-}
+      BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      market:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  trading_net:

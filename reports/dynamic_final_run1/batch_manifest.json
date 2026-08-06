@@ -1,0 +1,710 @@
+{
+  "symbols_file": "reports/active_alt100_final.csv",
+  "start": "2026-07-01T00:00:00+00:00",
+  "end": "2026-08-01T00:00:00+00:00",
+  "workers": 2,
+  "results": [
+    {
+      "symbol": "1000BONKUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/1000BONKUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.21,
+      "output": "reports/dynamic_final_run1/1000BONKUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "1000PEPEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/1000PEPEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.56,
+      "output": "reports/dynamic_final_run1/1000PEPEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "1000RATSUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/1000RATSUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.66,
+      "output": "reports/dynamic_final_run1/1000RATSUSDT_dynamic_trigger_orders.csv rows=5\n\noutput reports/dynamic_final_run1/1000RATSUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'stop': 1})\nwins 0 win_rate 0.0 sum_net_pct -0.6796\n2026-07-31T14:59:06+08:00 all_filled 0.0493175000 stop 0.0496150000 -0.6796%\n"
+    },
+    {
+      "symbol": "1000SHIBUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/1000SHIBUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.25,
+      "output": "reports/dynamic_final_run1/1000SHIBUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "AAVEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/AAVEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.93,
+      "output": "reports/dynamic_final_run1/AAVEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ACEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ACEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.94,
+      "output": "reports/dynamic_final_run1/ACEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ACXUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ACXUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.5,
+      "output": "reports/dynamic_final_run1/ACXUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "AEROUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/AEROUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.7,
+      "output": "reports/dynamic_final_run1/AEROUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "AIOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/AIOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.77,
+      "output": "reports/dynamic_final_run1/AIOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "AKEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/AKEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 24.26,
+      "output": "reports/dynamic_final_run1/AKEUSDT_dynamic_trigger_orders.csv rows=638\n\noutput reports/dynamic_final_run1/AKEUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 34 statuses Counter({'timeout': 19, 'target': 8, 'ambiguous': 4, 'stop': 3})\nwins 27 win_rate 0.7941176470588235 sum_net_pct 200.9792\n2026-07-15T04:51:13+08:00 all_filled 0.0002608268 target 0.0002577304 1.1214%\n2026-07-15T05:41:00+08:00 all_filled 0.0003152000 ambiguous 0.0003152000 -0.0800%\n2026-07-15T05:59:07+08:00 all_filled 0.0003548946 ambiguous 0.0003548946 -0.0800%\n2026-07-15T07:36:50+08:00 partial_filled 0.0005484168 target 0.0005437004 0.7875%\n2026-07-15T08:01:13+08:00 all_filled 0.0006205714 target 0.0006157143 0.7089%\n2026-07-15T08:17:27+08:00 all_filled 0.0006259393 ambiguous 0.0006259393 -0.0800%\n2026-07-15T08:59:37+08:00 all_filled 0.0006753875 ambiguous 0.0006753875 -0.0800%\n2026-07-15T12:38:33+08:00 all_filled 0.0005954625 target 0.0005882375 1.1482%\n2026-07-16T00:11:50+08:00 partial_filled 0.0007493786 timeout 0.0007136000 4.9338%\n2026-07-16T07:46:28+08:00 partial_filled 0.0009285143 timeout 0.0008454000 9.7514%\n2026-07-19T05:15:50+08:00 partial_filled 0.0020549425 timeout 0.0019005000 8.0464%\n2026-07-20T00:08:20+08:00 all_filled 0.0022809304 stop 0.0024088250 -5.3894%\n2026-07-22T03:05:13+08:00 partial_filled 0.0016866179 timeout 0.0015665000 7.5879%\n2026-07-22T03:44:04+08:00 all_filled 0.0016949393 timeout 0.0016115000 5.0977%\n2026-07-22T03:49:32+08:00 partial_filled 0.0017090107 timeout 0.0016375000 4.2871%\n2026-07-22T20:58:15+08:00 partial_filled 0.0019113871 timeout 0.0017535000 8.9241%\n2026-07-22T23:08:10+08:00 partial_filled 0.0018612032 timeout 0.0016986000 9.4928%\n2026-07-23T17:23:01+08:00 all_filled 0.0027323232 target 0.0025331196 7.7840%\n2026-07-25T02:12:35+08:00 partial_filled 0.0030455593 timeout 0.0026162000 16.3316%\n2026-07-25T22:39:53+08:00 partial_filled 0.0033375850 timeout 0.0031451000 6.0402%\n2026-07-27T06:17:38+08:00 all_filled 0.0043347857 stop 0.0044397000 -2.4431%\n2026-07-27T06:36:41+08:00 all_filled 0.0054619429 stop 0.0055518000 -1.6985%\n2026-07-28T00:32:09+08:00 partial_filled 0.0044256881 timeout 0.0040068000 10.3744%\n2026-07-28T15:44:52+08:00 all_filled 0.0048797625 target 0.0041177375 18.4259%\n2026-07-28T19:40:02+08:00 partial_filled 0.0048063050 target 0.0042176150 13.8779%\n2026-07-28T19:59:23+08:00 all_filled 0.0049530554 target 0.0042510161 16.4346%\n2026-07-29T19:45:09+08:00 partial_filled 0.0041097664 timeout 0.0037712000 8.8977%\n2026-07-29T19:52:13+08:00 partial_filled 0.0041917354 timeout 0.0038469000 8.8840%\n2026-07-29T21:14:17+08:00 partial_filled 0.0042143839 timeout 0.0038383000 9.7182%\n2026-07-29T21:21:17+08:00 partial_filled 0.0042202243 timeout 0.0038760000 8.8009%\n2026-07-29T21:30:29+08:00 partial_filled 0.0042378521 timeout 0.0041847000 1.1902%\n2026-07-29T22:34:07+08:00 partial_filled 0.0040564975 timeout 0.0037748000 7.3826%\n2026-07-29T22:37:23+08:00 partial_filled 0.0040524150 timeout 0.0038124000 6.2156%\n2026-07-29T23:07:36+08:00 partial_filled 0.0041416657 timeout 0.0038114000 8.5852%\n"
+    },
+    {
+      "symbol": "ALLOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ALLOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 5.52,
+      "output": "reports/dynamic_final_run1/ALLOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ASTERUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ASTERUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.6,
+      "output": "reports/dynamic_final_run1/ASTERUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "BANKUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BANKUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 12.45,
+      "output": "reports/dynamic_final_run1/BANKUSDT_dynamic_trigger_orders.csv rows=10\n\noutput reports/dynamic_final_run1/BANKUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'stop': 1})\nwins 0 win_rate 0.0 sum_net_pct -3.0561\n2026-07-27T06:26:10+08:00 all_filled 0.5170014286 stop 0.5328600000 -3.0561%\n"
+    },
+    {
+      "symbol": "BASEDUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BASEDUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.32,
+      "output": "reports/dynamic_final_run1/BASEDUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "BEATUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BEATUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 7.81,
+      "output": "reports/dynamic_final_run1/BEATUSDT_dynamic_trigger_orders.csv rows=1\n\noutput reports/dynamic_final_run1/BEATUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 0 statuses Counter()\nwins 0 win_rate 0 sum_net_pct 0\n"
+    },
+    {
+      "symbol": "BICOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BICOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.82,
+      "output": "reports/dynamic_final_run1/BICOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "BIOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BIOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.85,
+      "output": "reports/dynamic_final_run1/BIOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "BIRBUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BIRBUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.3,
+      "output": "reports/dynamic_final_run1/BIRBUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "BLESSUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BLESSUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.61,
+      "output": "reports/dynamic_final_run1/BLESSUSDT_dynamic_trigger_orders.csv rows=1\n\noutput reports/dynamic_final_run1/BLESSUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'stop': 1})\nwins 0 win_rate 0.0 sum_net_pct -3.0336\n2026-07-03T08:14:53+08:00 all_filled 0.0089270536 stop 0.0091987500 -3.0336%\n"
+    },
+    {
+      "symbol": "BSBUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BSBUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.14,
+      "output": "reports/dynamic_final_run1/BSBUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "BTWUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/BTWUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.34,
+      "output": "reports/dynamic_final_run1/BTWUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "CAPUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/CAPUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.23,
+      "output": "reports/dynamic_final_run1/CAPUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "COTIUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/COTIUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.57,
+      "output": "reports/dynamic_final_run1/COTIUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "CRVUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/CRVUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.67,
+      "output": "reports/dynamic_final_run1/CRVUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "CYSUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/CYSUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 0.96,
+      "output": "reports/dynamic_final_run1/CYSUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "DASHUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/DASHUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.52,
+      "output": "reports/dynamic_final_run1/DASHUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "DEXEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/DEXEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 12.93,
+      "output": "reports/dynamic_final_run1/DEXEUSDT_dynamic_trigger_orders.csv rows=5\n\noutput reports/dynamic_final_run1/DEXEUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'target': 1})\nwins 1 win_rate 1.0 sum_net_pct 5.0145\n2026-07-12T13:45:10+08:00 all_filled 49.5978571429 target 47.1935714286 5.0145%\n"
+    },
+    {
+      "symbol": "ENAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ENAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.95,
+      "output": "reports/dynamic_final_run1/ENAUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ENJUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ENJUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.25,
+      "output": "reports/dynamic_final_run1/ENJUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "EPICUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/EPICUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.99,
+      "output": "reports/dynamic_final_run1/EPICUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ESPORTSUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ESPORTSUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 10.74,
+      "output": "reports/dynamic_final_run1/ESPORTSUSDT_dynamic_trigger_orders.csv rows=16\n\noutput reports/dynamic_final_run1/ESPORTSUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 5 statuses Counter({'stop': 2, 'timeout': 2, 'target': 1})\nwins 3 win_rate 0.6 sum_net_pct 3.2821999999999996\n2026-07-16T14:55:54+08:00 all_filled 0.0220775000 stop 0.0232250000 -5.0208%\n2026-07-16T15:07:09+08:00 partial_filled 0.0267371429 target 0.0246114287 8.5571%\n2026-07-16T18:32:07+08:00 all_filled 0.0214616071 stop 0.0221325000 -3.1113%\n2026-07-19T10:00:18+08:00 partial_filled 0.0438504592 timeout 0.0435600000 0.5868%\n2026-07-25T14:14:44+08:00 partial_filled 0.0615228214 timeout 0.0601100000 2.2704%\n"
+    },
+    {
+      "symbol": "ESPUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ESPUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.38,
+      "output": "reports/dynamic_final_run1/ESPUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ETHFIUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ETHFIUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.44,
+      "output": "reports/dynamic_final_run1/ETHFIUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "EULUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/EULUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.48,
+      "output": "reports/dynamic_final_run1/EULUSDT_dynamic_trigger_orders.csv rows=1\n\noutput reports/dynamic_final_run1/EULUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 0 statuses Counter()\nwins 0 win_rate 0 sum_net_pct 0\n"
+    },
+    {
+      "symbol": "EVAAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/EVAAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 9.94,
+      "output": "reports/dynamic_final_run1/EVAAUSDT_dynamic_trigger_orders.csv rows=13\n\noutput reports/dynamic_final_run1/EVAAUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 2 statuses Counter({'target': 1, 'timeout': 1})\nwins 2 win_rate 1.0 sum_net_pct 11.281600000000001\n2026-07-07T16:19:21+08:00 all_filled 2.2983410714 target 2.1276732143 7.9413%\n2026-07-14T13:35:28+08:00 all_filled 1.2577982143 timeout 1.2162000000 3.3403%\n"
+    },
+    {
+      "symbol": "FARTCOINUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/FARTCOINUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.11,
+      "output": "reports/dynamic_final_run1/FARTCOINUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "FETUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/FETUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.65,
+      "output": "reports/dynamic_final_run1/FETUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "FIDAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/FIDAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.24,
+      "output": "reports/dynamic_final_run1/FIDAUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "GALAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/GALAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.02,
+      "output": "reports/dynamic_final_run1/GALAUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "GIGGLEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/GIGGLEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.83,
+      "output": "reports/dynamic_final_run1/GIGGLEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "GWEIUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/GWEIUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.31,
+      "output": "reports/dynamic_final_run1/GWEIUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "HEIUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/HEIUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.07,
+      "output": "reports/dynamic_final_run1/HEIUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "HFTUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/HFTUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.13,
+      "output": "reports/dynamic_final_run1/HFTUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "HOMEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/HOMEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.42,
+      "output": "reports/dynamic_final_run1/HOMEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "HYPERUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/HYPERUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.39,
+      "output": "reports/dynamic_final_run1/HYPERUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/HYPEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 6.72,
+      "output": "reports/dynamic_final_run1/HYPEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ICNTUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ICNTUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.47,
+      "output": "reports/dynamic_final_run1/ICNTUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "IDOLUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/IDOLUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.49,
+      "output": "reports/dynamic_final_run1/IDOLUSDT_dynamic_trigger_orders.csv rows=4\n\noutput reports/dynamic_final_run1/IDOLUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'ambiguous': 1})\nwins 0 win_rate 0.0 sum_net_pct -0.08\n2026-07-23T10:06:35+08:00 all_filled 0.0202853571 ambiguous 0.0202853571 -0.0800%\n"
+    },
+    {
+      "symbol": "JCTUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/JCTUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.76,
+      "output": "reports/dynamic_final_run1/JCTUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "JTOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/JTOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.45,
+      "output": "reports/dynamic_final_run1/JTOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "JUPUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/JUPUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.3,
+      "output": "reports/dynamic_final_run1/JUPUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "KAITOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/KAITOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 8.77,
+      "output": "reports/dynamic_final_run1/KAITOUSDT_dynamic_trigger_orders.csv rows=2\n\noutput reports/dynamic_final_run1/KAITOUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 0 statuses Counter()\nwins 0 win_rate 0 sum_net_pct 0\n"
+    },
+    {
+      "symbol": "KITEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/KITEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.75,
+      "output": "reports/dynamic_final_run1/KITEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "KOMAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/KOMAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.08,
+      "output": "reports/dynamic_final_run1/KOMAUSDT_dynamic_trigger_orders.csv rows=6\n\noutput reports/dynamic_final_run1/KOMAUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'timeout': 1})\nwins 1 win_rate 1.0 sum_net_pct 2.0833\n2026-07-31T07:40:12+08:00 all_filled 0.0239930536 timeout 0.0234850000 2.0833%\n"
+    },
+    {
+      "symbol": "LABUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/LABUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 13.03,
+      "output": "reports/dynamic_final_run1/LABUSDT_dynamic_trigger_orders.csv rows=9\n\noutput reports/dynamic_final_run1/LABUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'timeout': 1})\nwins 1 win_rate 1.0 sum_net_pct 3.7624\n2026-07-04T17:58:29+08:00 all_filled 16.1142678571 timeout 15.5180000000 3.7624%\n"
+    },
+    {
+      "symbol": "LAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/LAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.96,
+      "output": "reports/dynamic_final_run1/LAUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "LDOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/LDOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.58,
+      "output": "reports/dynamic_final_run1/LDOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "LITUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/LITUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 5.07,
+      "output": "reports/dynamic_final_run1/LITUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "MMTUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/MMTUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.32,
+      "output": "reports/dynamic_final_run1/MMTUSDT_dynamic_trigger_orders.csv rows=1\n\noutput reports/dynamic_final_run1/MMTUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'target': 1})\nwins 1 win_rate 1.0 sum_net_pct 12.796\n2026-07-31T10:31:29+08:00 all_filled 0.4571982143 target 0.4050446429 12.7960%\n"
+    },
+    {
+      "symbol": "MYXUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/MYXUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.75,
+      "output": "reports/dynamic_final_run1/MYXUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "NILUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/NILUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.57,
+      "output": "reports/dynamic_final_run1/NILUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "NOMUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/NOMUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.8,
+      "output": "reports/dynamic_final_run1/NOMUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ONDOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ONDOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.44,
+      "output": "reports/dynamic_final_run1/ONDOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ONUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ONUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 6.22,
+      "output": "reports/dynamic_final_run1/ONUSDT_dynamic_trigger_orders.csv rows=4\n\noutput reports/dynamic_final_run1/ONUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 1 statuses Counter({'timeout': 1})\nwins 1 win_rate 1.0 sum_net_pct 6.5196\n2026-07-28T02:23:31+08:00 all_filled 0.2142544643 timeout 0.2009900000 6.5196%\n"
+    },
+    {
+      "symbol": "ORDIUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ORDIUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.7,
+      "output": "reports/dynamic_final_run1/ORDIUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "PENDLEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/PENDLEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.47,
+      "output": "reports/dynamic_final_run1/PENDLEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "PENGUUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/PENGUUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.23,
+      "output": "reports/dynamic_final_run1/PENGUUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "PIEVERSEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/PIEVERSEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.6,
+      "output": "reports/dynamic_final_run1/PIEVERSEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "PIPPINUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/PIPPINUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.9,
+      "output": "reports/dynamic_final_run1/PIPPINUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "PTBUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/PTBUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.02,
+      "output": "reports/dynamic_final_run1/PTBUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "PUMPUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/PUMPUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.14,
+      "output": "reports/dynamic_final_run1/PUMPUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "RENDERUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/RENDERUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.8,
+      "output": "reports/dynamic_final_run1/RENDERUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "REUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/REUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 5.21,
+      "output": "reports/dynamic_final_run1/REUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "RIFUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/RIFUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 5.28,
+      "output": "reports/dynamic_final_run1/RIFUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ROBOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ROBOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.48,
+      "output": "reports/dynamic_final_run1/ROBOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "SAHARAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/SAHARAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.59,
+      "output": "reports/dynamic_final_run1/SAHARAUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "SKRUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/SKRUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.02,
+      "output": "reports/dynamic_final_run1/SKRUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "SKYAIUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/SKYAIUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.23,
+      "output": "reports/dynamic_final_run1/SKYAIUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "SLXUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/SLXUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.7,
+      "output": "reports/dynamic_final_run1/SLXUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "STOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/STOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.36,
+      "output": "reports/dynamic_final_run1/STOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "SYNUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/SYNUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 5.71,
+      "output": "reports/dynamic_final_run1/SYNUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "TAKEUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/TAKEUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.56,
+      "output": "reports/dynamic_final_run1/TAKEUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "TAOUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/TAOUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.41,
+      "output": "reports/dynamic_final_run1/TAOUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "TIAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/TIAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.94,
+      "output": "reports/dynamic_final_run1/TIAUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "TRUMPUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/TRUMPUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.98,
+      "output": "reports/dynamic_final_run1/TRUMPUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "TUTUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/TUTUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 1.17,
+      "output": "reports/dynamic_final_run1/TUTUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "UAIUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/UAIUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.54,
+      "output": "reports/dynamic_final_run1/UAIUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "UBUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/UBUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.79,
+      "output": "reports/dynamic_final_run1/UBUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "USUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/USUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.74,
+      "output": "reports/dynamic_final_run1/USUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "VANRYUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/VANRYUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 8.5,
+      "output": "reports/dynamic_final_run1/VANRYUSDT_dynamic_trigger_orders.csv rows=1\n\noutput reports/dynamic_final_run1/VANRYUSDT_dynamic_trigger_orders_with_pnl.csv\ntrades 0 statuses Counter()\nwins 0 win_rate 0 sum_net_pct 0\n"
+    },
+    {
+      "symbol": "VELVETUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/VELVETUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 5.03,
+      "output": "reports/dynamic_final_run1/VELVETUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "VIRTUALUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/VIRTUALUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.79,
+      "output": "reports/dynamic_final_run1/VIRTUALUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "VVVUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/VVVUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.52,
+      "output": "reports/dynamic_final_run1/VVVUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "WIFUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/WIFUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.14,
+      "output": "reports/dynamic_final_run1/WIFUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "WLDUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/WLDUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.51,
+      "output": "reports/dynamic_final_run1/WLDUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "WLFIUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/WLFIUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 4.11,
+      "output": "reports/dynamic_final_run1/WLFIUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "XMRUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/XMRUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.76,
+      "output": "reports/dynamic_final_run1/XMRUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ZAMAUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ZAMAUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 3.0,
+      "output": "reports/dynamic_final_run1/ZAMAUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ZECUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ZECUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 7.26,
+      "output": "reports/dynamic_final_run1/ZECUSDT_dynamic_trigger_orders.csv rows=0\n"
+    },
+    {
+      "symbol": "ZROUSDT",
+      "status": "ok",
+      "rows_file": "reports/dynamic_final_run1/ZROUSDT_dynamic_trigger_orders_with_pnl.csv",
+      "seconds": 2.27,
+      "output": "reports/dynamic_final_run1/ZROUSDT_dynamic_trigger_orders.csv rows=0\n"
+    }
+  ],
+  "ok": 100,
+  "failed": 0
+}

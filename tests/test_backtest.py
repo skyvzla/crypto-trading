@@ -1,0 +1,344 @@
+"""
+回测引擎单元测试
+
+测试核心功能：
+1. 数据加载
+2. 事件排序
+3. 订单成交判断
+4. 持仓管理
+5. 确定性验证
+"""
+import unittest
+from decimal import Decimal
+from datetime import datetime
+
+from trading_platform.shared.events import Bar1s, Kline, OrderIntent, Fill
+from trading_platform.shared.config import BacktestConfig
+from trading_platform.backtest.engine import BacktestEngine
+from trading_platform.backtest.executor import BacktestExecutor
+
+
+class MockStrategy:
+    """
+    测试用模拟策略
+    """
+
+    def __init__(self):
+        self.bars_received = []
+        self.klines_received = []
+        self.fills_received = []
+
+    def on_bar1s(self, bar: Bar1s) -> list[OrderIntent] | None:
+        self.bars_received.append(bar)
+
+        # 在第一个 Bar 时下单
+        if len(self.bars_received) == 1:
+            return [
+                OrderIntent(
+                    symbol=bar.symbol,
+                    side='SELL',
+                    price=bar.close - Decimal('10'),  # 低于当前价10
+                    quantity=Decimal('0.001'),
+                    client_order_id='test_order_1',
+                    ttl_ms=None,
+                    strategy_id='test',
+                    trigger_reason='test_trigger'
+                )
+            ]
+
+        return None
+
+    def on_kline(self, kline: Kline) -> list[OrderIntent] | None:
+        self.klines_received.append(kline)
+        return None
+
+    def on_fill(self, fill: Fill) -> None:
+        self.fills_received.append(fill)
+
+
+class TestBacktestEngine(unittest.TestCase):
+    """回测引擎测试"""
+
+    def test_event_sorting(self):
+        """测试事件排序"""
+        # 创建测试事件（乱序）
+        events = [
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=1000,
+                available_time=2000,
+                open=Decimal('50000'),
+                high=Decimal('50100'),
+                low=Decimal('49900'),
+                close=Decimal('50050'),
+                volume=Decimal('10'),
+                trade_count=100,
+                vwap=Decimal('50025'),
+                type_priority=1,
+                sequence=0
+            ),
+            Kline(
+                symbol='BTCUSDT',
+                interval='1m',
+                open_time=1000,
+                close_time=60000,
+                available_time=2000,  # 与 Bar 相同时间
+                open=Decimal('50000'),
+                high=Decimal('50200'),
+                low=Decimal('49800'),
+                close=Decimal('50100'),
+                volume=Decimal('100'),
+                type_priority=2,
+                sequence=0
+            ),
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=2000,
+                available_time=3000,
+                open=Decimal('50050'),
+                high=Decimal('50150'),
+                low=Decimal('49950'),
+                close=Decimal('50100'),
+                volume=Decimal('12'),
+                trade_count=120,
+                vwap=Decimal('50075'),
+                type_priority=1,
+                sequence=1
+            ),
+        ]
+
+        # 排序
+        events.sort(
+            key=lambda e: (
+                e.available_time,
+                e.type_priority,
+                e.symbol,
+                e.sequence
+            )
+        )
+
+        # 验证排序结果
+        self.assertEqual(len(events), 3)
+        # 第一个应该是 Bar（type_priority=1）
+        self.assertIsInstance(events[0], Bar1s)
+        self.assertEqual(events[0].available_time, 2000)
+        # 第二个应该是 Kline（type_priority=2）
+        self.assertIsInstance(events[1], Kline)
+        self.assertEqual(events[1].available_time, 2000)
+        # 第三个应该是第二个 Bar
+        self.assertIsInstance(events[2], Bar1s)
+        self.assertEqual(events[2].available_time, 3000)
+
+    def test_order_placement(self):
+        """测试订单下单"""
+        # 创建简单事件
+        events = [
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=1000,
+                available_time=2000,
+                open=Decimal('50000'),
+                high=Decimal('50100'),
+                low=Decimal('49900'),
+                close=Decimal('50000'),
+                volume=Decimal('10'),
+                trade_count=100,
+                vwap=Decimal('50000'),
+                type_priority=1,
+                sequence=0
+            )
+        ]
+
+        config = BacktestConfig()
+        strategy = MockStrategy()
+        engine = BacktestEngine(strategy, events, config)
+
+        # 运行回测
+        result = engine.run()
+
+        # 验证订单已创建
+        self.assertEqual(len(strategy.bars_received), 1)
+        self.assertEqual(len(result.orders), 1)
+
+        order = result.orders[0]
+        self.assertEqual(order.symbol, 'BTCUSDT')
+        self.assertEqual(order.side, 'SELL')
+        self.assertEqual(order.status, 'NEW')  # 未成交
+
+    def test_order_fill_sell(self):
+        """测试做空订单成交"""
+        # 创建事件：第二个 Bar 触及挂单价
+        events = [
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=1000,
+                available_time=2000,
+                open=Decimal('50000'),
+                high=Decimal('50100'),
+                low=Decimal('49900'),
+                close=Decimal('50000'),
+                volume=Decimal('10'),
+                trade_count=100,
+                vwap=Decimal('50000'),
+                type_priority=1,
+                sequence=0
+            ),
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=2000,
+                available_time=3000,
+                open=Decimal('50000'),
+                high=Decimal('50200'),  # 触及挂单价（50000 - 10 = 49990）
+                low=Decimal('49800'),
+                close=Decimal('50100'),
+                volume=Decimal('12'),
+                trade_count=120,
+                vwap=Decimal('50000'),
+                type_priority=1,
+                sequence=1
+            )
+        ]
+
+        config = BacktestConfig()
+        strategy = MockStrategy()
+        engine = BacktestEngine(strategy, events, config)
+
+        # 运行回测
+        result = engine.run()
+
+        # 验证成交
+        self.assertEqual(len(result.fills), 1)
+        fill = result.fills[0]
+        self.assertEqual(fill.symbol, 'BTCUSDT')
+        self.assertEqual(fill.side, 'SELL')
+        self.assertEqual(fill.price, Decimal('49990'))  # 挂单价
+
+        # 验证订单状态
+        order = result.orders[0]
+        self.assertEqual(order.status, 'FILLED')
+        self.assertEqual(order.filled_quantity, Decimal('0.001'))
+
+    def test_ttl_expiration(self):
+        """测试订单 TTL 过期"""
+        # 创建事件，第二个 Bar 时订单已过期
+        events = [
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=1000,
+                available_time=2000,
+                open=Decimal('50000'),
+                high=Decimal('50100'),
+                low=Decimal('49900'),
+                close=Decimal('50000'),
+                volume=Decimal('10'),
+                trade_count=100,
+                vwap=Decimal('50000'),
+                type_priority=1,
+                sequence=0
+            ),
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=62000,  # 60秒后
+                available_time=63000,
+                open=Decimal('50000'),
+                high=Decimal('50200'),
+                low=Decimal('49800'),
+                close=Decimal('50100'),
+                volume=Decimal('12'),
+                trade_count=120,
+                vwap=Decimal('50000'),
+                type_priority=1,
+                sequence=1
+            )
+        ]
+
+        config = BacktestConfig()
+
+        # 使用带 TTL 的策略
+        class TTLStrategy(MockStrategy):
+            def on_bar1s(self, bar: Bar1s) -> list[OrderIntent] | None:
+                self.bars_received.append(bar)
+                if len(self.bars_received) == 1:
+                    return [
+                        OrderIntent(
+                            symbol=bar.symbol,
+                            side='SELL',
+                            price=bar.close - Decimal('10'),
+                            quantity=Decimal('0.001'),
+                            client_order_id='test_order_1',
+                            ttl_ms=60000,  # 60秒 TTL
+                            strategy_id='test',
+                            trigger_reason='test_trigger'
+                        )
+                    ]
+                return None
+
+        strategy = TTLStrategy()
+        engine = BacktestEngine(strategy, events, config)
+
+        # 运行回测
+        result = engine.run()
+
+        # 验证订单已过期，未成交
+        self.assertEqual(len(result.fills), 0)
+        order = result.orders[0]
+        self.assertEqual(order.status, 'EXPIRED')
+
+    def test_position_management(self):
+        """测试持仓管理"""
+        # 创建事件：开仓 -> 平仓
+        events = [
+            # 第一个 Bar：下开仓单
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=1000,
+                available_time=2000,
+                open=Decimal('50000'),
+                high=Decimal('50100'),
+                low=Decimal('49900'),
+                close=Decimal('50000'),
+                volume=Decimal('10'),
+                trade_count=100,
+                vwap=Decimal('50000'),
+                type_priority=1,
+                sequence=0
+            ),
+            # 第二个 Bar：开仓成交
+            Bar1s(
+                symbol='BTCUSDT',
+                timestamp=2000,
+                available_time=3000,
+                open=Decimal('50000'),
+                high=Decimal('50200'),
+                low=Decimal('49800'),
+                close=Decimal('49900'),
+                volume=Decimal('12'),
+                trade_count=120,
+                vwap=Decimal('50000'),
+                type_priority=1,
+                sequence=1
+            ),
+        ]
+
+        config = BacktestConfig()
+        strategy = MockStrategy()
+        engine = BacktestEngine(strategy, events, config)
+
+        # 运行回测
+        result = engine.run()
+
+        # 验证持仓
+        self.assertEqual(len(result.positions), 1)
+        pos = result.positions[0]
+        self.assertEqual(pos.symbol, 'BTCUSDT')
+        self.assertEqual(pos.side, 'SHORT')
+        self.assertEqual(pos.entry_price, Decimal('49990'))
+
+
+def run_tests():
+    """运行所有测试"""
+    unittest.main(argv=[''], verbosity=2, exit=False)
+
+
+if __name__ == '__main__':
+    run_tests()
