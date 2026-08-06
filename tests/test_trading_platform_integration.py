@@ -137,6 +137,27 @@ class TestRiskGuard:
         assert can_open == False
         assert "Max position value" in reason
 
+    def test_rejects_invalid_notional_and_excess_leverage(self):
+        guard = RiskGuard(
+            "account_a",
+            RiskConfig(max_position_value_usdt=Decimal("10000"), max_leverage=3),
+        )
+
+        can_open, reason = guard.check_can_open("BTCUSDT", Decimal("0"))
+        assert can_open is False
+        assert "positive" in reason
+
+        can_open, reason = guard.check_can_open(
+            "BTCUSDT", Decimal("1000"), leverage=4
+        )
+        assert can_open is False
+        assert "Leverage" in reason
+
+        can_open, reason = guard.check_can_open(
+            "BTCUSDT", Decimal("1000"), leverage=3
+        )
+        assert can_open is True
+
     def test_symbol_blocking(self):
         """测试币种阻塞"""
         guard = RiskGuard("account_a", RiskConfig())

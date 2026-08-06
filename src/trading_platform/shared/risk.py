@@ -39,13 +39,27 @@ class RiskGuard:
         self.blocked_symbols: Set[str] = set()
         self.block_reasons: Dict[str, str] = {}
 
-    def check_can_open(self, symbol: str, value_usdt: Decimal) -> tuple[bool, str]:
+    def check_can_open(
+        self,
+        symbol: str,
+        value_usdt: Decimal,
+        leverage: int = 1,
+    ) -> tuple[bool, str]:
         """
         检查是否可以开新仓
 
         Returns:
             (can_open, reason)
         """
+        if value_usdt <= 0:
+            return False, "Position value must be positive"
+
+        if leverage < 1 or leverage > self.config.max_leverage:
+            return False, (
+                f"Leverage out of range: {leverage}, "
+                f"allowed 1..{self.config.max_leverage}"
+            )
+
         # 检查币种是否被阻塞
         if symbol in self.blocked_symbols:
             reason = self.block_reasons.get(symbol, 'unknown')
