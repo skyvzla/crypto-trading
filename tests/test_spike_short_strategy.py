@@ -4,7 +4,10 @@
 import pytest
 from decimal import Decimal
 from trading_platform.shared.events import Bar1s, Kline
-from trading_platform.strategies.spike_short import DynamicSpikeShortStrategy
+from trading_platform.strategies.spike_short import (
+    DynamicSpikeShortStrategy,
+    SpikeSignal,
+)
 
 
 class TestDynamicSpikeShortStrategy:
@@ -12,7 +15,9 @@ class TestDynamicSpikeShortStrategy:
 
     def test_strategy_creation(self):
         """测试策略创建"""
-        strategy = DynamicSpikeShortStrategy("BTCUSDT")
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000")
+        )
         assert strategy.symbol == "BTCUSDT"
         assert len(strategy.bars_1s) == 0
         assert len(strategy.klines_1m) == 0
@@ -20,7 +25,9 @@ class TestDynamicSpikeShortStrategy:
 
     def test_cache_update(self):
         """测试缓存更新"""
-        strategy = DynamicSpikeShortStrategy("BTCUSDT")
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000")
+        )
 
         # 添加60个1s Bar
         for i in range(70):
@@ -38,12 +45,14 @@ class TestDynamicSpikeShortStrategy:
             )
             strategy._update_cache(bar)
 
-        # 应该只保留最近60个
-        assert len(strategy.bars_1s) == 60
+        # 信号计算需要当前 Bar 以及 60 秒前的 Bar
+        assert len(strategy.bars_1s) == 61
 
     def test_kline_update(self):
         """测试K线更新"""
-        strategy = DynamicSpikeShortStrategy("BTCUSDT")
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000")
+        )
 
         # 添加1分钟K线
         kline_1m = Kline(
@@ -79,7 +88,9 @@ class TestDynamicSpikeShortStrategy:
 
     def test_signal_detection_insufficient_data(self):
         """测试数据不足时不产生信号"""
-        strategy = DynamicSpikeShortStrategy("BTCUSDT")
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000")
+        )
 
         # 只有10个Bar，不足60个
         for i in range(10):
@@ -110,7 +121,7 @@ class TestDynamicSpikeShortStrategy:
             vwap=Decimal("31000"),
         )
 
-        signal = strategy._detect_signal(current_bar, 1609459211000)
+        signal = strategy._detect_signal(current_bar)
         assert signal is None  # 数据不足
 
     def test_strategy_parameters(self):
@@ -120,6 +131,43 @@ class TestDynamicSpikeShortStrategy:
         assert DynamicSpikeShortStrategy.RISE_FROM_12H_LOW == Decimal("0.20")
         assert len(DynamicSpikeShortStrategy.TIER_WEIGHTS) == 3
         assert sum(DynamicSpikeShortStrategy.TIER_WEIGHTS) == Decimal("1.0")
+
+    def test_orders_activate_after_one_second_with_full_ttl(self):
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000")
+        )
+        signal = SpikeSignal(
+            signal_time=1_000,
+            trigger_price=Decimal("100"),
+            spike_high=Decimal("120"),
+            origin_price=Decimal("90"),
+            atr=Decimal("10"),
+            tier_prices=[Decimal("108.5"), Decimal("112.5"), Decimal("116.5")],
+            tier_weights=list(strategy.TIER_WEIGHTS),
+            invalid_price=Decimal("155"),
+            active_time=2_000,
+            expire_time=182_000,
+        )
+        strategy.active_signals.append(signal)
+
+        def bar_at(timestamp: int) -> Bar1s:
+            return Bar1s(
+                symbol="BTCUSDT",
+                timestamp=timestamp,
+                available_time=timestamp + 1_000,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+                trade_count=1,
+                vwap=Decimal("100"),
+            )
+
+        assert strategy._manage_signals(bar_at(1_000)) == []
+        intents = strategy._manage_signals(bar_at(2_000))
+        assert len(intents) == 3
+        assert all(intent.ttl_ms == 180_000 for intent in intents)
 
 
 if __name__ == "__main__":

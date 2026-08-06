@@ -9,7 +9,8 @@
 - `docs/PROJECT_IMPLEMENTATION_PLAN.md`：完整实施计划与验收条件
 - `docs/PROJECT_GAP_ANALYSIS.md`：已完成、缺失和 P0/P1 问题
 
-当前尚未形成可验收的策略回测或实盘闭环，不应直接启动正式账户。
+Spike replay 回测入口已经可运行；测试网执行、持仓退出和账本闭环尚未完成，
+不应直接启动正式账户。
 
 ## 目录约定
 
@@ -41,7 +42,17 @@ docker compose -f compose.yaml ps
 开发 API：行情层 `http://localhost:8000`，账本层 `http://localhost:8001`。
 历史行情数据不随代码仓迁移，回测时通过 Compose 挂载的 `data/` 目录提供。
 
-当前 testnet URL 隔离、行情订阅刷新和 combined stream 解包仍有 P0 缺陷。修复并通过集成测试前，不要填入任何真实 API Key。
+当前已修复 testnet URL 隔离、行情订阅刷新和 combined stream 解包，并有回归测试。
+执行恢复、保护退出和启动对账仍未完成，因此不要填入正式账户 API Key。
+
+Spike replay 示例（历史 Parquet 数据需预先放入 `data/market/`）：
+
+```bash
+uv run --extra dev python -m trading_platform.backtest.runner \
+  --strategy spike --symbols BTCUSDT \
+  --start 2026-06-01 --end 2026-06-02 \
+  --data-dir data/market --total-notional 1000
+```
 
 常用停止命令：
 

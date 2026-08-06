@@ -16,7 +16,13 @@ import redis.asyncio as redis
 import uvicorn
 from fastapi import FastAPI
 
-from trading_platform.market.api.routes import SubscriptionManager, create_router
+from trading_platform.market.api.routes import (
+    HealthResponse,
+    SubscriptionManager,
+    SubscriptionRequest,
+    SubscriptionResponse,
+    UnsubscribeResponse,
+)
 from trading_platform.market.feed.aggregator import Bar1sAggregator
 from trading_platform.market.feed.binance_ws import (
     BinanceWebSocketClient,
@@ -26,7 +32,7 @@ from trading_platform.market.feed.binance_ws import (
 )
 from trading_platform.market.store.kline_store import KlineStore
 from trading_platform.market.store.redis_pub import RedisPublisher
-from trading_platform.shared.config import MarketLayerConfig, RedisConfig
+from trading_platform.shared.config import BinanceConfig, MarketLayerConfig
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +66,7 @@ class MarketLayerService:
 
         # WebSocket 客户端
         self.ws_client = BinanceWebSocketClient(
-            ws_base_url="wss://fstream.binance.com",
+            ws_base_url=BinanceConfig().ws_base_url,
             reconnect_delay=5.0,
         )
 
@@ -243,29 +249,21 @@ def create_app(
         lifespan=lifespan,
     )
 
-    # 挂载路由
-    router = create_router(service.subscription_manager)
-    app.include_router(router)
-
-    # 注册订阅变更回调
+    # 注册订阅路由。这里直接注册带 WS 刷新的处理器，避免与基础 router
+    # 注册同一路径后由旧 handler 抢先匹配。
     @app.put("/subscriptions/{consumer_id}")
-    async def update_subscription_with_refresh(consumer_id: str, request: Any):
+    async def update_subscription_with_refresh(
+        consumer_id: str, request: SubscriptionRequest
+    ) -> SubscriptionResponse:
         """扩展订阅接口，在订阅变更后刷新 WebSocket 流"""
-        # 先调用原始处理器
-        from trading_platform.market.api.routes import SubscriptionRequest
-
-        req = SubscriptionRequest(**request.dict() if hasattr(request, 'dict') else request)
-
         result = service.subscription_manager.update_subscription(
             consumer_id=consumer_id,
-            symbols=req.symbols,
-            types=req.types,
+            symbols=request.symbols,
+            types=request.types,
         )
 
         # 刷新 WebSocket 流
         await service.refresh_ws_streams()
-
-        from trading_platform.market.api.routes import SubscriptionResponse
 
         return SubscriptionResponse(
             consumer_id=consumer_id,
@@ -276,24 +274,20 @@ def create_app(
         )
 
     @app.delete("/subscriptions/{consumer_id}")
-    async def remove_subscription_with_refresh(consumer_id: str):
+    async def remove_subscription_with_refresh(consumer_id: str) -> UnsubscribeResponse:
         """扩展取消订阅接口，在订阅变更后刷新 WebSocket 流"""
         service.subscription_manager.remove_consumer(consumer_id)
 
         # 刷新 WebSocket 流
         await service.refresh_ws_streams()
 
-        from trading_platform.market.api.routes import UnsubscribeResponse
-
         return UnsubscribeResponse(consumer_id=consumer_id)
 
     # 更新健康检查，返回运行时长
     @app.get("/health")
-    async def health_check():
+    async def health_check() -> HealthResponse:
         """健康检查"""
         stats = service.subscription_manager.get_stats()
-
-        from trading_platform.market.api.routes import HealthResponse
 
         return HealthResponse(
             instance_epoch=stats["instance_epoch"],

@@ -2,7 +2,7 @@
 配置管理模块
 使用 pydantic-settings 加载环境变量和配置文件
 """
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Literal
 
@@ -41,6 +41,16 @@ class BinanceConfig(BaseSettings):
     base_url: str = 'https://fapi.binance.com'
     ws_base_url: str = 'wss://fstream.binance.com'
     testnet: bool = False
+
+    @model_validator(mode="after")
+    def apply_testnet_endpoints(self) -> "BinanceConfig":
+        """Use Binance Futures testnet endpoints when testnet is enabled."""
+        if self.testnet:
+            if self.base_url == "https://fapi.binance.com":
+                self.base_url = "https://testnet.binancefuture.com"
+            if self.ws_base_url == "wss://fstream.binance.com":
+                self.ws_base_url = "wss://stream.binancefuture.com"
+        return self
 
 
 class MarketLayerConfig(BaseSettings):

@@ -50,6 +50,14 @@ class BacktestExecutor:
         Returns:
             订单对象
         """
+        # clientOrderId 是执行幂等键：同一账户下重复提交时返回已有订单。
+        for existing in self.engine.orders.values():
+            if (
+                existing.account_id == self.account_id
+                and existing.client_order_id == order_intent.client_order_id
+            ):
+                return existing
+
         # 生成订单ID
         self._order_counter += 1
         order_id = f"order_{self._order_counter}_{self.engine.virtual_time_ms}"

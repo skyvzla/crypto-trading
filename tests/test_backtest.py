@@ -59,6 +59,35 @@ class MockStrategy:
 class TestBacktestEngine(unittest.TestCase):
     """回测引擎测试"""
 
+    def test_strategy_is_bound_to_engine(self):
+        """支持回测适配能力的策略会在引擎初始化时完成绑定。"""
+        class BindableStrategy(MockStrategy):
+            def bind_engine(self, engine):
+                self.engine = engine
+
+        strategy = BindableStrategy()
+        engine = BacktestEngine(strategy, [], BacktestConfig())
+
+        self.assertIs(strategy.engine, engine)
+
+    def test_client_order_id_is_idempotent(self):
+        """重复 clientOrderId 不应创建第二张订单。"""
+        engine = BacktestEngine(MockStrategy(), [], BacktestConfig())
+        intent = OrderIntent(
+            symbol='BTCUSDT',
+            side='SELL',
+            price=Decimal('50000'),
+            quantity=Decimal('0.001'),
+            client_order_id='same-client-order-id',
+        )
+
+        first = engine.executor.place_order(intent)
+        second = engine.executor.place_order(intent)
+
+        self.assertIs(first, second)
+        self.assertEqual(len(engine.orders), 1)
+        self.assertEqual(len(engine.order_records), 1)
+
     def test_event_sorting(self):
         """测试事件排序"""
         # 创建测试事件（乱序）

@@ -19,6 +19,12 @@ from trading_platform.shared.events import Bar1s, Kline
 logger = logging.getLogger(__name__)
 
 
+def unwrap_stream_message(data: dict[str, Any]) -> dict[str, Any]:
+    """Return the event payload from either a raw or combined stream message."""
+    payload = data.get("data")
+    return payload if isinstance(payload, dict) else data
+
+
 class BinanceWebSocketClient:
     """
     Binance WebSocket 客户端
@@ -94,7 +100,10 @@ class BinanceWebSocketClient:
 
                 try:
                     data = json.loads(message)
-                    yield data
+                    # Binance combined streams wrap the event in {stream, data}.
+                    # Keep the downstream parsers independent of transport mode.
+                    if isinstance(data, dict):
+                        yield unwrap_stream_message(data)
                 except json.JSONDecodeError as e:
                     logger.warning(f"无法解析 WebSocket 消息: {e}, message: {message[:100]}")
                     continue

@@ -13,6 +13,7 @@ import argparse
 import logging
 import sys
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 from trading_platform.shared.config import BacktestConfig
@@ -123,6 +124,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--total-notional',
+        type=Decimal,
+        default=None,
+        help='Spike 每轮信号总名义金额（使用 --strategy spike 时必填）'
+    )
+
+    parser.add_argument(
         '--log-level',
         type=str,
         default='INFO',
@@ -147,7 +155,12 @@ def parse_date(date_str: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
-def load_strategy(strategy_name: str, account_id: str):
+def load_strategy(
+    strategy_name: str,
+    account_id: str,
+    symbols: list[str] | None = None,
+    total_notional: Decimal | None = None,
+):
     """
     动态加载策略实例
 
@@ -174,10 +187,19 @@ def load_strategy(strategy_name: str, account_id: str):
             return MinimalStrategy(account_id=account_id)
 
         elif strategy_name == 'spike':
-            # 导入 spike 策略（需要用户实现）
-            # 这里使用占位符，实际需要根据项目结构导入
-            raise NotImplementedError(
-                f"策略 '{strategy_name}' 需要在 trading_platform.strategies 中实现"
+            if not symbols:
+                raise ValueError("Spike strategy requires at least one symbol")
+            if total_notional is None or total_notional <= 0:
+                raise ValueError(
+                    "Spike strategy requires a positive --total-notional"
+                )
+
+            from trading_platform.strategies.spike_short import (
+                DynamicSpikeBacktestStrategy,
+            )
+            return DynamicSpikeBacktestStrategy(
+                symbols=symbols,
+                total_notional=total_notional,
             )
         else:
             raise ImportError(f"Unknown strategy: {strategy_name}")
@@ -243,12 +265,17 @@ def main():
     # 2. 加载策略
     logger.info("Step 2/4: 加载策略")
     try:
-        strategy = load_strategy(args.strategy, args.account_id)
+        strategy = load_strategy(
+            args.strategy,
+            args.account_id,
+            symbols=args.symbols,
+            total_notional=args.total_notional,
+        )
     except Exception as e:
         logger.error(f"策略加载失败: {e}")
         logger.info(
-            "\n提示：请在 trading_platform.strategies 中实现策略类，"
-            "并在 runner.py 的 load_strategy() 函数中添加导入逻辑。\n"
+            "\n提示：Spike 策略必须提供至少一个币种和正数 "
+            "--total-notional。\n"
         )
         sys.exit(1)
 
@@ -310,7 +337,8 @@ def main():
 
     # 保存结果
     try:
-        analyzer.save_results(config.output_dir, run_id)
+        output_path = Path(output_dir)
+        analyzer.save_results(str(output_path.parent), output_path.name)
         logger.info(f"结果已保存到: {output_dir}")
     except Exception as e:
         logger.error(f"保存结果失败: {e}", exc_info=True)

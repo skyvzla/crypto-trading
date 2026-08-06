@@ -5,7 +5,7 @@
 - [项目实施计划](PROJECT_IMPLEMENTATION_PLAN.md)：唯一的实施路线、阶段目标、验收条件和风险门禁。
 - [三层架构](ARCHITECTURE.md)：行情数据层、策略执行层、账本控制层的职责与边界。
 - [项目功能盘点](PROJECT_GAP_ANALYSIS.md)：当前源码和测试得到的已完成项、缺失项与 P0/P1 问题。
-- [Spike 策略规格](../SPIKE_STRATEGY_SPEC.md)：策略规则草案；未确认参数不得直接实现。
+- [策略规格](../SPIKE_STRATEGY_SPEC.md)：策略规则草案；未确认参数不得直接实现。
 - [Spike 决策记录](spike_trader/decisions.md)：已确认决策和待确认问题。
 - [阶段总览](spike_trader/phases/README.md)：阶段依赖与退出条件。
 

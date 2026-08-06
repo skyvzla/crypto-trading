@@ -205,7 +205,9 @@ class ResultAnalyzer:
                 'net_pnl': 0.0,
                 'profit_factor': 0.0,
                 'max_drawdown': 0.0,
-                'sharpe_ratio': 0.0
+                'sharpe_ratio': 0.0,
+                'total_profit': 0.0,
+                'total_loss': 0.0,
             }
 
         total_realized = positions_df['realized_pnl'].sum()

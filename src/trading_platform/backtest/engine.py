@@ -94,6 +94,11 @@ class BacktestEngine:
         # 执行层
         self.executor = BacktestExecutor(self, account_id)
 
+        # 允许需要撤单等回测适配能力的策略在构造后获得引擎引用。
+        bind_engine = getattr(self.strategy, 'bind_engine', None)
+        if callable(bind_engine):
+            bind_engine(self)
+
     def run(self) -> BacktestResult:
         """
         主循环：逐事件推送
