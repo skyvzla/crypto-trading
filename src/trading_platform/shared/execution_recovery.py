@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import threading
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -230,3 +231,82 @@ class SubmitUnknownResolver:
             return Resolution(False, None, response=response, reason="invalid_status_transition")
         resolved = self.wal.record_exchange_status(record, response, recorded_at=recorded_at)
         return Resolution(True, status, response=response)
+
+
+class RecoveredUnknownResolver(Protocol):
+    async def resolve_recovered_unknowns_once(self) -> dict[str, Resolution]:
+        ...
+
+
+class SubmitUnknownPollingService:
+    """在有限次数内后台重复解析 WAL 中的未知提交。
+
+    单次解析及风险门禁仍由执行器负责。本服务只编排重试间隔和生命周期；
+    达到尝试上限或解析异常时不会改写 WAL，也不会人工解除风险阻塞。
+    """
+
+    def __init__(
+        self,
+        resolver: RecoveredUnknownResolver,
+        *,
+        poll_interval_seconds: float,
+        max_attempts: int,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ):
+        if poll_interval_seconds < 0:
+            raise ValueError("poll_interval_seconds must be non-negative")
+        if max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        self.resolver = resolver
+        self.poll_interval_seconds = poll_interval_seconds
+        self.max_attempts = max_attempts
+        self._sleep = sleep
+        self._task: asyncio.Task[dict[str, Resolution]] | None = None
+        self.attempts = 0
+        self.last_error: Exception | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self) -> asyncio.Task[dict[str, Resolution]]:
+        """启动一个后台轮询任务；重复调用返回同一个运行中任务。"""
+        if self.is_running:
+            assert self._task is not None
+            return self._task
+        self._task = asyncio.create_task(self.run())
+        return self._task
+
+    async def stop(self) -> None:
+        """取消并等待后台任务结束。"""
+        task = self._task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    async def run(self) -> dict[str, Resolution]:
+        """持续查询，全部已解析、已无未知项或达到上限时返回。"""
+        self.attempts = 0
+        self.last_error = None
+        last_results: dict[str, Resolution] = {}
+        while self.attempts < self.max_attempts:
+            self.attempts += 1
+            try:
+                results = await self.resolver.resolve_recovered_unknowns_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # 不改变 WAL 或风险门禁；下一轮继续以交易所事实尝试解析。
+                self.last_error = exc
+            else:
+                self.last_error = None
+                last_results = results
+                if not results or all(result.resolved for result in results.values()):
+                    return results
+            if self.attempts < self.max_attempts:
+                await self._sleep(self.poll_interval_seconds)
+        return last_results

@@ -1,3 +1,4 @@
+import asyncio
 import json
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
@@ -9,6 +10,7 @@ from trading_platform.shared.binance import BinanceOrderExecutor
 from trading_platform.shared.events import OrderIntent
 from trading_platform.shared.execution_recovery import (
     OrderWAL,
+    SubmitUnknownPollingService,
     SubmitUnknownResolver,
 )
 from trading_platform.shared.risk import RiskConfig, RiskGuard
@@ -283,3 +285,142 @@ async def test_startup_recovery_converts_bare_intent_to_blocking_unknown(tmp_pat
     assert wal.recover_latest()["cid-1"].status == "SUBMIT_UNKNOWN"
     assert "BTCUSDT" in guard.blocked_symbols
     rest.post_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exchange_status", ["NEW", "FILLED"])
+async def test_unknown_poller_retries_until_known_and_unblocks_symbol(
+    tmp_path, exchange_status
+):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(make_intent(), account_id="account-1", recorded_at=1000)
+    wal.record_submit_unknown(intent, recorded_at=1001, error="timeout")
+    rest = Mock(
+        post_order=AsyncMock(),
+        query_order=AsyncMock(
+            side_effect=[None, {"orderId": 42, "status": exchange_status}]
+        ),
+    )
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        now_ms=iter([2000, 2001]).__next__,
+        risk_guard=guard,
+    )
+    poller = SubmitUnknownPollingService(
+        executor, poll_interval_seconds=0, max_attempts=3
+    )
+
+    results = await poller.run()
+
+    assert results["cid-1"].resolved is True
+    assert poller.attempts == 2
+    assert wal.recover_latest()["cid-1"].status == exchange_status
+    assert "BTCUSDT" not in guard.blocked_symbols
+
+
+@pytest.mark.asyncio
+async def test_unknown_poller_attempt_limit_keeps_symbol_blocked(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(make_intent(), account_id="account-1", recorded_at=1000)
+    wal.record_submit_unknown(intent, recorded_at=1001, error="timeout")
+    rest = Mock(post_order=AsyncMock(), query_order=AsyncMock(return_value=None))
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        now_ms=iter([2000, 2001]).__next__,
+        risk_guard=guard,
+    )
+    poller = SubmitUnknownPollingService(
+        executor, poll_interval_seconds=0, max_attempts=2
+    )
+
+    results = await poller.run()
+
+    assert results["cid-1"].reason == "order_not_found"
+    assert poller.attempts == 2
+    assert rest.query_order.await_count == 2
+    assert wal.recover_latest()["cid-1"].status == "SUBMIT_UNKNOWN"
+    assert "BTCUSDT" in guard.blocked_symbols
+
+
+@pytest.mark.asyncio
+async def test_unknown_poller_query_errors_fail_closed(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(make_intent(), account_id="account-1", recorded_at=1000)
+    wal.record_submit_unknown(intent, recorded_at=1001, error="timeout")
+    rest = Mock(
+        post_order=AsyncMock(),
+        query_order=AsyncMock(side_effect=RuntimeError("network down")),
+    )
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        now_ms=iter([2000, 2001]).__next__,
+        risk_guard=guard,
+    )
+    poller = SubmitUnknownPollingService(
+        executor, poll_interval_seconds=0, max_attempts=2
+    )
+
+    results = await poller.run()
+
+    assert results["cid-1"].reason == "query_failed:RuntimeError"
+    assert rest.query_order.await_count == 2
+    assert wal.recover_latest()["cid-1"].status == "SUBMIT_UNKNOWN"
+    assert "BTCUSDT" in guard.blocked_symbols
+
+
+@pytest.mark.asyncio
+async def test_unknown_poller_recovers_from_orchestration_error_fail_closed():
+    resolver = Mock(
+        resolve_recovered_unknowns_once=AsyncMock(
+            side_effect=[RuntimeError("temporary failure"), {}]
+        )
+    )
+    poller = SubmitUnknownPollingService(
+        resolver, poll_interval_seconds=0, max_attempts=2
+    )
+
+    results = await poller.run()
+
+    assert results == {}
+    assert poller.attempts == 2
+    assert poller.last_error is None
+    assert resolver.resolve_recovered_unknowns_once.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unknown_poller_start_is_idempotent_and_stop_cancels_task():
+    entered_sleep = asyncio.Event()
+
+    async def wait_forever(_seconds):
+        entered_sleep.set()
+        await asyncio.Event().wait()
+
+    resolver = Mock(
+        resolve_recovered_unknowns_once=AsyncMock(
+            return_value={"cid-1": Mock(resolved=False)}
+        )
+    )
+    poller = SubmitUnknownPollingService(
+        resolver,
+        poll_interval_seconds=1,
+        max_attempts=2,
+        sleep=wait_forever,
+    )
+
+    first = poller.start()
+    second = poller.start()
+    await entered_sleep.wait()
+    await poller.stop()
+
+    assert first is second
+    assert first.cancelled()
+    assert poller.is_running is False
