@@ -189,3 +189,43 @@ async def test_live_executor_recovered_intent_is_not_resubmitted(tmp_path):
     assert record.status == "SUBMIT_UNKNOWN"
     assert record.payload["error"] == "recovered_unresolved_intent"
     rest.post_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_live_executor_resolves_each_recovered_unknown_once(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    for index, client_order_id in enumerate(("cid-1", "cid-2")):
+        intent = wal.record_intent(
+            make_intent(client_order_id),
+            account_id="account-1",
+            recorded_at=1000 + index * 2,
+        )
+        wal.record_submit_unknown(
+            intent,
+            recorded_at=1001 + index * 2,
+            error="timeout",
+        )
+    rest = Mock(
+        post_order=AsyncMock(),
+        query_order=AsyncMock(
+            side_effect=[
+                {"orderId": 41, "status": "NEW"},
+                None,
+            ]
+        ),
+    )
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        now_ms=iter([2000, 2001]).__next__,
+    )
+
+    results = await executor.resolve_recovered_unknowns_once()
+
+    assert results["cid-1"].resolved is True
+    assert results["cid-2"].reason == "order_not_found"
+    assert rest.query_order.await_count == 2
+    latest = wal.recover_latest()
+    assert latest["cid-1"].status == "NEW"
+    assert latest["cid-2"].status == "SUBMIT_UNKNOWN"

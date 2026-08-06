@@ -90,3 +90,12 @@ class BinanceOrderExecutor:
     async def resolve_submit_unknown(self, record: OrderWALRecord) -> Resolution:
         """对一个未知提交执行一次查单；未解析时保持未知。"""
         return await self._resolver.resolve_once(record, recorded_at=self._now_ms())
+
+    async def resolve_recovered_unknowns_once(self) -> dict[str, Resolution]:
+        """启动时对 WAL 中的未知提交各查询一次，不执行循环或重下单。"""
+        results: dict[str, Resolution] = {}
+        for client_order_id, record in self.wal.recover_latest().items():
+            if record.status != "SUBMIT_UNKNOWN":
+                continue
+            results[client_order_id] = await self.resolve_submit_unknown(record)
+        return results

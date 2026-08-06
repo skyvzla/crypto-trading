@@ -141,7 +141,7 @@ D-007 超时退出及真实 Parquet 输入的三档全成交 CLI 回归。剩余
 交付物：订单 WAL、`SUBMIT_UNKNOWN` 解析、User Stream、启动对账、撤单竞态处理、交易所
 托管保护单、账户级风控和紧急停止。
 
-已完成订单 WAL、Binance REST 可靠提交适配、单次 `SUBMIT_UNKNOWN` 查单状态解析，以及
+已完成订单 WAL、Binance REST 可靠提交适配、启动时逐订单单次 `SUBMIT_UNKNOWN` 查单状态解析，以及
 User Stream 线程安全回报投递、重连去重和停止取消的 mock 验证。剩余后台查单与重启恢复、
 账户级风险门禁、启动对账、迟到回报、保护单及外部测试网验证。
 
