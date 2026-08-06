@@ -64,19 +64,25 @@ class UserDataStream:
         self._running = True
         self._loop = asyncio.get_running_loop()
 
-        # 创建 listenKey
-        self.listen_key = await self.rest_client.create_listen_key()
-        logger.info(f"Created listenKey: {self.listen_key[:10]}...")
+        try:
+            # 创建 listenKey
+            self.listen_key = await self.rest_client.create_listen_key()
+            logger.info(f"Created listenKey: {self.listen_key[:10]}...")
 
-        # 启动 keepalive 任务
-        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+            # 启动 keepalive 任务
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
-        # 启动 WebSocket 连接
-        await self._connect_ws()
+            # 启动 WebSocket 连接
+            await self._connect_ws()
+        except Exception:
+            await self.stop()
+            raise
 
     async def stop(self) -> None:
         """停止 User Data Stream"""
-        if not self._running:
+        if not self._running and not any(
+            (self._keepalive_task, self._ws_thread, self._reconnect_task, self.listen_key)
+        ):
             return
 
         self._running = False
@@ -94,6 +100,14 @@ class UserDataStream:
             self.ws.close()
             self.ws = None
 
+        if self._ws_thread and not self._ws_thread.done():
+            self._ws_thread.cancel()
+            try:
+                await self._ws_thread
+            except asyncio.CancelledError:
+                pass
+        self._ws_thread = None
+
         # 取消 keepalive 任务
         if self._keepalive_task:
             self._keepalive_task.cancel()
@@ -101,6 +115,7 @@ class UserDataStream:
                 await self._keepalive_task
             except asyncio.CancelledError:
                 pass
+            self._keepalive_task = None
 
         # 关闭 listenKey
         if self.listen_key:

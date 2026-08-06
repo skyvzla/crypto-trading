@@ -85,3 +85,21 @@ async def test_close_schedules_only_one_reconnect_and_stop_cancels_it(monkeypatc
     assert first.cancelled()
     on_close(None, 1006, "after stop")
     assert stream._reconnect_task is None
+
+
+@pytest.mark.asyncio
+async def test_start_failure_cleans_listen_key_and_background_tasks():
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    stream = UserDataStream(rest)
+    stream._connect_ws = AsyncMock(side_effect=RuntimeError("ws unavailable"))
+
+    with pytest.raises(RuntimeError, match="ws unavailable"):
+        await stream.start()
+
+    assert stream._running is False
+    assert stream.listen_key is None
+    assert stream._keepalive_task is None
+    rest.close_listen_key.assert_awaited_once_with("listen-key")
