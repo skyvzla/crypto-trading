@@ -37,6 +37,7 @@ def test_imports():
 
         # 账本层
         "trading_platform.ledger.db.models",
+        "trading_platform.ledger.binance_reports",
         "trading_platform.ledger.api.routes",
 
         # 策略层

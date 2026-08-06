@@ -8,7 +8,7 @@
 
 项目已形成“历史数据预热 -> Spike 信号 -> 三档订单 -> 成交/持仓 -> 报告”的
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
-执行，以及执行回报到账本的事务闭环尚未完成。
+执行，以及执行回报、账户仓位到账本的完整运行时闭环尚未完成。
 
 当前本地全量测试为 `92 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
 `97 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
@@ -133,7 +133,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **风控** | 单币、账户、保证金、杠杆、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | subcategory、低频发现扫描、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/数据集缺失拒绝/窗口缺口门禁/未平仓 MTM；⏳ 部分成交、滑点、同秒顺序最终口径 | Phase 2 |
-| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；⏳ 完整 PnL 链路 | Phase 2/4 |
+| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ Binance 订单/成交回报原子入账适配；⏳ 运行时接线和完整 PnL 链路 | Phase 2/4 |
 | **Web** | ✅ subcategory 控制、账本、PnL、运行状态；⏳ 身份与权限 | Phase 4 |
 | **运维** | testnet/live 隔离、监控、告警、凭据、回滚、紧急平仓 | Phase 5-6 |
 
@@ -187,7 +187,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | Campaign | ⚠️ 已有全局准入锁和首成交时钟 | 40% | 缺退出、恢复与持久化 |
 | 持仓管理 | ⚠️ D-007 已实现 | 25% | 保护退出、盈利管理和完整已平仓 PnL 待确认 |
 | 环境解耦 | ✅ 依赖最小账户协议 | 70% | 缺 testnet/live 账户适配器 |
-| 账本查询 | ✅ PostgreSQL CRUD/PnL/API | 80% | 缺 Campaign 和执行回报接线 |
+| 账本查询 | ✅ PostgreSQL CRUD/PnL/API | 85% | Binance 订单/成交回报可原子幂等入账；缺运行时回调、Campaign 和仓位接线 |
 | Web V1 | ✅ 账本、PnL、状态、subcategory | 80% | 缺身份权限和浏览器视觉验收 |
 
 **Phase 0 剩余工作**：

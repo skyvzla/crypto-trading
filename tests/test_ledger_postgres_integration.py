@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 
 from trading_platform.ledger.api.routes import router
+from trading_platform.ledger.binance_reports import BinanceExecutionReportLedger
 from trading_platform.ledger.db.models import (
     LedgerDB,
     Order,
@@ -196,3 +197,52 @@ async def test_unconfirmed_controls_are_not_exposed(client):
     assert (
         await client.get("/api/v1/config/account_a/strategy")
     ).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_binance_execution_report_is_atomically_idempotent(ledger):
+    suffix = uuid4().hex[:10]
+    writer = BinanceExecutionReportLedger(
+        ledger,
+        account_id=f"account-{suffix}",
+        strategy_id="spike_short",
+    )
+    order_data = {
+        "s": "BTCUSDT",
+        "c": f"client-{suffix}",
+        "i": 123456,
+        "S": "SELL",
+        "o": "LIMIT",
+        "X": "FILLED",
+        "x": "TRADE",
+        "ps": "SHORT",
+        "q": "1.5",
+        "p": "100",
+        "sp": "0",
+        "ap": "99.5",
+        "z": "1.5",
+        "l": "1.5",
+        "L": "99.5",
+        "Y": "149.25",
+        "n": "0.03",
+        "N": "USDT",
+        "rp": "0.75",
+        "m": True,
+        "t": 987654,
+        "T": 1780000000000,
+        "O": 1779999999000,
+    }
+
+    first_order, first_trade = await writer.handle(order_data)
+    second_order, second_trade = await writer.handle(order_data)
+
+    assert first_order == second_order
+    assert first_trade and second_trade == 0
+    account_id = f"account-{suffix}"
+    assert await ledger.count_orders(account_id=account_id) == 1
+    assert await ledger.count_trades(account_id=account_id) == 1
+    stored = (await ledger.get_orders(account_id=account_id))[0]
+    assert stored.status == "FILLED"
+    assert stored.filled_quantity == Decimal("1.5")
+    trade = (await ledger.get_trades(account_id=account_id))[0]
+    assert trade.realized_pnl == Decimal("0.75")

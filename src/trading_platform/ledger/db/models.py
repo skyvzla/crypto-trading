@@ -102,6 +102,47 @@ class VersionConflictError(Exception):
 
 
 class LedgerDB:
+    _ORDER_UPSERT = """
+        INSERT INTO orders (
+            account_id, strategy_id, symbol, order_id, client_order_id,
+            side, order_type, position_side, quantity, price, stop_price,
+            status, filled_quantity, avg_fill_price, commission,
+            commission_asset, exchange_created_at
+        ) VALUES (
+            %(account_id)s, %(strategy_id)s, %(symbol)s, %(order_id)s,
+            %(client_order_id)s, %(side)s, %(order_type)s, %(position_side)s,
+            %(quantity)s, %(price)s, %(stop_price)s, %(status)s,
+            %(filled_quantity)s, %(avg_fill_price)s, %(commission)s,
+            %(commission_asset)s, %(exchange_created_at)s
+        )
+        ON CONFLICT (account_id, symbol, order_id) DO UPDATE
+        SET status = EXCLUDED.status,
+            filled_quantity = EXCLUDED.filled_quantity,
+            avg_fill_price = EXCLUDED.avg_fill_price,
+            commission = EXCLUDED.commission,
+            commission_asset = EXCLUDED.commission_asset,
+            updated_at = NOW(),
+            filled_at = CASE
+                WHEN EXCLUDED.status = 'FILLED' THEN NOW()
+                ELSE orders.filled_at
+            END
+        RETURNING id
+    """
+    _TRADE_INSERT = """
+        INSERT INTO trades (
+            account_id, strategy_id, symbol, trade_id, order_id, client_order_id,
+            side, position_side, quantity, price, quote_quantity, commission,
+            commission_asset, realized_pnl, is_maker, exchange_time
+        ) VALUES (
+            %(account_id)s, %(strategy_id)s, %(symbol)s, %(trade_id)s,
+            %(order_id)s, %(client_order_id)s, %(side)s, %(position_side)s,
+            %(quantity)s, %(price)s, %(quote_quantity)s, %(commission)s,
+            %(commission_asset)s, %(realized_pnl)s, %(is_maker)s, %(exchange_time)s
+        )
+        ON CONFLICT (account_id, symbol, trade_id) DO NOTHING
+        RETURNING id
+    """
+
     def __init__(self, pool: AsyncConnectionPool):
         self.pool = pool
 
@@ -117,35 +158,12 @@ class LedgerDB:
         return True
 
     async def insert_order(self, order: Order) -> int:
-        query = """
-            INSERT INTO orders (
-                account_id, strategy_id, symbol, order_id, client_order_id,
-                side, order_type, position_side, quantity, price, stop_price,
-                status, filled_quantity, avg_fill_price, commission,
-                commission_asset, exchange_created_at
-            ) VALUES (
-                %(account_id)s, %(strategy_id)s, %(symbol)s, %(order_id)s,
-                %(client_order_id)s, %(side)s, %(order_type)s, %(position_side)s,
-                %(quantity)s, %(price)s, %(stop_price)s, %(status)s,
-                %(filled_quantity)s, %(avg_fill_price)s, %(commission)s,
-                %(commission_asset)s, %(exchange_created_at)s
-            )
-            ON CONFLICT (account_id, symbol, order_id) DO UPDATE
-            SET status = EXCLUDED.status,
-                filled_quantity = EXCLUDED.filled_quantity,
-                avg_fill_price = EXCLUDED.avg_fill_price,
-                commission = EXCLUDED.commission,
-                commission_asset = EXCLUDED.commission_asset,
-                updated_at = NOW(),
-                filled_at = CASE
-                    WHEN EXCLUDED.status = 'FILLED' THEN NOW()
-                    ELSE orders.filled_at
-                END
-            RETURNING id
-        """
         async with self.pool.connection() as conn:
-            result = await conn.execute(query, order.__dict__)
-            row = await result.fetchone()
+            return await self._insert_order(conn, order)
+
+    async def _insert_order(self, conn: object, order: Order) -> int:
+        result = await conn.execute(self._ORDER_UPSERT, order.__dict__)
+        row = await result.fetchone()
         return row[0] if row else 0
 
     async def update_order_status(
@@ -225,24 +243,24 @@ class LedgerDB:
         return await self._count("orders", **filters)
 
     async def insert_trade(self, trade: Trade) -> int:
-        query = """
-            INSERT INTO trades (
-                account_id, strategy_id, symbol, trade_id, order_id, client_order_id,
-                side, position_side, quantity, price, quote_quantity, commission,
-                commission_asset, realized_pnl, is_maker, exchange_time
-            ) VALUES (
-                %(account_id)s, %(strategy_id)s, %(symbol)s, %(trade_id)s,
-                %(order_id)s, %(client_order_id)s, %(side)s, %(position_side)s,
-                %(quantity)s, %(price)s, %(quote_quantity)s, %(commission)s,
-                %(commission_asset)s, %(realized_pnl)s, %(is_maker)s, %(exchange_time)s
-            )
-            ON CONFLICT (account_id, symbol, trade_id) DO NOTHING
-            RETURNING id
-        """
         async with self.pool.connection() as conn:
-            result = await conn.execute(query, trade.__dict__)
-            row = await result.fetchone()
+            return await self._insert_trade(conn, trade)
+
+    async def _insert_trade(self, conn: object, trade: Trade) -> int:
+        result = await conn.execute(self._TRADE_INSERT, trade.__dict__)
+        row = await result.fetchone()
         return row[0] if row else 0
+
+    async def apply_execution_report(
+        self,
+        order: Order,
+        trade: Trade | None,
+    ) -> tuple[int, int | None]:
+        """在单个事务中写入订单事实和可选成交事实。"""
+        async with self.transaction() as conn:
+            order_id = await self._insert_order(conn, order)
+            trade_id = await self._insert_trade(conn, trade) if trade else None
+        return order_id, trade_id
 
     async def get_trades(
         self,
