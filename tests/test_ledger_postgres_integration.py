@@ -128,8 +128,11 @@ async def test_health_pagination_idempotency_and_pnl(ledger, client):
 
 
 @pytest.mark.asyncio
-async def test_subcategory_optimistic_concurrency_and_audit(client):
+async def test_subcategory_optimistic_concurrency_and_audit(client, ledger):
     name = f"spike-{uuid4().hex[:10]}"
+    # 未配置项必须按关闭处理，避免策略在账本不可知时新增风险。
+    assert (await client.get(f"/api/v1/subcategory-admissions/{name}")).status_code == 404
+    assert await ledger.is_subcategory_enabled(name) is False
     created = await client.put(
         f"/api/v1/subcategory-admissions/{name}",
         json={
@@ -141,6 +144,7 @@ async def test_subcategory_optimistic_concurrency_and_audit(client):
     )
     assert created.status_code == 200
     assert created.json()["version"] == 1
+    assert await ledger.is_subcategory_enabled(name) is True
 
     updated = await client.put(
         f"/api/v1/subcategory-admissions/{name}",
@@ -154,6 +158,11 @@ async def test_subcategory_optimistic_concurrency_and_audit(client):
     assert updated.status_code == 200
     assert updated.json()["version"] == 2
     assert updated.json()["enabled"] is False
+
+    admission = await client.get(f"/api/v1/subcategory-admissions/{name}")
+    assert admission.status_code == 200
+    assert admission.json()["enabled"] is False
+    assert await ledger.is_subcategory_enabled(name) is False
 
     stale = await client.put(
         f"/api/v1/subcategory-admissions/{name}",

@@ -388,6 +388,15 @@ class LedgerDB:
             )
             return await cursor.fetchone()
 
+    async def is_subcategory_enabled(self, subcategory: str) -> bool:
+        """读取策略准入状态；未配置项按关闭处理（fail closed）。
+
+        该方法只提供事实读取，不负责缓存、轮询或撤单。实时执行协调器可以在
+        发起新风险前调用它，避免把 Web 控制状态复制成另一套规则。
+        """
+        admission = await self.get_subcategory_admission(subcategory)
+        return admission is not None and admission.enabled
+
     async def list_subcategory_admissions(
         self, limit: int = 100, offset: int = 0
     ) -> tuple[list[SubcategoryAdmission], int]:
