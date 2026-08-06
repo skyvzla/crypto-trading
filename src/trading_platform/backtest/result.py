@@ -177,20 +177,30 @@ class ResultAnalyzer:
         if positions_df.empty:
             return {
                 'total': 0,
+                'open': 0,
+                'closed': 0,
                 'profitable': 0,
                 'loss': 0,
                 'win_rate': 0.0
             }
 
         total = len(positions_df)
-        profitable = len(positions_df[positions_df['realized_pnl'] > 0])
-        loss = len(positions_df[positions_df['realized_pnl'] < 0])
+        closed_positions = positions_df[positions_df['status'] == 'CLOSED'].copy()
+        closed_positions['net_position_pnl'] = (
+            closed_positions['realized_pnl']
+            - closed_positions['total_commission']
+        )
+        closed = len(closed_positions)
+        profitable = len(closed_positions[closed_positions['net_position_pnl'] > 0])
+        loss = len(closed_positions[closed_positions['net_position_pnl'] < 0])
 
         return {
             'total': total,
+            'open': total - closed,
+            'closed': closed,
             'profitable': profitable,
             'loss': loss,
-            'win_rate': profitable / total if total > 0 else 0.0,
+            'win_rate': profitable / closed if closed > 0 else 0.0,
             'by_symbol': positions_df.groupby('symbol').size().to_dict()
         }
 
@@ -201,6 +211,7 @@ class ResultAnalyzer:
         if positions_df.empty:
             return {
                 'total_realized': 0.0,
+                'total_unrealized': 0.0,
                 'total_commission': 0.0,
                 'net_pnl': 0.0,
                 'profit_factor': 0.0,
@@ -211,28 +222,40 @@ class ResultAnalyzer:
             }
 
         total_realized = positions_df['realized_pnl'].sum()
+        total_unrealized = positions_df['unrealized_pnl'].sum()
         total_commission = positions_df['total_commission'].sum()
-        net_pnl = total_realized
+        net_pnl = total_realized + total_unrealized - total_commission
+
+        closed_positions = positions_df[positions_df['status'] == 'CLOSED'].copy()
+        closed_positions['net_position_pnl'] = (
+            closed_positions['realized_pnl']
+            - closed_positions['total_commission']
+        )
 
         # Profit Factor: 盈利交易总额 / 亏损交易总额
-        profitable_positions = positions_df[positions_df['realized_pnl'] > 0]
-        loss_positions = positions_df[positions_df['realized_pnl'] < 0]
+        profitable_positions = closed_positions[
+            closed_positions['net_position_pnl'] > 0
+        ]
+        loss_positions = closed_positions[
+            closed_positions['net_position_pnl'] < 0
+        ]
 
-        total_profit = profitable_positions['realized_pnl'].sum()
-        total_loss = abs(loss_positions['realized_pnl'].sum())
+        total_profit = profitable_positions['net_position_pnl'].sum()
+        total_loss = abs(loss_positions['net_position_pnl'].sum())
 
         profit_factor = total_profit / total_loss if total_loss > 0 else (
             float('inf') if total_profit > 0 else 0.0
         )
 
         # 最大回撤
-        max_drawdown = self._calculate_max_drawdown(positions_df)
+        max_drawdown = self._calculate_max_drawdown(closed_positions)
 
         # Sharpe Ratio
-        sharpe_ratio = self._calculate_sharpe_ratio(positions_df)
+        sharpe_ratio = self._calculate_sharpe_ratio(closed_positions)
 
         return {
             'total_realized': float(total_realized),
+            'total_unrealized': float(total_unrealized),
             'total_commission': float(total_commission),
             'net_pnl': float(net_pnl),
             'profit_factor': float(profit_factor) if profit_factor != float('inf') else 999.0,
@@ -259,7 +282,12 @@ class ResultAnalyzer:
         positions_df = positions_df.sort_values('closed_at')
 
         # 计算累计盈亏
-        cumulative_pnl = positions_df['realized_pnl'].cumsum()
+        pnl_column = (
+            'net_position_pnl'
+            if 'net_position_pnl' in positions_df.columns
+            else 'realized_pnl'
+        )
+        cumulative_pnl = positions_df[pnl_column].cumsum()
 
         # 计算回撤
         running_max = cumulative_pnl.cummax()
@@ -280,7 +308,12 @@ class ResultAnalyzer:
         if positions_df.empty or len(positions_df) < 2:
             return 0.0
 
-        returns = positions_df['realized_pnl'].values
+        pnl_column = (
+            'net_position_pnl'
+            if 'net_position_pnl' in positions_df.columns
+            else 'realized_pnl'
+        )
+        returns = positions_df[pnl_column].values
 
         mean_return = np.mean(returns)
         std_return = np.std(returns, ddof=1)

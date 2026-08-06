@@ -16,6 +16,7 @@ from trading_platform.shared.events import Bar1s, Kline, OrderIntent, Fill
 from trading_platform.shared.config import BacktestConfig
 from trading_platform.backtest.engine import BacktestEngine
 from trading_platform.backtest.executor import BacktestExecutor
+from trading_platform.backtest.result import ResultAnalyzer
 
 
 class MockStrategy:
@@ -87,6 +88,53 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(len(engine.orders), 1)
         self.assertEqual(len(engine.order_records), 1)
+
+    def test_warmup_events_update_strategy_without_creating_orders(self):
+        class WarmupAwareStrategy(MockStrategy):
+            def __init__(self):
+                super().__init__()
+                self.enabled = True
+
+            def set_trading_enabled(self, enabled):
+                self.enabled = enabled
+
+            def on_bar1s(self, bar):
+                self.bars_received.append(bar)
+                if not self.enabled:
+                    return []
+                return [
+                    OrderIntent(
+                        symbol=bar.symbol,
+                        side='SELL',
+                        price=bar.close + Decimal('10'),
+                        quantity=Decimal('1'),
+                        client_order_id=f'order-{bar.timestamp}',
+                    )
+                ]
+
+        events = [
+            Bar1s(
+                symbol='BTCUSDT', timestamp=1_000, available_time=2_000,
+                open=Decimal('100'), high=Decimal('100'), low=Decimal('100'),
+                close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+                vwap=Decimal('100'),
+            ),
+            Bar1s(
+                symbol='BTCUSDT', timestamp=2_000, available_time=3_000,
+                open=Decimal('100'), high=Decimal('100'), low=Decimal('100'),
+                close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+                vwap=Decimal('100'),
+            ),
+        ]
+        strategy = WarmupAwareStrategy()
+        config = BacktestConfig(trading_start_ms=3_000)
+
+        result = BacktestEngine(strategy, events, config).run()
+
+        self.assertEqual(len(strategy.bars_received), 2)
+        self.assertEqual(len(result.orders), 1)
+        self.assertEqual(result.orders[0].client_order_id, 'order-2000')
+        self.assertEqual(result.virtual_time_start, 3_000)
 
     def test_event_sorting(self):
         """测试事件排序"""
@@ -246,6 +294,17 @@ class TestBacktestEngine(unittest.TestCase):
         order = result.orders[0]
         self.assertEqual(order.status, 'FILLED')
         self.assertEqual(order.filled_quantity, Decimal('0.001'))
+
+        # 未确认期末强平规则时，回测必须如实保留未平仓状态。
+        self.assertEqual(len(result.positions), 1)
+        position = result.positions[0]
+        self.assertEqual(position.status, 'OPEN')
+        self.assertIsNone(position.closed_at)
+        self.assertEqual(position.unrealized_pnl, Decimal('-0.110'))
+        summary = ResultAnalyzer(result).analyze()
+        self.assertEqual(summary['positions']['open'], 1)
+        self.assertAlmostEqual(summary['pnl']['total_unrealized'], -0.11)
+        self.assertAlmostEqual(summary['pnl']['net_pnl'], -0.119998)
 
     def test_ttl_expiration(self):
         """测试订单 TTL 过期"""

@@ -7,7 +7,7 @@ from decimal import Decimal
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query, Body, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from trading_platform.ledger.db.models import (
     LedgerDB,
@@ -23,6 +23,8 @@ from trading_platform.ledger.db.models import (
 
 class OrderResponse(BaseModel):
     """订单响应"""
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     account_id: str
     strategy_id: str
@@ -45,12 +47,10 @@ class OrderResponse(BaseModel):
     exchange_created_at: Optional[datetime] = None
     filled_at: Optional[datetime] = None
 
-    class Config:
-        from_attributes = True
-
-
 class TradeResponse(BaseModel):
     """成交响应"""
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     account_id: str
     strategy_id: str
@@ -70,12 +70,10 @@ class TradeResponse(BaseModel):
     created_at: datetime
     exchange_time: datetime
 
-    class Config:
-        from_attributes = True
-
-
 class PositionResponse(BaseModel):
     """持仓响应"""
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     account_id: str
     strategy_id: str
@@ -90,10 +88,6 @@ class PositionResponse(BaseModel):
     margin_type: Optional[str] = None
     isolated_margin: Optional[Decimal] = None
     updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
 
 class PnLSummary(BaseModel):
     """盈亏统计"""
@@ -121,16 +115,14 @@ class ControlStateRequest(BaseModel):
 
 class ControlStateResponse(BaseModel):
     """控制状态响应"""
+    model_config = ConfigDict(from_attributes=True)
+
     account_id: str
     desired_state: str
     state_version: int
     updated_at: datetime
     updated_by: Optional[str] = None
     reason: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
 
 class ConfigRequest(BaseModel):
     """配置更新请求"""
@@ -142,6 +134,8 @@ class ConfigRequest(BaseModel):
 
 class ConfigResponse(BaseModel):
     """配置响应"""
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     account_id: str
     strategy_id: str
@@ -151,10 +145,6 @@ class ConfigResponse(BaseModel):
     description: Optional[str] = None
     updated_at: datetime
     updated_by: Optional[str] = None
-
-    class Config:
-        from_attributes = True
-
 
 # ============ 路由器 ============
 

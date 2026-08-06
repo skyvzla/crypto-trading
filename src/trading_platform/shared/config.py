@@ -90,6 +90,7 @@ class BacktestConfig(BaseSettings):
     output_dir: str = 'reports'
     maker_fee_rate: float = 0.0002  # 0.02%
     taker_fee_rate: float = 0.0004  # 0.04%
+    trading_start_ms: int | None = None  # 此前事件只用于指标预热
 
 
 def load_config() -> dict:

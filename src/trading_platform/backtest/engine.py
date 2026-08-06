@@ -85,6 +85,7 @@ class BacktestEngine:
 
         # 持仓管理
         self.positions: dict[str, Position] = {}
+        self.last_prices: dict[str, Decimal] = {}
 
         # 结果收集
         self.order_records: list[Order] = []
@@ -94,10 +95,16 @@ class BacktestEngine:
         # 执行层
         self.executor = BacktestExecutor(self, account_id)
 
+        self._trading_enabled = (
+            config.trading_start_ms is None
+            or self.virtual_time_ms >= config.trading_start_ms
+        )
+
         # 允许需要撤单等回测适配能力的策略在构造后获得引擎引用。
         bind_engine = getattr(self.strategy, 'bind_engine', None)
         if callable(bind_engine):
             bind_engine(self)
+        self._set_strategy_trading_enabled(self._trading_enabled)
 
     def run(self) -> BacktestResult:
         """
@@ -112,6 +119,17 @@ class BacktestEngine:
             # 1. 更新虚拟时钟（使用 available_time，避免未来信息）
             self.virtual_time_ms = event.available_time
 
+            trading_enabled = (
+                self.config.trading_start_ms is None
+                or self.virtual_time_ms >= self.config.trading_start_ms
+            )
+            if trading_enabled != self._trading_enabled:
+                self._trading_enabled = trading_enabled
+                self._set_strategy_trading_enabled(trading_enabled)
+
+            if isinstance(event, Bar1s):
+                self.last_prices[event.symbol] = event.close
+
             # 2. 先检查订单成交（重要！成交判断在事件推送之前）
             self._check_fills(event)
 
@@ -124,7 +142,7 @@ class BacktestEngine:
                 order_intents = self.strategy.on_kline(event)
 
             # 4. 执行策略返回的下单意图
-            if order_intents:
+            if self._trading_enabled and order_intents:
                 for intent in order_intents:
                     self.executor.place_order(intent)
 
@@ -135,6 +153,11 @@ class BacktestEngine:
         # 6. 生成结果报告
         logger.info("Backtest completed")
         return self._generate_result()
+
+    def _set_strategy_trading_enabled(self, enabled: bool) -> None:
+        setter = getattr(self.strategy, 'set_trading_enabled', None)
+        if callable(setter):
+            setter(enabled)
 
     def _check_fills(self, event: Event) -> None:
         """
@@ -296,7 +319,6 @@ class BacktestEngine:
                 else:  # LONG
                     pnl = (fill.price - pos.entry_price) * close_qty
 
-                pnl -= fill.commission  # 扣除手续费
                 pos.realized_pnl += pnl
                 pos.quantity -= close_qty
                 pos.total_commission += fill.commission
@@ -353,14 +375,26 @@ class BacktestEngine:
         Returns:
             回测结果对象
         """
-        # 关闭所有未平仓持仓（用最后已知价格标记）
+        # 未确认期末结算规则前，不得把未平仓仓位伪装成已平仓。
         for pos in list(self.positions.values()):
-            pos.status = 'CLOSED'
-            pos.closed_at = self.virtual_time_ms
+            last_price = self.last_prices.get(pos.symbol)
+            if last_price is not None:
+                if pos.side == 'SHORT':
+                    pos.unrealized_pnl = (
+                        pos.entry_price - last_price
+                    ) * pos.quantity
+                else:
+                    pos.unrealized_pnl = (
+                        last_price - pos.entry_price
+                    ) * pos.quantity
             self.position_records.append(pos)
 
         return BacktestResult(
-            virtual_time_start=self.events[0].available_time if self.events else 0,
+            virtual_time_start=(
+                self.config.trading_start_ms
+                if self.config.trading_start_ms is not None
+                else (self.events[0].available_time if self.events else 0)
+            ),
             virtual_time_end=self.virtual_time_ms,
             orders=self.order_records,
             fills=self.fill_records,

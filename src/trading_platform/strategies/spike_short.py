@@ -101,6 +101,8 @@ class DynamicSpikeShortStrategy:
         self.total_notional = Decimal(total_notional)
         self.account_id = account_id
         self._engine = engine
+        self._trading_enabled = True
+        self._entry_enabled = True
 
         # 数据缓存
         self.bars_1s: List[Bar1s] = []
@@ -115,6 +117,14 @@ class DynamicSpikeShortStrategy:
         """由适配器注入引擎引用"""
         self._engine = engine
 
+    def set_trading_enabled(self, enabled: bool) -> None:
+        """预热阶段只更新数据缓存，不检测或推进交易信号。"""
+        self._trading_enabled = enabled
+
+    def set_entry_enabled(self, enabled: bool) -> None:
+        """控制新信号准入；已有信号仍继续失效、撤单和到期处理。"""
+        self._entry_enabled = enabled
+
     # ------------------------------------------------------------------
     # 事件入口（符合 backtest.engine.Strategy 协议）
     # ------------------------------------------------------------------
@@ -123,13 +133,17 @@ class DynamicSpikeShortStrategy:
         """处理 1 秒 Bar 事件"""
         self._update_cache(bar)
 
+        if not self._trading_enabled:
+            return []
+
         if len(self.bars_1s) < self.BAR_BUFFER:
             return []
 
-        signal = self._detect_signal(bar)
-        if signal:
-            self.active_signals.append(signal)
-            self.last_signal_time = signal.signal_time
+        if self._entry_enabled:
+            signal = self._detect_signal(bar)
+            if signal:
+                self.active_signals.append(signal)
+                self.last_signal_time = signal.signal_time
 
         return self._manage_signals(bar)
 
@@ -331,13 +345,23 @@ class DynamicSpikeShortStrategy:
 
     def _min_low_1m(self, minute_start: int, minutes: int) -> Optional[Decimal]:
         """已完成 1m K 线在 [minute_start - minutes, minute_start) 内的最低价"""
+        window = self._completed_1m_window(minute_start, minutes)
+        return min((k.low for k in window), default=None) if window else None
+
+    def _completed_1m_window(
+        self, minute_start: int, minutes: int
+    ) -> List[Kline]:
+        """返回连续完整的 1m 窗口；缺任一分钟时返回空列表。"""
         window_start = minute_start - minutes * MS_PER_MINUTE
-        lows = [
-            k.low
+        by_open_time = {
+            k.open_time: k
             for k in self.klines_1m
             if window_start <= k.open_time < minute_start
-        ]
-        return min(lows) if lows else None
+        }
+        expected_times = range(window_start, minute_start, MS_PER_MINUTE)
+        if any(open_time not in by_open_time for open_time in expected_times):
+            return []
+        return [by_open_time[open_time] for open_time in expected_times]
 
     def _spike_high(self, minute_start: int) -> Optional[Decimal]:
         """
@@ -346,18 +370,25 @@ class DynamicSpikeShortStrategy:
             已缓存 1s Bar 的最高价（覆盖当前未完成分钟）
         )
         """
-        window_start = minute_start - self.SPIKE_HIGH_MINUTES * MS_PER_MINUTE
-        highs = [
-            k.high
-            for k in self.klines_1m
-            if window_start <= k.open_time < minute_start
-        ]
+        completed = self._completed_1m_window(
+            minute_start, self.SPIKE_HIGH_MINUTES
+        )
+        if not completed:
+            return None
+        highs = [k.high for k in completed]
         highs.extend(b.high for b in self.bars_1s if b.timestamp >= minute_start)
         return max(highs) if highs else None
 
     def _atr_5m(self) -> Optional[Decimal]:
         """已完成 5m K 线的 14 周期 ATR"""
         if len(self.klines_5m) < self.ATR_PERIOD + 1:
+            return None
+
+        atr_klines = self.klines_5m[-(self.ATR_PERIOD + 1):]
+        if any(
+            current.open_time - previous.open_time != 5 * MS_PER_MINUTE
+            for previous, current in zip(atr_klines, atr_klines[1:])
+        ):
             return None
 
         true_ranges = []
@@ -394,15 +425,53 @@ class DynamicSpikeBacktestStrategy:
             )
             for symbol in symbols
         }
+        self._engine: Optional[BacktestEngine] = engine
+        self.active_symbol: Optional[str] = None
 
     def bind_engine(self, engine: BacktestEngine) -> None:
+        self._engine = engine
         for strategy in self.strategies.values():
             strategy.bind_engine(engine)
 
+    def set_trading_enabled(self, enabled: bool) -> None:
+        for strategy in self.strategies.values():
+            strategy.set_trading_enabled(enabled)
+
     def on_bar1s(self, bar: Bar1s) -> List[OrderIntent]:
         strategy = self.strategies.get(bar.symbol)
-        return strategy.on_bar1s(bar) if strategy else []
+        if strategy is None:
+            return []
+
+        strategy.set_entry_enabled(
+            self.active_symbol is None or self.active_symbol == bar.symbol
+        )
+        intents = strategy.on_bar1s(bar)
+
+        if self.active_symbol is None and self._has_live_campaign(bar.symbol):
+            self.active_symbol = bar.symbol
+        elif (
+            self.active_symbol == bar.symbol
+            and not self._has_live_campaign(bar.symbol)
+        ):
+            self.active_symbol = None
+
+        return intents
 
     def on_kline(self, kline: Kline) -> List[OrderIntent]:
         strategy = self.strategies.get(kline.symbol)
         return strategy.on_kline(kline) if strategy else []
+
+    def _has_live_campaign(self, symbol: str) -> bool:
+        strategy = self.strategies[symbol]
+        if strategy.active_signals:
+            return True
+        if self._engine is None:
+            return False
+        if symbol in self._engine.positions:
+            return True
+        return any(
+            order.symbol == symbol
+            and order.status in {"NEW", "SUBMIT_UNKNOWN"}
+            and order.strategy_id == "spike_short"
+            for order in self._engine.orders.values()
+        )

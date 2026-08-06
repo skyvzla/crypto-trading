@@ -41,6 +41,12 @@ def parse_args() -> argparse.Namespace:
         default="reports/spike_short_backtest",
         help="Output directory",
     )
+    parser.add_argument(
+        "--warmup-hours",
+        type=float,
+        default=16.0,
+        help="Indicator warmup period before --start (default: 16)",
+    )
     return parser.parse_args()
 
 
@@ -55,6 +61,10 @@ def main() -> None:
     if start_ms >= end_ms:
         print("Error: --start must be earlier than --end", file=sys.stderr)
         raise SystemExit(2)
+    if args.warmup_hours < 0:
+        print("Error: --warmup-hours must not be negative", file=sys.stderr)
+        raise SystemExit(2)
+    load_start_ms = start_ms - int(args.warmup_hours * 3_600_000)
 
     print("=== Dynamic Spike Short Strategy Backtest ===")
     print(f"Symbol: {args.symbol}")
@@ -64,18 +74,24 @@ def main() -> None:
     loader = BacktestDataLoader(
         data_dir=args.data_dir,
         symbols=[args.symbol],
-        start_ms=start_ms,
+        start_ms=load_start_ms,
         end_ms=end_ms,
+        require_aggtrades=True,
+        required_kline_intervals=["1m", "5m"],
     )
     events = loader.load_all()
     if not events:
         print("Error: no market data found in the requested range", file=sys.stderr)
+        raise SystemExit(1)
+    if not any(event.available_time >= start_ms for event in events):
+        print("Error: no events in the trading period", file=sys.stderr)
         raise SystemExit(1)
 
     output_path = Path(args.output)
     config = BacktestConfig(
         data_dir=args.data_dir,
         output_dir=str(output_path),
+        trading_start_ms=start_ms,
     )
     strategy = DynamicSpikeBacktestStrategy(
         symbols=[args.symbol],

@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any
 
 import websockets
-from websockets.client import WebSocketClientProtocol
+from websockets.asyncio.client import ClientConnection
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from trading_platform.shared.events import Bar1s, Kline
@@ -40,9 +40,23 @@ class BinanceWebSocketClient:
         self.ws_base_url = ws_base_url
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
-        self._ws: WebSocketClientProtocol | None = None
+        self._ws: ClientConnection | None = None
         self._running = False
         self._reconnect_count = 0
+        self._streams: tuple[str, ...] = ()
+
+    def _stream_url(self) -> str:
+        stream_path = "/".join(self._streams)
+        return f"{self.ws_base_url}/stream?streams={stream_path}"
+
+    async def _open_connection(self) -> None:
+        url = self._stream_url()
+        self._ws = await websockets.connect(
+            url,
+            ping_interval=20,
+            ping_timeout=10,
+            close_timeout=5,
+        )
 
     async def connect(self, streams: list[str]) -> None:
         """
@@ -54,18 +68,13 @@ class BinanceWebSocketClient:
         if not streams:
             raise ValueError("至少需要一个流")
 
-        stream_path = "/".join(streams)
-        url = f"{self.ws_base_url}/stream?streams={stream_path}"
+        self._streams = tuple(sorted(set(streams)))
+        url = self._stream_url()
 
         logger.info(f"连接 Binance WebSocket: {url}")
 
         try:
-            self._ws = await websockets.connect(
-                url,
-                ping_interval=20,
-                ping_timeout=10,
-                close_timeout=5,
-            )
+            await self._open_connection()
             self._running = True
             self._reconnect_count = 0
             logger.info(f"WebSocket 连接成功，订阅 {len(streams)} 个流")
@@ -79,7 +88,44 @@ class BinanceWebSocketClient:
         if self._ws:
             await self._ws.close()
             self._ws = None
+        self._streams = ()
         logger.info("WebSocket 已断开")
+
+    async def _reconnect(self) -> bool:
+        """Reconnect using the last successful subscription set."""
+        while self._running:
+            if (
+                self.max_reconnect_attempts > 0
+                and self._reconnect_count >= self.max_reconnect_attempts
+            ):
+                logger.error(f"达到最大重连次数 {self.max_reconnect_attempts}，停止重连")
+                self._running = False
+                return False
+
+            self._reconnect_count += 1
+            logger.info(
+                f"等待 {self.reconnect_delay}s 后重连（第 {self._reconnect_count} 次）"
+            )
+            await asyncio.sleep(self.reconnect_delay)
+            if not self._running:
+                return False
+
+            try:
+                await self._open_connection()
+                if not self._running:
+                    if self._ws is not None:
+                        await self._ws.close()
+                        self._ws = None
+                    return False
+                logger.info(f"WebSocket 重连成功，订阅 {len(self._streams)} 个流")
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._ws = None
+                logger.warning(f"WebSocket 重连失败: {exc}")
+
+        return False
 
     async def receive_messages(self) -> AsyncIterator[dict[str, Any]]:
         """
@@ -103,6 +149,7 @@ class BinanceWebSocketClient:
                     # Binance combined streams wrap the event in {stream, data}.
                     # Keep the downstream parsers independent of transport mode.
                     if isinstance(data, dict):
+                        self._reconnect_count = 0
                         yield unwrap_stream_message(data)
                 except json.JSONDecodeError as e:
                     logger.warning(f"无法解析 WebSocket 消息: {e}, message: {message[:100]}")
@@ -114,23 +161,13 @@ class BinanceWebSocketClient:
                 if not self._running:
                     break
 
-                # 尝试重连
-                if self.max_reconnect_attempts > 0 and self._reconnect_count >= self.max_reconnect_attempts:
-                    logger.error(f"达到最大重连次数 {self.max_reconnect_attempts}，停止重连")
-                    break
-
-                self._reconnect_count += 1
-                logger.info(f"等待 {self.reconnect_delay}s 后重连（第 {self._reconnect_count} 次）")
-                await asyncio.sleep(self.reconnect_delay)
-
-                # 重连逻辑由外部调用者控制，这里只是标记连接断开
                 self._ws = None
-                logger.warning("需要外部重新调用 connect() 来重连")
-                break
+                if not await self._reconnect():
+                    break
 
             except Exception as e:
                 logger.error(f"接收消息时发生未预期错误: {e}", exc_info=True)
-                await asyncio.sleep(1)
+                raise
 
 
 def parse_aggtrade_message(data: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:

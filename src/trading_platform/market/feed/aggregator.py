@@ -4,7 +4,7 @@
 计算 open/high/low/close/volume/vwap
 """
 import logging
-from collections import defaultdict, deque
+from collections import defaultdict
 from decimal import Decimal
 from typing import Any
 
@@ -35,15 +35,18 @@ class Bar1sAggregator:
         # 每个交易对的最新处理时间
         self._last_timestamp: dict[str, int] = {}
 
+        # 已发布窗口不能再修订，避免迟到成交造成同一秒重复 Bar。
+        self._finalized_through: dict[str, int] = {}
+
     def add_trade(
         self,
         symbol: str,
         price: Decimal,
         quantity: Decimal,
         timestamp: int,
-    ) -> Bar1s | None:
+    ) -> list[Bar1s]:
         """
-        添加一笔交易，返回完成的 Bar（如果有）
+        添加一笔交易，返回本次完成的全部 Bar
 
         Args:
             symbol: 交易对
@@ -52,10 +55,17 @@ class Bar1sAggregator:
             timestamp: 交易时间戳（毫秒）
 
         Returns:
-            完成的 Bar1s 或 None
+            按时间升序排列的已完成 Bar1s 列表
         """
         # 计算所属秒级桶
         second_ts = (timestamp // 1000) * 1000
+
+        if second_ts <= self._finalized_through.get(symbol, -1):
+            logger.warning(
+                f"{symbol} 收到已完成窗口的迟到交易: timestamp={timestamp}, "
+                f"finalized_through={self._finalized_through[symbol]}"
+            )
+            return []
 
         # 检查是否过于迟到
         last_ts = self._last_timestamp.get(symbol, 0)
@@ -64,7 +74,7 @@ class Bar1sAggregator:
                 f"{symbol} 收到过期交易: timestamp={timestamp}, "
                 f"last_ts={last_ts}, 延迟={last_ts - timestamp}ms"
             )
-            return None
+            return []
 
         # 获取或创建窗口
         windows = self._windows[symbol]
@@ -80,11 +90,9 @@ class Bar1sAggregator:
             self._last_timestamp[symbol] = timestamp
 
         # 检查是否可以关闭旧窗口
-        completed_bar = self._try_close_window(symbol, second_ts)
+        return self._close_completed_windows(symbol, second_ts)
 
-        return completed_bar
-
-    def _try_close_window(self, symbol: str, current_second: int) -> Bar1s | None:
+    def _close_completed_windows(self, symbol: str, current_second: int) -> list[Bar1s]:
         """
         尝试关闭已完成的窗口
 
@@ -103,14 +111,12 @@ class Bar1sAggregator:
                 window = windows.pop(ts)
                 bar = window.to_bar(symbol)
                 completed_bars.append(bar)
+                self._finalized_through[symbol] = max(
+                    ts, self._finalized_through.get(symbol, -1)
+                )
 
-        # 返回最新完成的 Bar（如果有多个）
-        if completed_bars:
-            # 按时间排序，返回最早的一个（FIFO）
-            completed_bars.sort(key=lambda b: b.timestamp)
-            return completed_bars[0]
-
-        return None
+        completed_bars.sort(key=lambda bar: bar.timestamp)
+        return completed_bars
 
     def flush_symbol(self, symbol: str) -> list[Bar1s]:
         """
@@ -131,6 +137,8 @@ class Bar1sAggregator:
             del self._windows[symbol]
         if symbol in self._last_timestamp:
             del self._last_timestamp[symbol]
+        if symbol in self._finalized_through:
+            del self._finalized_through[symbol]
 
         return bars
 

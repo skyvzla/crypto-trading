@@ -81,6 +81,7 @@ class MarketLayerService:
         self._running = False
         self._ws_task: asyncio.Task | None = None
         self._current_streams: list[str] = []
+        self._refresh_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """启动服务"""
@@ -92,15 +93,10 @@ class MarketLayerService:
         logger.info("正在停止行情层服务...")
         self._running = False
 
-        # 停止 WebSocket
-        if self._ws_task and not self._ws_task.done():
-            self._ws_task.cancel()
-            try:
-                await self._ws_task
-            except asyncio.CancelledError:
-                pass
-
-        await self.ws_client.disconnect()
+        async with self._refresh_lock:
+            await self._stop_ws_task()
+            await self.ws_client.disconnect()
+            self._current_streams = []
 
         logger.info("行情层服务已停止")
 
@@ -110,49 +106,68 @@ class MarketLayerService:
 
         当订阅变化时调用，重新连接 WebSocket
         """
-        # 获取所有活跃的订阅
-        active_streams = self.subscription_manager.get_active_streams()
+        async with self._refresh_lock:
+            active_streams = self.subscription_manager.get_active_streams()
+            needed_streams = sorted(
+                {
+                    stream
+                    for symbol, symbol_types in active_streams.items()
+                    for stream in build_stream_names([symbol], list(symbol_types))
+                }
+            )
 
-        if not active_streams:
-            logger.info("无活跃订阅，关闭 WebSocket")
+            task_is_running = self._ws_task is not None and not self._ws_task.done()
+            if needed_streams == self._current_streams and task_is_running:
+                logger.debug("WebSocket 流无变化，跳过重连")
+                return
+
+            if not needed_streams:
+                logger.info("无活跃订阅，关闭 WebSocket")
+            elif needed_streams == self._current_streams:
+                logger.warning("WebSocket 消息任务已结束，使用原订阅重新启动")
+            else:
+                logger.info(f"刷新 WebSocket 流: {len(needed_streams)} 个流")
+
+            await self._stop_ws_task()
             await self.ws_client.disconnect()
             self._current_streams = []
+
+            if needed_streams:
+                await self.ws_client.connect(needed_streams)
+                task = asyncio.create_task(self._ws_message_loop())
+                self._ws_task = task
+                self._current_streams = needed_streams
+                task.add_done_callback(self._on_ws_task_done)
+
+    async def _stop_ws_task(self) -> None:
+        task = self._ws_task
+        self._ws_task = None
+        if task is None:
             return
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning(f"回收已失败的 WebSocket 消息任务: {exc}")
 
-        # 构建需要的流列表
-        symbols = list(active_streams.keys())
-        subscription_types = []
-
-        for symbol_types in active_streams.values():
-            subscription_types.extend(symbol_types.keys())
-
-        subscription_types = list(set(subscription_types))
-
-        needed_streams = build_stream_names(symbols, subscription_types)
-        needed_streams.sort()
-
-        # 检查是否需要重连
-        if needed_streams == self._current_streams:
-            logger.debug("WebSocket 流无变化，跳过重连")
+    def _on_ws_task_done(self, task: asyncio.Task) -> None:
+        if task is not self._ws_task:
             return
-
-        logger.info(f"刷新 WebSocket 流: {len(needed_streams)} 个流")
-
-        # 停止旧连接
-        if self._ws_task and not self._ws_task.done():
-            self._ws_task.cancel()
-            try:
-                await self._ws_task
-            except asyncio.CancelledError:
-                pass
-
-        await self.ws_client.disconnect()
-
-        # 建立新连接
-        if needed_streams:
-            await self.ws_client.connect(needed_streams)
-            self._ws_task = asyncio.create_task(self._ws_message_loop())
-            self._current_streams = needed_streams
+        self._ws_task = None
+        self._current_streams = []
+        if task.cancelled():
+            return
+        exception = task.exception()
+        if exception is not None:
+            logger.error(
+                f"WebSocket 消息任务异常结束: {exception}",
+                exc_info=(type(exception), exception, exception.__traceback__),
+            )
+        else:
+            logger.warning("WebSocket 消息任务意外结束")
 
     async def _ws_message_loop(self) -> None:
         """WebSocket 消息处理循环"""
@@ -189,15 +204,14 @@ class MarketLayerService:
 
     async def _handle_aggtrade(self, symbol: str, trade_data: dict[str, Any]) -> None:
         """处理 aggTrade，聚合为 1s Bar"""
-        bar = self.aggregator.add_trade(
+        bars = self.aggregator.add_trade(
             symbol=symbol,
             price=trade_data["price"],
             quantity=trade_data["quantity"],
             timestamp=trade_data["timestamp"],
         )
 
-        if bar:
-            # 发布到 Redis Pub/Sub
+        for bar in bars:
             await self.redis_publisher.publish_bar1s(bar)
 
     async def _handle_kline(self, symbol: str, interval: str, kline: Any) -> None:

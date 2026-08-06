@@ -9,8 +9,6 @@ from decimal import Decimal
 from typing import Union
 
 import pandas as pd
-import numpy as np
-
 from trading_platform.shared.events import Bar1s, Kline
 
 logger = logging.getLogger(__name__)
@@ -38,7 +36,9 @@ class BacktestDataLoader:
         data_dir: str,
         symbols: list[str],
         start_ms: int,
-        end_ms: int
+        end_ms: int,
+        require_aggtrades: bool = False,
+        required_kline_intervals: list[str] | None = None,
     ):
         """
         Args:
@@ -47,10 +47,17 @@ class BacktestDataLoader:
             start_ms: 开始时间（毫秒时间戳）
             end_ms: 结束时间（毫秒时间戳）
         """
+        if start_ms >= end_ms:
+            raise ValueError("start_ms must be earlier than end_ms")
+        if not symbols:
+            raise ValueError("symbols must not be empty")
+
         self.data_dir = Path(data_dir)
-        self.symbols = symbols
+        self.symbols = list(dict.fromkeys(symbol.upper() for symbol in symbols))
         self.start_ms = start_ms
         self.end_ms = end_ms
+        self.require_aggtrades = require_aggtrades
+        self.required_kline_intervals = set(required_kline_intervals or [])
 
     def load_all(self) -> list[Event]:
         """
@@ -70,9 +77,15 @@ class BacktestDataLoader:
         for symbol in self.symbols:
             try:
                 bars = self._load_bars(symbol)
+                if self.require_aggtrades and not bars:
+                    raise ValueError(
+                        f"No aggTrade rows in requested range for {symbol}"
+                    )
                 events.extend(bars)
                 logger.info(f"Loaded {len(bars)} bars for {symbol}")
             except FileNotFoundError:
+                if self.require_aggtrades:
+                    raise ValueError(f"Missing required aggTrade data for {symbol}")
                 logger.warning(f"No aggTrade data found for {symbol}")
 
         # 2. 加载 K 线
@@ -80,11 +93,19 @@ class BacktestDataLoader:
             for interval in ['1m', '5m', '15m']:
                 try:
                     klines = self._load_klines(symbol, interval)
+                    if interval in self.required_kline_intervals and not klines:
+                        raise ValueError(
+                            f"No {interval} Kline rows in requested range for {symbol}"
+                        )
                     events.extend(klines)
                     logger.info(
                         f"Loaded {len(klines)} {interval} klines for {symbol}"
                     )
                 except FileNotFoundError:
+                    if interval in self.required_kline_intervals:
+                        raise ValueError(
+                            f"Missing required {interval} Kline data for {symbol}"
+                        )
                     logger.warning(
                         f"No {interval} kline data found for {symbol}"
                     )
@@ -132,11 +153,13 @@ class BacktestDataLoader:
         # 读取 Parquet
         df = pd.read_parquet(agg_trades_path)
 
-        # 过滤时间范围
+        self._require_columns(df, {'trade_time', 'price', 'qty'}, agg_trades_path)
+
+        # 过滤时间范围并按事件时间稳定排序，确保 OHLC 不依赖文件行顺序。
         df = df[
             (df['trade_time'] >= self.start_ms) &
             (df['trade_time'] < self.end_ms)
-        ]
+        ].sort_values('trade_time', kind='stable')
 
         if df.empty:
             return []
@@ -162,6 +185,7 @@ class BacktestDataLoader:
         bars = []
 
         # 按秒分组（向下取整到秒）
+        agg_trades = agg_trades.copy()
         agg_trades['second'] = agg_trades['trade_time'] // 1000
 
         for idx, (second, group) in enumerate(agg_trades.groupby('second')):
@@ -223,6 +247,12 @@ class BacktestDataLoader:
         # 读取 Parquet（只读取 is_final=True 的）
         df = pd.read_parquet(kline_path)
 
+        self._require_columns(
+            df,
+            {'open_time', 'close_time', 'open', 'high', 'low', 'close', 'volume'},
+            kline_path,
+        )
+
         # 过滤 is_final 和时间范围
         if 'is_final' in df.columns:
             df = df[df['is_final'] == True]
@@ -230,7 +260,7 @@ class BacktestDataLoader:
         df = df[
             (df['close_time'] >= self.start_ms) &
             (df['close_time'] < self.end_ms)
-        ]
+        ].sort_values(['close_time', 'open_time'], kind='stable')
 
         if df.empty:
             return []
@@ -255,3 +285,14 @@ class BacktestDataLoader:
             klines.append(kline)
 
         return klines
+
+    @staticmethod
+    def _require_columns(
+        df: pd.DataFrame, required: set[str], source: Path
+    ) -> None:
+        """在进入聚合前给出可操作的数据格式错误。"""
+        missing = sorted(required.difference(df.columns))
+        if missing:
+            raise ValueError(
+                f"{source} missing required columns: {', '.join(missing)}"
+            )

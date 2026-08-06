@@ -67,3 +67,7 @@ def test_spike_cli_runs_on_sample_data(tmp_path, monkeypatch, entrypoint):
 def test_spike_loader_requires_explicit_notional():
     with pytest.raises(ValueError, match="total-notional"):
         runner.load_strategy("spike", "backtest", symbols=["BTCUSDT"])
+
+
+def test_generic_runner_dates_are_parsed_as_utc():
+    assert runner.parse_date("2026-06-01") == 1780272000000

@@ -12,7 +12,7 @@
 import argparse
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -131,6 +131,13 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--warmup-hours',
+        type=float,
+        default=None,
+        help='指标预热时长；Spike 默认 16 小时，其他策略默认 0'
+    )
+
+    parser.add_argument(
         '--log-level',
         type=str,
         default='INFO',
@@ -151,7 +158,7 @@ def parse_date(date_str: str) -> int:
     Returns:
         毫秒时间戳
     """
-    dt = datetime.strptime(date_str, '%Y-%m-%d')
+    dt = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
 
 
@@ -221,6 +228,15 @@ def main():
     # 解析时间范围
     start_ms = parse_date(args.start)
     end_ms = parse_date(args.end)
+    warmup_hours = (
+        args.warmup_hours
+        if args.warmup_hours is not None
+        else (16.0 if args.strategy == 'spike' else 0.0)
+    )
+    if warmup_hours < 0:
+        logger.error("--warmup-hours 不能为负数")
+        sys.exit(2)
+    load_start_ms = start_ms - int(warmup_hours * 3_600_000)
 
     # 生成输出目录
     if args.output:
@@ -246,8 +262,12 @@ def main():
     loader = BacktestDataLoader(
         data_dir=args.data_dir,
         symbols=args.symbols,
-        start_ms=start_ms,
-        end_ms=end_ms
+        start_ms=load_start_ms,
+        end_ms=end_ms,
+        require_aggtrades=args.strategy == 'spike',
+        required_kline_intervals=(
+            ['1m', '5m'] if args.strategy == 'spike' else []
+        ),
     )
 
     try:
@@ -258,6 +278,9 @@ def main():
 
     if not events:
         logger.error("未找到任何数据，请检查数据目录和时间范围")
+        sys.exit(1)
+    if not any(event.available_time >= start_ms for event in events):
+        logger.error("只有预热数据，交易时间范围内没有事件")
         sys.exit(1)
 
     logger.info(f"数据加载完成: {len(events)} 个事件")
@@ -286,7 +309,8 @@ def main():
         data_dir=args.data_dir,
         output_dir=output_dir,
         maker_fee_rate=args.maker_fee,
-        taker_fee_rate=args.taker_fee
+        taker_fee_rate=args.taker_fee,
+        trading_start_ms=start_ms,
     )
 
     engine = BacktestEngine(
@@ -322,11 +346,14 @@ def main():
     logger.info(f"  - 成交率: {summary['orders']['fill_rate']:.2%}")
     logger.info("")
     logger.info(f"持仓总数: {summary['positions']['total']}")
+    logger.info(f"  - 未平仓: {summary['positions']['open']}")
+    logger.info(f"  - 已平仓: {summary['positions']['closed']}")
     logger.info(f"  - 盈利: {summary['positions']['profitable']}")
     logger.info(f"  - 亏损: {summary['positions']['loss']}")
     logger.info(f"  - 胜率: {summary['positions']['win_rate']:.2%}")
     logger.info("")
     logger.info(f"总盈亏: {summary['pnl']['net_pnl']:.2f} USDT")
+    logger.info(f"  - 未实现盈亏: {summary['pnl']['total_unrealized']:.2f} USDT")
     logger.info(f"  - 盈利总额: {summary['pnl']['total_profit']:.2f} USDT")
     logger.info(f"  - 亏损总额: {summary['pnl']['total_loss']:.2f} USDT")
     logger.info(f"  - 手续费: {summary['pnl']['total_commission']:.2f} USDT")
