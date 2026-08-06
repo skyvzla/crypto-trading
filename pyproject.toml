@@ -33,6 +33,9 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 include = ["trading_platform*"]
 
+[tool.setuptools.package-data]
+"trading_platform.ledger" = ["web/*.html", "web/*.css", "web/*.js"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

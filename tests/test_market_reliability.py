@@ -10,6 +10,8 @@ from websockets.exceptions import WebSocketException
 from trading_platform.market.feed.aggregator import Bar1sAggregator
 from trading_platform.market.feed.binance_ws import BinanceWebSocketClient
 from trading_platform.market.main import MarketLayerConfig, MarketLayerService
+from trading_platform.market.store.kline_store import KlineStore
+from trading_platform.market.store.redis_pub import RedisPublisher
 
 
 def test_aggregator_returns_every_bar_closed_by_one_trade():
@@ -165,3 +167,43 @@ def test_health_is_ready_without_subscriptions_when_redis_is_available():
     assert response.status_code == 200
     assert response.json()["status"] == "ready"
     assert response.json()["websocket_connected"] is True
+
+
+def test_health_reports_required_websocket_failure_as_not_ready():
+    from trading_platform.market.main import create_app
+
+    app, service = create_app(MarketLayerConfig(), "test-epoch")
+    service.redis.ping = AsyncMock(return_value=True)
+    service._current_streams = ["btcusdt@aggTrade"]
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()["websocket_connected"] is False
+
+
+@pytest.mark.asyncio
+async def test_market_service_closes_shared_redis_with_aclose():
+    redis_client = AsyncMock()
+    service = MarketLayerService(MarketLayerConfig(), redis_client, "test-epoch")
+    service.ws_client = AsyncMock()
+
+    await service.stop()
+
+    redis_client.aclose.assert_awaited_once_with()
+    redis_client.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_store_close_helpers_use_aclose():
+    publisher_redis = AsyncMock()
+    store_redis = AsyncMock()
+
+    await RedisPublisher(publisher_redis).close()
+    await KlineStore(store_redis).close()
+
+    publisher_redis.aclose.assert_awaited_once_with()
+    publisher_redis.close.assert_not_called()
+    store_redis.aclose.assert_awaited_once_with()
+    store_redis.close.assert_not_called()

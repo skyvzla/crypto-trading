@@ -4,9 +4,11 @@
 """
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from trading_platform.ledger.db.models import LedgerDB, create_connection_pool
@@ -51,10 +53,6 @@ async def lifespan(app: FastAPI):
         max_size=db_config.get("pool_max_size", 10)
     )
 
-    app.state.ledger_db = LedgerDB(pool)
-    logger.info("Database connection pool created")
-
-    # 初始化数据库表（可选，也可以手动执行 schema.sql）
     try:
         async with pool.connection() as conn:
             result = await conn.execute(
@@ -70,18 +68,20 @@ async def lifespan(app: FastAPI):
                 raise RuntimeError("Required ledger tables are missing; apply ledger/db/schema.sql")
             logger.info("Database tables verified")
     except Exception as e:
-            await pool.close()
-            raise RuntimeError(f"Failed to verify database tables: {e}") from e
+        await pool.close()
+        raise RuntimeError(f"Failed to verify database tables: {e}") from e
 
+    app.state.ledger_db = LedgerDB(pool)
+    logger.info("Database connection pool created")
     logger.info("Ledger service started successfully")
 
-    yield
-
-    # 关闭时清理
-    logger.info("Shutting down ledger service...")
-    await pool.close()
-    app.state.ledger_db = None
-    logger.info("Database connection pool closed")
+    try:
+        yield
+    finally:
+        logger.info("Shutting down ledger service...")
+        await pool.close()
+        app.state.ledger_db = None
+        logger.info("Database connection pool closed")
 
 
 # 创建 FastAPI 应用
@@ -103,6 +103,9 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(router)
+
+web_dir = Path(__file__).with_name("web")
+app.mount("/ui", StaticFiles(directory=web_dir, html=True), name="ledger-ui")
 
 
 # 根路径

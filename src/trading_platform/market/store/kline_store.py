@@ -133,4 +133,4 @@ class KlineStore:
 
     async def close(self) -> None:
         """关闭 Redis 连接"""
-        await self.redis.close()
+        await self.redis.aclose()

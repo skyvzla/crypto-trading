@@ -1,4 +1,27 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: trading_platform
+    volumes:
+      - ./src/trading_platform/ledger/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trading_platform"]
+      interval: 1s
+      timeout: 2s
+      retries: 20
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 1s
+      retries: 10
+
   test:
     build:
       context: .
@@ -7,3 +30,10 @@ services:
     command: ["uv", "run", "pytest", "-q"]
     environment:
       PYTHONPATH: /app/src
+      TEST_REDIS_URL: redis://redis:6379/15
+      LEDGER_TEST_DSN: postgresql://postgres:postgres@postgres:5432/trading_platform
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy

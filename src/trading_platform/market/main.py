@@ -94,9 +94,12 @@ class MarketLayerService:
         self._running = False
 
         async with self._refresh_lock:
-            await self._stop_ws_task()
-            await self.ws_client.disconnect()
-            self._current_streams = []
+            try:
+                await self._stop_ws_task()
+                await self.ws_client.disconnect()
+            finally:
+                self._current_streams = []
+                await self.redis.aclose()
 
         logger.info("行情层服务已停止")
 
@@ -252,8 +255,10 @@ def create_app(
     async def lifespan(app: FastAPI):
         """FastAPI 生命周期管理"""
         await service.start()
-        yield
-        await service.stop()
+        try:
+            yield
+        finally:
+            await service.stop()
 
     # 创建 FastAPI 应用
     app = FastAPI(
