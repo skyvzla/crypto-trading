@@ -7,7 +7,15 @@ import logging
 from decimal import Decimal
 from typing import Protocol, Union
 
-from trading_platform.shared.events import Bar1s, Kline, Order, Fill, Position, OrderIntent
+from trading_platform.shared.events import (
+    Bar1s,
+    Kline,
+    Order,
+    Fill,
+    Position,
+    OrderIntent,
+    StrategyAuditEvent,
+)
 from trading_platform.shared.config import BacktestConfig
 from .executor import BacktestExecutor
 from .result import BacktestResult
@@ -91,6 +99,7 @@ class BacktestEngine:
         self.order_records: list[Order] = []
         self.fill_records: list[Fill] = []
         self.position_records: list[Position] = []
+        self.audit_records: list[StrategyAuditEvent] = []
 
         # 执行层
         self.executor = BacktestExecutor(self, account_id)
@@ -100,10 +109,14 @@ class BacktestEngine:
             or self.virtual_time_ms >= config.trading_start_ms
         )
 
-        # 允许需要撤单等回测适配能力的策略在构造后获得引擎引用。
-        bind_engine = getattr(self.strategy, 'bind_engine', None)
-        if callable(bind_engine):
-            bind_engine(self)
+        bind_account = getattr(self.strategy, 'bind_account', None)
+        if callable(bind_account):
+            bind_account(self)
+        else:
+            # 保留演示/第三方策略的旧适配钩子。
+            bind_engine = getattr(self.strategy, 'bind_engine', None)
+            if callable(bind_engine):
+                bind_engine(self)
         self._set_strategy_trading_enabled(self._trading_enabled)
 
     def run(self) -> BacktestResult:
@@ -145,6 +158,7 @@ class BacktestEngine:
             if self._trading_enabled and order_intents:
                 for intent in order_intents:
                     self.executor.place_order(intent)
+            self._collect_strategy_audit_events()
 
             # 5. 进度打印（可选）
             if i % 10000 == 0 and i > 0:
@@ -158,6 +172,24 @@ class BacktestEngine:
         setter = getattr(self.strategy, 'set_trading_enabled', None)
         if callable(setter):
             setter(enabled)
+
+    def _collect_strategy_audit_events(self) -> None:
+        drain = getattr(self.strategy, 'drain_audit_events', None)
+        if callable(drain):
+            self.audit_records.extend(drain())
+
+    # StrategyAccount implementation
+    def get_order(self, order_id: str) -> Order | None:
+        return self.orders.get(order_id)
+
+    def iter_orders(self) -> tuple[Order, ...]:
+        return tuple(self.orders.values())
+
+    def has_open_position(self, symbol: str) -> bool:
+        return symbol in self.positions
+
+    def cancel_order(self, order_id: str) -> bool:
+        return self.executor.cancel_order(order_id)
 
     def _check_fills(self, event: Event) -> None:
         """
@@ -208,6 +240,7 @@ class BacktestEngine:
                 # 通知策略
                 if hasattr(self.strategy, 'on_fill'):
                     self.strategy.on_fill(fill)
+                    self._collect_strategy_audit_events()
 
     def _execute_fill(self, order: Order, event: Bar1s) -> Fill:
         """
@@ -399,5 +432,6 @@ class BacktestEngine:
             orders=self.order_records,
             fills=self.fill_records,
             positions=self.position_records,
-            config=self.config
+            config=self.config,
+            audit_events=self.audit_records,
         )

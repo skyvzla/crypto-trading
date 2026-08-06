@@ -5,7 +5,7 @@
 """
 import json
 import logging
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from decimal import Decimal
 from typing import Any
@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 import numpy as np
 
-from trading_platform.shared.events import Order, Fill, Position
+from trading_platform.shared.events import Order, Fill, Position, StrategyAuditEvent
 from trading_platform.shared.config import BacktestConfig
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,7 @@ class BacktestResult:
     fills: list[Fill]
     positions: list[Position]
     config: BacktestConfig
+    audit_events: list[StrategyAuditEvent] = field(default_factory=list)
 
     def to_dataframes(self) -> dict[str, pd.DataFrame]:
         """
@@ -94,10 +95,26 @@ class BacktestResult:
                 'status': pos.status,
             })
 
+        audit_data = []
+        for event in self.audit_events:
+            audit_data.append({
+                'event_time': event.event_time,
+                'event_type': event.event_type,
+                'symbol': event.symbol,
+                'strategy_id': event.strategy_id,
+                'campaign_id': event.campaign_id,
+                'details': json.dumps(
+                    event.details,
+                    sort_keys=True,
+                    ensure_ascii=True,
+                ),
+            })
+
         return {
             'orders': pd.DataFrame(orders_data),
             'fills': pd.DataFrame(fills_data),
             'positions': pd.DataFrame(positions_data),
+            'audit_events': pd.DataFrame(audit_data),
         }
 
 
@@ -352,6 +369,9 @@ class ResultAnalyzer:
         dfs['orders'].to_parquet(output_path / 'orders.parquet', index=False)
         dfs['fills'].to_parquet(output_path / 'fills.parquet', index=False)
         dfs['positions'].to_parquet(output_path / 'positions.parquet', index=False)
+        dfs['audit_events'].to_parquet(
+            output_path / 'audit_events.parquet', index=False
+        )
 
         # 保存汇总指标
         summary = self.analyze()
@@ -363,7 +383,11 @@ class ResultAnalyzer:
             'run_id': run_id,
             'virtual_time_start': self.result.virtual_time_start,
             'virtual_time_end': self.result.virtual_time_end,
-            'total_events': len(self.result.orders) + len(self.result.fills),
+            'total_events': (
+                len(self.result.orders)
+                + len(self.result.fills)
+                + len(self.result.audit_events)
+            ),
             'config': {
                 'data_dir': self.result.config.data_dir,
                 'maker_fee_rate': self.result.config.maker_fee_rate,

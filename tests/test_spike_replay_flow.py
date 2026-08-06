@@ -93,6 +93,15 @@ def test_spike_replay_runs_from_warmup_through_three_fills():
     assert result.positions[0].side == "SHORT"
     assert result.positions[0].status == "OPEN"
     assert strategy.strategies["BTCUSDT"].first_fill_time == minute_start + 3_000
+    assert {event.event_type for event in result.audit_events} == {
+        "signal_triggered",
+        "entry_plan_created",
+        "campaign_first_fill",
+    }
+    assert len([
+        event for event in result.audit_events
+        if event.event_type == "campaign_first_fill"
+    ]) == 1
 
     summary = ResultAnalyzer(result).analyze()
     assert summary["orders"]["fill_rate"] == 1.0

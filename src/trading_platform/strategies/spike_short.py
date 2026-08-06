@@ -9,21 +9,25 @@ Dynamic Spike Short Strategy - 冻结基线实现
 3. 三档分层做空：spike_high - ATR × (1.15 / 0.75 / 0.35)
 4. 失效保护：max(spike_high + 3.5×ATR, 主目标位 + 2.0×ATR)
 
-与脚本的已知偏差（有意保留，见 docs/spike_trader/decisions.md D-020）:
+与脚本的已知偏差（有意保留，见 docs/spike_trader/decisions.md）:
 - spike_high 不使用信号所在分钟的未完成 1m K 线，改用已完成 K 线 + 已缓存 1s Bar
 - ATR 只使用已完成的 5m K 线，不使用信号所在的未完成 5m 周期
 两处偏差都是为了消除脚本中的未来数据泄漏，会导致与原 CSV 逐笔存在可解释差异。
 
-未实现（Phase 2 范围，需先确认规则）:
-- Campaign 状态机、全局互斥、第一笔成交计时
-- 持仓退出（保护单、900 秒规则、盈利管理）
+当前已实现全局轮次互斥和第一笔成交计时；完整 Campaign 恢复及持仓退出仍待后续阶段。
 """
 from decimal import Decimal
 from typing import List, Optional
 from dataclasses import dataclass, field
 
-from trading_platform.shared.events import Bar1s, Fill, Kline, OrderIntent
-from trading_platform.backtest.engine import BacktestEngine
+from trading_platform.shared.events import (
+    Bar1s,
+    Fill,
+    Kline,
+    OrderIntent,
+    StrategyAuditEvent,
+)
+from trading_platform.shared.execution import StrategyAccount
 
 MS_PER_SECOND = 1000
 MS_PER_MINUTE = 60 * MS_PER_SECOND
@@ -51,8 +55,7 @@ class DynamicSpikeShortStrategy:
     """
     动态逼空做空策略（单币种）
 
-    注意：本类当前仍通过构造函数持有回测引擎引用，用于查询时钟和撤单。
-    这是 Phase 1 的过渡实现，Phase 2 必须替换为环境无关的 Clock / Account 抽象。
+    策略只依赖 StrategyAccount 小接口，不感知 replay/testnet/live 的具体执行实现。
     """
 
     # ---- 冻结参数（来自实验脚本，不得擅自修改）----
@@ -83,7 +86,7 @@ class DynamicSpikeShortStrategy:
         self,
         symbol: str,
         total_notional: Decimal,
-        engine: Optional[BacktestEngine] = None,
+        account: Optional[StrategyAccount] = None,
         account_id: str = "backtest",
     ):
         """
@@ -91,7 +94,7 @@ class DynamicSpikeShortStrategy:
             symbol: 交易对
             total_notional: 每轮固定总名义金额（D-005）。三档按 30/40/30 分配。
                             该值必须由配置显式提供，不设默认值。
-            engine: 回测引擎（Phase 1 过渡依赖）
+            account: 订单、持仓查询与撤单适配器
             account_id: 账户 ID
         """
         if total_notional is None or total_notional <= 0:
@@ -100,7 +103,7 @@ class DynamicSpikeShortStrategy:
         self.symbol = symbol
         self.total_notional = Decimal(total_notional)
         self.account_id = account_id
-        self._engine = engine
+        self._account = account
         self._trading_enabled = True
         self._entry_enabled = True
 
@@ -113,10 +116,11 @@ class DynamicSpikeShortStrategy:
         self.last_signal_time: Optional[int] = None
         self.active_signals: List[SpikeSignal] = []
         self.first_fill_time: Optional[int] = None
+        self._audit_events: List[StrategyAuditEvent] = []
 
-    def bind_engine(self, engine: BacktestEngine) -> None:
-        """由适配器注入引擎引用"""
-        self._engine = engine
+    def bind_account(self, account: StrategyAccount) -> None:
+        """由运行模式适配器注入最小账户执行接口。"""
+        self._account = account
 
     def set_trading_enabled(self, enabled: bool) -> None:
         """预热阶段只更新数据缓存，不检测或推进交易信号。"""
@@ -130,15 +134,32 @@ class DynamicSpikeShortStrategy:
         """记录本轮第一笔真实成交时间，作为 900 秒计时起点。"""
         if fill.symbol != self.symbol or self.first_fill_time is not None:
             return
-        if self._engine is None:
+        if self._account is None:
             return
-        order = self._engine.orders.get(fill.order_id)
+        order = self._account.get_order(fill.order_id)
         if order is None or order.strategy_id != "spike_short":
             return
         self.first_fill_time = fill.fill_time
+        self._record_audit(
+            event_time=fill.fill_time,
+            event_type="campaign_first_fill",
+            campaign_id=self._campaign_id_from_client_order(order.client_order_id),
+            details={
+                "order_id": fill.order_id,
+                "fill_id": fill.fill_id,
+                "price": str(fill.price),
+                "quantity": str(fill.quantity),
+            },
+        )
 
     def reset_campaign_timing(self) -> None:
         self.first_fill_time = None
+
+    def drain_audit_events(self) -> List[StrategyAuditEvent]:
+        """返回并清空尚未被运行适配器收集的审计事件。"""
+        events = self._audit_events
+        self._audit_events = []
+        return events
 
     # ------------------------------------------------------------------
     # 事件入口（符合 backtest.engine.Strategy 协议）
@@ -159,6 +180,32 @@ class DynamicSpikeShortStrategy:
             if signal:
                 self.active_signals.append(signal)
                 self.last_signal_time = signal.signal_time
+                campaign_id = self._campaign_id(signal)
+                self._record_audit(
+                    event_time=signal.signal_time,
+                    event_type="signal_triggered",
+                    campaign_id=campaign_id,
+                    details={
+                        "trigger_price": str(signal.trigger_price),
+                        "rise_threshold_5s": str(self.SPIKE_RISE_5S),
+                        "volume_threshold_5s": str(self.VOLUME_MULTIPLE_5S),
+                    },
+                )
+                self._record_audit(
+                    event_time=signal.signal_time,
+                    event_type="entry_plan_created",
+                    campaign_id=campaign_id,
+                    details={
+                        "spike_high": str(signal.spike_high),
+                        "origin_price": str(signal.origin_price),
+                        "atr": str(signal.atr),
+                        "tier_prices": [str(price) for price in signal.tier_prices],
+                        "tier_weights": [str(weight) for weight in signal.tier_weights],
+                        "invalid_price": str(signal.invalid_price),
+                        "active_time": signal.active_time,
+                        "expire_time": signal.expire_time,
+                    },
+                )
 
         return self._manage_signals(bar)
 
@@ -187,13 +234,17 @@ class DynamicSpikeShortStrategy:
         for sig in list(self.active_signals):
             # 1. 过期：撤销未成交入场单（D-006）
             if bar.timestamp >= sig.expire_time:
-                self._cancel_signal_orders(sig)
+                cancelled = self._cancel_signal_orders(sig)
+                self._record_signal_terminal(sig, "signal_expired", bar.timestamp, cancelled)
                 self.active_signals.remove(sig)
                 continue
 
             # 2. 触及失效价：撤销未成交入场单，已成交仓位交由退出逻辑处理（D-006）
             if bar.high >= sig.invalid_price:
-                self._cancel_signal_orders(sig)
+                cancelled = self._cancel_signal_orders(sig)
+                self._record_signal_terminal(
+                    sig, "signal_invalidated", bar.timestamp, cancelled
+                )
                 self.active_signals.remove(sig)
                 continue
 
@@ -235,20 +286,67 @@ class DynamicSpikeShortStrategy:
         """
         撤销该信号已提交且仍未成交的入场单。
 
-        Phase 2 必须改为通过账户抽象下发撤单指令，而不是直接操作引擎。
+        通过账户抽象下发撤单，不依赖运行模式的具体执行器。
         """
-        if self._engine is None or not sig.placed_client_order_ids:
+        if self._account is None or not sig.placed_client_order_ids:
             return 0
 
         cancelled = 0
-        for order in list(self._engine.orders.values()):
+        for order in self._account.iter_orders():
             if order.client_order_id not in sig.placed_client_order_ids:
                 continue
             if order.status != "NEW":
                 continue
-            if self._engine.executor.cancel_order(order.order_id):
+            if self._account.cancel_order(order.order_id):
                 cancelled += 1
         return cancelled
+
+    def _campaign_id(self, sig: SpikeSignal) -> str:
+        return f"spike_short:{self.symbol}:{sig.signal_time}"
+
+    @staticmethod
+    def _campaign_id_from_client_order(client_order_id: str) -> str | None:
+        prefix, separator, _tier = client_order_id.rpartition("_tier")
+        if not separator or not prefix.startswith("spike_short_"):
+            return None
+        symbol_and_time = prefix[len("spike_short_"):]
+        symbol, separator, signal_time = symbol_and_time.rpartition("_")
+        if not separator:
+            return None
+        return f"spike_short:{symbol}:{signal_time}"
+
+    def _record_signal_terminal(
+        self,
+        sig: SpikeSignal,
+        event_type: str,
+        event_time: int,
+        cancelled_orders: int,
+    ) -> None:
+        self._record_audit(
+            event_time=event_time,
+            event_type=event_type,
+            campaign_id=self._campaign_id(sig),
+            details={"cancelled_orders": cancelled_orders},
+        )
+
+    def _record_audit(
+        self,
+        *,
+        event_time: int,
+        event_type: str,
+        campaign_id: str | None,
+        details: dict,
+    ) -> None:
+        self._audit_events.append(
+            StrategyAuditEvent(
+                event_time=event_time,
+                event_type=event_type,
+                symbol=self.symbol,
+                strategy_id="spike_short",
+                campaign_id=campaign_id,
+                details=details,
+            )
+        )
 
     # ------------------------------------------------------------------
     # 缓存与信号检测
@@ -432,21 +530,21 @@ class DynamicSpikeBacktestStrategy:
         self,
         symbols: List[str],
         total_notional: Decimal,
-        engine: Optional[BacktestEngine] = None,
+        account: Optional[StrategyAccount] = None,
     ):
         self.strategies = {
             symbol: DynamicSpikeShortStrategy(
-                symbol, total_notional=total_notional, engine=engine
+                symbol, total_notional=total_notional, account=account
             )
             for symbol in symbols
         }
-        self._engine: Optional[BacktestEngine] = engine
+        self._account: Optional[StrategyAccount] = account
         self.active_symbol: Optional[str] = None
 
-    def bind_engine(self, engine: BacktestEngine) -> None:
-        self._engine = engine
+    def bind_account(self, account: StrategyAccount) -> None:
+        self._account = account
         for strategy in self.strategies.values():
-            strategy.bind_engine(engine)
+            strategy.bind_account(account)
 
     def set_trading_enabled(self, enabled: bool) -> None:
         for strategy in self.strategies.values():
@@ -482,17 +580,23 @@ class DynamicSpikeBacktestStrategy:
         if strategy is not None:
             strategy.on_fill(fill)
 
+    def drain_audit_events(self) -> List[StrategyAuditEvent]:
+        events: List[StrategyAuditEvent] = []
+        for strategy in self.strategies.values():
+            events.extend(strategy.drain_audit_events())
+        return events
+
     def _has_live_campaign(self, symbol: str) -> bool:
         strategy = self.strategies[symbol]
         if strategy.active_signals:
             return True
-        if self._engine is None:
+        if self._account is None:
             return False
-        if symbol in self._engine.positions:
+        if self._account.has_open_position(symbol):
             return True
         return any(
             order.symbol == symbol
             and order.status in {"NEW", "SUBMIT_UNKNOWN"}
             and order.strategy_id == "spike_short"
-            for order in self._engine.orders.values()
+            for order in self._account.iter_orders()
         )

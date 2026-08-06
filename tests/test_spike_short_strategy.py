@@ -3,7 +3,7 @@
 """
 import pytest
 from decimal import Decimal
-from trading_platform.shared.events import Bar1s, Kline
+from trading_platform.shared.events import Bar1s, Kline, Order
 from trading_platform.strategies.spike_short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
@@ -169,6 +169,69 @@ class TestDynamicSpikeShortStrategy:
         intents = strategy._manage_signals(bar_at(2_000))
         assert len(intents) == 3
         assert all(intent.ttl_ms == 180_000 for intent in intents)
+
+    def test_signal_invalidation_cancels_through_account_interface(self):
+        class FakeAccount:
+            def __init__(self):
+                self.cancelled = []
+                self.order = Order(
+                    order_id="order-1",
+                    client_order_id="spike_short_BTCUSDT_1000_tier1",
+                    account_id="backtest",
+                    symbol="BTCUSDT",
+                    side="SELL",
+                    type="LIMIT",
+                    price=Decimal("108.5"),
+                    quantity=Decimal("1"),
+                    status="NEW",
+                    created_at=2_000,
+                    strategy_id="spike_short",
+                )
+
+            def get_order(self, order_id):
+                return self.order if order_id == self.order.order_id else None
+
+            def iter_orders(self):
+                return (self.order,)
+
+            def has_open_position(self, symbol):
+                return False
+
+            def cancel_order(self, order_id):
+                self.cancelled.append(order_id)
+                self.order.status = "CANCELLED"
+                return True
+
+        account = FakeAccount()
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000"), account=account
+        )
+        signal = SpikeSignal(
+            signal_time=1_000,
+            trigger_price=Decimal("100"),
+            spike_high=Decimal("120"),
+            origin_price=Decimal("90"),
+            atr=Decimal("10"),
+            tier_prices=[Decimal("108.5"), Decimal("112.5"), Decimal("116.5")],
+            tier_weights=list(strategy.TIER_WEIGHTS),
+            invalid_price=Decimal("125"),
+            active_time=2_000,
+            expire_time=182_000,
+            placed_client_order_ids={account.order.client_order_id},
+        )
+        strategy.active_signals.append(signal)
+        bar = Bar1s(
+            symbol="BTCUSDT", timestamp=3_000, available_time=4_000,
+            open=Decimal("124"), high=Decimal("126"), low=Decimal("123"),
+            close=Decimal("125"), volume=Decimal("1"), trade_count=1,
+            vwap=Decimal("125"),
+        )
+
+        assert strategy._manage_signals(bar) == []
+        assert account.cancelled == ["order-1"]
+        audit = strategy.drain_audit_events()
+        assert [event.event_type for event in audit] == ["signal_invalidated"]
+        assert audit[0].details == {"cancelled_orders": 1}
 
     def test_minute_window_requires_every_completed_kline(self):
         strategy = DynamicSpikeShortStrategy(

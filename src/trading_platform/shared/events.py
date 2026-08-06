@@ -5,7 +5,7 @@
 import json
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 
 # 订阅类型
@@ -232,3 +232,15 @@ class Position:
     opened_at: int  # 毫秒时间戳
     closed_at: int | None = None
     status: Literal['OPEN', 'CLOSED'] = 'OPEN'
+
+
+@dataclass(frozen=True)
+class StrategyAuditEvent:
+    """策略决策审计事件，供 replay 和实时适配器统一记录。"""
+
+    event_time: int
+    event_type: str
+    symbol: str
+    strategy_id: str
+    campaign_id: str | None
+    details: dict[str, Any]
