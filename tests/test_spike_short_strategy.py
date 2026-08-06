@@ -229,6 +229,9 @@ class TestDynamicSpikeShortStrategy:
                     self.should_trigger = False
                 return []
 
+            def reset_campaign_timing(self):
+                pass
+
         adapter = DynamicSpikeBacktestStrategy(
             ["AAAUSDT", "BBBUSDT"], Decimal("1000")
         )

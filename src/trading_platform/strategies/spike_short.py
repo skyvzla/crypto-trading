@@ -22,7 +22,7 @@ from decimal import Decimal
 from typing import List, Optional
 from dataclasses import dataclass, field
 
-from trading_platform.shared.events import Bar1s, Kline, OrderIntent
+from trading_platform.shared.events import Bar1s, Fill, Kline, OrderIntent
 from trading_platform.backtest.engine import BacktestEngine
 
 MS_PER_SECOND = 1000
@@ -112,6 +112,7 @@ class DynamicSpikeShortStrategy:
         # 信号状态
         self.last_signal_time: Optional[int] = None
         self.active_signals: List[SpikeSignal] = []
+        self.first_fill_time: Optional[int] = None
 
     def bind_engine(self, engine: BacktestEngine) -> None:
         """由适配器注入引擎引用"""
@@ -124,6 +125,20 @@ class DynamicSpikeShortStrategy:
     def set_entry_enabled(self, enabled: bool) -> None:
         """控制新信号准入；已有信号仍继续失效、撤单和到期处理。"""
         self._entry_enabled = enabled
+
+    def on_fill(self, fill: Fill) -> None:
+        """记录本轮第一笔真实成交时间，作为 900 秒计时起点。"""
+        if fill.symbol != self.symbol or self.first_fill_time is not None:
+            return
+        if self._engine is None:
+            return
+        order = self._engine.orders.get(fill.order_id)
+        if order is None or order.strategy_id != "spike_short":
+            return
+        self.first_fill_time = fill.fill_time
+
+    def reset_campaign_timing(self) -> None:
+        self.first_fill_time = None
 
     # ------------------------------------------------------------------
     # 事件入口（符合 backtest.engine.Strategy 协议）
@@ -453,6 +468,7 @@ class DynamicSpikeBacktestStrategy:
             self.active_symbol == bar.symbol
             and not self._has_live_campaign(bar.symbol)
         ):
+            strategy.reset_campaign_timing()
             self.active_symbol = None
 
         return intents
@@ -460,6 +476,11 @@ class DynamicSpikeBacktestStrategy:
     def on_kline(self, kline: Kline) -> List[OrderIntent]:
         strategy = self.strategies.get(kline.symbol)
         return strategy.on_kline(kline) if strategy else []
+
+    def on_fill(self, fill: Fill) -> None:
+        strategy = self.strategies.get(fill.symbol)
+        if strategy is not None:
+            strategy.on_fill(fill)
 
     def _has_live_campaign(self, symbol: str) -> bool:
         strategy = self.strategies[symbol]
