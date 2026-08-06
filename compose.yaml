@@ -91,6 +91,7 @@ services:
     restart: unless-stopped
 
   strategy_kline:
+    profiles: ["examples"]
     build: *app_build
     command: ["python", "-m", "trading_platform.strategies.kline.main"]
     init: true
@@ -121,6 +122,7 @@ services:
     restart: unless-stopped
 
   strategy_tick:
+    profiles: ["examples"]
     build: *app_build
     command: ["python", "-m", "trading_platform.strategies.tick.main"]
     init: true
