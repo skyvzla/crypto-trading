@@ -3,7 +3,9 @@
 """
 from typing import Literal
 
-OrderStatus = Literal['NEW', 'FILLED', 'CANCELLED', 'EXPIRED', 'SUBMIT_UNKNOWN']
+OrderStatus = Literal[
+    'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED', 'SUBMIT_UNKNOWN'
+]
 
 # 允许的状态转换
 VALID_TRANSITIONS = {
@@ -12,7 +14,9 @@ VALID_TRANSITIONS = {
     'FILLED': set(),  # 终态
     'CANCELLED': set(),  # 终态
     'EXPIRED': set(),  # 终态
-    'SUBMIT_UNKNOWN': {'NEW', 'FILLED', 'CANCELLED'},  # 查单后可能是任何状态
+    'SUBMIT_UNKNOWN': {
+        'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED'
+    },  # 查单后以交易所事实为准
 }
 
 

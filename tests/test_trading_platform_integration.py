@@ -62,6 +62,8 @@ class TestOrderStates:
         assert is_valid_transition('NEW', 'CANCELLED') == True
         assert is_valid_transition('SUBMIT_UNKNOWN', 'NEW') == True
         assert is_valid_transition('SUBMIT_UNKNOWN', 'FILLED') == True
+        assert is_valid_transition('SUBMIT_UNKNOWN', 'PARTIALLY_FILLED') == True
+        assert is_valid_transition('SUBMIT_UNKNOWN', 'EXPIRED') == True
 
     def test_invalid_transitions(self):
         """测试非法状态转换"""
