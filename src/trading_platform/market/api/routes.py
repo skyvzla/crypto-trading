@@ -6,9 +6,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-
-from trading_platform.shared.events import SubscriptionType
+from pydantic import BaseModel, Field, field_validator
 
 
 logger = logging.getLogger(__name__)
@@ -20,7 +18,18 @@ logger = logging.getLogger(__name__)
 class SubscriptionRequest(BaseModel):
     """订阅请求"""
     symbols: list[str] = Field(..., min_length=1, description="交易对列表")
-    types: list[SubscriptionType] = Field(..., min_length=1, description="订阅类型列表")
+    types: list[str] = Field(..., min_length=1, description="订阅类型列表")
+
+    @field_validator("types")
+    @classmethod
+    def validate_subscription_types(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if value == "bar1s":
+                continue
+            if value.startswith("kline:") and value.split(":", 1)[1]:
+                continue
+            raise ValueError(f"不支持的订阅类型: {value}")
+        return values
 
 
 class SubscriptionResponse(BaseModel):
@@ -47,6 +56,20 @@ class HealthResponse(BaseModel):
     active_ws_streams: int
     redis_connected: bool = False
     websocket_connected: bool = False
+    connection_generation: int = 0
+    data_quality_ready: bool = False
+    data_quality_issues: int = 0
+
+
+class QualityResponse(BaseModel):
+    """策略可消费的逐流数据质量状态。"""
+
+    ready: bool
+    websocket_connected: bool
+    connection_generation: int
+    last_connected_at_ms: int | None
+    last_disconnected_at_ms: int | None
+    streams: dict[str, dict[str, Any]]
 
 
 # ==================== 订阅管理器 ====================

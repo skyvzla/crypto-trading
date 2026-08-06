@@ -89,6 +89,22 @@ async def test_market_service_publishes_bar_and_round_trips_kline(real_redis):
         assert latest["symbol"] == symbol
         assert latest["close_time"] == 60999
         assert latest["close"] == "103"
+
+        older = Kline(
+            symbol=symbol,
+            interval="1m",
+            open_time=0,
+            close_time=59_999,
+            available_time=60_000,
+            open=Decimal("1"),
+            high=Decimal("2"),
+            low=Decimal("1"),
+            close=Decimal("1"),
+            volume=Decimal("1"),
+        )
+        await service._handle_kline(symbol, "1m", older)
+        latest_after_replay = await service.kline_store.get_latest_kline(symbol, "1m")
+        assert latest_after_replay["close_time"] == 60999
     finally:
         await pubsub.aclose()
         await real_redis.delete(kline_key)

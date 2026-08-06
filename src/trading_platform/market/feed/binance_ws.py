@@ -5,6 +5,7 @@ Binance WebSocket 接入
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
@@ -44,6 +45,9 @@ class BinanceWebSocketClient:
         self._running = False
         self._reconnect_count = 0
         self._streams: tuple[str, ...] = ()
+        self.connection_generation = 0
+        self.last_connected_at_ms: int | None = None
+        self.last_disconnected_at_ms: int | None = None
 
     @property
     def connected(self) -> bool:
@@ -61,6 +65,8 @@ class BinanceWebSocketClient:
             ping_timeout=10,
             close_timeout=5,
         )
+        self.connection_generation += 1
+        self.last_connected_at_ms = int(time.time() * 1000)
 
     async def connect(self, streams: list[str]) -> None:
         """
@@ -89,6 +95,8 @@ class BinanceWebSocketClient:
     async def disconnect(self) -> None:
         """断开连接"""
         self._running = False
+        if self._ws is not None:
+            self.last_disconnected_at_ms = int(time.time() * 1000)
         if self._ws:
             await self._ws.close()
             self._ws = None
@@ -166,6 +174,7 @@ class BinanceWebSocketClient:
                     break
 
                 self._ws = None
+                self.last_disconnected_at_ms = int(time.time() * 1000)
                 if not await self._reconnect():
                     break
 

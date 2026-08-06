@@ -10,6 +10,7 @@ from websockets.exceptions import WebSocketException
 from trading_platform.market.feed.aggregator import Bar1sAggregator
 from trading_platform.market.feed.binance_ws import BinanceWebSocketClient
 from trading_platform.market.main import MarketLayerConfig, MarketLayerService
+from trading_platform.market.quality import MarketDataQualityTracker
 from trading_platform.market.store.kline_store import KlineStore
 from trading_platform.market.store.redis_pub import RedisPublisher
 
@@ -43,6 +44,33 @@ def test_aggregator_drops_trade_for_an_already_published_second():
     ) == []
     emitted = aggregator.add_trade("BTCUSDT", Decimal("50"), Decimal("1"), 5000)
     assert [bar.timestamp for bar in emitted] == [3000]
+
+
+def test_quality_tracker_rejects_duplicate_and_gap_without_guessing_recovery():
+    tracker = MarketDataQualityTracker()
+    stream = "btcusdt@aggTrade"
+    tracker.begin_connection([stream], generation=1)
+
+    assert tracker.observe_aggtrade("BTCUSDT", 100, 1_000, 2_000)
+    assert not tracker.observe_aggtrade("BTCUSDT", 100, 1_000, 2_001)
+    assert tracker.snapshot()[stream]["status"] == "healthy"
+    assert tracker.snapshot()[stream]["duplicate_count"] == 1
+
+    assert not tracker.observe_aggtrade("BTCUSDT", 102, 1_002, 2_002)
+    quality = tracker.snapshot()[stream]
+    assert quality["status"] == "degraded"
+    assert quality["gap_count"] == 1
+    assert not tracker.observe_aggtrade("BTCUSDT", 103, 1_003, 2_003)
+
+
+def test_quality_tracker_detects_completed_kline_gap():
+    tracker = MarketDataQualityTracker()
+    stream = "btcusdt@kline_1m"
+    tracker.begin_connection([stream], generation=1)
+
+    assert tracker.observe_kline("BTCUSDT", "1m", 60_000, 119_999, 120_100)
+    assert not tracker.observe_kline("BTCUSDT", "1m", 180_000, 239_999, 240_100)
+    assert tracker.snapshot()[stream]["status"] == "degraded"
 
 
 @pytest.mark.asyncio
@@ -181,6 +209,54 @@ def test_health_reports_required_websocket_failure_as_not_ready():
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
     assert response.json()["websocket_connected"] is False
+
+
+def test_health_reports_stream_quality_gate():
+    from trading_platform.market.main import create_app
+
+    app, service = create_app(MarketLayerConfig(), "test-epoch")
+    service.redis.ping = AsyncMock(return_value=True)
+    service.quality.begin_connection(["btcusdt@aggTrade"], generation=1)
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["data_quality_ready"] is False
+    assert response.json()["data_quality_issues"] == 1
+
+
+@pytest.mark.asyncio
+async def test_message_task_failure_is_recovered_with_existing_subscription():
+    service = MarketLayerService(MarketLayerConfig(), AsyncMock(), "test-epoch")
+    service._running = True
+    service.subscription_manager.update_subscription(
+        "consumer", ["BTCUSDT"], ["bar1s"]
+    )
+    service.ws_client = AsyncMock()
+    service.ws_client.reconnect_delay = 0
+    service.ws_client.connection_generation = 1
+    service.ws_client.connect.side_effect = [None]
+    service.ws_client.connected = True
+
+    async def receive_messages():
+        await asyncio.Event().wait()
+        yield {}
+
+    service.ws_client.receive_messages = receive_messages
+    service._current_streams = ["btcusdt@aggTrade"]
+
+    async def fail():
+        raise RuntimeError("message loop failed")
+
+    failed = asyncio.create_task(fail())
+    await asyncio.sleep(0)
+    service._ws_task = failed
+    service._on_ws_task_done(failed)
+    await asyncio.sleep(0.01)
+
+    service.ws_client.connect.assert_awaited_once_with(["btcusdt@aggTrade"])
+    assert service._ws_task is not None
+    await service.stop()
 
 
 @pytest.mark.asyncio

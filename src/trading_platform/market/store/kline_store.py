@@ -64,6 +64,16 @@ class KlineStore:
         message = json.dumps(payload, cls=DecimalEncoder)
 
         try:
+            # WS reconnects can replay a completed candle. Never let an older
+            # event move the Redis "latest" watermark backwards.
+            existing = await self.redis.hget(key, "latest")
+            if existing is not None:
+                if isinstance(existing, bytes):
+                    existing = existing.decode("utf-8")
+                previous_close_time = json.loads(existing).get("close_time")
+                if previous_close_time is not None and int(previous_close_time) >= kline.close_time:
+                    return
+
             # 写入 Redis Hash 的 latest 字段
             await self.redis.hset(key, "latest", message)
 

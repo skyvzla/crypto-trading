@@ -18,6 +18,7 @@ from fastapi import FastAPI, Response, status
 
 from trading_platform.market.api.routes import (
     HealthResponse,
+    QualityResponse,
     SubscriptionManager,
     SubscriptionRequest,
     SubscriptionResponse,
@@ -30,6 +31,7 @@ from trading_platform.market.feed.binance_ws import (
     parse_aggtrade_message,
     parse_kline_message,
 )
+from trading_platform.market.quality import MarketDataQualityTracker
 from trading_platform.market.store.kline_store import KlineStore
 from trading_platform.market.store.redis_pub import RedisPublisher
 from trading_platform.shared.config import BinanceConfig, MarketLayerConfig
@@ -82,6 +84,9 @@ class MarketLayerService:
         self._ws_task: asyncio.Task | None = None
         self._current_streams: list[str] = []
         self._refresh_lock = asyncio.Lock()
+        self._recovery_task: asyncio.Task | None = None
+        self.quality = MarketDataQualityTracker()
+        self._quality_generation = 0
 
     async def start(self) -> None:
         """启动服务"""
@@ -92,6 +97,15 @@ class MarketLayerService:
         """停止服务"""
         logger.info("正在停止行情层服务...")
         self._running = False
+
+        recovery_task = self._recovery_task
+        self._recovery_task = None
+        if recovery_task is not None and recovery_task is not asyncio.current_task():
+            recovery_task.cancel()
+            try:
+                await recovery_task
+            except asyncio.CancelledError:
+                pass
 
         async with self._refresh_lock:
             try:
@@ -118,6 +132,7 @@ class MarketLayerService:
                     for stream in build_stream_names([symbol], list(symbol_types))
                 }
             )
+            self.quality.set_expected_streams(needed_streams)
 
             task_is_running = self._ws_task is not None and not self._ws_task.done()
             if needed_streams == self._current_streams and task_is_running:
@@ -136,7 +151,16 @@ class MarketLayerService:
             self._current_streams = []
 
             if needed_streams:
-                await self.ws_client.connect(needed_streams)
+                try:
+                    await self.ws_client.connect(needed_streams)
+                except Exception:
+                    self._schedule_ws_recovery()
+                    raise
+                self.quality.begin_connection(
+                    needed_streams,
+                    self.ws_client.connection_generation,
+                )
+                self._quality_generation = self.ws_client.connection_generation
                 task = asyncio.create_task(self._ws_message_loop())
                 self._ws_task = task
                 self._current_streams = needed_streams
@@ -171,6 +195,31 @@ class MarketLayerService:
             )
         else:
             logger.warning("WebSocket 消息任务意外结束")
+        self._schedule_ws_recovery()
+
+    def _schedule_ws_recovery(self) -> None:
+        if not self._running or not self.subscription_manager.get_active_streams():
+            return
+        if self._recovery_task is not None and not self._recovery_task.done():
+            return
+        self._recovery_task = asyncio.create_task(self._recover_ws_loop())
+
+    async def _recover_ws_loop(self) -> None:
+        try:
+            while self._running and self.subscription_manager.get_active_streams():
+                await asyncio.sleep(self.ws_client.reconnect_delay)
+                try:
+                    await self.refresh_ws_streams()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(f"WebSocket 后台恢复失败: {exc}")
+                    continue
+                if self._ws_task is not None and not self._ws_task.done():
+                    return
+        finally:
+            if self._recovery_task is asyncio.current_task():
+                self._recovery_task = None
 
     async def _ws_message_loop(self) -> None:
         """WebSocket 消息处理循环"""
@@ -185,6 +234,7 @@ class MarketLayerService:
     async def _handle_ws_message(self, message: dict[str, Any]) -> None:
         """处理单条 WebSocket 消息"""
         try:
+            self._sync_quality_generation()
             # 解析 aggTrade
             aggtrade_result = parse_aggtrade_message(message)
             if aggtrade_result:
@@ -205,8 +255,23 @@ class MarketLayerService:
         except Exception as e:
             logger.error(f"处理消息失败: {e}", exc_info=True)
 
+    def _sync_quality_generation(self) -> None:
+        """Mark streams as awaiting data when the client reconnects."""
+        generation = self.ws_client.connection_generation
+        if generation == self._quality_generation or not self._current_streams:
+            return
+        self.quality.begin_connection(self._current_streams, generation)
+        self._quality_generation = generation
+
     async def _handle_aggtrade(self, symbol: str, trade_data: dict[str, Any]) -> None:
         """处理 aggTrade，聚合为 1s Bar"""
+        if not self.quality.observe_aggtrade(
+            symbol=symbol,
+            aggregate_trade_id=trade_data.get("agg_trade_id"),
+            event_time_ms=trade_data["timestamp"],
+            received_at_ms=int(time.time() * 1000),
+        ):
+            return
         bars = self.aggregator.add_trade(
             symbol=symbol,
             price=trade_data["price"],
@@ -219,6 +284,14 @@ class MarketLayerService:
 
     async def _handle_kline(self, symbol: str, interval: str, kline: Any) -> None:
         """处理已完成的 Kline，存储到 Redis Hash"""
+        if not self.quality.observe_kline(
+            symbol=symbol,
+            interval=interval,
+            open_time_ms=kline.open_time,
+            close_time_ms=kline.close_time,
+            received_at_ms=int(time.time() * 1000),
+        ):
+            return
         await self.kline_store.store_kline(kline)
 
     def get_uptime(self) -> float:
@@ -312,7 +385,11 @@ def create_app(
         except Exception:
             redis_connected = False
 
-        websocket_required = bool(service._current_streams)
+        service._sync_quality_generation()
+        websocket_required = bool(
+            service._current_streams
+            or service.subscription_manager.get_active_streams()
+        )
         websocket_connected = (
             not websocket_required
             or (
@@ -321,7 +398,8 @@ def create_app(
                 and service.ws_client.connected
             )
         )
-        ready = redis_connected and websocket_connected
+        data_quality_ready = service.quality.ready
+        ready = redis_connected and websocket_connected and data_quality_ready
         if not ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
@@ -333,6 +411,29 @@ def create_app(
             active_ws_streams=stats["active_streams"],
             redis_connected=redis_connected,
             websocket_connected=websocket_connected,
+            connection_generation=service.ws_client.connection_generation,
+            data_quality_ready=data_quality_ready,
+            data_quality_issues=service.quality.issue_count,
+        )
+
+    @app.get("/quality")
+    async def quality_status(response: Response) -> QualityResponse:
+        service._sync_quality_generation()
+        required = bool(
+            service._current_streams
+            or service.subscription_manager.get_active_streams()
+        )
+        websocket_connected = service.ws_client.connected
+        ready = not required or (websocket_connected and service.quality.ready)
+        if not ready:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return QualityResponse(
+            ready=ready,
+            websocket_connected=websocket_connected,
+            connection_generation=service.ws_client.connection_generation,
+            last_connected_at_ms=service.ws_client.last_connected_at_ms,
+            last_disconnected_at_ms=service.ws_client.last_disconnected_at_ms,
+            streams=service.quality.snapshot(),
         )
 
     return app, service
