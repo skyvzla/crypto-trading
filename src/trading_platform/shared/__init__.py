@@ -11,6 +11,7 @@ from .config import (
     BacktestConfig,
 )
 from .events import Bar1s, Kline, OrderIntent, Fill, Order, Position
+from .execution_recovery import OrderWAL, OrderWALRecord, Resolution, SubmitUnknownResolver
 from .binance import (
     BinanceRestClient,
     BinanceAPIException,
@@ -36,6 +37,10 @@ __all__ = [
     'Fill',
     'Order',
     'Position',
+    'OrderWAL',
+    'OrderWALRecord',
+    'Resolution',
+    'SubmitUnknownResolver',
     # Binance
     'BinanceRestClient',
     'BinanceAPIException',

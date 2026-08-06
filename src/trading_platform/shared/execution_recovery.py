@@ -1,0 +1,207 @@
+"""订单提交恢复基础设施。
+
+该模块只负责记录执行事实和解析交易所查单结果，不负责重试下单、撤单或
+推断交易规则。WAL 是追加式 JSONL：每条记录完整自描述，进程重启时可重放。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import threading
+from dataclasses import asdict, dataclass, field
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Literal, Protocol
+
+from trading_platform.shared.events import OrderIntent
+from trading_platform.shared.order_states import OrderStatus, is_valid_transition
+
+
+WALRecordType = Literal["intent", "submit_unknown", "exchange_status"]
+_KNOWN_EXCHANGE_STATUSES = {
+    "NEW": "NEW",
+    "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+    "FILLED": "FILLED",
+    "CANCELED": "CANCELLED",
+    "EXPIRED": "EXPIRED",
+}
+
+
+@dataclass(frozen=True)
+class OrderWALRecord:
+    """一条订单执行事实。
+
+    ``intent`` 记录必须在 REST 提交前写入；REST 超时后追加
+    ``submit_unknown``。只有查单得到明确的已知状态时才追加
+    ``exchange_status``。
+    """
+
+    record_type: WALRecordType
+    recorded_at: int
+    account_id: str
+    client_order_id: str
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    order_type: Literal["LIMIT", "MARKET"]
+    quantity: str
+    price: str
+    status: OrderStatus | None = None
+    exchange_order_id: str | None = None
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "OrderWALRecord":
+        return cls(
+            record_type=data["record_type"],
+            recorded_at=int(data["recorded_at"]),
+            account_id=data["account_id"],
+            client_order_id=data["client_order_id"],
+            symbol=data["symbol"],
+            side=data["side"],
+            order_type=data["order_type"],
+            quantity=str(data["quantity"]),
+            price=str(data["price"]),
+            status=data.get("status"),
+            exchange_order_id=(
+                str(data["exchange_order_id"])
+                if data.get("exchange_order_id") is not None
+                else None
+            ),
+            payload=dict(data.get("payload") or {}),
+        )
+
+
+class OrderWAL:
+    """线程安全、追加式订单 WAL。
+
+    WAL 不删除或覆盖记录；``recover_latest`` 返回每个客户端订单号的最后一条
+    事实。损坏行默认抛错，避免以不完整日志继续承担新增风险。
+    """
+
+    def __init__(self, path: str | os.PathLike[str]):
+        self.path = Path(path)
+        self._lock = threading.Lock()
+
+    def append(self, record: OrderWALRecord) -> None:
+        line = json.dumps(record.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, self.path.open("a", encoding="utf-8") as stream:
+            stream.write(line)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def record_intent(self, intent: OrderIntent, *, account_id: str, recorded_at: int) -> OrderWALRecord:
+        record = OrderWALRecord(
+            record_type="intent",
+            recorded_at=recorded_at,
+            account_id=account_id,
+            client_order_id=intent.client_order_id,
+            symbol=intent.symbol,
+            side=intent.side,
+            order_type=intent.order_type,
+            quantity=str(intent.quantity),
+            price=str(intent.price),
+            payload={
+                "ttl_ms": intent.ttl_ms,
+                "strategy_id": intent.strategy_id,
+                "trigger_reason": intent.trigger_reason,
+            },
+        )
+        self.append(record)
+        return record
+
+    def record_submit_unknown(self, record: OrderWALRecord, *, recorded_at: int, error: str) -> OrderWALRecord:
+        if record.record_type not in {"intent", "submit_unknown"}:
+            raise ValueError("SUBMIT_UNKNOWN must follow an order intent")
+        unknown = OrderWALRecord(
+            **{
+                **record.to_dict(),
+                "record_type": "submit_unknown",
+                "recorded_at": recorded_at,
+                "status": "SUBMIT_UNKNOWN",
+                "payload": {**record.payload, "error": error},
+            }
+        )
+        self.append(unknown)
+        return unknown
+
+    def recover_latest(self) -> dict[str, OrderWALRecord]:
+        if not self.path.exists():
+            return {}
+        latest: dict[str, OrderWALRecord] = {}
+        with self.path.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                try:
+                    record = OrderWALRecord.from_dict(json.loads(line))
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(f"Invalid order WAL record at line {line_number}") from exc
+                latest[record.client_order_id] = record
+        return latest
+
+
+class OrderQuery(Protocol):
+    async def query_order(self, symbol: str, *, orig_client_order_id: str) -> dict[str, Any] | None:
+        ...
+
+
+@dataclass(frozen=True)
+class Resolution:
+    """一次查单尝试的结果；未解析时 ``status`` 保持未知。"""
+
+    resolved: bool
+    status: OrderStatus | None
+    response: dict[str, Any] | None = None
+    reason: str | None = None
+
+
+class SubmitUnknownResolver:
+    """按交易所事实解析单个 ``SUBMIT_UNKNOWN`` 订单。
+
+    该类不自动重试，也不在查无订单时标记取消；调用方可按运行策略决定下一次查单
+    或人工门禁。每次明确响应都会先校验状态转换，再追加 WAL。
+    """
+
+    def __init__(self, wal: OrderWAL, query_client: OrderQuery):
+        self.wal = wal
+        self.query_client = query_client
+
+    async def resolve_once(self, record: OrderWALRecord, *, recorded_at: int) -> Resolution:
+        if record.status != "SUBMIT_UNKNOWN":
+            raise ValueError("only SUBMIT_UNKNOWN records can be resolved")
+        try:
+            response = await self.query_client.query_order(
+                record.symbol, orig_client_order_id=record.client_order_id
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return Resolution(False, None, reason=f"query_failed:{type(exc).__name__}")
+        if response is None:
+            return Resolution(False, None, reason="order_not_found")
+        exchange_status = response.get("status")
+        status = _KNOWN_EXCHANGE_STATUSES.get(exchange_status)
+        if status is None:
+            return Resolution(False, None, response=response, reason="unknown_exchange_status")
+        if not is_valid_transition("SUBMIT_UNKNOWN", status):
+            return Resolution(False, None, response=response, reason="invalid_status_transition")
+        resolved = OrderWALRecord(
+            **{
+                **record.to_dict(),
+                "record_type": "exchange_status",
+                "recorded_at": recorded_at,
+                "status": status,
+                "exchange_order_id": (
+                    str(response["orderId"]) if response.get("orderId") is not None else record.exchange_order_id
+                ),
+                "payload": {**record.payload, "exchange_response": response},
+            }
+        )
+        self.wal.append(resolved)
+        return Resolution(True, status, response=response)
