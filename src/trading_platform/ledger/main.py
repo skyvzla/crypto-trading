@@ -2,10 +2,8 @@
 账本层主进程
 启动 FastAPI 服务，提供账本查询和控制接口
 """
-import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,21 +22,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# 全局数据库实例
-_ledger_db: Optional[LedgerDB] = None
-
-
-def get_ledger_db() -> LedgerDB:
-    """获取全局数据库实例"""
-    if _ledger_db is None:
-        raise RuntimeError("Database not initialized")
-    return _ledger_db
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    global _ledger_db
 
     # 启动时初始化
     logger.info("Initializing ledger service...")
@@ -65,29 +51,27 @@ async def lifespan(app: FastAPI):
         max_size=db_config.get("pool_max_size", 10)
     )
 
-    _ledger_db = LedgerDB(pool)
+    app.state.ledger_db = LedgerDB(pool)
     logger.info("Database connection pool created")
 
     # 初始化数据库表（可选，也可以手动执行 schema.sql）
     try:
         async with pool.connection() as conn:
-            # 检查表是否存在
             result = await conn.execute(
                 """
-                SELECT EXISTS (
-                    SELECT FROM information_schema.tables
+                SELECT COUNT(*)
+                FROM information_schema.tables
                     WHERE table_schema = 'public'
-                    AND table_name = 'orders'
-                )
+                    AND table_name IN ('orders', 'trades', 'positions', 'subcategory_admission', 'subcategory_admission_audit')
                 """
             )
-            row = await result.fetchone()
-            if not row or not row[0]:
-                logger.warning("Tables not found. Please run schema.sql to initialize database.")
-            else:
-                logger.info("Database tables verified")
+            tables = await result.fetchone()
+            if not tables or tables[0] != 5:
+                raise RuntimeError("Required ledger tables are missing; apply ledger/db/schema.sql")
+            logger.info("Database tables verified")
     except Exception as e:
-        logger.error(f"Failed to verify database tables: {e}")
+            await pool.close()
+            raise RuntimeError(f"Failed to verify database tables: {e}") from e
 
     logger.info("Ledger service started successfully")
 
@@ -96,13 +80,14 @@ async def lifespan(app: FastAPI):
     # 关闭时清理
     logger.info("Shutting down ledger service...")
     await pool.close()
+    app.state.ledger_db = None
     logger.info("Database connection pool closed")
 
 
 # 创建 FastAPI 应用
 app = FastAPI(
     title="Trading Platform Ledger API",
-    description="账本层查询接口，提供订单、成交、持仓、盈亏统计和紧急控制",
+    description="账本层查询接口与 subcategory 交易池准入控制",
     version="1.0.0",
     lifespan=lifespan
 )
