@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `73 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `78 passed`；
+- 本地全量测试为 `75 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `78 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；
@@ -136,10 +136,13 @@ D-007 超时退出及真实 Parquet 输入的三档全成交 CLI 回归。剩余
 
 ### Phase 3：执行、恢复与风险控制
 
-**状态：未开始**
+**状态：部分完成**
 
 交付物：订单 WAL、`SUBMIT_UNKNOWN` 解析、User Stream、启动对账、撤单竞态处理、交易所
 托管保护单、账户级风控和紧急停止。
+
+已完成 User Stream 线程安全回报投递、重连去重和停止取消的 mock 验证。剩余 WAL、
+`SUBMIT_UNKNOWN` 查询确认、启动对账、迟到回报、保护单及外部测试网验证。
 
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
 未终态轮次；本地状态以交易所订单、成交和仓位事实为准。
@@ -209,7 +212,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `73 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `78 passed`。
+当前基线：本地 `75 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `78 passed`。
 
 ## 8. 风险与停止条件
 

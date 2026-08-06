@@ -10,7 +10,7 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
 执行，以及执行回报到账本的事务闭环尚未完成。
 
-当前本地全量测试为 `73 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+当前本地全量测试为 `75 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
 `78 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -141,7 +141,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`73 passed, 5 skipped`
+- `uv run --extra dev pytest -q`：`75 passed, 5 skipped`
 - `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`78 passed`
 - Python 编译检查通过
 - Compose 配置解析通过
