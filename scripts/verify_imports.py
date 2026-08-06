@@ -20,11 +20,13 @@ def test_imports():
         "trading_platform.shared.logging_config",
         "trading_platform.shared.risk",
         "trading_platform.shared.order_states",
+        "trading_platform.shared.execution_recovery",
 
         # Binance执行层
         "trading_platform.shared.binance.rest_client",
         "trading_platform.shared.binance.user_stream",
         "trading_platform.shared.binance.rate_limiter",
+        "trading_platform.shared.binance.live_executor",
 
         # 行情层
         "trading_platform.market.feed.binance_ws",
