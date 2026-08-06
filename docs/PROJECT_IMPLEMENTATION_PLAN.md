@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `88 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `93 passed`；
+- 本地全量测试为 `89 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `94 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
@@ -213,7 +213,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `88 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `93 passed`。
+当前基线：本地 `89 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `94 passed`。
 
 ## 8. 风险与停止条件
 
