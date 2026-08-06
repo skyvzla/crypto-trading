@@ -256,6 +256,20 @@ def test_health_is_ready_without_subscriptions_when_redis_is_available():
     assert response.json()["websocket_connected"] is True
 
 
+def test_health_exposes_testnet_environment(monkeypatch):
+    from trading_platform.market.main import create_app
+
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
+    app, service = create_app(MarketLayerConfig(), "test-epoch")
+    service.redis.ping = AsyncMock(return_value=True)
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["binance_testnet"] is True
+    assert service.ws_client.ws_base_url == "wss://stream.binancefuture.com"
+
+
 def test_health_reports_required_websocket_failure_as_not_ready():
     from trading_platform.market.main import create_app
 

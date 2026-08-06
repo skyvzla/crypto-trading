@@ -62,13 +62,14 @@ class MarketLayerService:
         self.redis = redis_client
         self.instance_epoch = instance_epoch
         self.start_time = time.time()
+        self.binance_config = BinanceConfig()
 
         # 订阅管理器
         self.subscription_manager = SubscriptionManager(instance_epoch)
 
         # WebSocket 客户端
         self.ws_client = BinanceWebSocketClient(
-            ws_base_url=BinanceConfig().ws_base_url,
+            ws_base_url=self.binance_config.ws_base_url,
             reconnect_delay=5.0,
         )
 
@@ -414,6 +415,7 @@ def create_app(
             status="ready" if ready else "degraded",
             instance_epoch=stats["instance_epoch"],
             uptime_seconds=service.get_uptime(),
+            binance_testnet=service.binance_config.testnet,
             subscribed_symbols=stats["subscribed_symbols"],
             active_ws_streams=stats["active_streams"],
             redis_connected=redis_connected,

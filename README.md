@@ -45,6 +45,12 @@ scripts/deploy.sh
 执行恢复基础（WAL、未知提交单次/后台恢复和风险阻塞）已经实现；轮询参数及运行时装配、
 完整启动对账、保护退出和真实测试网闭环仍未完成，因此不要填入正式账户 API Key。
 
+公开 testnet 行情闭环验收（不需要 API Key，且会拒绝非 testnet 行情服务）：
+
+```bash
+docker compose exec -T market python scripts/market_smoke.py e2e
+```
+
 Spike replay 示例（历史 Parquet 数据需预先放入 `data/market/`）：
 
 ```bash

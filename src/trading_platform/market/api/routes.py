@@ -52,6 +52,7 @@ class HealthResponse(BaseModel):
     status: str = "ready"
     instance_epoch: str
     uptime_seconds: float
+    binance_testnet: bool = False
     subscribed_symbols: int
     active_ws_streams: int
     redis_connected: bool = False

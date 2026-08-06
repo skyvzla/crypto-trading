@@ -10,12 +10,12 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
 执行，以及执行回报、账户仓位到账本的完整运行时闭环尚未完成。
 
-当前本地全量测试为 `123 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`130 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `124 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`131 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
-PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明 Binance testnet
-执行或实盘流程可用。
+PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
+testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 testnet 执行或实盘流程可用。
 
 当前文档优先级：
 
@@ -32,7 +32,7 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 | 区域 | 当前能力 | 当前判断 |
 |---|---|---|
 | 工程结构 | `src/`、`tests/`、Dockerfile、Compose、pytest | 已建立 |
-| 行情客户端 | Binance WebSocket 客户端、aggTrade/Kline 解析器 | P0 已修复，待外部集成验证 |
+| 行情客户端 | Binance WebSocket 客户端、aggTrade/Kline 解析器 | testnet 短时外部 smoke 已通过，待长时间运行验证 |
 | 行情聚合 | aggTrade 到 `Bar1s` 的内存聚合器 | 已实现基础逻辑 |
 | 行情分发 | Redis Pub/Sub、Kline latest Hash | 已通过真实 Redis 服务级集成 |
 | 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新与断线重连已有自动化验证，待进程重启恢复和外部长时间验证 |
@@ -140,10 +140,11 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`123 passed, 7 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`130 passed`
+- `uv run --extra dev pytest -q`：`124 passed, 7 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`131 passed`
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
+- `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过
@@ -153,7 +154,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - Spike 部分成交、保护性退出、盈利管理、完整已平仓 PnL
 - subcategory 关闭后的实时轮询、订单关联和撤销接线；策略核心已暴露全局新入场准入开关
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
-- Binance 外部 HTTP/WS 长时间运行和完整 User Stream 对账
+- Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
 - Binance Futures testnet 真实外部执行；Compose 全服务健康与 testnet 配置隔离已验证
 - 外部 DuckDB 历史数据上的新平台端到端回测
 
@@ -196,6 +197,6 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - 对照脚本 CSV 验证差异可解释
 
 **Phase 1 剩余项**：
-- 真实 Binance testnet 流的外部连通和长时间运行验证
+- Binance testnet 公共流短时连通已验证；仍需长时间运行验收
 - 外部告警通道和进程重启后的订阅恢复
 - 待确认的监听租约规则

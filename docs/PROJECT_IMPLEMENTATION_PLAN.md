@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.4
+> 版本：v1.5
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -37,10 +37,12 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `123 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `130 passed`；
+- 本地全量测试为 `124 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `131 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
+- Binance Futures testnet 公共行情短时 smoke 已真实接收 11 条完成 1s Bar 和一条新完成 1m Kline，
+  Redis 交付及质量门禁均为 healthy；该结果不包含鉴权 REST 或订单执行；
 - 账本层已完成订单、成交、持仓 CRUD/PnL 查询、subcategory 准入审计及 Web V1；
 - Spike 已通过 `StrategyAccount` 接口与回测引擎内部结构解耦，并输出基础策略审计事件；
 - 默认 Compose 已验证 PostgreSQL、Redis、行情和账本服务可健康启动；未确认的示例策略仅在
@@ -49,8 +51,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
   仍未完成；订单/成交回报及 `ACCOUNT_UPDATE` 仓位快照的原子入账已经实现，User Stream
   已提供两类回报的线程安全回调入口，D-007 replay 超时退出也已实现。
 
-当前结果证明离线入场链路及 Redis/PostgreSQL 内部服务集成可用，不能证明 Binance testnet
-或正式账户可用。
+当前结果证明离线入场链路、Redis/PostgreSQL 内部服务集成及 Binance testnet 公共行情短时
+链路可用，不能证明 testnet 订单执行或正式账户可用。
 
 ## 4. 功能范围与状态
 
@@ -61,8 +63,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 | 能力 | 状态 | 剩余工作 | 验收 |
 |---|---|---|---|
-| Binance REST/WS testnet 隔离 | 完成 | 真实测试网连通验证 | 测试网配置绝不访问生产端点 |
-| aggTrade/Kline 接入与 combined stream 解包 | 完成 | 外部流长时间运行验证 | 原始与 combined 消息均可解析 |
+| Binance REST/WS testnet 隔离 | 完成 | 鉴权 REST 需随 testnet 执行验证 | 健康 API 暴露环境；外部 smoke 会拒绝非 testnet 服务 |
+| aggTrade/Kline 接入与 combined stream 解包 | 完成 | 外部流长时间运行验证 | testnet 短时 smoke 已接收完成 Bar/Kline，原始与 combined 消息均可解析 |
 | aggTrade 聚合完成 1s Bar | 完成 | 外部流长时间运行验证 | 不重复、不丢失跨多秒完成 Bar |
 | 动态订阅、引用计数、刷新和重连 | 部分完成 | 租约规则、进程重启恢复 | 订阅变更和断线后恢复原 streams |
 | Redis 分发和 Kline Store | 完成 | 长时间运行与外部告警通道 | 真实 Redis 读写通过；零订阅者发布会告警，活跃流无消费者时健康检查 503 |
@@ -116,8 +118,9 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 交付物：可靠的完成 1s Bar、完成 K 线、动态订阅、重连、Redis 分发、依赖健康检查、
 数据质量门禁。
 
-已完成 Pub/Sub 零消费者告警、行情质量状态 API 及实时策略 fail-closed 消费。剩余：真实
-测试网 WS 长时间验证、外部告警通道、进程重启订阅恢复，以及待确认的租约规则实现。
+已完成 Pub/Sub 零消费者告警、行情质量状态 API、实时策略 fail-closed 消费，以及 testnet
+公共 WS 到 Redis 的短时外部 smoke。剩余：长时间运行验证、外部告警通道、进程重启订阅
+恢复，以及待确认的租约规则实现。
 
 退出条件：断线、乱序、迟到、跨秒、多订阅和依赖故障场景均有自动化验证；故障期间
 不会产生新交易信号。
@@ -218,7 +221,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `123 passed, 7 skipped`；Compose 真实 Redis/PostgreSQL 环境 `130 passed`。
+当前基线：本地 `124 passed, 7 skipped`；Compose 真实 Redis/PostgreSQL 环境 `131 passed`。
 
 ## 8. 风险与停止条件
 
