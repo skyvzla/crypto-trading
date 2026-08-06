@@ -43,8 +43,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；
 - 账本层已完成订单、成交、持仓 CRUD/PnL 查询、subcategory 准入审计及 Web V1；
 - Spike 已通过 `StrategyAccount` 接口与回测引擎内部结构解耦，并输出基础策略审计事件；
-- 测试网真实执行、User Stream/WAL/启动对账、持仓保护与退出、执行回报到账本的事务闭环
-  仍未完成。
+- 测试网真实执行、User Stream/WAL/启动对账、完整持仓保护与退出、执行回报到账本的事务闭环
+  仍未完成；已确认的 D-007 超时退出已在 replay 中实现。
 
 当前结果证明离线入场链路及 Redis/PostgreSQL 内部服务集成可用，不能证明 Binance testnet
 或正式账户可用。
