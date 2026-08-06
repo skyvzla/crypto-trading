@@ -10,8 +10,8 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
 执行，以及执行回报、账户仓位到账本的完整运行时闭环尚未完成。
 
-当前本地全量测试为 `103 passed, 6 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`109 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `123 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`130 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明 Binance testnet
@@ -73,21 +73,21 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 
 **仍缺失的实时适配**（Phase 3 修复范围）：
 - testnet/live 账户实现尚未接入 `StrategyAccount`
-- User Stream 基础回报投递与重连调度已有实现和 mock 覆盖；订单 WAL 与单次 `SUBMIT_UNKNOWN` 查单解析已有实现；启动对账、迟到回报及完整账本对账尚未形成闭环
+- User Stream 订单/账户回报投递与重连调度已有实现和 mock 覆盖；订单 WAL、单次恢复和显式参数的 `SUBMIT_UNKNOWN` 后台轮询已有实现；运行时装配、启动对账、迟到回报及完整账本对账尚未形成闭环
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
 **订单幂等问题**：
 - 策略使用 `client_order_id` 标记已下单
 - 新代码已在 `SpikeSignal.placed_client_order_ids` 中维护幂等集合
-- WAL 已接入 Binance REST 提交适配器：提交前记录意图，网络状态不明时保持 `SUBMIT_UNKNOWN`，重复 client ID 不重下单；启动恢复会阻塞对应 symbol，直到该 symbol 所有未知订单解析；仍需后台轮询编排
+- WAL 已接入 Binance REST 提交适配器：提交前记录意图，网络状态不明时保持 `SUBMIT_UNKNOWN`，重复 client ID 不重下单；启动恢复及后台轮询会持续阻塞对应 symbol，直到全部未知订单解析
 
 **失效撤单已实现**：
 - 新代码通过 `_cancel_signal_orders()` 正确撤销未成交订单
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- `SUBMIT_UNKNOWN` 后台轮询和完整重启恢复编排
+- 确认 `SUBMIT_UNKNOWN` 轮询周期/次数并接入实际运行生命周期
 - 完整启动对账
 - 迟到回报处理
 
@@ -127,12 +127,12 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时；⏳ 恢复与终态 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/REST 提交/启动单次 `SUBMIT_UNKNOWN` 解析/风险阻塞；⏳后台轮询、完整启动对账、迟到回报 | Phase 3 |
+| **执行恢复** | ✅ WAL/REST 提交/单次与后台 `SUBMIT_UNKNOWN` 解析/风险阻塞；⏳轮询参数及运行时装配、完整启动对账、迟到回报 | Phase 3 |
 | **持仓退出** | ✅ D-007 900 秒非正收益退出；保护单、止损、止盈、盈利管理、最终结算 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞；⏳保证金、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | subcategory、低频发现扫描、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/数据集缺失拒绝/窗口缺口门禁/未平仓 MTM；⏳ 部分成交、滑点、同秒顺序最终口径 | Phase 2 |
-| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ Binance 订单/成交回报原子入账适配；⏳ 运行时接线和完整 PnL 链路 | Phase 2/4 |
+| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ Binance 订单/成交和账户仓位原子入账适配；⏳ 运行时装配和完整 PnL 链路 | Phase 2/4 |
 | **Web** | ✅ subcategory 控制、账本、PnL、运行状态；⏳ 身份与权限 | Phase 4 |
 | **运维** | testnet/live 隔离、监控、告警、凭据、回滚、紧急平仓 | Phase 5-6 |
 
@@ -140,8 +140,10 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`103 passed, 6 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`109 passed`
+- `uv run --extra dev pytest -q`：`123 passed, 7 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`130 passed`
+- 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
+- `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过
@@ -181,12 +183,12 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 信号检测逻辑 | 已冻结 | 参数与实验脚本对齐，消除未来数据泄漏 |
 | 三档挂单 | 已修复 | `range(3)` 修复，价格计算正确 |
 | 数据连续性检查 | 已实现 | 5s/60s 窗口检查及行情层质量门禁已接入 |
-| 订单幂等 | 部分完成 | `placed_client_order_ids`、订单 WAL 和单次启动恢复已有，缺后台恢复编排 |
+| 订单幂等 | 部分完成 | `placed_client_order_ids`、订单 WAL、单次启动恢复和后台轮询已有，缺参数确认与运行时装配 |
 | 失效撤单 | replay 已实现 | `_cancel_signal_orders()` 正确撤单；实时撤单竞态待验证 |
 | Campaign | 部分完成 | 已有全局准入锁和首成交时钟，缺退出、恢复与持久化 |
 | 持仓管理 | 部分完成 | D-007 已实现；保护退出、盈利管理和完整已平仓 PnL 待确认 |
 | 环境解耦 | 部分完成 | 已依赖最小账户协议，缺 testnet/live 账户适配器 |
-| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API 和订单/成交原子入账已有，缺运行时回调、Campaign 和仓位接线 |
+| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API 及订单/成交/仓位原子入账已有，缺运行时装配和 Campaign |
 | Web V1 | 部分完成 | 账本、PnL、状态、subcategory 已有，缺身份权限和浏览器视觉验收 |
 
 **Phase 0 剩余工作**：

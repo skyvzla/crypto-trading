@@ -18,6 +18,11 @@ if [ ! -f .env ]; then
   exit 0
 fi
 
-docker compose -f compose.yaml build
-docker compose -f compose.yaml up -d
-docker compose -f compose.yaml ps
+docker compose config -q
+docker compose build
+docker compose up -d --wait postgres redis
+docker compose exec -T postgres sh -c \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < src/trading_platform/ledger/db/schema.sql
+docker compose up -d --wait market ledger
+docker compose ps

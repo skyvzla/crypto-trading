@@ -35,16 +35,15 @@ docker compose -f compose.test.yaml run --rm test
 
 # 启动当前开发服务骨架（不得使用正式账户密钥）
 cp .env.example .env
-docker compose -f compose.yaml up -d --build
-docker compose -f compose.yaml ps
+scripts/deploy.sh
 ```
 
 开发 API：行情层 `http://localhost:8000`，账本层 `http://localhost:8001`。
 历史行情数据不随代码仓迁移，回测时通过 Compose 挂载的 `data/` 目录提供。
 
 当前已修复 testnet URL 隔离、行情订阅刷新和 combined stream 解包，并有回归测试。
-执行恢复基础（WAL、未知提交单次恢复和风险阻塞）已经实现；后台持续查单、完整启动对账、
-保护退出和真实测试网闭环仍未完成，因此不要填入正式账户 API Key。
+执行恢复基础（WAL、未知提交单次/后台恢复和风险阻塞）已经实现；轮询参数及运行时装配、
+完整启动对账、保护退出和真实测试网闭环仍未完成，因此不要填入正式账户 API Key。
 
 Spike replay 示例（历史 Parquet 数据需预先放入 `data/market/`）：
 

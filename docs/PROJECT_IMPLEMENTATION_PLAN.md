@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.3
+> 版本：v1.4
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `103 passed, 6 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `109 passed`；
+- 本地全量测试为 `123 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `130 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
@@ -45,8 +45,9 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 - Spike 已通过 `StrategyAccount` 接口与回测引擎内部结构解耦，并输出基础策略审计事件；
 - 默认 Compose 已验证 PostgreSQL、Redis、行情和账本服务可健康启动；未确认的示例策略仅在
   `--profile examples` 下启动；
-- 测试网真实执行、完整启动对账、持仓保护与退出、运行时 User Stream/账户仓位入账接线
-  仍未完成；订单/成交回报的原子入账及 D-007 replay 超时退出已经实现。
+- 测试网真实执行、完整启动对账、持仓保护与退出、User Stream 与具体运行账户的装配
+  仍未完成；订单/成交回报及 `ACCOUNT_UPDATE` 仓位快照的原子入账已经实现，User Stream
+  已提供两类回报的线程安全回调入口，D-007 replay 超时退出也已实现。
 
 当前结果证明离线入场链路及 Redis/PostgreSQL 内部服务集成可用，不能证明 Binance testnet
 或正式账户可用。
@@ -77,7 +78,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | replay runner 与报告 | 部分完成 | 部分成交、滑点、退出费用及期末口径 | 已输出订单、成交、持仓、汇总、策略审计，并实现 D-007 超时退出 |
 | 全局交易准入与首成交计时 | 部分完成 | Campaign 完整状态机、恢复、终态 | 当前已验证全局互斥和首成交计时 |
 | 入场幂等与失效撤单 | 部分完成 | 后台恢复、撤单竞态、迟到回报 | replay 已验证幂等和失效撤单；订单 WAL 已接入 Binance REST 提交适配器 |
-| User Stream 与启动对账 | 部分完成 | 交易所事实同步、断线补偿 | 已补齐线程安全回报投递、重连去重和停止取消；启动对账与完整一致性仍待实现 |
+| User Stream 与启动对账 | 部分完成 | 运行时装配、完整交易所事实同步、断线补偿 | 已补齐订单/账户回报投递、重连去重、停止取消和未知订单轮询编排；轮询参数待确认 |
 | 持仓保护与退出 | 部分完成 | 止损、止盈、盈利管理、退出费用和分批 | D-007 已实现；D-008 盈利管理待确认 |
 | 账户级风控 | 部分完成 | 保证金、日亏损、数据延迟、急停 | 已限制持仓价值、币种数、杠杆并阻塞未知订单 symbol |
 | testnet/live 适配 | 部分完成 | 实时账户适配器和真实执行闭环 | 策略已依赖最小 `StrategyAccount` 协议 |
@@ -86,8 +87,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 | 能力 | 状态 | 剩余工作 | 验收 |
 |---|---|---|---|
-| PostgreSQL schema 和模型 | 部分完成 | 迁移版本管理、Campaign 表 | 订单/成交/持仓 CRUD 已通过真实 PostgreSQL 测试 |
-| 订单/成交/持仓/Campaign 账本 | 部分完成 | Campaign、仓位与运行时回调接通 | 当前支持查询；Binance 订单/成交回报已可原子幂等写入 |
+| PostgreSQL schema 和模型 | 部分完成 | 迁移版本管理、Campaign 表 | 订单/成交/持仓 CRUD 已通过真实 PostgreSQL 测试；部署会幂等应用当前 schema |
+| 订单/成交/持仓/Campaign 账本 | 部分完成 | Campaign 与具体运行时回调装配 | Binance 订单/成交和账户仓位回报均可原子幂等写入，迟到仓位快照不会覆盖新事实 |
 | FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 分页、总数、PnL 和真实数据库健康检查已验证 |
 | subcategory 准入控制 | 部分完成 | 实时轮询、订单关联与关闭后撤单接线 | 乐观并发、409 冲突、追加审计和策略全局新入场开关已验证 |
 | Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供运行状态、账本、PnL 和 subcategory 控制 |
@@ -143,9 +144,9 @@ D-007 超时退出及真实 Parquet 输入的三档全成交 CLI 回归。剩余
 托管保护单、账户级风控和紧急停止。
 
 已完成订单 WAL、Binance REST 可靠提交适配、启动时逐订单单次 `SUBMIT_UNKNOWN` 查单状态解析、
-未知订单 symbol 风险阻塞与全部解析后解锁，以及
-User Stream 线程安全回报投递、重连去重和停止取消的 mock 验证。剩余后台查单与重启恢复、
-完整启动对账、迟到回报、保护单及外部测试网验证。
+未知订单 symbol 风险阻塞与全部解析后解锁、显式参数的后台查单编排，以及 User Stream
+订单/账户回报投递、重连去重和停止取消的 mock 验证。剩余：确认后台查单周期与次数并接入
+运行生命周期、完整启动对账、订单迟到回报、保护单及外部测试网验证。
 
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
 未终态轮次；本地状态以交易所订单、成交和仓位事实为准。
@@ -157,9 +158,9 @@ User Stream 线程安全回报投递、重连去重和停止取消的 mock 验�
 交付物：数据库迁移、完整账本写入、查询 API、subcategory 控制、Web 交易池/账本/PnL/
 运行状态、控制审计。
 
-已完成订单/成交/持仓 CRUD、Binance 订单/成交回报原子幂等入账适配、数据库聚合 PnL、
+已完成订单/成交/持仓 CRUD、Binance 订单/成交回报与 `ACCOUNT_UPDATE` 仓位快照原子幂等入账、数据库聚合 PnL、
 分页查询、subcategory 乐观并发与追加审计、依赖健康检查和 Web V1。剩余：Campaign 持久化、
-运行时 User Stream/账户仓位回报接线、策略轮询准入状态、
+User Stream 与具体账户/策略运行时装配、策略轮询准入状态、
 迁移版本管理，以及待确认的身份认证和权限。
 
 退出条件：控制变更和完整交易生命周期均可查询；并发修改不会静默覆盖；Web 不可绕过
@@ -172,7 +173,8 @@ User Stream 线程安全回报投递、重连去重和停止取消的 mock 验�
 交付物：Compose 服务级集成环境、Binance Futures testnet 小额测试、故障注入、运行手册、
 告警和恢复演练。
 
-Compose 已覆盖真实 Redis/PostgreSQL 服务级集成，默认行情/账本服务首次部署健康检查已验证；
+Compose 已覆盖真实 Redis/PostgreSQL 服务级集成，测试编排已使用独立项目隔离且不会重建默认依赖；
+默认行情/账本服务首次部署健康检查及 PostgreSQL 重建后账本恢复脚本已验证；
 Binance testnet 外部执行、故障注入、
 运行手册、告警和恢复演练尚未完成。
 
@@ -216,7 +218,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `103 passed, 6 skipped`；Compose 真实 Redis/PostgreSQL 环境 `109 passed`。
+当前基线：本地 `123 passed, 7 skipped`；Compose 真实 Redis/PostgreSQL 环境 `130 passed`。
 
 ## 8. 风险与停止条件
 
