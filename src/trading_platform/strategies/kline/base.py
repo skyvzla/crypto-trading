@@ -75,6 +75,7 @@ class KlineStrategyBase(ABC):
 
         # 行情层状态
         self.last_known_epoch: str | None = None
+        self.market_data_ready = False
 
         # 去重水位：(symbol, interval) -> last_close_time
         self.last_processed: dict[tuple[str, str], int] = {}
@@ -129,9 +130,13 @@ class KlineStrategyBase(ABC):
 
         # 注册订阅
         await self._register_subscriptions()
+        # 注册后行情流会短暂处于 awaiting_data，禁止消费 Redis 中的旧快照。
+        self.market_data_ready = False
 
         # 启动 User Data Stream
         await self.user_stream.start()
+
+        self._running = True
 
         # 启动定时器
         await self._start_timers()
@@ -139,7 +144,6 @@ class KlineStrategyBase(ABC):
         # 启动健康检查循环
         self._health_check_task = asyncio.create_task(self._health_check_loop())
 
-        self._running = True
         logger.info(f"Strategy {self.strategy_name} started")
 
     async def stop(self) -> None:
@@ -194,8 +198,12 @@ class KlineStrategyBase(ABC):
                 if response.status_code == 200:
                     health = response.json()
                     self.last_known_epoch = health.get("instance_epoch")
-                    logger.info(f"Market layer ready, epoch: {self.last_known_epoch}")
-                    return
+                    quality = await self.http_client.get("/quality")
+                    if quality.status_code == 200 and quality.json().get("ready", False):
+                        self.market_data_ready = True
+                        logger.info(f"Market layer ready, epoch: {self.last_known_epoch}")
+                        return
+                    self.market_data_ready = False
             except Exception as e:
                 logger.warning(f"Market layer not ready (attempt {attempt+1}/{max_attempts}): {e}")
                 await asyncio.sleep(2)
@@ -291,6 +299,8 @@ class KlineStrategyBase(ABC):
         redis_key = f"kline:{symbol}:{interval}"
 
         try:
+            if not self.market_data_ready:
+                return
             # 从 Redis Hash 读取 latest
             kline_json = await self.redis.hget(redis_key, "latest")
             if not kline_json:
@@ -331,12 +341,22 @@ class KlineStrategyBase(ABC):
                     health = response.json()
                     current_epoch = health.get("instance_epoch")
 
+                    quality = await self.http_client.get("/quality")
+                    self.market_data_ready = (
+                        quality.status_code == 200
+                        and quality.json().get("ready", False)
+                    )
+
                     if self.last_known_epoch and current_epoch != self.last_known_epoch:
                         logger.warning(f"Market layer restarted (epoch changed), re-registering subscriptions")
                         await self._register_subscriptions()
+                        self.market_data_ready = False
 
                     self.last_known_epoch = current_epoch
+                else:
+                    self.market_data_ready = False
             except Exception as e:
+                self.market_data_ready = False
                 logger.error(f"Health check failed: {e}")
 
     async def _on_execution_report(self, order_data: dict[str, Any]) -> None:

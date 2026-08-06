@@ -72,10 +72,12 @@ class TickStrategyBase(ABC):
 
         # 行情层状态
         self.last_known_epoch: str | None = None
+        self.market_data_ready = False
 
         # 运行状态
         self._running = False
         self._health_check_task: asyncio.Task | None = None
+        self._pubsub_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """启动策略"""
@@ -120,9 +122,13 @@ class TickStrategyBase(ABC):
 
         # 注册订阅
         await self._register_subscriptions()
+        # 注册后行情流会短暂处于 awaiting_data，禁止消费 Redis 中的旧 Bar。
+        self.market_data_ready = False
 
         # 启动 User Data Stream
         await self.user_stream.start()
+
+        self._running = True
 
         # 启动 Redis Pub/Sub
         await self._start_pubsub()
@@ -130,7 +136,6 @@ class TickStrategyBase(ABC):
         # 启动健康检查循环
         self._health_check_task = asyncio.create_task(self._health_check_loop())
 
-        self._running = True
         logger.info(f"Strategy {self.strategy_name} started")
 
     async def stop(self) -> None:
@@ -148,6 +153,14 @@ class TickStrategyBase(ABC):
                 await self._health_check_task
             except asyncio.CancelledError:
                 pass
+
+        if self._pubsub_task:
+            self._pubsub_task.cancel()
+            try:
+                await self._pubsub_task
+            except asyncio.CancelledError:
+                pass
+            self._pubsub_task = None
 
         # 注销订阅
         await self._unregister_subscriptions()
@@ -185,8 +198,12 @@ class TickStrategyBase(ABC):
                 if response.status_code == 200:
                     health = response.json()
                     self.last_known_epoch = health.get("instance_epoch")
-                    logger.info(f"Market layer ready, epoch: {self.last_known_epoch}")
-                    return
+                    quality = await self.http_client.get("/quality")
+                    if quality.status_code == 200 and quality.json().get("ready", False):
+                        self.market_data_ready = True
+                        logger.info(f"Market layer ready, epoch: {self.last_known_epoch}")
+                        return
+                    self.market_data_ready = False
             except Exception as e:
                 logger.warning(f"Market layer not ready (attempt {attempt+1}/{max_attempts}): {e}")
                 await asyncio.sleep(2)
@@ -235,7 +252,7 @@ class TickStrategyBase(ABC):
         await self.pubsub.subscribe(*channels)
 
         # 启动消息处理循环
-        asyncio.create_task(self._pubsub_loop())
+        self._pubsub_task = asyncio.create_task(self._pubsub_loop())
         logger.info(f"Subscribed to channels: {channels}")
 
     async def _pubsub_loop(self) -> None:
@@ -245,6 +262,8 @@ class TickStrategyBase(ABC):
                 break
 
             if message['type'] == 'message':
+                if not self.market_data_ready:
+                    continue
                 channel = message['channel']
                 data = message['data']
 
@@ -269,12 +288,22 @@ class TickStrategyBase(ABC):
                     health = response.json()
                     current_epoch = health.get("instance_epoch")
 
+                    quality = await self.http_client.get("/quality")
+                    self.market_data_ready = (
+                        quality.status_code == 200
+                        and quality.json().get("ready", False)
+                    )
+
                     if self.last_known_epoch and current_epoch != self.last_known_epoch:
                         logger.warning(f"Market layer restarted (epoch changed), re-registering subscriptions")
                         await self._register_subscriptions()
+                        self.market_data_ready = False
 
                     self.last_known_epoch = current_epoch
+                else:
+                    self.market_data_ready = False
             except Exception as e:
+                self.market_data_ready = False
                 logger.error(f"Health check failed: {e}")
 
     async def _on_execution_report(self, order_data: dict[str, Any]) -> None:
