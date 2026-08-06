@@ -1,6 +1,6 @@
 """
 Binance User Data Stream 管理
-负责 listenKey 管理、WebSocket 连接、executionReport 解析、断线重连
+负责 listenKey 管理、WebSocket 连接、订单/账户事件投递、断线重连
 """
 import asyncio
 import inspect
@@ -23,7 +23,7 @@ class UserDataStream:
     职责：
     - listenKey 创建和 keepalive（30分钟一次）
     - WebSocket 连接和自动重连
-    - executionReport 事件解析和回调
+    - ORDER_TRADE_UPDATE 与 ACCOUNT_UPDATE 事件投递
     """
 
     def __init__(
@@ -31,6 +31,7 @@ class UserDataStream:
         rest_client: BinanceRestClient,
         ws_base_url: str = "wss://fstream.binance.com",
         on_execution_report: Callable[[dict[str, Any]], None] | None = None,
+        on_account_update: Callable[[dict[str, Any]], None] | None = None,
         on_reconnect: Callable[[], None] | None = None,
     ):
         """
@@ -38,11 +39,13 @@ class UserDataStream:
             rest_client: REST 客户端（用于 listenKey 管理）
             ws_base_url: WebSocket 基础 URL
             on_execution_report: executionReport 事件回调
+            on_account_update: ACCOUNT_UPDATE 完整事件回调
             on_reconnect: 重连完成回调
         """
         self.rest_client = rest_client
         self.ws_base_url = ws_base_url.rstrip('/')
         self.on_execution_report = on_execution_report
+        self.on_account_update = on_account_update
         self.on_reconnect = on_reconnect
 
         self.listen_key: str | None = None
@@ -163,8 +166,8 @@ class UserDataStream:
                     if self.on_execution_report:
                         self._schedule(self._handle_execution_report(order_data))
                 elif event_type == 'ACCOUNT_UPDATE':
-                    # 账户更新事件（可选处理）
-                    logger.debug(f"Account update: {data}")
+                    if self.on_account_update:
+                        self._schedule(self._handle_account_update(data))
                 else:
                     logger.debug(f"Unknown event type: {event_type}")
 
@@ -285,6 +288,17 @@ class UserDataStream:
                 await result
         except Exception as e:
             logger.error(f"Error in execution report callback: {e}", exc_info=True)
+
+    async def _handle_account_update(self, event: dict[str, Any]) -> None:
+        """处理完整 ACCOUNT_UPDATE 事件。"""
+        if not self.on_account_update:
+            return
+        try:
+            result = self.on_account_update(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.error("Error in account update callback", exc_info=True)
 
 
 async def main_example():

@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, Sequence
 
 from psycopg.rows import class_row
 from psycopg_pool import AsyncConnectionPool
@@ -72,6 +72,7 @@ class Position:
     leverage: Optional[int] = None
     margin_type: Optional[str] = None
     isolated_margin: Optional[Decimal] = None
+    exchange_time: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
 
@@ -142,6 +143,27 @@ class LedgerDB:
         ON CONFLICT (account_id, symbol, trade_id) DO NOTHING
         RETURNING id
     """
+    _ACCOUNT_POSITION_UPSERT = """
+        INSERT INTO positions (
+            account_id, strategy_id, symbol, position_side, quantity, entry_price,
+            unrealized_pnl, margin_type, isolated_margin, exchange_time
+        ) VALUES (
+            %(account_id)s, %(strategy_id)s, %(symbol)s, %(position_side)s,
+            %(quantity)s, %(entry_price)s, %(unrealized_pnl)s, %(margin_type)s,
+            %(isolated_margin)s, %(exchange_time)s
+        )
+        ON CONFLICT (account_id, strategy_id, symbol, position_side) DO UPDATE
+        SET quantity = EXCLUDED.quantity,
+            entry_price = EXCLUDED.entry_price,
+            unrealized_pnl = EXCLUDED.unrealized_pnl,
+            margin_type = EXCLUDED.margin_type,
+            isolated_margin = EXCLUDED.isolated_margin,
+            exchange_time = EXCLUDED.exchange_time,
+            updated_at = NOW()
+        WHERE positions.exchange_time IS NULL
+           OR positions.exchange_time <= EXCLUDED.exchange_time
+        RETURNING id
+    """
 
     def __init__(self, pool: AsyncConnectionPool):
         self.pool = pool
@@ -204,9 +226,9 @@ class LedgerDB:
         strategy_id: Optional[str] = None,
         symbol: Optional[str] = None,
         status: Optional[str] = None,
-        positive: bool = False,
+        nonzero: bool = False,
     ) -> tuple[str, dict[str, object]]:
-        parts = ["quantity > 0"] if positive else []
+        parts = ["quantity <> 0"] if nonzero else []
         params: dict[str, object] = {}
         for key, value in (
             ("account_id", account_id),
@@ -289,11 +311,12 @@ class LedgerDB:
             INSERT INTO positions (
                 account_id, strategy_id, symbol, position_side, quantity, entry_price,
                 mark_price, unrealized_pnl, liquidation_price, leverage, margin_type,
-                isolated_margin
+                isolated_margin, exchange_time
             ) VALUES (
                 %(account_id)s, %(strategy_id)s, %(symbol)s, %(position_side)s,
                 %(quantity)s, %(entry_price)s, %(mark_price)s, %(unrealized_pnl)s,
-                %(liquidation_price)s, %(leverage)s, %(margin_type)s, %(isolated_margin)s
+                %(liquidation_price)s, %(leverage)s, %(margin_type)s,
+                %(isolated_margin)s, %(exchange_time)s
             )
             ON CONFLICT (account_id, strategy_id, symbol, position_side) DO UPDATE
             SET quantity = EXCLUDED.quantity,
@@ -304,6 +327,7 @@ class LedgerDB:
                 leverage = EXCLUDED.leverage,
                 margin_type = EXCLUDED.margin_type,
                 isolated_margin = EXCLUDED.isolated_margin,
+                exchange_time = COALESCE(EXCLUDED.exchange_time, positions.exchange_time),
                 updated_at = NOW()
             RETURNING id
         """
@@ -311,6 +335,19 @@ class LedgerDB:
             result = await conn.execute(query, position.__dict__)
             row = await result.fetchone()
         return row[0] if row else 0
+
+    async def apply_account_update(self, positions: Sequence[Position]) -> list[int]:
+        """原子写入一条 ACCOUNT_UPDATE 中携带的仓位快照。"""
+        ids: list[int] = []
+        async with self.transaction() as conn:
+            for position in positions:
+                result = await conn.execute(
+                    self._ACCOUNT_POSITION_UPSERT,
+                    position.__dict__,
+                )
+                row = await result.fetchone()
+                ids.append(row[0] if row else 0)
+        return ids
 
     async def get_positions(
         self,
@@ -321,7 +358,7 @@ class LedgerDB:
         offset: int = 0,
     ) -> list[Position]:
         where, params = self._filters(
-            account_id, strategy_id, symbol, positive=True
+            account_id, strategy_id, symbol, nonzero=True
         )
         params.update(limit=limit, offset=offset)
         async with self.pool.connection() as conn:
@@ -334,7 +371,7 @@ class LedgerDB:
             return await cursor.fetchall()
 
     async def count_positions(self, **filters: object) -> int:
-        return await self._count("positions", positive=True, **filters)
+        return await self._count("positions", nonzero=True, **filters)
 
     async def get_pnl_summary(
         self,
@@ -357,7 +394,7 @@ class LedgerDB:
                 )
             ).fetchone()
             position_where, position_params = self._filters(
-                account_id, strategy_id, symbol, positive=True
+                account_id, strategy_id, symbol, nonzero=True
             )
             unrealized = await (
                 await conn.execute(
@@ -385,10 +422,10 @@ class LedgerDB:
         strategy_id: Optional[str] = None,
         symbol: Optional[str] = None,
         status: Optional[str] = None,
-        positive: bool = False,
+        nonzero: bool = False,
     ) -> int:
         where, params = self._filters(
-            account_id, strategy_id, symbol, status, positive
+            account_id, strategy_id, symbol, status, nonzero
         )
         async with self.pool.connection() as conn:
             result = await conn.execute(f"SELECT COUNT(*) FROM {table}{where}", params)

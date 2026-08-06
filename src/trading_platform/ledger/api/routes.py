@@ -79,6 +79,7 @@ class PositionResponse(BaseModel):
     leverage: Optional[int] = None
     margin_type: Optional[str] = None
     isolated_margin: Optional[Decimal] = None
+    exchange_time: Optional[datetime] = None
     updated_at: datetime
 
 

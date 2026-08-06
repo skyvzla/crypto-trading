@@ -53,6 +53,44 @@ async def test_callbacks_from_websocket_thread_are_returned_to_event_loop(monkey
 
 
 @pytest.mark.asyncio
+async def test_account_updates_are_returned_to_event_loop_as_complete_events(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(create_listen_key=AsyncMock(return_value="listen-key"))
+    received = asyncio.Event()
+
+    async def on_account_update(event):
+        assert event["e"] == "ACCOUNT_UPDATE"
+        assert event["T"] == 1780000000000
+        assert event["a"]["P"][0]["s"] == "BTCUSDT"
+        received.set()
+
+    stream = UserDataStream(rest, on_account_update=on_account_update)
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock()
+    await stream._connect_ws()
+
+    message = (
+        '{"e":"ACCOUNT_UPDATE","E":1780000000100,"T":1780000000000,'
+        '"a":{"m":"ORDER","B":[],"P":[{"s":"BTCUSDT"}]}}'
+    )
+    thread = threading.Thread(
+        target=lambda: FakeWebSocketApp.instance.callbacks["on_message"](
+            None, message
+        )
+    )
+    thread.start()
+    thread.join()
+    await asyncio.wait_for(received.wait(), timeout=1)
+    stream._ws_thread.cancel()
+    await stream._ws_thread
+
+
+@pytest.mark.asyncio
 async def test_close_schedules_only_one_reconnect_and_stop_cancels_it(monkeypatch):
     monkeypatch.setattr(
         "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",

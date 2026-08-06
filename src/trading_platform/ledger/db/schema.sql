@@ -69,10 +69,14 @@ CREATE TABLE IF NOT EXISTS positions (
     leverage INTEGER,
     margin_type VARCHAR(16),
     isolated_margin DECIMAL(20, 8),
+    exchange_time TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT positions_account_strategy_symbol_side_key
         UNIQUE (account_id, strategy_id, symbol, position_side)
 );
+
+ALTER TABLE positions
+    ADD COLUMN IF NOT EXISTS exchange_time TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_positions_updated_at
     ON positions(updated_at DESC);

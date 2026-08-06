@@ -11,6 +11,7 @@ import pytest
 from fastapi import FastAPI
 
 from trading_platform.ledger.api.routes import router
+from trading_platform.ledger.binance_account_updates import BinanceAccountUpdateLedger
 from trading_platform.ledger.binance_reports import BinanceExecutionReportLedger
 from trading_platform.ledger.db.models import (
     LedgerDB,
@@ -246,3 +247,81 @@ async def test_binance_execution_report_is_atomically_idempotent(ledger):
     assert stored.filled_quantity == Decimal("1.5")
     trade = (await ledger.get_trades(account_id=account_id))[0]
     assert trade.realized_pnl == Decimal("0.75")
+
+
+@pytest.mark.asyncio
+async def test_binance_account_update_persists_signed_snapshot_and_rejects_stale(
+    ledger, client
+):
+    suffix = uuid4().hex[:10]
+    account_id = f"account-{suffix}"
+    writer = BinanceAccountUpdateLedger(
+        ledger,
+        account_id=account_id,
+        strategy_id="spike_short",
+    )
+    await ledger.upsert_position(
+        Position(
+            account_id=account_id,
+            strategy_id="spike_short",
+            symbol="BTCUSDT",
+            position_side="SHORT",
+            quantity=Decimal("-0.25"),
+            entry_price=Decimal("101"),
+            mark_price=Decimal("99"),
+            liquidation_price=Decimal("150"),
+            leverage=5,
+        )
+    )
+
+    def event(transaction_time, quantity, unrealized_pnl):
+        return {
+            "e": "ACCOUNT_UPDATE",
+            "E": transaction_time + 10,
+            "T": transaction_time,
+            "a": {
+                "m": "ORDER",
+                "B": [{"a": "USDT", "wb": "100", "cw": "90", "bc": "0"}],
+                "P": [{
+                    "s": "BTCUSDT",
+                    "pa": quantity,
+                    "ep": "100.25",
+                    "bep": "100.20",
+                    "cr": "0.75",
+                    "up": unrealized_pnl,
+                    "mt": "isolated",
+                    "iw": "10",
+                    "ps": "SHORT",
+                    "ma": "USDT",
+                }],
+            },
+        }
+
+    first = await writer.handle(event(1780000000000, "-1.5", "2.5"))
+    duplicate = await writer.handle(event(1780000000000, "-1.5", "2.5"))
+    stale = await writer.handle(event(1779999999000, "-0.5", "0.1"))
+
+    assert first[0] > 0
+    assert duplicate == first
+    assert stale == [0]
+    assert await ledger.count_positions(account_id=account_id) == 1
+    stored = (await ledger.get_positions(account_id=account_id))[0]
+    assert stored.quantity == Decimal("-1.5")
+    assert stored.unrealized_pnl == Decimal("2.5")
+    assert stored.mark_price == Decimal("99")
+    assert stored.liquidation_price == Decimal("150")
+    assert stored.leverage == 5
+    assert stored.exchange_time == datetime.fromtimestamp(
+        1780000000000 / 1000, tz=timezone.utc
+    )
+    response = await client.get(
+        "/api/v1/positions",
+        params={"account_id": account_id, "strategy_id": "spike_short"},
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert Decimal(response.json()["items"][0]["quantity"]) == Decimal("-1.5")
+
+    await writer.handle(event(1780000001000, "0", "0"))
+    assert await ledger.count_positions(account_id=account_id) == 0
+    assert await ledger.get_positions(account_id=account_id) == []
