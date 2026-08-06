@@ -10,8 +10,8 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
 执行，以及执行回报到账本的事务闭环尚未完成。
 
-当前本地全量测试为 `71 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`76 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `73 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`78 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明 Binance testnet
@@ -102,12 +102,12 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 
 **仍缺失**（Phase 1 数据层范围）：
 - Redis Pub/Sub 消费端断流检测与告警
-- 策略实时消费 `/quality` 状态并将其接入开仓门禁
 
 **已补齐**（2026-08-07）：
 - `/health` 和 `/quality` 暴露逐流质量、连接代次和降级原因
 - WebSocket 重连后先进入 `awaiting_data`，aggTrade/Kline 缺口、重复和乱序会粘性降级
 - 降级期间停止继续发布不完整行情；未实现未经确认的 REST 回补或对账
+- Kline/Tick 实时策略基类消费 `/quality`，质量未知或降级时不处理旧快照和 Pub/Sub Bar
 
 **已修复**（2026-08-06）：新代码中的 `range(1,4)` bug 已改为 `range(3)`，与实验脚本对齐。
 
@@ -141,8 +141,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`71 passed, 5 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`76 passed`
+- `uv run --extra dev pytest -q`：`73 passed, 5 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`78 passed`
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过

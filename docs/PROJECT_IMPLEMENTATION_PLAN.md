@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `71 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `76 passed`；
+- 本地全量测试为 `73 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `78 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；
@@ -62,7 +62,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 |---|---|---|---|
 | Binance REST/WS testnet 隔离 | 完成 | 真实测试网连通验证 | 测试网配置绝不访问生产端点 |
 | aggTrade/Kline 接入与 combined stream 解包 | 完成 | 外部流长时间运行验证 | 原始与 combined 消息均可解析 |
-| aggTrade 聚合完成 1s Bar | 完成 | 数据质量状态向策略传递 | 不重复、不丢失跨多秒完成 Bar |
+| aggTrade 聚合完成 1s Bar | 完成 | 外部流长时间运行验证 | 不重复、不丢失跨多秒完成 Bar |
 | 动态订阅、引用计数、刷新和重连 | 部分完成 | 租约规则、进程重启恢复 | 订阅变更和断线后恢复原 streams |
 | Redis 分发和 Kline Store | 完成 | 长时间断流告警 | 真实 Redis 读写通过，故障时健康检查 503 |
 | 历史 Parquet 数据读取 | 部分完成 | 归档边界、缺口报告 | replay 不联网补数据，缺数据直接拒绝 |
@@ -73,7 +73,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | 能力 | 状态 | 剩余工作 | 验收 |
 |---|---|---|---|
 | Spike 信号与三档价格 | 完成 | 与历史脚本固定案例对账 | 参数与冻结脚本一致，无未来数据 |
-| 16h 预热和连续性检查 | 完成 | 数据质量标记统一 | 预热不下单，窗口缺口阻止信号 |
+| 16h 预热和连续性检查 | 完成 | 外部质量长时间运行验证 | 预热不下单，窗口缺口阻止信号 |
 | replay runner 与报告 | 部分完成 | 部分成交、滑点、退出费用及期末口径 | 已输出订单、成交、持仓、汇总、策略审计，并实现 D-007 超时退出 |
 | 全局交易准入与首成交计时 | 部分完成 | Campaign 完整状态机、恢复、终态 | 当前已验证全局互斥和首成交计时 |
 | 入场幂等与失效撤单 | 部分完成 | WAL、撤单竞态、迟到回报 | replay 已验证幂等和失效撤单 |
@@ -209,7 +209,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `71 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `76 passed`。
+当前基线：本地 `73 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `78 passed`。
 
 ## 8. 风险与停止条件
 
