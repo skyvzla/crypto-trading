@@ -634,6 +634,11 @@ class DynamicSpikeBacktestStrategy:
         for strategy in self.strategies.values():
             strategy.set_trading_enabled(enabled)
 
+    def set_entry_enabled(self, enabled: bool) -> None:
+        """统一控制多币种适配器的新入场准入；已有信号仍继续管理。"""
+        for strategy in self.strategies.values():
+            strategy.set_entry_enabled(enabled)
+
     def on_bar1s(self, bar: Bar1s) -> List[OrderIntent]:
         strategy = self.strategies.get(bar.symbol)
         if strategy is None:

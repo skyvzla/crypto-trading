@@ -383,6 +383,21 @@ class TestDynamicSpikeShortStrategy:
         assert adapter.active_symbol == "BBBUSDT"
         assert len(second.active_signals) == 1
 
+    def test_multi_symbol_adapter_exposes_global_entry_gate(self):
+        adapter = DynamicSpikeBacktestStrategy(
+            ["AAAUSDT", "BBBUSDT"], Decimal("1000")
+        )
+        adapter.set_entry_enabled(False)
+        assert all(
+            strategy._entry_enabled is False
+            for strategy in adapter.strategies.values()
+        )
+        adapter.set_entry_enabled(True)
+        assert all(
+            strategy._entry_enabled is True
+            for strategy in adapter.strategies.values()
+        )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
