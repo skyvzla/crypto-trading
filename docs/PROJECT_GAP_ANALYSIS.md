@@ -73,7 +73,7 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 
 **仍缺失的实时适配**（Phase 3 修复范围）：
 - testnet/live 账户实现尚未接入 `StrategyAccount`
-- User Stream、WAL、启动对账和迟到回报尚未形成闭环
+- User Stream 基础回报投递与重连调度已有实现和 mock 覆盖；WAL、启动对账、迟到回报及完整账本对账尚未形成闭环
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
@@ -90,7 +90,7 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 - 订单 WAL（写前日志）
 - `SUBMIT_UNKNOWN` 后台查询确认
 - 启动对账
-- User Stream 回执处理
+- User Stream 回执处理基础调度（线程回调回主事件循环、重连去重、停止取消）
 - 迟到回报处理
 
 ### 3.6 数据质量检查已加强（2026-08-06）
