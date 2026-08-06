@@ -43,6 +43,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；
 - 账本层已完成订单、成交、持仓 CRUD/PnL 查询、subcategory 准入审计及 Web V1；
 - Spike 已通过 `StrategyAccount` 接口与回测引擎内部结构解耦，并输出基础策略审计事件；
+- 默认 Compose 已验证 PostgreSQL、Redis、行情和账本服务可健康启动；未确认的示例策略仅在
+  `--profile examples` 下启动；
 - 测试网真实执行、User Stream/WAL/启动对账、完整持仓保护与退出、执行回报到账本的事务闭环
   仍未完成；已确认的 D-007 超时退出已在 replay 中实现。
 
@@ -163,7 +165,8 @@ D-007 超时退出及真实 Parquet 输入的三档全成交 CLI 回归。剩余
 交付物：Compose 服务级集成环境、Binance Futures testnet 小额测试、故障注入、运行手册、
 告警和恢复演练。
 
-Compose 已覆盖真实 Redis/PostgreSQL 服务级集成；Binance testnet 外部执行、故障注入、
+Compose 已覆盖真实 Redis/PostgreSQL 服务级集成，默认行情/账本服务首次部署健康检查已验证；
+Binance testnet 外部执行、故障注入、
 运行手册、告警和恢复演练尚未完成。
 
 退出条件：至少覆盖下单、部分成交、撤单、拒单、超时、断流、重启、对账、保护退出和
