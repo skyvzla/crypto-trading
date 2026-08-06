@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `89 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `94 passed`；
+- 本地全量测试为 `92 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `97 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
@@ -89,7 +89,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | PostgreSQL schema 和模型 | 部分完成 | 迁移版本管理、Campaign 表 | 订单/成交/持仓 CRUD 已通过真实 PostgreSQL 测试 |
 | 订单/成交/持仓/Campaign 账本 | 部分完成 | Campaign 与执行回报事务化接通 | 当前支持订单、成交、持仓和 PnL 事实查询 |
 | FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 分页、总数、PnL 和真实数据库健康检查已验证 |
-| subcategory 准入控制 | 部分完成 | 策略实时轮询与关闭后撤单接线 | 乐观并发、409 冲突和追加审计已验证 |
+| subcategory 准入控制 | 部分完成 | 实时轮询、订单关联与关闭后撤单接线 | 乐观并发、409 冲突、追加审计和策略全局新入场开关已验证 |
 | Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供运行状态、账本、PnL 和 subcategory 控制 |
 | 权限与操作审计 | 待确认 | 身份、角色、敏感操作范围 | 所有控制变更可追责 |
 | 监控、告警、备份恢复 | 未开始 | SLO、告警通道、演练 | 关键故障可发现、可恢复 |
@@ -213,7 +213,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `89 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `94 passed`。
+当前基线：本地 `92 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `97 passed`。
 
 ## 8. 风险与停止条件
 
