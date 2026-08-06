@@ -10,8 +10,8 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
 执行，以及执行回报到账本的事务闭环尚未完成。
 
-当前本地全量测试为 `75 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`78 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `84 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`89 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明 Binance testnet
@@ -73,22 +73,22 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 
 **仍缺失的实时适配**（Phase 3 修复范围）：
 - testnet/live 账户实现尚未接入 `StrategyAccount`
-- User Stream 基础回报投递与重连调度已有实现和 mock 覆盖；WAL、启动对账、迟到回报及完整账本对账尚未形成闭环
+- User Stream 基础回报投递与重连调度已有实现和 mock 覆盖；订单 WAL 与单次 `SUBMIT_UNKNOWN` 查单解析已有实现；启动对账、迟到回报及完整账本对账尚未形成闭环
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
 **订单幂等问题**：
 - 策略使用 `client_order_id` 标记已下单
 - 新代码已在 `SpikeSignal.placed_client_order_ids` 中维护幂等集合
-- 仍需 Phase 3 实现 WAL 和 `SUBMIT_UNKNOWN` 对账
+- WAL 已记录下单意图、提交未知和明确交易所状态；仍需把恢复器接入真实 REST 提交、后台查单和风险门禁
 
 **失效撤单已实现**：
 - 新代码通过 `_cancel_signal_orders()` 正确撤销未成交订单
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- 订单 WAL（写前日志）
-- `SUBMIT_UNKNOWN` 后台查询确认
+- 真实 REST 提交前后的订单 WAL 接线
+- `SUBMIT_UNKNOWN` 后台轮询、重启恢复和风险门禁接线
 - 启动对账
 - User Stream 回执处理基础调度（线程回调回主事件循环、重连去重、停止取消）
 - 迟到回报处理
@@ -129,7 +129,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时；⏳ 恢复与终态 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
-| **执行恢复** | WAL、`SUBMIT_UNKNOWN` 查询确认、启动对账、迟到回报 | Phase 3 |
+| **执行恢复** | ✅ WAL/单次 `SUBMIT_UNKNOWN` 解析；⏳真实提交接线、后台轮询、启动对账、迟到回报 | Phase 3 |
 | **持仓退出** | ✅ D-007 900 秒非正收益退出；保护单、止损、止盈、盈利管理、最终结算 | Phase 2/3 |
 | **风控** | 单币、账户、保证金、杠杆、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | subcategory、低频发现扫描、监听租约、保护性监听 | Phase 1/4 |
@@ -142,8 +142,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`75 passed, 5 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`78 passed`
+- `uv run --extra dev pytest -q`：`84 passed, 5 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`89 passed`
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过
@@ -183,7 +183,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 信号检测逻辑 | ✅ 已冻结 | 90% | 参数与实验脚本对齐，消除未来数据泄漏 |
 | 三档挂单 | ✅ 已修复 | 90% | `range(3)` 修复，价格计算正确 |
 | 数据连续性检查 | ✅ 已实现 | 80% | 5s/60s 窗口检查，缺行情层级标记 |
-| 订单幂等 | ✅ 已实现 | 70% | `placed_client_order_ids` 幂等集合，需 WAL |
+| 订单幂等 | ✅ 已实现 | 75% | `placed_client_order_ids` 与订单 WAL 已有，需接入真实提交恢复 |
 | 失效撤单 | ✅ 已实现 | 70% | `_cancel_signal_orders()` 正确撤单 |
 | Campaign | ⚠️ 已有全局准入锁和首成交时钟 | 40% | 缺退出、恢复与持久化 |
 | 持仓管理 | ⚠️ D-007 已实现 | 25% | 保护退出、盈利管理和完整已平仓 PnL 待确认 |

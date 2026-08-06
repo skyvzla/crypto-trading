@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `75 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `78 passed`；
+- 本地全量测试为 `84 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `89 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
@@ -45,7 +45,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 - Spike 已通过 `StrategyAccount` 接口与回测引擎内部结构解耦，并输出基础策略审计事件；
 - 默认 Compose 已验证 PostgreSQL、Redis、行情和账本服务可健康启动；未确认的示例策略仅在
   `--profile examples` 下启动；
-- 测试网真实执行、User Stream/WAL/启动对账、完整持仓保护与退出、执行回报到账本的事务闭环
+- 测试网真实执行、User Stream/启动对账、完整持仓保护与退出、执行回报到账本的事务闭环
   仍未完成；已确认的 D-007 超时退出已在 replay 中实现。
 
 当前结果证明离线入场链路及 Redis/PostgreSQL 内部服务集成可用，不能证明 Binance testnet
@@ -76,7 +76,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | 16h 预热和连续性检查 | 完成 | 外部质量长时间运行验证 | 预热不下单，窗口缺口阻止信号 |
 | replay runner 与报告 | 部分完成 | 部分成交、滑点、退出费用及期末口径 | 已输出订单、成交、持仓、汇总、策略审计，并实现 D-007 超时退出 |
 | 全局交易准入与首成交计时 | 部分完成 | Campaign 完整状态机、恢复、终态 | 当前已验证全局互斥和首成交计时 |
-| 入场幂等与失效撤单 | 部分完成 | WAL、撤单竞态、迟到回报 | replay 已验证幂等和失效撤单 |
+| 入场幂等与失效撤单 | 部分完成 | 真实提交接线、撤单竞态、迟到回报 | replay 已验证幂等和失效撤单；订单 WAL 已可追加记录 |
 | User Stream 与启动对账 | 部分完成 | 交易所事实同步、断线补偿 | 已补齐线程安全回报投递、重连去重和停止取消；启动对账与完整一致性仍待实现 |
 | 持仓保护与退出 | 部分完成 | 止损、止盈、盈利管理、退出费用和分批 | D-007 已实现；D-008 盈利管理待确认 |
 | 账户级风控 | 部分完成 | 保证金、杠杆、日亏损、数据延迟、急停 | 异常默认禁止新增风险 |
@@ -141,8 +141,9 @@ D-007 超时退出及真实 Parquet 输入的三档全成交 CLI 回归。剩余
 交付物：订单 WAL、`SUBMIT_UNKNOWN` 解析、User Stream、启动对账、撤单竞态处理、交易所
 托管保护单、账户级风控和紧急停止。
 
-已完成 User Stream 线程安全回报投递、重连去重和停止取消的 mock 验证。剩余 WAL、
-`SUBMIT_UNKNOWN` 查询确认、启动对账、迟到回报、保护单及外部测试网验证。
+已完成订单 WAL 追加记录、单次 `SUBMIT_UNKNOWN` 查单状态解析，以及 User Stream 线程安全
+回报投递、重连去重和停止取消的 mock 验证。剩余真实 REST 提交接线、后台查单与重启恢复、
+启动对账、迟到回报、保护单及外部测试网验证。
 
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
 未终态轮次；本地状态以交易所订单、成交和仓位事实为准。
@@ -212,7 +213,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `75 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `78 passed`。
+当前基线：本地 `84 passed, 5 skipped`；Compose 真实 Redis/PostgreSQL 环境 `89 passed`。
 
 ## 8. 风险与停止条件
 
