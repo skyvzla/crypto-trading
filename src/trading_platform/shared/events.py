@@ -202,7 +202,9 @@ class Order:
     type: Literal['LIMIT', 'MARKET']
     price: Decimal
     quantity: Decimal
-    status: Literal['NEW', 'FILLED', 'CANCELLED', 'EXPIRED', 'SUBMIT_UNKNOWN']
+    status: Literal[
+        'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED', 'SUBMIT_UNKNOWN'
+    ]
 
     created_at: int  # 毫秒时间戳
     ttl_ms: int | None = None

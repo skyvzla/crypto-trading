@@ -11,7 +11,6 @@ import json
 import os
 import threading
 from dataclasses import asdict, dataclass, field
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -56,8 +55,16 @@ class OrderWALRecord:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "OrderWALRecord":
+        record_type = data["record_type"]
+        if record_type not in {"intent", "submit_unknown", "exchange_status"}:
+            raise ValueError(f"unknown WAL record type: {record_type}")
+        status = data.get("status")
+        if status is not None and status not in {
+            "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELLED", "EXPIRED", "SUBMIT_UNKNOWN"
+        }:
+            raise ValueError(f"unknown WAL order status: {status}")
         return cls(
-            record_type=data["record_type"],
+            record_type=record_type,
             recorded_at=int(data["recorded_at"]),
             account_id=data["account_id"],
             client_order_id=data["client_order_id"],
@@ -66,7 +73,7 @@ class OrderWALRecord:
             order_type=data["order_type"],
             quantity=str(data["quantity"]),
             price=str(data["price"]),
-            status=data.get("status"),
+            status=status,
             exchange_order_id=(
                 str(data["exchange_order_id"])
                 if data.get("exchange_order_id") is not None
@@ -130,6 +137,36 @@ class OrderWAL:
         self.append(unknown)
         return unknown
 
+    def record_exchange_status(
+        self,
+        record: OrderWALRecord,
+        response: dict[str, Any],
+        *,
+        recorded_at: int,
+    ) -> OrderWALRecord:
+        """追加一次已知的交易所订单状态事实。"""
+        status = _KNOWN_EXCHANGE_STATUSES.get(response.get("status"))
+        if status is None:
+            raise ValueError(f"unknown exchange order status: {response.get('status')!r}")
+        if record.status == "SUBMIT_UNKNOWN" and not is_valid_transition(record.status, status):
+            raise ValueError(f"invalid status transition: {record.status} -> {status}")
+        resolved = OrderWALRecord(
+            **{
+                **record.to_dict(),
+                "record_type": "exchange_status",
+                "recorded_at": recorded_at,
+                "status": status,
+                "exchange_order_id": (
+                    str(response["orderId"])
+                    if response.get("orderId") is not None
+                    else record.exchange_order_id
+                ),
+                "payload": {**record.payload, "exchange_response": response},
+            }
+        )
+        self.append(resolved)
+        return resolved
+
     def recover_latest(self) -> dict[str, OrderWALRecord]:
         if not self.path.exists():
             return {}
@@ -191,17 +228,5 @@ class SubmitUnknownResolver:
             return Resolution(False, None, response=response, reason="unknown_exchange_status")
         if not is_valid_transition("SUBMIT_UNKNOWN", status):
             return Resolution(False, None, response=response, reason="invalid_status_transition")
-        resolved = OrderWALRecord(
-            **{
-                **record.to_dict(),
-                "record_type": "exchange_status",
-                "recorded_at": recorded_at,
-                "status": status,
-                "exchange_order_id": (
-                    str(response["orderId"]) if response.get("orderId") is not None else record.exchange_order_id
-                ),
-                "payload": {**record.payload, "exchange_response": response},
-            }
-        )
-        self.wal.append(resolved)
+        resolved = self.wal.record_exchange_status(record, response, recorded_at=recorded_at)
         return Resolution(True, status, response=response)
