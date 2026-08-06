@@ -45,6 +45,10 @@ class BinanceWebSocketClient:
         self._reconnect_count = 0
         self._streams: tuple[str, ...] = ()
 
+    @property
+    def connected(self) -> bool:
+        return self._running and self._ws is not None
+
     def _stream_url(self) -> str:
         stream_path = "/".join(self._streams)
         return f"{self.ws_base_url}/stream?streams={stream_path}"

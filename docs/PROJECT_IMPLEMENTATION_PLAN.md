@@ -50,7 +50,8 @@ V1 只实现上涨尖峰后的做空策略。清算地图、其他策略和未�
 验收：测试网配置绝不连接生产 URL；PUT 订阅确实刷新流；combined stream 能产生 Bar/Kline；断线和重启后订阅可恢复；缺口和预热不足会阻止信号。
 
 已完成：testnet 隔离、combined stream 解包、订阅刷新、自动重连、并发刷新保护、
-按币种构建 streams、多根完成 Bar 全量发布和已发布窗口迟到数据防重复。
+按币种构建 streams、多根完成 Bar 全量发布、已发布窗口迟到数据防重复，以及
+Redis/WS readiness 健康检查和故障 HTTP 503。
 
 ### Phase 2：统一策略核心与 Campaign
 

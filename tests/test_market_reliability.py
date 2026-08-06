@@ -4,6 +4,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi.testclient import TestClient
 from websockets.exceptions import WebSocketException
 
 from trading_platform.market.feed.aggregator import Bar1sAggregator
@@ -138,3 +139,29 @@ async def test_market_service_publishes_all_completed_bars():
     )
 
     assert [call.args[0] for call in service.redis_publisher.publish_bar1s.await_args_list] == bars
+
+
+def test_health_reports_redis_failure_as_not_ready():
+    from trading_platform.market.main import create_app
+
+    app, service = create_app(MarketLayerConfig(), "test-epoch")
+    service.redis.ping = AsyncMock(side_effect=ConnectionError("redis unavailable"))
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()["redis_connected"] is False
+
+
+def test_health_is_ready_without_subscriptions_when_redis_is_available():
+    from trading_platform.market.main import create_app
+
+    app, service = create_app(MarketLayerConfig(), "test-epoch")
+    service.redis.ping = AsyncMock(return_value=True)
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["websocket_connected"] is True

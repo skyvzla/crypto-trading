@@ -45,6 +45,8 @@ class HealthResponse(BaseModel):
     uptime_seconds: float
     subscribed_symbols: int
     active_ws_streams: int
+    redis_connected: bool = False
+    websocket_connected: bool = False
 
 
 # ==================== 订阅管理器 ====================

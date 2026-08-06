@@ -9,7 +9,7 @@
 项目已形成“历史数据预热 -> Spike 信号 -> 三档订单 -> 成交/持仓 -> 报告”的
 可运行 replay 入场链路；持仓保护与退出、测试网执行和账本写入闭环尚未完成。
 
-当前本地全量测试为 `55 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `57 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、关键数据缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新和多 Bar 发布；仍不能证明测试网
 执行或实盘流程可用。
@@ -133,7 +133,7 @@ tier_prices = [spike_high - atr * (0.75 - n * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev python -m pytest -q`：`55 passed`
+- `uv run --extra dev python -m pytest -q`：`57 passed`
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过
@@ -188,5 +188,5 @@ tier_prices = [spike_high - atr * (0.75 - n * 0.40) for n in range(3)]
 
 **Phase 1 剩余项**：
 - Redis 与真实 Binance 流的容器集成验证
-- Redis Pub/Sub 断流检测、健康状态和告警
+- Redis Pub/Sub 断流检测和告警（Redis/WS readiness 已接入 `/health`）
 - 数据质量状态传递给实时策略

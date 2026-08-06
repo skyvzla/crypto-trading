@@ -14,7 +14,7 @@ from typing import Any
 
 import redis.asyncio as redis
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 
 from trading_platform.market.api.routes import (
     HealthResponse,
@@ -299,15 +299,35 @@ def create_app(
 
     # 更新健康检查，返回运行时长
     @app.get("/health")
-    async def health_check() -> HealthResponse:
+    async def health_check(response: Response) -> HealthResponse:
         """健康检查"""
         stats = service.subscription_manager.get_stats()
+        try:
+            redis_connected = bool(await service.redis.ping())
+        except Exception:
+            redis_connected = False
+
+        websocket_required = bool(service._current_streams)
+        websocket_connected = (
+            not websocket_required
+            or (
+                service._ws_task is not None
+                and not service._ws_task.done()
+                and service.ws_client.connected
+            )
+        )
+        ready = redis_connected and websocket_connected
+        if not ready:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
         return HealthResponse(
+            status="ready" if ready else "degraded",
             instance_epoch=stats["instance_epoch"],
             uptime_seconds=service.get_uptime(),
             subscribed_symbols=stats["subscribed_symbols"],
             active_ws_streams=stats["active_streams"],
+            redis_connected=redis_connected,
+            websocket_connected=websocket_connected,
         )
 
     return app, service
