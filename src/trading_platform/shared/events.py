@@ -165,6 +165,7 @@ class OrderIntent:
     quantity: Decimal
     client_order_id: str
     ttl_ms: int | None = None  # 订单生存时间（毫秒），None=永久有效
+    order_type: Literal['LIMIT', 'MARKET'] = 'LIMIT'
 
     # 元数据（用于日志和分析）
     strategy_id: str | None = None

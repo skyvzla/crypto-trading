@@ -3,7 +3,7 @@
 """
 import pytest
 from decimal import Decimal
-from trading_platform.shared.events import Bar1s, Kline, Order
+from trading_platform.shared.events import Bar1s, Kline, Order, Position
 from trading_platform.strategies.spike_short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
@@ -232,6 +232,67 @@ class TestDynamicSpikeShortStrategy:
         audit = strategy.drain_audit_events()
         assert [event.event_type for event in audit] == ["signal_invalidated"]
         assert audit[0].details == {"cancelled_orders": 1}
+
+    def test_d007_non_positive_position_exits_at_900_seconds(self):
+        class Account:
+            def __init__(self):
+                self.position = Position(
+                    symbol="BTCUSDT", side="SHORT", entry_price=Decimal("100"),
+                    quantity=Decimal("1"), total_commission=Decimal("0.2"),
+                    unrealized_pnl=Decimal("0"), realized_pnl=Decimal("0"),
+                    opened_at=1_000,
+                )
+
+            def get_position(self, symbol):
+                return self.position if symbol == "BTCUSDT" else None
+
+        account = Account()
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000"), account=account
+        )
+        strategy.first_fill_time = 1_000
+        strategy._campaign_id_for_timing = "spike_short:BTCUSDT:1"
+        bar = Bar1s(
+            symbol="BTCUSDT", timestamp=901_000, available_time=901_000,
+            open=Decimal("110"), high=Decimal("111"), low=Decimal("109"),
+            close=Decimal("110"), volume=Decimal("1"), trade_count=1,
+            vwap=Decimal("110"),
+        )
+
+        intents = strategy._manage_non_positive_timeout(bar)
+        assert len(intents) == 1
+        assert intents[0].order_type == "MARKET"
+        assert intents[0].side == "BUY"
+        assert intents[0].quantity == Decimal("1")
+        assert [event.event_type for event in strategy.drain_audit_events()] == [
+            "campaign_timeout_check", "campaign_timeout_exit_requested"
+        ]
+        assert strategy._manage_non_positive_timeout(bar) == []
+
+    def test_d007_profitable_position_is_not_force_closed(self):
+        class Account:
+            def get_position(self, symbol):
+                return Position(
+                    symbol=symbol, side="SHORT", entry_price=Decimal("100"),
+                    quantity=Decimal("1"), total_commission=Decimal("0.2"),
+                    unrealized_pnl=Decimal("0"), realized_pnl=Decimal("0"),
+                    opened_at=1_000,
+                )
+
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000"), account=Account()
+        )
+        strategy.first_fill_time = 1_000
+        strategy._campaign_id_for_timing = "spike_short:BTCUSDT:1"
+        bar = Bar1s(
+            symbol="BTCUSDT", timestamp=901_000, available_time=901_000,
+            open=Decimal("90"), high=Decimal("91"), low=Decimal("89"),
+            close=Decimal("90"), volume=Decimal("1"), trade_count=1,
+            vwap=Decimal("90"),
+        )
+        assert strategy._manage_non_positive_timeout(bar) == []
+        assert strategy._timeout_checked is True
+        assert strategy.drain_audit_events()[0].details["exit_required"] is False
 
     def test_minute_window_requires_every_completed_kline(self):
         strategy = DynamicSpikeShortStrategy(

@@ -157,7 +157,13 @@ class BacktestEngine:
             # 4. 执行策略返回的下单意图
             if self._trading_enabled and order_intents:
                 for intent in order_intents:
-                    self.executor.place_order(intent)
+                    order = self.executor.place_order(intent)
+                    if order.type == 'MARKET' and order.status == 'NEW':
+                        fill = self._execute_fill(order, event)
+                        self.fills.append(fill)
+                        self.fill_records.append(fill)
+                        if hasattr(self.strategy, 'on_fill'):
+                            self.strategy.on_fill(fill)
             self._collect_strategy_audit_events()
 
             # 5. 进度打印（可选）
@@ -187,6 +193,9 @@ class BacktestEngine:
 
     def has_open_position(self, symbol: str) -> bool:
         return symbol in self.positions
+
+    def get_position(self, symbol: str) -> Position | None:
+        return self.positions.get(symbol)
 
     def cancel_order(self, order_id: str) -> bool:
         return self.executor.cancel_order(order_id)

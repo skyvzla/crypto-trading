@@ -69,7 +69,7 @@ class BacktestExecutor:
             account_id=self.account_id,
             symbol=order_intent.symbol,
             side=order_intent.side,
-            type='LIMIT',
+            type=order_intent.order_type,
             price=order_intent.price,
             quantity=order_intent.quantity,
             status='NEW',

@@ -78,6 +78,7 @@ class DynamicSpikeShortStrategy:
 
     SIGNAL_COOLDOWN = 180  # 信号冷却时间（秒）
     ORDER_TTL = 180  # 订单有效期（秒）
+    NON_POSITIVE_EXIT_AFTER_MS = 900 * MS_PER_SECOND
 
     # 触发判定需要的 1s Bar 数量：索引 i-60 .. i
     BAR_BUFFER = 61
@@ -116,6 +117,9 @@ class DynamicSpikeShortStrategy:
         self.last_signal_time: Optional[int] = None
         self.active_signals: List[SpikeSignal] = []
         self.first_fill_time: Optional[int] = None
+        self._campaign_id_for_timing: str | None = None
+        self._timeout_checked = False
+        self._exit_requested = False
         self._audit_events: List[StrategyAuditEvent] = []
 
     def bind_account(self, account: StrategyAccount) -> None:
@@ -132,28 +136,50 @@ class DynamicSpikeShortStrategy:
 
     def on_fill(self, fill: Fill) -> None:
         """记录本轮第一笔真实成交时间，作为 900 秒计时起点。"""
-        if fill.symbol != self.symbol or self.first_fill_time is not None:
+        if fill.symbol != self.symbol:
             return
         if self._account is None:
             return
         order = self._account.get_order(fill.order_id)
         if order is None or order.strategy_id != "spike_short":
             return
-        self.first_fill_time = fill.fill_time
-        self._record_audit(
-            event_time=fill.fill_time,
-            event_type="campaign_first_fill",
-            campaign_id=self._campaign_id_from_client_order(order.client_order_id),
-            details={
-                "order_id": fill.order_id,
-                "fill_id": fill.fill_id,
-                "price": str(fill.price),
-                "quantity": str(fill.quantity),
-            },
-        )
+        if self.first_fill_time is None and fill.side == "SELL":
+            self.first_fill_time = fill.fill_time
+            self._campaign_id_for_timing = self._campaign_id_from_client_order(
+                order.client_order_id
+            )
+            self._record_audit(
+                event_time=fill.fill_time,
+                event_type="campaign_first_fill",
+                campaign_id=self._campaign_id_for_timing,
+                details={
+                    "order_id": fill.order_id,
+                    "fill_id": fill.fill_id,
+                    "price": str(fill.price),
+                    "quantity": str(fill.quantity),
+                },
+            )
+        elif (
+            fill.side == "BUY"
+            and order.trigger_reason == "campaign_timeout_exit"
+        ):
+            self._record_audit(
+                event_time=fill.fill_time,
+                event_type="campaign_timeout_exit_filled",
+                campaign_id=self._campaign_id_for_timing,
+                details={
+                    "order_id": fill.order_id,
+                    "fill_id": fill.fill_id,
+                    "price": str(fill.price),
+                    "quantity": str(fill.quantity),
+                },
+            )
 
     def reset_campaign_timing(self) -> None:
         self.first_fill_time = None
+        self._campaign_id_for_timing = None
+        self._timeout_checked = False
+        self._exit_requested = False
 
     def drain_audit_events(self) -> List[StrategyAuditEvent]:
         """返回并清空尚未被运行适配器收集的审计事件。"""
@@ -174,6 +200,8 @@ class DynamicSpikeShortStrategy:
 
         if len(self.bars_1s) < self.BAR_BUFFER:
             return []
+
+        timeout_intent = self._manage_non_positive_timeout(bar)
 
         if self._entry_enabled:
             signal = self._detect_signal(bar)
@@ -207,7 +235,63 @@ class DynamicSpikeShortStrategy:
                     },
                 )
 
-        return self._manage_signals(bar)
+        return timeout_intent + self._manage_signals(bar)
+
+    def _manage_non_positive_timeout(self, bar: Bar1s) -> List[OrderIntent]:
+        """执行已确认的 D-007：首成交后 900 秒净收益不为正则退出。
+
+        D-008 的盈利仓位管理不在这里实现；若 900 秒时仍盈利，只记录检查结果。
+        """
+        if (
+            self.first_fill_time is None
+            or self._timeout_checked
+            or self._exit_requested
+            or self._account is None
+            or bar.available_time < self.first_fill_time + self.NON_POSITIVE_EXIT_AFTER_MS
+        ):
+            return []
+        position = self._account.get_position(self.symbol)
+        if position is None or position.quantity <= 0:
+            return []
+        if position.side != "SHORT":
+            return []
+        self._timeout_checked = True
+        gross_pnl = (position.entry_price - bar.close) * position.quantity
+        net_pnl = gross_pnl - position.total_commission
+        self._record_audit(
+            event_time=bar.available_time,
+            event_type="campaign_timeout_check",
+            campaign_id=self._campaign_id_for_timing,
+            details={
+                "first_fill_time": self.first_fill_time,
+                "mark_price": str(bar.close),
+                "gross_pnl": str(gross_pnl),
+                "entry_commission": str(position.total_commission),
+                "net_pnl": str(net_pnl),
+                "exit_required": net_pnl <= 0,
+            },
+        )
+        if net_pnl > 0:
+            return []
+        self._exit_requested = True
+        self._record_audit(
+            event_time=bar.available_time,
+            event_type="campaign_timeout_exit_requested",
+            campaign_id=self._campaign_id_for_timing,
+            details={"quantity": str(position.quantity), "mark_price": str(bar.close)},
+        )
+        return [
+            OrderIntent(
+                symbol=self.symbol,
+                side="BUY",
+                price=bar.close,
+                quantity=position.quantity,
+                client_order_id=f"{self._campaign_id_for_timing or 'spike_short'}_timeout_exit",
+                order_type="MARKET",
+                strategy_id="spike_short",
+                trigger_reason="campaign_timeout_exit",
+            )
+        ]
 
     def on_kline(self, kline: Kline) -> List[OrderIntent]:
         """处理已完成 K 线事件"""

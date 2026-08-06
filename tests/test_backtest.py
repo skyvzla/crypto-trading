@@ -89,6 +89,32 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertEqual(len(engine.orders), 1)
         self.assertEqual(len(engine.order_records), 1)
 
+    def test_market_order_intent_fills_on_current_bar(self):
+        class ExitStrategy(MockStrategy):
+            def on_bar1s(self, bar):
+                return [OrderIntent(
+                    symbol=bar.symbol,
+                    side='BUY',
+                    price=bar.close,
+                    quantity=Decimal('1'),
+                    client_order_id='market-exit',
+                    order_type='MARKET',
+                    strategy_id='test',
+                    trigger_reason='timeout',
+                )]
+
+        event = Bar1s(
+            symbol='BTCUSDT', timestamp=1_000, available_time=2_000,
+            open=Decimal('110'), high=Decimal('111'), low=Decimal('109'),
+            close=Decimal('110'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('110'),
+        )
+        engine = BacktestEngine(ExitStrategy(), [event], BacktestConfig())
+        result = engine.run()
+        self.assertEqual(len(result.fills), 1)
+        self.assertEqual(result.fills[0].price, Decimal('110'))
+        self.assertEqual(result.orders[0].type, 'MARKET')
+
     def test_warmup_events_update_strategy_without_creating_orders(self):
         class WarmupAwareStrategy(MockStrategy):
             def __init__(self):

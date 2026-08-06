@@ -20,6 +20,10 @@ class StrategyAccount(Protocol):
         """查询交易对是否仍有仓位。"""
         ...
 
+    def get_position(self, symbol: str):
+        """返回当前持仓快照；无持仓时返回 None。"""
+        ...
+
     def cancel_order(self, order_id: str) -> bool:
         """请求撤销订单，返回是否接受本次撤销。"""
         ...
