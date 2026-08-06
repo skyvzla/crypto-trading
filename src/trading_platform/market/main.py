@@ -399,7 +399,14 @@ def create_app(
             )
         )
         data_quality_ready = service.quality.ready
-        ready = redis_connected and websocket_connected and data_quality_ready
+        pubsub_delivery_ready = service.redis_publisher.delivery_ready
+        pubsub_required = websocket_required
+        ready = (
+            redis_connected
+            and websocket_connected
+            and data_quality_ready
+            and (not pubsub_required or pubsub_delivery_ready)
+        )
         if not ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
@@ -414,6 +421,8 @@ def create_app(
             connection_generation=service.ws_client.connection_generation,
             data_quality_ready=data_quality_ready,
             data_quality_issues=service.quality.issue_count,
+            pubsub_delivery_ready=pubsub_delivery_ready,
+            pubsub_delivery_issues=service.redis_publisher.delivery_issue_count,
         )
 
     @app.get("/quality")
@@ -424,7 +433,12 @@ def create_app(
             or service.subscription_manager.get_active_streams()
         )
         websocket_connected = service.ws_client.connected
-        ready = not required or (websocket_connected and service.quality.ready)
+        pubsub_delivery_ready = service.redis_publisher.delivery_ready
+        ready = not required or (
+            websocket_connected
+            and service.quality.ready
+            and pubsub_delivery_ready
+        )
         if not ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return QualityResponse(
@@ -434,6 +448,9 @@ def create_app(
             last_connected_at_ms=service.ws_client.last_connected_at_ms,
             last_disconnected_at_ms=service.ws_client.last_disconnected_at_ms,
             streams=service.quality.snapshot(),
+            pubsub_delivery_ready=pubsub_delivery_ready,
+            pubsub_delivery_issues=service.redis_publisher.delivery_issue_count,
+            pubsub_channels=service.redis_publisher.delivery_snapshot(),
         )
 
     return app, service

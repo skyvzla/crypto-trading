@@ -40,7 +40,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 - 本地全量测试为 `75 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `78 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
-  Pub/Sub/Kline Store 服务级集成和依赖健康检查；
+  Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
 - 账本层已完成订单、成交、持仓 CRUD/PnL 查询、subcategory 准入审计及 Web V1；
 - Spike 已通过 `StrategyAccount` 接口与回测引擎内部结构解耦，并输出基础策略审计事件；
 - 默认 Compose 已验证 PostgreSQL、Redis、行情和账本服务可健康启动；未确认的示例策略仅在
@@ -64,7 +64,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | aggTrade/Kline 接入与 combined stream 解包 | 完成 | 外部流长时间运行验证 | 原始与 combined 消息均可解析 |
 | aggTrade 聚合完成 1s Bar | 完成 | 外部流长时间运行验证 | 不重复、不丢失跨多秒完成 Bar |
 | 动态订阅、引用计数、刷新和重连 | 部分完成 | 租约规则、进程重启恢复 | 订阅变更和断线后恢复原 streams |
-| Redis 分发和 Kline Store | 完成 | 长时间断流告警 | 真实 Redis 读写通过，故障时健康检查 503 |
+| Redis 分发和 Kline Store | 完成 | 长时间运行与外部告警通道 | 真实 Redis 读写通过；零订阅者发布会告警，活跃流无消费者时健康检查 503 |
 | 历史 Parquet 数据读取 | 部分完成 | 归档边界、缺口报告 | replay 不联网补数据，缺数据直接拒绝 |
 | 监听池发现与租约 | 待确认 | 入池、回吐、期限、重入规则 | 规则冻结后补状态机测试 |
 

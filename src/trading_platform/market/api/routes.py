@@ -59,6 +59,8 @@ class HealthResponse(BaseModel):
     connection_generation: int = 0
     data_quality_ready: bool = False
     data_quality_issues: int = 0
+    pubsub_delivery_ready: bool = True
+    pubsub_delivery_issues: int = 0
 
 
 class QualityResponse(BaseModel):
@@ -70,6 +72,9 @@ class QualityResponse(BaseModel):
     last_connected_at_ms: int | None
     last_disconnected_at_ms: int | None
     streams: dict[str, dict[str, Any]]
+    pubsub_delivery_ready: bool = True
+    pubsub_delivery_issues: int = 0
+    pubsub_channels: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 # ==================== 订阅管理器 ====================

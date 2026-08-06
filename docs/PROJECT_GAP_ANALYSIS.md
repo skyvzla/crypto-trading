@@ -100,8 +100,9 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 - 60 秒窗口连续性检查：`current.timestamp - bar_60s_ago.timestamp == 60000ms`
 - 缺口或断线时不触发信号
 
-**仍缺失**（Phase 1 数据层范围）：
-- Redis Pub/Sub 消费端断流检测与告警
+**已补齐**（2026-08-07）：
+- Redis 发布器记录每个已发布通道的订阅者数量、零订阅次数和最近发布时间；零订阅者时记录告警，恢复时记录恢复日志。
+- `/health`、`/quality` 暴露 Pub/Sub 交付状态；存在活跃行情流且最近一次发布无消费者时 fail-closed（503），避免下游误认为行情已送达。
 
 **已补齐**（2026-08-07）：
 - `/health` 和 `/quality` 暴露逐流质量、连接代次和降级原因

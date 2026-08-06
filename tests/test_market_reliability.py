@@ -13,6 +13,45 @@ from trading_platform.market.main import MarketLayerConfig, MarketLayerService
 from trading_platform.market.quality import MarketDataQualityTracker
 from trading_platform.market.store.kline_store import KlineStore
 from trading_platform.market.store.redis_pub import RedisPublisher
+from trading_platform.shared.events import Bar1s
+
+
+def _bar(symbol: str = "BTCUSDT") -> Bar1s:
+    return Bar1s(
+        symbol=symbol,
+        timestamp=1_000,
+        available_time=2_000,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100"),
+        volume=Decimal("2"),
+        trade_count=1,
+        vwap=Decimal("100"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_redis_publisher_detects_and_reports_consumer_disconnect(caplog):
+    redis_client = AsyncMock()
+    redis_client.publish.side_effect = [0, 2]
+    publisher = RedisPublisher(redis_client)
+
+    with caplog.at_level("WARNING"):
+        assert await publisher.publish_bar1s(_bar()) == 0
+    state = publisher.delivery_snapshot()["bar1s:BTCUSDT"]
+    assert state["status"] == "degraded"
+    assert state["zero_subscriber_count"] == 1
+    assert publisher.delivery_ready is False
+    assert publisher.delivery_issue_count == 1
+    assert "消费端断流" in caplog.text
+
+    await publisher.publish_bar1s(_bar())
+    state = publisher.delivery_snapshot()["bar1s:BTCUSDT"]
+    assert state["status"] == "healthy"
+    assert state["last_subscriber_count"] == 2
+    assert publisher.delivery_ready is True
+    assert publisher.delivery_issue_count == 0
 
 
 def test_aggregator_returns_every_bar_closed_by_one_trade():
@@ -71,6 +110,26 @@ def test_quality_tracker_detects_completed_kline_gap():
     assert tracker.observe_kline("BTCUSDT", "1m", 60_000, 119_999, 120_100)
     assert not tracker.observe_kline("BTCUSDT", "1m", 180_000, 239_999, 240_100)
     assert tracker.snapshot()[stream]["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_health_fails_closed_when_active_pubsub_has_no_consumers():
+    from trading_platform.market.main import create_app
+
+    app, service = create_app(MarketLayerConfig(), "test-epoch")
+    service.redis.ping = AsyncMock(return_value=True)
+    service.redis_publisher.redis.publish = AsyncMock(return_value=0)
+    await service.redis_publisher.publish_bar1s(_bar())
+    service.subscription_manager.update_subscription(
+        "consumer", ["BTCUSDT"], ["bar1s"]
+    )
+    service._current_streams = ["btcusdt@aggTrade"]
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 503
+    assert response.json()["pubsub_delivery_ready"] is False
+    assert response.json()["pubsub_delivery_issues"] == 1
 
 
 @pytest.mark.asyncio
