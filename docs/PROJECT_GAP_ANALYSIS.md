@@ -10,8 +10,8 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
 执行，以及执行回报到账本的事务闭环尚未完成。
 
-当前本地全量测试为 `84 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`89 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `88 passed, 5 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`93 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明 Binance testnet
@@ -80,15 +80,14 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源；仍不能证明
 **订单幂等问题**：
 - 策略使用 `client_order_id` 标记已下单
 - 新代码已在 `SpikeSignal.placed_client_order_ids` 中维护幂等集合
-- WAL 已记录下单意图、提交未知和明确交易所状态；仍需把恢复器接入真实 REST 提交、后台查单和风险门禁
+- WAL 已接入 Binance REST 提交适配器：提交前记录意图，网络状态不明时保持 `SUBMIT_UNKNOWN`，重复 client ID 不重下单；仍需后台查单编排和账户级风险门禁
 
 **失效撤单已实现**：
 - 新代码通过 `_cancel_signal_orders()` 正确撤销未成交订单
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- 真实 REST 提交前后的订单 WAL 接线
-- `SUBMIT_UNKNOWN` 后台轮询、重启恢复和风险门禁接线
+- `SUBMIT_UNKNOWN` 后台轮询、重启恢复编排和风险门禁接线
 - 启动对账
 - User Stream 回执处理基础调度（线程回调回主事件循环、重连去重、停止取消）
 - 迟到回报处理
@@ -129,7 +128,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时；⏳ 恢复与终态 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/单次 `SUBMIT_UNKNOWN` 解析；⏳真实提交接线、后台轮询、启动对账、迟到回报 | Phase 3 |
+| **执行恢复** | ✅ WAL/REST 提交/单次 `SUBMIT_UNKNOWN` 解析；⏳后台轮询、启动对账、迟到回报 | Phase 3 |
 | **持仓退出** | ✅ D-007 900 秒非正收益退出；保护单、止损、止盈、盈利管理、最终结算 | Phase 2/3 |
 | **风控** | 单币、账户、保证金、杠杆、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | subcategory、低频发现扫描、监听租约、保护性监听 | Phase 1/4 |
@@ -142,8 +141,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`84 passed, 5 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`89 passed`
+- `uv run --extra dev pytest -q`：`88 passed, 5 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`93 passed`
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过

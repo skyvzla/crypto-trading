@@ -15,6 +15,7 @@ from .execution_recovery import OrderWAL, OrderWALRecord, Resolution, SubmitUnkn
 from .binance import (
     BinanceRestClient,
     BinanceAPIException,
+    BinanceOrderExecutor,
     UserDataStream,
     RateLimiter,
     RateLimitRule,
@@ -44,6 +45,7 @@ __all__ = [
     # Binance
     'BinanceRestClient',
     'BinanceAPIException',
+    'BinanceOrderExecutor',
     'UserDataStream',
     'RateLimiter',
     'RateLimitRule',
