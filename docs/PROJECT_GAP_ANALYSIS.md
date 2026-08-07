@@ -8,10 +8,11 @@
 
 项目已形成“历史数据预热 -> Spike 信号 -> 三档订单 -> 成交/持仓 -> 报告”的
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
-执行，以及执行回报、账户仓位到账本的完整运行时闭环尚未完成。
+执行仍未完成。User Stream 到 WAL/RiskGuard/PostgreSQL 的可复用运行时与组合测试已经完成，
+但尚未建立绑定具体 testnet 账户的长期运行进程和完整交易所启动对账。
 
-当前本地全量测试为 `129 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`136 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `149 passed, 8 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`157 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
@@ -82,7 +83,9 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 tes
 
 **仍缺失的实时适配**（Phase 3 修复范围）：
 - testnet/live 账户实现尚未接入 `StrategyAccount`
-- User Stream 订单/账户回报投递与重连调度已有实现和 mock 覆盖；订单 WAL、单次恢复和显式参数的 `SUBMIT_UNKNOWN` 后台轮询已有实现；运行时装配、启动对账、迟到回报及完整账本对账尚未形成闭环
+- User Stream 订单/账户回报、未知 WAL 启动对账、后台轮询、停止和重连已形成可复用运行时；
+  订单回报会同步 WAL/RiskGuard 和 PostgreSQL，账户回报写入持仓。具体 testnet 账户进程、
+  完整交易所启动对账和迟到回报竞态仍未完成
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
@@ -96,9 +99,9 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 tes
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- 确认 `SUBMIT_UNKNOWN` 轮询周期/次数并接入实际运行生命周期
-- 完整启动对账
-- 迟到回报处理
+- 确认 `SUBMIT_UNKNOWN` 轮询周期/次数和账户/策略归属，建立实际运行进程
+- 交易所全部未终态订单、成交和仓位的完整启动对账
+- 撤单与迟到回报竞态处理
 
 ### 3.6 数据质量检查已加强（2026-08-06）
 
@@ -136,12 +139,12 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时；⏳ 恢复与终态 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/REST 提交/单次与后台 `SUBMIT_UNKNOWN` 解析/风险阻塞；⏳轮询参数及运行时装配、完整启动对账、迟到回报 | Phase 3 |
+| **执行恢复** | ✅ WAL/REST 提交/User Stream 同步/未知单启动与后台解析/风险阻塞/生命周期；⏳具体账户进程、完整启动对账、迟到回报 | Phase 3 |
 | **持仓退出** | ✅ D-007 900 秒非正收益退出；保护单、止损、止盈、盈利管理、最终结算 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞；⏳保证金、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | subcategory、低频发现扫描、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/数据集缺失拒绝/窗口缺口门禁/未平仓 MTM；⏳ 部分成交、滑点、同秒顺序最终口径 | Phase 2 |
-| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ Binance 订单/成交和账户仓位原子入账适配；⏳ 运行时装配和完整 PnL 链路 | Phase 2/4 |
+| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ Binance 回报到 WAL/风险门禁/账本组合链路；⏳ 具体账户进程和完整 PnL 链路 | Phase 2/4 |
 | **Web** | ✅ subcategory 控制、账本、PnL、运行状态；⏳ 身份与权限 | Phase 4 |
 | **运维** | testnet/live 隔离、监控、告警、凭据、回滚、紧急平仓 | Phase 5-6 |
 
@@ -149,11 +152,13 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`129 passed, 7 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`136 passed`
+- `uv run --extra dev pytest -q`：`149 passed, 8 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`157 passed`
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready
+- 真实 PostgreSQL 组合回归：`ORDER_TRADE_UPDATE` 同步 WAL、未知订单风险门禁、订单和成交，
+  `ACCOUNT_UPDATE` 随后写入同账户持仓
 - AKEUSDT 外部 DuckDB 只读 replay：UTC `2026-07-01` 至 `2026-08-01`，16h 预热，
   处理 `1,945,737` 个事件；D-004 修复后为 `3 orders / 3 fills / 1 OPEN`、单 Campaign，
   入场名义约 `1000 USDT`
@@ -187,6 +192,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 7. Web V1 的身份认证、角色和敏感操作范围是什么？
 8. replay、testnet、live 各自的验收阈值和人工审批条件是什么？
 9. 外部 DuckDB 继续只读挂载，还是迁移为本项目独立数据卷？
+10. testnet API Key 对应账户是否专用于 `spike_short`？共享账户需确认订单和仓位归属规则。
+11. `SUBMIT_UNKNOWN` 后台轮询周期和最大次数采用什么值？
 
 ## 8. 当前代码状态总结（2026-08-07 更新）
 
@@ -195,12 +202,12 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 信号检测逻辑 | 已冻结 | 参数与实验脚本对齐，消除未来数据泄漏 |
 | 三档挂单 | 已修复 | `range(3)` 修复，价格计算正确 |
 | 数据连续性检查 | 已实现 | 5s/60s 窗口检查及行情层质量门禁已接入 |
-| 订单幂等 | 部分完成 | `placed_client_order_ids`、订单 WAL、单次启动恢复和后台轮询已有，缺参数确认与运行时装配 |
+| 订单幂等 | 部分完成 | `placed_client_order_ids`、订单 WAL、User Stream 同步、启动恢复和后台轮询已有，缺参数确认与具体账户进程 |
 | 失效撤单 | replay 已实现 | `_cancel_signal_orders()` 正确撤单；实时撤单竞态待验证 |
 | Campaign | 部分完成 | 已有全局准入锁和首成交时钟，缺退出、恢复与持久化 |
 | 持仓管理 | 部分完成 | D-007 已实现；保护退出、盈利管理和完整已平仓 PnL 待确认 |
 | 环境解耦 | 部分完成 | 已依赖最小账户协议，缺 testnet/live 账户适配器 |
-| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API 及订单/成交/仓位原子入账已有，缺运行时装配和 Campaign |
+| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API、回报组合运行时及订单/成交/仓位原子入账已有，缺具体账户进程和 Campaign |
 | Web V1 | 部分完成 | 账本、PnL、状态、subcategory 已有，缺身份权限和浏览器视觉验收 |
 
 **Phase 0 剩余工作**：
