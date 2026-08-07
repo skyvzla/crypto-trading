@@ -296,8 +296,10 @@ docker compose --profile spike run --rm --no-deps \
 - 本轮 Compose 相关组合回归为 `174 passed, 1 warning`；最终全量回归为
   `490 passed, 34 skipped, 1 warning`。
 
-当前 `spike` subcategory 为 disabled，Spike 以 `entry_enabled=false` 运行只读控制面验证，
-账户为 0 挂单、0 非零仓位；启用交易准入前必须经过新的人工操作。
+当前 `spike` subcategory 为 disabled。正式 soak 后 Market 再次出现确定 gap，Spike 已优雅
+停止，不通过重启清除质量事实；最终 dry-run 确认 AKEUSDT/BTCUSDT 均为 0 挂单、0 非零仓位，
+报告为 `reports/testnet_final_flat_after_soak_20260808.json`。启用交易准入前必须先确定并验收
+Market 缺口恢复方式，再经过新的人工操作。
 
 AKEUSDT 的 `MIN_NOTIONAL` 为 5 USDT。三档权重为 30/40/30，因此 10 USDT 总金额会形成
 3/4/3 USDT 的必然无效订单。进程会在连接交易所、读取 symbol rules 后验证最小档必须严格
