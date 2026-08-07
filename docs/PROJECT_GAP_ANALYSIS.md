@@ -2,7 +2,7 @@
 
 > 盘点日期：2026-08-07
 > 盘点依据：当前源码、容器测试、`docs/spike_trader/decisions.md` 与已归档状态快照
-> 状态：实施中；testnet 完整成交链路已验收，正式退出参数待确认
+> 状态：实施中；testnet 完整成交链路已验收，正式退出参数按候选证据迭代
 
 ## 1. 当前结论
 
@@ -12,8 +12,8 @@
 撤单、启动对账和周期安全扫描。正式退出仍未完成：testnet 仅允许 D-007 简化退出用于
 执行验证，最新动能/趋势退出参数冻结前，`live` 会拒绝启动。
 
-当前本地全量测试为 `277 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-全量测试为 `288 passed, 1 warning`。测试已按
+当前本地全量测试为 `293 passed, 12 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
+全量测试为 `301 passed, 4 skipped, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -94,7 +94,9 @@ User Stream `TRADE`、账户仓位确认、剩余档撤单、外部 reduce-only 
 - `spike-live` 进程已装配历史 Kline 预热、实时行情、User Stream、账本、Campaign 和准入；
 - 启动强制专用账户、one-way 模式、交易所规则快照和订单/仓位一致性；关机先撤销未终态入场单；
 - 本地与 Compose 已覆盖部分成交、撤单竞态、重连顺序、迟到回报、成交后仓位确认和全局 halt；
-  one-way testnet 已验证完整策略进程成交和保护退出。首次停机发现“交易所已成交但本地 WAL
+  one-way testnet 已验证完整策略进程成交和保护退出。User Stream 断流会立即关闭执行门禁，
+  只有重连对账完成才恢复；带仓重启从 Redis/WAL/PostgreSQL 恢复 timing、手续费和成交幂等。
+  首次停机发现“交易所已成交但本地 WAL
   尚为部分成交”的撤单竞态，现会在撤单异常后按原 client ID 查询交易所，明确终态才消解。
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
@@ -161,9 +163,10 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run pytest -q`：`277 passed, 11 skipped, 1 warning`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`288 passed, 1 warning`
+- 本地 `uv run pytest -q`：`293 passed, 12 skipped, 1 warning`
+- 真实 Redis/PostgreSQL 容器全量：`301 passed, 4 skipped, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
+- AKEUSDT 外部执行追加 1 轮非市价 LIMIT 撤单和 3 轮可成交 LIMIT 开空/reduce-only MARKET 平仓；最终独立检查为 0 挂单、0 仓位
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
 - Binance `demo-fapi` 真实鉴权成功；账户已切换 one-way，AKEUSDT 真实 `SELL LIMIT` 成交
   1300 后以 reduce-only `BUY MARKET` 成交 1300 并归零
