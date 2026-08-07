@@ -15,6 +15,7 @@ from .user_stream import (
     UserDataStream,
 )
 from .live_executor import BinanceOrderExecutor
+from .runtime import BinanceExecutionRuntime
 
 __all__ = [
     'RateLimiter',
@@ -25,4 +26,5 @@ __all__ = [
     'BinanceAPIException',
     'UserDataStream',
     'BinanceOrderExecutor',
+    'BinanceExecutionRuntime',
 ]
