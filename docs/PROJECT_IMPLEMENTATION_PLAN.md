@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.13
+> 版本：v1.14
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 当前 Compose 真实 Redis/PostgreSQL 全量测试为 `222 passed, 1 warning`；
+- 当前 Compose 真实 Redis/PostgreSQL 全量测试为 `247 passed, 1 warning`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 真实 replay 基准已固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
   `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
@@ -61,7 +61,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
   `--profile examples` 下启动；
 - User Stream、启动时未知 WAL 单次对账、有限次数后台查单和停止/重连已形成可复用运行时；
   `ORDER_TRADE_UPDATE` 会严格同步 WAL/RiskGuard，并与订单/成交、`ACCOUNT_UPDATE` 持仓
-  共同写入 PostgreSQL，组合链路已通过真实数据库测试。具体 `spike-live` 进程已装配交易
+  共同写入 PostgreSQL。启动及重连会先按 WAL 所有权从 REST 回补错过的订单、成交与管理
+  标的仓位，再执行严格快照对账；组合链路已通过真实数据库测试。具体 `spike-live` 进程已装配交易
   规则量化、one-way 模式门禁、行情预热、Redis Campaign、subcategory、TTL 撤单和关机
   撤单；`demo-fapi` 鉴权成功，但现有 testnet 账户为 Hedge Mode，真实写操作在提交前被拒绝。
 - 账户级回报不得隐式归属策略：运行时工厂要求显式声明专用策略账户；共享账户在缺少
@@ -102,7 +103,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | replay runner 与报告 | 部分完成 | 部分成交、滑点、退出费用及期末口径 | 已输出订单、成交、持仓、汇总、策略审计，并实现 D-007 超时退出 |
 | 全局交易准入与首成交计时 | 部分完成 | Redis Store 接入运行时、恢复和终态 | 已验证全局互斥、首成交计时、Redis 原子租约及 D-009“盈利超过 900 秒时先平旧轮次再激活新信号” |
 | 入场幂等与失效撤单 | 部分完成 | 后台恢复、撤单竞态、迟到回报 | replay 已验证幂等和失效撤单；订单 WAL 已接入 Binance REST 提交适配器 |
-| User Stream 与启动对账 | 部分完成 | one-way testnet 外部竞态验证、成交历史恢复 | 已接好具体账户进程、WAL/风险门禁/账本回调、启动及重连对账和 5秒×12 次未知单轮询 |
+| User Stream 与启动对账 | 部分完成 | one-way testnet 外部竞态验证 | 已接好具体账户进程、WAL/风险门禁/账本回调、REST 成交回补、启动及重连严格对账和 5秒×12 次未知单轮询 |
 | 持仓保护与退出 | 部分完成 | 止损、止盈、盈利管理、退出费用和分批 | D-007 已实现；起涨点处的持有/减半方向已确认，计算阈值和剩余仓位退出待确认 |
 | 账户级风控 | 部分完成 | 保证金、日亏损、数据延迟、急停 | 已限制持仓价值、币种数、杠杆并阻塞未知订单 symbol |
 | testnet/live 适配 | 部分完成 | one-way testnet 真实多轮验证、最新退出策略 | 已有正式进程与 `BinanceStrategyAccount`；未冻结退出前 live 拒绝启动 |
@@ -172,7 +173,8 @@ PnL `-15,771.98 USDT` 不作为绩效基线。剩余：完成 Campaign 状态机
 托管保护单、账户级风控和紧急停止。
 
 已完成订单 WAL、Binance REST 可靠提交适配、启动时逐订单单次 `SUBMIT_UNKNOWN` 查单状态解析、
-未知订单 symbol 风险阻塞与全部解析后解锁、显式参数的后台查单编排、订单/仓位启动快照一致性门禁，以及 User Stream
+未知订单 symbol 风险阻塞与全部解析后解锁、显式参数的后台查单编排、WAL 所属订单/成交与
+管理标的仓位的 REST 启动回补、订单/仓位启动快照一致性门禁，以及 User Stream
 订单/账户回报投递。运行时已组合启动对账、后台轮询、停止和重连；账户级订单回报会严格
 校验并同步 WAL/RiskGuard，随后与成交和仓位事实写入 PostgreSQL。后台查单已冻结为 5 秒
 一次、最多 12 次；具体 testnet 进程、交易规则量化和 one-way 模式门禁已完成。剩余：在
@@ -249,7 +251,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前 Compose 真实 Redis/PostgreSQL 全量测试基线为 `222 passed, 1 warning`。
+当前 Compose 真实 Redis/PostgreSQL 全量测试基线为 `247 passed, 1 warning`。
 
 ## 8. 风险与停止条件
 

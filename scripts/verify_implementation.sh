@@ -12,4 +12,5 @@ trap cleanup EXIT
 
 docker compose -f compose.test.yaml build test
 docker compose -f compose.test.yaml run --rm test uv run python scripts/verify_imports.py
-docker compose -f compose.test.yaml run --rm test uv run pytest tests/test_execution_layer.py -v
+docker compose -f compose.test.yaml run --rm test \
+  uv run pytest tests/shared/execution/test_execution_layer.py -v

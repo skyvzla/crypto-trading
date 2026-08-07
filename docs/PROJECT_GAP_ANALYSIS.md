@@ -12,8 +12,8 @@
 撤单、启动对账和周期安全扫描。正式退出仍未完成：testnet 仅允许 D-007 简化退出用于
 执行验证，最新动能/趋势退出参数冻结前，`live` 会拒绝启动。
 
-当前 Compose 真实 Redis/PostgreSQL 全量测试为 `222 passed, 1 warning`。测试已按
-`backtest/market/strategies/shared/ledger/integration/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
+当前 Compose 真实 Redis/PostgreSQL 全量测试为 `247 passed, 1 warning`。测试已按
+`backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
@@ -102,9 +102,8 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴�
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- 确认 `SUBMIT_UNKNOWN` 轮询周期/次数，按策略类型配置专用账户并建立实际运行进程
-- 交易所成交事实的启动对账（订单和仓位快照一致性门禁已接入）
-- 撤单与迟到回报竞态处理
+- 在专用 one-way testnet 账户验证真实部分成交、撤单与迟到回报竞态
+- 定义 `SUBMIT_UNKNOWN` 达到 12 次上限后的人工处置流程
 
 ### 3.6 数据质量检查已加强（2026-08-06）
 
@@ -155,7 +154,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`222 passed, 1 warning`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`247 passed, 1 warning`
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
 - Binance `demo-fapi` 真实只读鉴权成功，`canTrade=true`；真实写入因账户 Hedge Mode 被前置门禁拒绝，未产生订单
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过

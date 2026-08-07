@@ -329,6 +329,29 @@ class BinanceRestClient:
 
         return await self._request('GET', '/fapi/v2/positionRisk', params)
 
+    async def get_account_trades(
+        self,
+        symbol: str,
+        *,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """查询账户成交历史，供启动时恢复错过的 User Stream 成交。"""
+        if not symbol:
+            raise ValueError("symbol is required")
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        params: dict[str, Any] = {"symbol": symbol, "limit": limit}
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
+        result = await self._request('GET', '/fapi/v1/userTrades', params)
+        if not isinstance(result, list):
+            raise RuntimeError("invalid Binance account trades response")
+        return result
+
     async def get_klines(
         self,
         symbol: str,

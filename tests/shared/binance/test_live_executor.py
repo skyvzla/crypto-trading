@@ -142,6 +142,55 @@ async def test_reused_client_id_with_different_intent_fails_closed(tmp_path):
     assert "BTCUSDT" in guard.blocked_symbols
 
 
+def test_startup_query_response_advances_owned_wal_and_unblocks_symbol(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    unknown = _unknown(wal, "cid-recovered")
+    guard = RiskGuard("account-1", RiskConfig())
+    guard.block_symbol("BTCUSDT", "SUBMIT_UNKNOWN")
+    executor = _executor(wal, guard)
+
+    record = executor.reconcile_order_response(
+        {
+            "clientOrderId": unknown.client_order_id,
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "type": "LIMIT",
+            "origQty": "0.1",
+            "price": "100",
+            "status": "FILLED",
+            "orderId": 77,
+            "executedQty": "0.1",
+        }
+    )
+
+    assert record.status == "FILLED"
+    assert record.exchange_order_id == "77"
+    assert "BTCUSDT" not in guard.blocked_symbols
+
+
+def test_startup_query_identity_mismatch_stays_fail_closed(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    _unknown(wal, "cid-recovered")
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = _executor(wal, guard)
+
+    with pytest.raises(ValueError, match="quantity mismatch"):
+        executor.reconcile_order_response(
+            {
+                "clientOrderId": "cid-recovered",
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "type": "LIMIT",
+                "origQty": "0.2",
+                "status": "NEW",
+                "orderId": 77,
+            }
+        )
+
+    assert wal.recover_latest()["cid-recovered"].status == "SUBMIT_UNKNOWN"
+    assert "BTCUSDT" in guard.blocked_symbols
+
+
 @pytest.mark.parametrize(
     ("binance_status", "expected_status"),
     [

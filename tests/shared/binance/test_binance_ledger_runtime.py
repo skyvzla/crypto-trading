@@ -78,6 +78,7 @@ def test_factory_wires_callbacks_and_explicit_recovery_parameters():
         db=Mock(),
         account_id="account-1",
         strategy_id="spike_short",
+        managed_symbols=["AKEUSDT"],
         dedicated_strategy_account=True,
         ws_base_url="wss://testnet.example/ws",
         poll_interval_seconds=7,
@@ -89,6 +90,7 @@ def test_factory_wires_callbacks_and_explicit_recovery_parameters():
     assert runtime.user_stream.on_account_update is not None
     assert runtime.unknown_poller.poll_interval_seconds == 7
     assert runtime.unknown_poller.max_attempts == 9
+    assert runtime.startup_reconciler.synchronizer.symbols == ("AKEUSDT",)
 
 
 def test_factory_rejects_shared_account_without_routing_rules():
@@ -99,6 +101,7 @@ def test_factory_rejects_shared_account_without_routing_rules():
             db=Mock(),
             account_id="account-1",
             strategy_id="spike_short",
+            managed_symbols=["AKEUSDT"],
             dedicated_strategy_account=False,
             ws_base_url="wss://testnet.example/ws",
             poll_interval_seconds=7,

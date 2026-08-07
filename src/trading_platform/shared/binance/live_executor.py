@@ -204,6 +204,49 @@ class BinanceOrderExecutor:
         self._refresh_symbol_risk(record.symbol)
         return updated
 
+    def reconcile_order_response(
+        self,
+        response: dict[str, Any],
+    ) -> OrderWALRecord:
+        """将 REST 查单事实严格合并到 WAL，供启动恢复使用。"""
+        client_order_id = response.get("clientOrderId")
+        if not isinstance(client_order_id, str) or not client_order_id:
+            raise ValueError("missing query order clientOrderId")
+        record = self.wal.recover_latest().get(client_order_id)
+        if record is None or record.account_id != self.account_id:
+            raise ValueError(f"query order is not owned by WAL: {client_order_id}")
+        try:
+            if response.get("symbol") != record.symbol:
+                raise ValueError("query order symbol mismatch")
+            if response.get("side") != record.side:
+                raise ValueError("query order side mismatch")
+            if response.get("type") != record.order_type:
+                raise ValueError("query order type mismatch")
+            if Decimal(str(response.get("origQty"))) != Decimal(record.quantity):
+                raise ValueError("query order quantity mismatch")
+            exchange_order_id = response.get("orderId")
+            if exchange_order_id is None or exchange_order_id == "":
+                raise ValueError("missing query order orderId")
+            if (
+                record.exchange_order_id is not None
+                and str(exchange_order_id) != record.exchange_order_id
+            ):
+                raise ValueError("query order exchange id mismatch")
+            updated = self.wal.record_exchange_status(
+                record,
+                response,
+                recorded_at=self._now_ms(),
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            if self.risk_guard is not None:
+                self.risk_guard.block_symbol(
+                    record.symbol,
+                    f"invalid query order response:{record.client_order_id}",
+                )
+            raise
+        self._refresh_symbol_risk(record.symbol)
+        return updated
+
     def _record_unknown(
         self,
         record: OrderWALRecord,

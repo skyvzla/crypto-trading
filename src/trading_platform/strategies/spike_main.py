@@ -250,6 +250,7 @@ class SpikeLiveProcess:
             db=db,
             account_id=self.settings.account_id,
             strategy_id=STRATEGY_ID,
+            managed_symbols=self.settings.symbols,
             dedicated_strategy_account=self.settings.dedicated_strategy_account,
             ws_base_url=self.binance.ws_base_url,
             poll_interval_seconds=self.settings.poll_interval_seconds,
