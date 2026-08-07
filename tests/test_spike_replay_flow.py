@@ -196,3 +196,57 @@ def test_spike_replay_rejects_second_signal_during_cooldown():
         "entry_plan_created",
         "signal_invalidated",
     ]
+
+
+def test_spike_replay_rejects_second_campaign_while_same_symbol_position_is_open():
+    """同币种已有 OPEN 持仓时，冷却后的合格尖峰也不得开启新 Campaign。"""
+    minute_start = 16 * 60 * MINUTE
+    events = _warmup_klines(minute_start, extra_minutes=4)
+    events.extend(_signal_bars(minute_start - MINUTE))
+    # 第一轮挂单并穿透三档，形成 OPEN 空仓。
+    events.append(_bar(minute_start + 1_000, "110", "110"))
+    events.append(_bar(minute_start + 2_000, "110", "119"))
+
+    # 保持秒线连续，待首轮信号 TTL 结束且超过 180 秒冷却。
+    for offset in range(3, 236):
+        events.append(_bar(minute_start + offset * 1_000, "100", "100"))
+    events.extend(
+        _bar(
+            minute_start + offset * 1_000,
+            close,
+            "120" if offset == 240 else close,
+            "4",
+        )
+        for offset, close in enumerate(
+            ("100", "101", "102", "104", "106"), start=236
+        )
+    )
+    # 若第二个 Campaign 被错误创建，此 Bar 会提交第二组三档订单。
+    events.append(_bar(minute_start + 241_000, "110", "110"))
+    events.sort(
+        key=lambda event: (
+            event.available_time,
+            event.type_priority,
+            event.symbol,
+            event.sequence,
+        )
+    )
+
+    strategy = DynamicSpikeBacktestStrategy(["BTCUSDT"], Decimal("1000"))
+    result = BacktestEngine(
+        strategy,
+        events,
+        BacktestConfig(trading_start_ms=minute_start + 1_000),
+    ).run()
+
+    assert len(result.orders) == 3
+    assert len(result.fills) == 3
+    assert len(result.positions) == 1
+    assert result.positions[0].status == "OPEN"
+    campaign_events = [
+        event
+        for event in result.audit_events
+        if event.event_type in {"signal_triggered", "entry_plan_created"}
+    ]
+    assert len(campaign_events) == 2
+    assert len({event.campaign_id for event in campaign_events}) == 1

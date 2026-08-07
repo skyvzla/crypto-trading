@@ -644,9 +644,7 @@ class DynamicSpikeBacktestStrategy:
         if strategy is None:
             return []
 
-        strategy.set_entry_enabled(
-            self.active_symbol is None or self.active_symbol == bar.symbol
-        )
+        strategy.set_entry_enabled(self.active_symbol is None)
         intents = strategy.on_bar1s(bar)
 
         if self.active_symbol is None and self._has_live_campaign(bar.symbol):
