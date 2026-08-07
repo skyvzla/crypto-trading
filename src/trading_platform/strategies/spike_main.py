@@ -125,11 +125,19 @@ class SpikeLiveProcess:
             await self._warm_strategy_history()
             await self._refresh_market_gate(require_ready=True)
             await self.admission.on_universe_scan()
+            await self.coordinator._flush_cancellations()
 
             self._tasks.extend(
                 [
                 asyncio.create_task(self._kline_loop(), name="spike-kline-loop"),
+                asyncio.create_task(
+                    self._market_watchdog_loop(), name="spike-market-watchdog"
+                ),
                 asyncio.create_task(self._safety_scan_loop(), name="spike-safety-scan"),
+                asyncio.create_task(
+                    self._execution_stream_fatal_loop(),
+                    name="spike-execution-stream-fatal",
+                ),
                 ]
             )
         except BaseException:
@@ -255,6 +263,7 @@ class SpikeLiveProcess:
             account=account,
             exit_policy=self.settings.exit_policy,
         )
+        strategy.set_trading_enabled(False)
         self.gate = CompositeEntryGate(strategy)
         for condition in ("execution", "market", "subcategory", "campaign"):
             self.gate.set_condition(condition, False)
@@ -310,6 +319,17 @@ class SpikeLiveProcess:
     def _on_execution_stream_disconnected(self) -> None:
         if self.gate is not None:
             self.gate.set_condition("execution", False)
+
+    async def _execution_stream_fatal_loop(self) -> None:
+        assert self.runtime is not None
+        exc = await self.runtime.user_stream.wait_fatal()
+        if self.gate is not None:
+            self.gate.set_condition("execution", False)
+        if self.coordinator is not None:
+            self.coordinator.risk_guard.halt(
+                f"execution stream callback failed: {type(exc).__name__}"
+            )
+        raise RuntimeError("execution stream callback failed") from exc
 
     def _restore_execution_gate(self) -> bool:
         if self.gate is None or self.coordinator is None or self.runtime is None:
@@ -473,7 +493,9 @@ class SpikeLiveProcess:
             await self._register_market_subscriptions()
             await self._refresh_market_gate()
             await self.admission.on_universe_scan()
+            await self.coordinator._flush_cancellations()
             await self.coordinator.restore_campaign_gate()
+            self.coordinator.validate_recovered_campaign()
             await self.coordinator.reconcile_entry_expirations()
             if self.runtime is not None and self.runtime.is_running:
                 if self.coordinator.account.has_unresolved_orders():
@@ -487,6 +509,12 @@ class SpikeLiveProcess:
                         self.gate.set_condition("execution", False)
                     else:
                         self._restore_execution_gate()
+
+    async def _market_watchdog_loop(self) -> None:
+        """缩短市场质量失效到关闭准入之间的时间。"""
+        while True:
+            await asyncio.sleep(5)
+            await self._refresh_market_gate()
 
     @property
     def _consumer_id(self) -> str:

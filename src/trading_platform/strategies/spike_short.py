@@ -181,6 +181,7 @@ class DynamicSpikeShortStrategy:
         self.exit_policy = exit_policy
         self._account = account
         self._trading_enabled = True
+        self._execution_enabled = True
         self._entry_enabled = True
 
         # 数据缓存
@@ -216,6 +217,10 @@ class DynamicSpikeShortStrategy:
     def set_entry_enabled(self, enabled: bool) -> None:
         """控制新信号准入；已有信号仍继续失效、撤单和到期处理。"""
         self._entry_enabled = enabled
+
+    def set_execution_enabled(self, enabled: bool) -> None:
+        """执行事实不可信时只缓存行情，不推进订单状态机。"""
+        self._execution_enabled = enabled
 
     def refresh_candidate_features(self) -> None:
         """预热批量写入完成后只计算一次当前候选特征。"""
@@ -384,7 +389,7 @@ class DynamicSpikeShortStrategy:
         """处理 1 秒 Bar 事件"""
         self._update_cache(bar)
 
-        if not self._trading_enabled:
+        if not self._trading_enabled or not self._execution_enabled:
             return []
 
         timeout_intent = (
@@ -1093,6 +1098,10 @@ class DynamicSpikeBacktestStrategy:
         self._entry_enabled = enabled
         for strategy in self.strategies.values():
             strategy.set_entry_enabled(enabled)
+
+    def set_execution_enabled(self, enabled: bool) -> None:
+        for strategy in self.strategies.values():
+            strategy.set_execution_enabled(enabled)
 
     def refresh_candidate_features(self) -> None:
         for strategy in self.strategies.values():

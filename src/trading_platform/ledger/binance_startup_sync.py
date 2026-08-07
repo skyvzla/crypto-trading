@@ -21,6 +21,7 @@ _STATUS_MAP = {
     "EXPIRED": "EXPIRED",
 }
 _ACTIVE_WAL_STATUSES = {None, "NEW", "PARTIALLY_FILLED", "SUBMIT_UNKNOWN"}
+_TERMINAL_WAL_STATUSES = {"FILLED", "CANCELLED", "EXPIRED"}
 _MAX_TRADE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000 - 1
 
 
@@ -174,7 +175,7 @@ def parse_position_snapshot(
 
 
 class BinanceStartupSynchronizer:
-    """只回补 WAL 所有的活跃订单，再同步配置 symbol 的仓位快照。"""
+    """回补活跃订单和未确认的终态 WAL，再同步仓位快照。"""
 
     def __init__(
         self,
@@ -199,14 +200,29 @@ class BinanceStartupSynchronizer:
 
     async def sync_once(self) -> BinanceStartupSyncResult:
         latest = self.executor.wal.recover_latest()
+        ledger_acknowledgements = (
+            self.executor.wal.recover_ledger_acknowledgements()
+        )
         records = [
             record
             for record in latest.values()
             if record.account_id == self.account_id
             and record.symbol in self.symbols
-            and (record.record_type == "intent" or record.status in _ACTIVE_WAL_STATUSES)
+            and (
+                record.record_type == "intent"
+                or record.status in _ACTIVE_WAL_STATUSES
+                or (
+                    record.status in _TERMINAL_WAL_STATUSES
+                    and ledger_acknowledgements.get(record.client_order_id) != {
+                        "recorded_at": record.recorded_at,
+                        "status": record.status,
+                        "exchange_order_id": record.exchange_order_id,
+                    }
+                )
+            )
         ]
         recovered_orders: dict[tuple[str, str], Order] = {}
+        recovered_records = {}
         earliest_by_symbol: dict[str, int] = {}
         for record in records:
             response = await self.rest_client.query_order(
@@ -217,7 +233,7 @@ class BinanceStartupSynchronizer:
                     f"owned active order missing from exchange: {record.client_order_id}"
                 )
             try:
-                self.executor.reconcile_order_response(response)
+                recovered_record = self.executor.reconcile_order_response(response)
             except Exception as exc:
                 raise BinanceStartupSyncError(
                     f"owned order identity mismatch: {record.client_order_id}"
@@ -229,9 +245,13 @@ class BinanceStartupSynchronizer:
             )
             await self.db.insert_order(order)
             recovered_orders[(order.symbol, order.order_id)] = order
+            recovered_records[order.client_order_id] = recovered_record
             earliest_by_symbol[record.symbol] = min(
-                earliest_by_symbol.get(record.symbol, record.recorded_at),
-                record.recorded_at,
+                earliest_by_symbol.get(
+                    record.symbol,
+                    record.intent_created_at or record.recorded_at,
+                ),
+                record.intent_created_at or record.recorded_at,
             )
 
         trade_count = 0
@@ -301,6 +321,9 @@ class BinanceStartupSynchronizer:
                     strategy_id=self.strategy_id,
                 )
             )
+        for record in recovered_records.values():
+            if record.status in _TERMINAL_WAL_STATUSES:
+                self.executor.wal.acknowledge_ledger(record)
         return BinanceStartupSyncResult(
             order_count=len(recovered_orders),
             trade_count=trade_count,

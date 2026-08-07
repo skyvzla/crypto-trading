@@ -200,3 +200,114 @@ async def test_start_failure_cleans_listen_key_and_background_tasks():
     assert stream.listen_key is None
     assert stream._keepalive_task is None
     rest.close_listen_key.assert_awaited_once_with("listen-key")
+
+
+@pytest.mark.asyncio
+async def test_callback_failure_sets_fatal_signal(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(create_listen_key=AsyncMock(return_value="listen-key"))
+
+    async def fail_report(_order):
+        raise RuntimeError("ledger unavailable")
+
+    stream = UserDataStream(rest, on_execution_report=fail_report)
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock()
+    await stream._connect_ws()
+
+    FakeWebSocketApp.instance.callbacks["on_message"](
+        None, '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}'
+    )
+
+    failure = await asyncio.wait_for(stream.wait_fatal(), timeout=1)
+    assert isinstance(failure, RuntimeError)
+    assert str(failure) == "ledger unavailable"
+    await stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_in_flight_callback_within_drain_timeout(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    callback_started = asyncio.Event()
+    release_callback = asyncio.Event()
+
+    async def delayed_report(_order):
+        callback_started.set()
+        await release_callback.wait()
+
+    stream = UserDataStream(
+        rest,
+        on_execution_report=delayed_report,
+        callback_drain_timeout_seconds=1,
+    )
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock()
+    await stream._connect_ws()
+    FakeWebSocketApp.instance.callbacks["on_message"](
+        None, '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}'
+    )
+    await asyncio.wait_for(callback_started.wait(), timeout=1)
+
+    stopping = asyncio.create_task(stream.stop())
+    await asyncio.sleep(0)
+    assert stopping.done() is False
+    release_callback.set()
+    await asyncio.wait_for(stopping, timeout=1)
+    assert stream._scheduled_futures == set()
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_callback_after_bounded_drain_timeout(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    callback_started = asyncio.Event()
+    callback_cancelled = asyncio.Event()
+
+    async def blocked_report(_order):
+        callback_started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            callback_cancelled.set()
+
+    stream = UserDataStream(
+        rest,
+        on_execution_report=blocked_report,
+        callback_drain_timeout_seconds=0.01,
+    )
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock()
+    await stream._connect_ws()
+    FakeWebSocketApp.instance.callbacks["on_message"](
+        None, '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}'
+    )
+    await asyncio.wait_for(callback_started.wait(), timeout=1)
+
+    with pytest.raises(TimeoutError, match="timed out draining 1"):
+        await asyncio.wait_for(stream.stop(), timeout=1)
+    await asyncio.wait_for(callback_cancelled.wait(), timeout=1)
+    assert stream._scheduled_futures == set()
+    assert stream.listen_key is None
+    rest.close_listen_key.assert_awaited_once_with("listen-key")

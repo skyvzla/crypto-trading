@@ -58,6 +58,56 @@ def test_order_projection_restores_explicit_reduce_only_contract(tmp_path):
     assert order.trigger_reason == "spike_tier1"
 
 
+def test_order_projection_keeps_original_ttl_after_partial_fill_and_restart_query(
+    tmp_path,
+):
+    _, rest, wal, risk = _account(tmp_path)
+    intent_record = wal.record_intent(
+        _intent(), account_id="spike-test", recorded_at=1_000
+    )
+    new_record = wal.record_exchange_status(
+        intent_record, {"status": "NEW", "orderId": 42}, recorded_at=5_000
+    )
+    wal.record_exchange_status(
+        new_record,
+        {"status": "PARTIALLY_FILLED", "orderId": 42, "executedQty": "0.25"},
+        recorded_at=9_000,
+    )
+    restarted_wal = OrderWAL(wal.path)
+    restarted_account = BinanceStrategyAccount(
+        rest,
+        restarted_wal,
+        account_id="spike-test",
+        strategy_id="spike_short",
+        risk_guard=risk,
+    )
+    restarted_executor = BinanceOrderExecutor(
+        rest,
+        restarted_wal,
+        account_id="spike-test",
+        now_ms=lambda: 12_000,
+        risk_guard=risk,
+    )
+
+    restarted_executor.reconcile_order_response(
+        {
+            "clientOrderId": "cid-1",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "type": "LIMIT",
+            "origQty": "1",
+            "status": "PARTIALLY_FILLED",
+            "orderId": 42,
+            "executedQty": "0.25",
+        }
+    )
+    order = restarted_account.iter_orders()[0]
+
+    assert order.created_at == 1_000
+    assert order.ttl_ms == 10_000
+    assert order.created_at + order.ttl_ms == 11_000
+
+
 @pytest.mark.asyncio
 async def test_sync_cancel_is_flushed_to_exchange_and_wal(tmp_path):
     account, rest, wal, _ = _account(tmp_path)

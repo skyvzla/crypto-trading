@@ -55,6 +55,7 @@ def test_settings_default_to_testnet_and_live_requires_exact_confirmation():
         account_id="spike-test", symbols="btcusdt", total_notional="100"
     )
     assert settings.mode == "testnet"
+    assert settings.exit_policy == "candidate-v1"
     assert settings.symbols == ["BTCUSDT"]
 
     with pytest.raises(ValidationError, match="confirmation"):
@@ -129,6 +130,7 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
         validate_recovered_campaign=Mock(),
         restore_campaign_timing=AsyncMock(),
         maybe_release_campaign=AsyncMock(),
+        _flush_cancellations=AsyncMock(),
         stop=AsyncMock(),
     )
     runtime = Mock(start=AsyncMock(), stop=AsyncMock())
@@ -243,6 +245,64 @@ def test_composite_gate_requires_every_condition():
     gate.set_condition("market", True)
     assert gate.enabled is True
     assert strategy.enabled is True
+    assert gate.condition("market") is True
+    assert gate.condition("missing") is False
+
+
+@pytest.mark.asyncio
+async def test_missing_redis_campaign_with_live_risk_halts_instead_of_opening_gate():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    risk = RiskGuard("spike-test", RiskConfig())
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(symbols_with_live_risk=Mock(return_value={"BTCUSDT"})),
+        executor=Mock(),
+        campaign_store=Mock(get_active=AsyncMock(return_value=None)),
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+    )
+
+    with pytest.raises(RuntimeError, match="disappeared"):
+        await coordinator.restore_campaign_gate()
+
+    assert risk.halted is True
+    assert gate.condition("campaign") is False
+
+
+@pytest.mark.asyncio
+async def test_reduce_only_exit_waits_while_execution_stream_is_unavailable():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", False)
+    risk = RiskGuard("spike-test", RiskConfig())
+    executor = Mock(submit=AsyncMock())
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=executor,
+        campaign_store=Mock(),
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+    )
+    exit_intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="BUY",
+        price=Decimal("99"),
+        quantity=Decimal("1"),
+        client_order_id="blocked-exit",
+        order_type="MARKET",
+        reduce_only=True,
+        strategy_id="spike_short",
+        trigger_reason="candidate_momentum_exit",
+    )
+
+    await coordinator._execute([exit_intent], event_time=1_001)
+
+    executor.submit.assert_not_awaited()
+    assert risk.halted is True
 
 
 def test_stream_disconnect_closes_execution_gate_immediately():
@@ -261,6 +321,35 @@ def test_stream_disconnect_closes_execution_gate_immediately():
     process._on_execution_stream_disconnected()
 
     process.gate.set_condition.assert_called_once_with("execution", False)
+
+
+@pytest.mark.asyncio
+async def test_stream_callback_failure_halts_process_fail_closed():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    failure = RuntimeError("postgres unavailable")
+    process.runtime = Mock(
+        user_stream=Mock(wait_fatal=AsyncMock(return_value=failure))
+    )
+    process.gate = Mock(set_condition=Mock())
+    risk = Mock(halt=Mock())
+    process.coordinator = Mock(risk_guard=risk)
+
+    with pytest.raises(RuntimeError, match="execution stream callback failed"):
+        await process._execution_stream_fatal_loop()
+
+    process.gate.set_condition.assert_called_once_with("execution", False)
+    risk.halt.assert_called_once_with(
+        "execution stream callback failed: RuntimeError"
+    )
 
 
 def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():
@@ -364,6 +453,7 @@ async def test_candidate_exit_is_submitted_before_redis_state_is_persisted():
     strategy.on_bar1s = Mock(return_value=[exit_intent])
     strategy.campaign_exit_state = Mock(return_value=(False, False, True))
     gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
     account = Mock(
         flush_cancellations=AsyncMock(return_value=()),
         has_pending_cancellations=False,

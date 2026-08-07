@@ -42,7 +42,7 @@ class SpikeLiveSettings(BaseSettings):
     )
 
     mode: Literal["testnet", "live"] = "testnet"
-    exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007"
+    exit_policy: Literal["execution-test-d007", "candidate-v1"] = "candidate-v1"
     live_confirmation: str = ""
     account_id: str
     dedicated_strategy_account: bool = True
@@ -96,7 +96,14 @@ class CompositeEntryGate:
         if not name:
             raise ValueError("gate condition name is required")
         self._conditions[name] = bool(enabled)
+        if name == "execution":
+            setter = getattr(self.strategy, "set_execution_enabled", None)
+            if callable(setter):
+                setter(bool(enabled))
         self.strategy.set_entry_enabled(self.enabled)
+
+    def condition(self, name: str) -> bool:
+        return self._conditions.get(name, False)
 
     def admission_view(self) -> "NamedEntryGate":
         return NamedEntryGate(self, "subcategory")
@@ -162,12 +169,20 @@ class SpikeExecutionCoordinator:
 
     async def restore_campaign_gate(self) -> None:
         """恢复 Redis 互斥事实；不依据本地状态猜测或删除已有 lease。"""
+        previous_campaign_id = self._owned_campaign_id
         lease = await self.campaign_store.get_active()
-        self._owned_campaign_id = None
-        self._owned_campaign_lease = None
         if lease is None:
+            live_risk = self.account.symbols_with_live_risk()
+            if previous_campaign_id is not None or live_risk:
+                self.gate.set_condition("campaign", False)
+                self.risk_guard.halt("Redis Campaign disappeared while risk remains")
+                raise RuntimeError("Redis Campaign disappeared while risk remains")
+            self._owned_campaign_id = None
+            self._owned_campaign_lease = None
             self.gate.set_condition("campaign", True)
             return
+        self._owned_campaign_id = None
+        self._owned_campaign_lease = None
         if lease.strategy_id == STRATEGY_ID and lease.symbol in self.strategy.strategies:
             self._owned_campaign_id = lease.campaign_id
             self._owned_campaign_lease = lease
@@ -349,8 +364,11 @@ class SpikeExecutionCoordinator:
     async def on_bar1s(self, bar: Bar1s) -> None:
         async with self._lock:
             intents = self.strategy.on_bar1s(bar)
-            await self._execute(intents, event_time=bar.available_time)
-            await self._persist_exit_state(bar.symbol)
+            execution_complete = await self._execute(
+                intents, event_time=bar.available_time
+            )
+            if execution_complete:
+                await self._persist_exit_state(bar.symbol)
             await self._flush_cancellations()
             await self._publish_audit()
             await self.maybe_release_campaign(bar.symbol)
@@ -358,8 +376,11 @@ class SpikeExecutionCoordinator:
     async def on_kline(self, kline: Kline) -> None:
         async with self._lock:
             intents = self.strategy.on_kline(kline)
-            await self._execute(intents, event_time=kline.available_time)
-            await self._persist_exit_state(kline.symbol)
+            execution_complete = await self._execute(
+                intents, event_time=kline.available_time
+            )
+            if execution_complete:
+                await self._persist_exit_state(kline.symbol)
             await self._flush_cancellations()
             await self._publish_audit()
 
@@ -393,7 +414,7 @@ class SpikeExecutionCoordinator:
         if cancel_due:
             await self._flush_cancellations()
 
-    async def _execute(self, intents: list[OrderIntent], *, event_time: int) -> None:
+    async def _execute(self, intents: list[OrderIntent], *, event_time: int) -> bool:
         entries = [intent for intent in intents if not intent.reduce_only]
         exits = [intent for intent in intents if intent.reduce_only]
         if entries and self.gate.enabled:
@@ -413,7 +434,11 @@ class SpikeExecutionCoordinator:
                     for intent in entries:
                         await self._submit(intent)
         for intent in exits:
+            if not self.gate.condition("execution"):
+                self.risk_guard.halt("exit blocked while execution facts are unavailable")
+                return False
             await self._submit(intent)
+        return True
 
     async def _submit(self, intent: OrderIntent) -> None:
         record = await self.executor.submit(

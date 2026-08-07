@@ -342,7 +342,11 @@ class BinanceStrategyAccount:
             price=Decimal(record.price),
             quantity=Decimal(record.quantity),
             status=record.status or "SUBMIT_UNKNOWN",
-            created_at=record.recorded_at,
+            created_at=(
+                record.intent_created_at
+                if record.intent_created_at is not None
+                else record.recorded_at
+            ),
             ttl_ms=payload.get("ttl_ms"),
             reduce_only=bool(payload.get("reduce_only", False)),
             filled_quantity=self._filled_quantity(payload),

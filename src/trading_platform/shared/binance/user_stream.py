@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import threading
 from concurrent.futures import Future
 from typing import Callable, Any
 
@@ -35,6 +36,7 @@ class UserDataStream:
         on_reconnect: Callable[[], None] | None = None,
         on_disconnect: Callable[[], None] | None = None,
         connect_timeout_seconds: float = 10.0,
+        callback_drain_timeout_seconds: float = 10.0,
     ):
         """
         Args:
@@ -47,6 +49,8 @@ class UserDataStream:
         """
         if connect_timeout_seconds <= 0:
             raise ValueError("connect_timeout_seconds must be positive")
+        if callback_drain_timeout_seconds <= 0:
+            raise ValueError("callback_drain_timeout_seconds must be positive")
         self.rest_client = rest_client
         self.ws_base_url = ws_base_url.rstrip('/')
         self.on_execution_report = on_execution_report
@@ -54,14 +58,19 @@ class UserDataStream:
         self.on_reconnect = on_reconnect
         self.on_disconnect = on_disconnect
         self.connect_timeout_seconds = connect_timeout_seconds
+        self.callback_drain_timeout_seconds = callback_drain_timeout_seconds
 
         self.listen_key: str | None = None
         self.ws: websocket.WebSocketApp | None = None
         self._keepalive_task: asyncio.Task | None = None
         self._ws_thread: asyncio.Task | None = None
         self._reconnect_task: Future | None = None
+        self._scheduled_futures: set[Future] = set()
+        self._scheduled_futures_lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._connected_event: asyncio.Event | None = None
+        self._fatal_event = asyncio.Event()
+        self._fatal_exception: BaseException | None = None
         self._running = False
         self._reconnect_delay = 1.0  # 初始重连延迟（秒）
         self._max_reconnect_delay = 60.0  # 最大重连延迟
@@ -75,6 +84,8 @@ class UserDataStream:
         self._running = True
         self._loop = asyncio.get_running_loop()
         self._connected_event = asyncio.Event()
+        self._fatal_event = asyncio.Event()
+        self._fatal_exception = None
 
         try:
             # 创建 listenKey
@@ -131,6 +142,12 @@ class UserDataStream:
                 pass
             self._keepalive_task = None
 
+        drain_error: BaseException | None = None
+        try:
+            await self._drain_scheduled_callbacks()
+        except BaseException as exc:
+            drain_error = exc
+
         # 关闭 listenKey
         if self.listen_key:
             try:
@@ -141,11 +158,23 @@ class UserDataStream:
 
         self.listen_key = None
         self._loop = None
+        if drain_error is not None:
+            raise drain_error
 
     @property
     def connected(self) -> bool:
         event = self._connected_event
         return event is not None and event.is_set()
+
+    @property
+    def fatal_exception(self) -> BaseException | None:
+        return self._fatal_exception
+
+    async def wait_fatal(self) -> BaseException:
+        """等待首个业务回调失败；调用方必须据此停止交易进程。"""
+        await self._fatal_event.wait()
+        assert self._fatal_exception is not None
+        return self._fatal_exception
 
     async def _keepalive_loop(self) -> None:
         """
@@ -306,14 +335,56 @@ class UserDataStream:
     def _schedule(self, coro) -> None:
         """将 websocket-client 线程中的协程安全投递到主事件循环。"""
         loop = self._loop
-        if not loop or loop.is_closed():
+        if not self._running or not loop or loop.is_closed():
             coro.close()
             return
         try:
             future = asyncio.run_coroutine_threadsafe(coro, loop)
-            future.add_done_callback(self._log_scheduled_error)
+            with self._scheduled_futures_lock:
+                self._scheduled_futures.add(future)
+            future.add_done_callback(self._scheduled_callback_done)
         except RuntimeError:
             coro.close()
+
+    def _scheduled_callback_done(self, future: Future) -> None:
+        with self._scheduled_futures_lock:
+            self._scheduled_futures.discard(future)
+        if future.cancelled():
+            return
+        try:
+            future.result()
+        except BaseException as exc:
+            logger.error("Scheduled User Data Stream callback failed", exc_info=True)
+            self._record_fatal(exc)
+
+    def _record_fatal(self, exc: BaseException) -> None:
+        loop = self._loop
+        if self._fatal_exception is not None:
+            return
+        self._fatal_exception = exc
+        if loop and not loop.is_closed():
+            loop.call_soon_threadsafe(self._fatal_event.set)
+
+    async def _drain_scheduled_callbacks(self) -> None:
+        with self._scheduled_futures_lock:
+            futures = tuple(self._scheduled_futures)
+        if not futures:
+            return
+        wrapped = [asyncio.wrap_future(future) for future in futures]
+        _, pending = await asyncio.wait(
+            wrapped, timeout=self.callback_drain_timeout_seconds
+        )
+        if not pending:
+            return
+        logger.error(
+            "Timed out draining %d User Data Stream callbacks", len(pending)
+        )
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        raise TimeoutError(
+            f"timed out draining {len(pending)} User Data Stream callbacks"
+        )
 
     @staticmethod
     def _log_scheduled_error(future: Future) -> None:
@@ -348,24 +419,17 @@ class UserDataStream:
         if not self.on_execution_report:
             return
 
-        try:
-            # 异步调用回调
-            result = self.on_execution_report(order_data)
-            if inspect.isawaitable(result):
-                await result
-        except Exception as e:
-            logger.error(f"Error in execution report callback: {e}", exc_info=True)
+        result = self.on_execution_report(order_data)
+        if inspect.isawaitable(result):
+            await result
 
     async def _handle_account_update(self, event: dict[str, Any]) -> None:
         """处理完整 ACCOUNT_UPDATE 事件。"""
         if not self.on_account_update:
             return
-        try:
-            result = self.on_account_update(event)
-            if inspect.isawaitable(result):
-                await result
-        except Exception:
-            logger.error("Error in account update callback", exc_info=True)
+        result = self.on_account_update(event)
+        if inspect.isawaitable(result):
+            await result
 
 
 async def main_example():

@@ -40,6 +40,64 @@ def test_wal_fsync_and_recover_latest(tmp_path):
     assert unknown.client_order_id == "cid-1"
 
 
+def test_wal_preserves_intent_created_at_across_order_statuses_and_restart(tmp_path):
+    path = tmp_path / "orders.jsonl"
+    wal = OrderWAL(path)
+    intent = wal.record_intent(make_intent(), account_id="a-1", recorded_at=1000)
+    new = wal.record_exchange_status(
+        intent, {"orderId": 42, "status": "NEW"}, recorded_at=2000
+    )
+    wal.record_exchange_status(
+        new,
+        {"orderId": 42, "status": "PARTIALLY_FILLED", "executedQty": "0.05"},
+        recorded_at=3000,
+    )
+
+    latest = OrderWAL(path).recover_latest()["cid-1"]
+
+    assert latest.recorded_at == 3000
+    assert latest.intent_created_at == 1000
+
+
+def test_old_wal_derives_intent_created_at_from_first_intent_row(tmp_path):
+    path = tmp_path / "orders.jsonl"
+    rows = [
+        {
+            "record_type": "intent",
+            "recorded_at": 1000,
+            "account_id": "a-1",
+            "client_order_id": "cid-1",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "order_type": "LIMIT",
+            "quantity": "0.1",
+            "price": "100",
+            "status": None,
+            "exchange_order_id": None,
+            "payload": {"ttl_ms": 10_000},
+        },
+        {
+            "record_type": "exchange_status",
+            "recorded_at": 3000,
+            "account_id": "a-1",
+            "client_order_id": "cid-1",
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "order_type": "LIMIT",
+            "quantity": "0.1",
+            "price": "100",
+            "status": "PARTIALLY_FILLED",
+            "exchange_order_id": "42",
+            "payload": {"ttl_ms": 10_000},
+        },
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    latest = OrderWAL(path).recover_latest()["cid-1"]
+
+    assert latest.intent_created_at == 1000
+
+
 def test_wal_rejects_corrupt_record(tmp_path):
     path = tmp_path / "orders.jsonl"
     wal = OrderWAL(path)

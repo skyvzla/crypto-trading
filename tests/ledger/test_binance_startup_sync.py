@@ -159,6 +159,96 @@ async def test_wal_new_to_filled_backfills_order_trade_position_before_strict(tm
 
 
 @pytest.mark.asyncio
+async def test_unacknowledged_filled_wal_backfills_missing_order_and_trade_once(tmp_path):
+    synchronizer, rest, db, wal = make_sync(tmp_path)
+    wal.record_exchange_status(
+        wal.recover_latest()[CLIENT_ORDER_ID],
+        query_order(),
+        recorded_at=RECORDED_AT + 2,
+    )
+
+    first = await synchronizer.sync_once()
+
+    assert first.order_count == 1
+    assert first.trade_count == 1
+    assert db.insert_order.await_args.args[0].status == "FILLED"
+    assert db.insert_trade.await_args.args[0].client_order_id == CLIENT_ORDER_ID
+    acknowledged = wal.recover_latest()[CLIENT_ORDER_ID]
+    assert wal.ledger_acknowledged(acknowledged)
+
+    rest.query_order.reset_mock()
+    rest.get_account_trades.reset_mock()
+    db.insert_order.reset_mock()
+    db.insert_trade.reset_mock()
+
+    second = await synchronizer.sync_once()
+
+    assert second.order_count == 0
+    assert second.trade_count == 0
+    rest.query_order.assert_not_awaited()
+    rest.get_account_trades.assert_not_awaited()
+    db.insert_order.assert_not_awaited()
+    db.insert_trade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unacknowledged_cancelled_wal_repairs_stale_new_ledger_order(tmp_path):
+    cancelled = query_order(
+        status="CANCELED",
+        executedQty="0",
+        avgPrice="0",
+    )
+    synchronizer, _, db, wal = make_sync(
+        tmp_path,
+        order_response=cancelled,
+        trades=[],
+    )
+    wal.record_exchange_status(
+        wal.recover_latest()[CLIENT_ORDER_ID],
+        cancelled,
+        recorded_at=RECORDED_AT + 2,
+    )
+
+    result = await synchronizer.sync_once()
+
+    assert result.order_count == 1
+    assert result.trade_count == 0
+    repaired = db.insert_order.await_args.args[0]
+    assert repaired.status == "CANCELLED"
+    assert repaired.filled_quantity == Decimal("0")
+    assert wal.ledger_acknowledged(wal.recover_latest()[CLIENT_ORDER_ID])
+
+
+@pytest.mark.asyncio
+async def test_terminal_wal_is_not_acknowledged_when_position_sync_fails(tmp_path):
+    synchronizer, _, _, wal = make_sync(tmp_path, positions=[])
+    wal.record_exchange_status(
+        wal.recover_latest()[CLIENT_ORDER_ID],
+        query_order(),
+        recorded_at=RECORDED_AT + 5_000,
+    )
+
+    with pytest.raises(BinanceStartupSyncError, match="position snapshot missing"):
+        await synchronizer.sync_once()
+
+    assert not wal.ledger_acknowledged(wal.recover_latest()[CLIENT_ORDER_ID])
+
+
+@pytest.mark.asyncio
+async def test_terminal_trade_recovery_starts_from_immutable_intent_time(tmp_path):
+    synchronizer, rest, _, wal = make_sync(tmp_path)
+    wal.record_exchange_status(
+        wal.recover_latest()[CLIENT_ORDER_ID],
+        query_order(),
+        recorded_at=RECORDED_AT + 60_000,
+    )
+
+    await synchronizer.sync_once()
+
+    assert rest.get_account_trades.await_args.kwargs["start_time"] == RECORDED_AT - 1_000
+
+
+@pytest.mark.asyncio
 async def test_query_order_none_fails_before_trade_position_or_strict(tmp_path):
     synchronizer, rest, db, _ = make_sync(tmp_path, order_response=None)
     rest.query_order.return_value = None

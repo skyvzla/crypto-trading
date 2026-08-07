@@ -47,6 +47,7 @@ class OrderWALRecord:
     order_type: Literal["LIMIT", "MARKET"]
     quantity: str
     price: str
+    intent_created_at: int | None = None
     status: OrderStatus | None = None
     exchange_order_id: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
@@ -74,6 +75,11 @@ class OrderWALRecord:
             order_type=data["order_type"],
             quantity=str(data["quantity"]),
             price=str(data["price"]),
+            intent_created_at=(
+                int(data["intent_created_at"])
+                if data.get("intent_created_at") is not None
+                else None
+            ),
             status=status,
             exchange_order_id=(
                 str(data["exchange_order_id"])
@@ -93,6 +99,7 @@ class OrderWAL:
 
     def __init__(self, path: str | os.PathLike[str]):
         self.path = Path(path)
+        self.ledger_ack_path = self.path.with_name(f"{self.path.name}.ledger-acks")
         self._lock = threading.Lock()
 
     def append(self, record: OrderWALRecord) -> None:
@@ -114,6 +121,7 @@ class OrderWAL:
             order_type=intent.order_type,
             quantity=str(intent.quantity),
             price=str(intent.price),
+            intent_created_at=recorded_at,
             payload={
                 "ttl_ms": intent.ttl_ms,
                 "strategy_id": intent.strategy_id,
@@ -173,6 +181,7 @@ class OrderWAL:
         if not self.path.exists():
             return {}
         latest: dict[str, OrderWALRecord] = {}
+        intent_created_at: dict[str, int] = {}
         with self.path.open("r", encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, 1):
                 if not line.strip():
@@ -181,7 +190,90 @@ class OrderWAL:
                     record = OrderWALRecord.from_dict(json.loads(line))
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                     raise ValueError(f"Invalid order WAL record at line {line_number}") from exc
+                if record.record_type == "intent":
+                    intent_created_at.setdefault(
+                        record.client_order_id,
+                        (
+                            record.intent_created_at
+                            if record.intent_created_at is not None
+                            else record.recorded_at
+                        ),
+                    )
                 latest[record.client_order_id] = record
+        # Older WAL rows predate ``intent_created_at``. Their original intent row is
+        # still present because the WAL is append-only, so derive the immutable time
+        # without requiring an on-disk migration.
+        for client_order_id, record in tuple(latest.items()):
+            created_at = (
+                record.intent_created_at
+                if record.intent_created_at is not None
+                else intent_created_at.get(client_order_id)
+            )
+            if created_at is not None and record.intent_created_at is None:
+                latest[client_order_id] = OrderWALRecord(
+                    **{**record.to_dict(), "intent_created_at": created_at}
+                )
+        return latest
+
+    def acknowledge_ledger(self, record: OrderWALRecord) -> None:
+        """持久化终态订单已经完整写入账本的确认点。"""
+        if record.status not in {"FILLED", "CANCELLED", "EXPIRED"}:
+            raise ValueError("only terminal WAL records can be acknowledged")
+        acknowledgement = {
+            "client_order_id": record.client_order_id,
+            "recorded_at": record.recorded_at,
+            "status": record.status,
+            "exchange_order_id": record.exchange_order_id,
+        }
+        line = json.dumps(
+            acknowledgement, sort_keys=True, separators=(",", ":")
+        ) + "\n"
+        self.ledger_ack_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock, self.ledger_ack_path.open("a", encoding="utf-8") as stream:
+            stream.write(line)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def ledger_acknowledged(self, record: OrderWALRecord) -> bool:
+        """判断当前终态 WAL 事实是否已有完全匹配的账本确认点。"""
+        return self.recover_ledger_acknowledgements().get(record.client_order_id) == {
+            "recorded_at": record.recorded_at,
+            "status": record.status,
+            "exchange_order_id": record.exchange_order_id,
+        }
+
+    def recover_ledger_acknowledgements(self) -> dict[str, dict[str, Any]]:
+        """读取每个订单最新的账本确认点；损坏时拒绝静默跳过补账。"""
+        if not self.ledger_ack_path.exists():
+            return {}
+        latest: dict[str, dict[str, Any]] = {}
+        with self.ledger_ack_path.open("r", encoding="utf-8") as stream:
+            for line_number, line in enumerate(stream, 1):
+                if not line.strip():
+                    continue
+                try:
+                    acknowledgement = json.loads(line)
+                    client_order_id = acknowledgement["client_order_id"]
+                    recorded_at = int(acknowledgement["recorded_at"])
+                    status = acknowledgement["status"]
+                    exchange_order_id = acknowledgement.get("exchange_order_id")
+                    if not isinstance(client_order_id, str) or status not in {
+                        "FILLED", "CANCELLED", "EXPIRED"
+                    }:
+                        raise ValueError("invalid ledger acknowledgement")
+                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid order WAL ledger acknowledgement at line {line_number}"
+                    ) from exc
+                latest[client_order_id] = {
+                    "recorded_at": recorded_at,
+                    "status": status,
+                    "exchange_order_id": (
+                        str(exchange_order_id)
+                        if exchange_order_id is not None
+                        else None
+                    ),
+                }
         return latest
 
 
