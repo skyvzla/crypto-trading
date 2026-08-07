@@ -1,0 +1,16 @@
+{
+  "account_id": "spike_testnet",
+  "duration_seconds": 1900.0,
+  "endpoint": "https://demo-fapi.binance.com",
+  "error": {
+    "code": "DEPENDENCY_UNREACHABLE",
+    "message": "consecutive observer dependency failures exceeded limit"
+  },
+  "expect_entry_enabled": "false",
+  "finished_at": "2026-08-07T14:29:50.717775+00:00",
+  "require_flat": true,
+  "result": "FAIL_CLOSED",
+  "sample_seconds": 5.0,
+  "started_at": "2026-08-07T14:29:40.651615+00:00",
+  "strategy_id": "spike_short"
+}

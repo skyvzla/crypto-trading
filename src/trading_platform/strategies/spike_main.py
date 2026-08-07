@@ -186,9 +186,25 @@ class SpikeLiveProcess:
             done, _ = await asyncio.wait(
                 [task, *self._tasks], return_when=asyncio.FIRST_COMPLETED
             )
-            for completed in done:
-                if completed is not task:
+            background_done = done - {task}
+            for completed in background_done:
+                task_name = completed.get_name()
+                try:
                     completed.result()
+                except BaseException as exc:
+                    if self._runtime_fatal_reason is None:
+                        self._mark_runtime_fatal(
+                            f"background task failed: {task_name}: "
+                            f"{type(exc).__name__}"
+                        )
+                        await self._try_publish_fatal_status()
+                    raise
+                reason = f"background task exited unexpectedly: {task_name}"
+                self._mark_runtime_fatal(reason)
+                await self._try_publish_fatal_status()
+                raise RuntimeError(reason)
+            if task in done:
+                return
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

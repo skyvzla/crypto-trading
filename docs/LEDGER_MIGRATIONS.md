@@ -43,3 +43,17 @@ runner 使用事务级 PostgreSQL advisory lock 串行化并发实例；全部�
 当前版本为 `0003_strategy_runtime_status.sql`，保存每个账户和策略的最新实例状态及心跳。
 不同实例只有更晚的 `started_at` 才能接管，同一实例只接受不早于当前记录的心跳，防止旧进程
 或乱序更新覆盖新状态。
+
+## 备份恢复演练
+
+以下命令对当前 Compose PostgreSQL 创建权限为 `0600` 的 custom-format 归档，恢复到随机命名
+的临时数据库，逐项核对 8 张业务/迁移表的行数和全部迁移文件校验和，随后删除且只删除该
+临时验证库。目标文件已存在时命令拒绝覆盖：
+
+```bash
+bash scripts/verify_ledger_backup_restore.sh \
+  backups/ledger_$(date -u +%Y%m%dT%H%M%SZ).dump
+```
+
+成功输出必须包含 `BACKUP_RESTORE_OK`。归档位于 Git 忽略的 `backups/`，包含真实账本数据，
+不得提交或发送到未授权位置。恢复演练不会替代生产备份保留、加密和异地存储策略。

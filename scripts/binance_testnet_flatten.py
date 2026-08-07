@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -20,7 +21,10 @@ from uuid import uuid4
 
 from trading_platform.shared.binance.rest_client import BinanceRestClient
 from trading_platform.shared.binance.symbol_rules import BinanceSymbolRuleBook
+from trading_platform.shared.config import BinanceConfig
 from trading_platform.shared.events import OrderIntent
+from trading_platform.shared.postgres_lease import ExecutionLeaseUnavailableError
+from trading_platform.shared.testnet_harness import exclusive_testnet_account
 
 
 TESTNET_HOST = "demo-fapi.binance.com"
@@ -44,7 +48,12 @@ class FlattenFailure(RuntimeError):
 def validate_environment(*, execute: bool, confirmation: str | None) -> tuple[str, str, str]:
     if os.getenv("BINANCE_TESTNET", "").strip().lower() != "true":
         raise FlattenFailure("TESTNET_FLAG_REQUIRED", "BINANCE_TESTNET must be exactly true")
-    base_url = os.getenv("BINANCE_BASE_URL", "").strip().rstrip("/")
+    explicit_base_url = os.getenv("BINANCE_BASE_URL")
+    base_url = (
+        explicit_base_url.strip().rstrip("/")
+        if explicit_base_url is not None
+        else BinanceConfig().base_url
+    )
     parsed = urlsplit(base_url)
     if (
         parsed.scheme != "https"
@@ -145,64 +154,139 @@ async def flatten(args: argparse.Namespace) -> dict:
     base_url, key, secret = validate_environment(execute=args.execute, confirmation=args.confirm)
     client = BinanceRestClient(api_key=key, api_secret=secret, base_url=base_url)
     report: dict = {"mode": "execute" if args.execute else "dry-run", "symbols": list(args.symbols), "orders": [], "positions": []}
+    @asynccontextmanager
+    async def execution_scope():
+        if not args.execute:
+            yield
+            return
+        try:
+            async with exclusive_testnet_account(args.account_id):
+                yield
+        except ExecutionLeaseUnavailableError as exc:
+            raise FlattenFailure(
+                "EXECUTION_LEASE_UNAVAILABLE",
+                "Spike or another harness already owns the testnet account",
+            ) from exc
+
     try:
-        mode = await client.get_position_mode()
-        if mode.get("dualSidePosition") is not False:
-            raise FlattenFailure("HEDGE_MODE_UNSUPPORTED", "account is not in one-way mode")
-        exchange_info = await client.get_exchange_info()
-        rules = BinanceSymbolRuleBook.from_exchange_info(
-            exchange_info, symbols=args.symbols
-        )
-        for symbol in args.symbols:
-            rule = rules.get(symbol)
-            position = position_for_symbol(await client.get_position_risk(symbol), symbol)
-            open_orders = await client.get_open_orders(symbol)
-            symbol_report = {"symbol": symbol, "position_before": safe_position(position), "open_orders_before": [safe_order(o) for o in open_orders]}
-            if args.execute:
-                for order in open_orders:
-                    order_id = order.get("orderId")
-                    client_id = order.get("clientOrderId")
-                    if not order_id and not client_id:
-                        raise FlattenFailure("ORDER_IDENTITY_MISSING", f"cannot cancel unidentified order on {symbol}")
-                    canceled = await client.cancel_order(symbol, order_id=order_id, orig_client_order_id=client_id)
-                    if not isinstance(canceled, dict):
-                        raise FlattenFailure("CANCEL_UNKNOWN", f"cancel response was not attributable on {symbol}")
-                    report["orders"].append(safe_order(canceled))
-                remaining_orders = await client.get_open_orders(symbol)
-                symbol_report["open_orders_after_cancel"] = [safe_order(o) for o in remaining_orders]
-                if remaining_orders:
-                    raise FlattenFailure("OPEN_ORDERS_REMAIN", f"open orders remain on {symbol} after cancellation")
-                position = position_for_symbol(await client.get_position_risk(symbol), symbol)
-                if position is not None:
-                    amount = Decimal(str(position["positionAmt"]))
-                    mark = Decimal(str(position.get("markPrice") or position.get("entryPrice") or "0"))
-                    if mark <= 0:
-                        raise FlattenFailure("MARK_PRICE_INVALID", f"missing positive mark price for {symbol}")
-                    client_id = f"flatten_{symbol[:10]}_{uuid4().hex[:16]}"
-                    intent = rule.normalize_intent(OrderIntent(symbol=symbol, side="BUY" if amount < 0 else "SELL", price=mark, quantity=abs(amount), client_order_id=client_id, order_type="MARKET", trigger_reason="manual_emergency_flatten"), reference_price=mark)
-                    exited = await client.post_order(symbol=symbol, side=intent.side, order_type="MARKET", quantity=intent.quantity, new_client_order_id=client_id, reduce_only=True)
-                    exited = await resolve_exit_order(
-                        client,
-                        symbol=symbol,
-                        client_order_id=client_id,
-                        initial=exited,
-                        attempts=args.query_attempts,
-                        interval_seconds=args.query_interval_seconds,
-                    )
-                    symbol_report["exit"] = safe_order(exited)
-                remaining = position_for_symbol(await client.get_position_risk(symbol), symbol)
-                symbol_report["position_after"] = safe_position(remaining)
-                if remaining is not None:
-                    raise FlattenFailure("POSITION_NOT_FLAT", f"position remains on {symbol}")
-            report["positions"].append(symbol_report)
-        report["result"] = "FLATTEN_OK" if args.execute else "DRY_RUN_OK"
-        return report
+        async with execution_scope():
+            return await _flatten_with_client(args, report, client)
     finally:
         await client.close()
 
 
+async def _flatten_with_client(
+    args: argparse.Namespace,
+    report: dict,
+    client: BinanceRestClient,
+) -> dict:
+    mode = await client.get_position_mode()
+    if mode.get("dualSidePosition") is not False:
+        raise FlattenFailure("HEDGE_MODE_UNSUPPORTED", "account is not in one-way mode")
+    exchange_info = await client.get_exchange_info()
+    rules = BinanceSymbolRuleBook.from_exchange_info(
+        exchange_info, symbols=args.symbols
+    )
+    for symbol in args.symbols:
+        rule = rules.get(symbol)
+        position = position_for_symbol(
+            await client.get_position_risk(symbol), symbol
+        )
+        open_orders = await client.get_open_orders(symbol)
+        symbol_report = {
+            "symbol": symbol,
+            "position_before": safe_position(position),
+            "open_orders_before": [safe_order(order) for order in open_orders],
+        }
+        if args.execute:
+            for order in open_orders:
+                order_id = order.get("orderId")
+                client_id = order.get("clientOrderId")
+                if not order_id and not client_id:
+                    raise FlattenFailure(
+                        "ORDER_IDENTITY_MISSING",
+                        f"cannot cancel unidentified order on {symbol}",
+                    )
+                canceled = await client.cancel_order(
+                    symbol,
+                    order_id=order_id,
+                    orig_client_order_id=client_id,
+                )
+                if not isinstance(canceled, dict):
+                    raise FlattenFailure(
+                        "CANCEL_UNKNOWN",
+                        f"cancel response was not attributable on {symbol}",
+                    )
+                report["orders"].append(safe_order(canceled))
+            remaining_orders = await client.get_open_orders(symbol)
+            symbol_report["open_orders_after_cancel"] = [
+                safe_order(order) for order in remaining_orders
+            ]
+            if remaining_orders:
+                raise FlattenFailure(
+                    "OPEN_ORDERS_REMAIN",
+                    f"open orders remain on {symbol} after cancellation",
+                )
+            position = position_for_symbol(
+                await client.get_position_risk(symbol), symbol
+            )
+            if position is not None:
+                amount = Decimal(str(position["positionAmt"]))
+                mark = Decimal(
+                    str(position.get("markPrice") or position.get("entryPrice") or "0")
+                )
+                if mark <= 0:
+                    raise FlattenFailure(
+                        "MARK_PRICE_INVALID", f"missing positive mark price for {symbol}"
+                    )
+                client_id = f"flatten_{symbol[:10]}_{uuid4().hex[:16]}"
+                intent = rule.normalize_intent(
+                    OrderIntent(
+                        symbol=symbol,
+                        side="BUY" if amount < 0 else "SELL",
+                        price=mark,
+                        quantity=abs(amount),
+                        client_order_id=client_id,
+                        order_type="MARKET",
+                        trigger_reason="manual_emergency_flatten",
+                    ),
+                    reference_price=mark,
+                )
+                exited = await client.post_order(
+                    symbol=symbol,
+                    side=intent.side,
+                    order_type="MARKET",
+                    quantity=intent.quantity,
+                    new_client_order_id=client_id,
+                    reduce_only=True,
+                )
+                exited = await resolve_exit_order(
+                    client,
+                    symbol=symbol,
+                    client_order_id=client_id,
+                    initial=exited,
+                    attempts=args.query_attempts,
+                    interval_seconds=args.query_interval_seconds,
+                )
+                symbol_report["exit"] = safe_order(exited)
+            remaining = position_for_symbol(
+                await client.get_position_risk(symbol), symbol
+            )
+            symbol_report["position_after"] = safe_position(remaining)
+            if remaining is not None:
+                raise FlattenFailure(
+                    "POSITION_NOT_FLAT", f"position remains on {symbol}"
+                )
+        report["positions"].append(symbol_report)
+    report["result"] = "FLATTEN_OK" if args.execute else "DRY_RUN_OK"
+    return report
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--account-id", default=os.getenv("SPIKE_ACCOUNT_ID", "spike_testnet")
+    )
     p.add_argument("--symbols", required=True, type=parse_symbols, help="explicit comma-separated USDT symbols")
     p.add_argument("--execute", action="store_true", help="perform cancellations and reduce-only exits")
     p.add_argument("--confirm", help="required fixed confirmation phrase")

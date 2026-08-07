@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -21,7 +22,10 @@ from trading_platform.shared.binance.symbol_rules import (
     BinanceSymbolRuleBook,
     SymbolRuleViolation,
 )
+from trading_platform.shared.config import BinanceConfig
 from trading_platform.shared.events import OrderIntent
+from trading_platform.shared.postgres_lease import ExecutionLeaseUnavailableError
+from trading_platform.shared.testnet_harness import exclusive_testnet_account
 
 
 TESTNET_HOST = "demo-fapi.binance.com"
@@ -66,7 +70,12 @@ def validate_testnet_environment(*, execute: bool, confirmation: str | None) -> 
     if os.getenv("BINANCE_TESTNET", "").strip().lower() != "true":
         raise SmokeFailure("TESTNET_FLAG_REQUIRED", "BINANCE_TESTNET must be exactly true")
 
-    base_url = os.getenv("BINANCE_BASE_URL", "").strip().rstrip("/")
+    explicit_base_url = os.getenv("BINANCE_BASE_URL")
+    base_url = (
+        explicit_base_url.strip().rstrip("/")
+        if explicit_base_url is not None
+        else BinanceConfig().base_url
+    )
     parsed = urlsplit(base_url)
     if (
         parsed.scheme != "https"
@@ -388,6 +397,33 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
     validate_scenario_authorization(args)
 
     client = BinanceRestClient(api_key=api_key, api_secret=api_secret, base_url=base_url)
+
+    @asynccontextmanager
+    async def execution_scope():
+        if not args.execute:
+            yield
+            return
+        try:
+            async with exclusive_testnet_account(args.account_id):
+                yield
+        except ExecutionLeaseUnavailableError as exc:
+            raise SmokeFailure(
+                "EXECUTION_LEASE_UNAVAILABLE",
+                "Spike or another harness already owns the testnet account",
+            ) from exc
+
+    try:
+        async with execution_scope():
+            await _run_smoke_with_client(args, report, client)
+    finally:
+        await client.close()
+
+
+async def _run_smoke_with_client(
+    args: argparse.Namespace,
+    report: dict[str, Any],
+    client: BinanceRestClient,
+) -> None:
     rules = None
     reference_price: Decimal | None = None
     write_started = False
@@ -724,7 +760,6 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
                     "flat": False,
                     "error": type(exc).__name__,
                 }
-        await client.close()
 
 
 def synthetic_exchange_info() -> dict[str, Any]:
@@ -763,6 +798,9 @@ def run_self_check() -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--account-id", default=os.getenv("SPIKE_ACCOUNT_ID", "spike_testnet")
+    )
     parser.add_argument("--symbol", default="BTCUSDT", type=str.upper)
     parser.add_argument("--quantity", type=lambda value: parse_decimal(value, name="quantity"), default=Decimal("0.001"))
     parser.add_argument("--limit-price", type=lambda value: parse_decimal(value, name="limit-price"), default=Decimal("100000"))

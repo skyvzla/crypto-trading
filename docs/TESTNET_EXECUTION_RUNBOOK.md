@@ -19,15 +19,17 @@ docker compose --profile spike up --build
 ## 安全边界
 
 - 必须设置 `BINANCE_TESTNET=true`。
-- `BINANCE_BASE_URL` 必须严格为 `https://demo-fapi.binance.com`。
+- 最终解析的 `BINANCE_BASE_URL` 必须严格为 `https://demo-fapi.binance.com`；未显式配置时
+  由 `BINANCE_TESTNET=true` 推导，任何生产端点都会拒绝。
 - 默认 dry-run，不读取账户、不提交或撤销订单；会读取公开最新 1m close，验证场景价格是否满足要求。
 - 真实 testnet 写操作必须同时提供 `--execute` 和确认短语。
 - 默认 `cancel-open` 场景的 SELL LIMIT 必须至少高于最近 1m close 100 bps，避免测试单立即成为可成交单。
 - `fill-and-exit` 场景会真实建立 testnet 空仓，除通用确认外还必须提供独立的开仓确认短语；该场景的 SELL LIMIT 必须位于最近 1m close 到其下方 20 bps 范围内。
 - 账户必须为 one-way position mode；V1 依赖 `reduceOnly`，Hedge Mode 在写入前拒绝。
 - 指定 symbol 在测试前必须空仓且无挂单，client ID 必须从未使用。
-- 人工 smoke/flatten 不得与 Spike 执行进程并发运行。Spike 将未归属 WAL 的
-  client order id 和非托管 symbol 仓位回报视为专用账户边界被破坏，会立即 fatal。
+- 人工 smoke/flatten/reconcile 写入与 Spike 共用 PostgreSQL advisory lock；锁键由
+  `--account-id`/`SPIKE_ACCOUNT_ID` 统一配置，默认 `spike_testnet`；
+  Spike 或其他 harness 已持锁时返回 `EXECUTION_LEASE_UNAVAILABLE`，不进入写路径。
 - 每个入场 `clientOrderId` 只提交一次。提交结果未知时仅用该 ID 查回，绝不重下。
 - 撤单无法确认时 fail-closed，报告 `CANCEL_UNKNOWN`，需要人工对账。
 - 仅支持单向持仓模式。本轮产生仓位时，撤销测试挂单后使用反向 `reduceOnly MARKET` 清仓；对冲模式直接拒绝。
@@ -52,7 +54,9 @@ uv run python scripts/binance_testnet_execution_smoke.py --self-check
 set -a
 source .env
 set +a
-uv run python scripts/binance_testnet_execution_smoke.py \
+docker compose --profile spike run --rm --no-deps \
+  -v "$PWD/reports:/app/reports" spike \
+  python scripts/binance_testnet_execution_smoke.py \
   --symbol BTCUSDT \
   --quantity 0.001 \
   --limit-price 100000
@@ -65,7 +69,9 @@ uv run python scripts/binance_testnet_execution_smoke.py \
 选择明显高于当前价格的限价，避免意外成交。`clientOrderId` 应为本轮唯一值，发生 `SUBMIT_UNKNOWN` 后严禁换 ID 重下，必须先在 Binance testnet 查清该 ID。
 
 ```bash
-uv run python scripts/binance_testnet_execution_smoke.py \
+docker compose --profile spike run --rm --no-deps \
+  -v "$PWD/reports:/app/reports" spike \
+  python scripts/binance_testnet_execution_smoke.py \
   --scenario cancel-open \
   --symbol BTCUSDT \
   --quantity 0.001 \
@@ -106,17 +112,19 @@ uv run python scripts/binance_testnet_execution_smoke.py \
 进程轮询默认为 5 秒一次、最多 12 次。超过上限后不重下单，Campaign 和 symbol 风险门禁保持阻塞。先停止同账户其他写入流程，再用以下命令只读查询：
 
 ```bash
-uv run --env-file .env python scripts/binance_testnet_reconcile_wal.py \
+docker compose --profile spike run --rm --no-deps spike \
+  python scripts/binance_testnet_reconcile_wal.py \
   --account-id spike_testnet \
-  --wal-path data/wal/spike_short.jsonl
+  --wal-path /app/data/wal/spike_short.jsonl
 ```
 
 只有核对 symbol、clientOrderId 和交易所状态后，才能显式追加 WAL 事实；该操作不会向交易所写入：
 
 ```bash
-uv run --env-file .env python scripts/binance_testnet_reconcile_wal.py \
+docker compose --profile spike run --rm --no-deps spike \
+  python scripts/binance_testnet_reconcile_wal.py \
   --account-id spike_testnet \
-  --wal-path data/wal/spike_short.jsonl \
+  --wal-path /app/data/wal/spike_short.jsonl \
   --execute \
   --confirm I_UNDERSTAND_WAL_RECONCILIATION_WRITES_LOCAL_STATE
 ```
@@ -134,7 +142,9 @@ uv run --env-file .env python scripts/binance_testnet_reconcile_wal.py \
 harness 运行时必须拒绝执行；开始和结束都要求全账户 0 挂单、0 非零仓位。
 
 ```bash
-uv run --env-file .env python scripts/binance_testnet_user_stream_reconnect.py \
+docker compose --profile spike run --rm --no-deps \
+  -v "$PWD/reports:/app/reports" spike \
+  python scripts/binance_testnet_user_stream_reconnect.py \
   --symbol BTCUSDT \
   --confirm I_UNDERSTAND_THIS_DISCONNECTS_THE_TESTNET_USER_STREAM \
   --report reports/testnet_user_stream_reconnect.json
@@ -143,6 +153,28 @@ uv run --env-file .env python scripts/binance_testnet_user_stream_reconnect.py \
 成功结果必须为 `RECONNECT_OK`，并同时观察到 disconnect、恢复对账、reconnected 和
 listenKey 轮换；最终仍须为 0 挂单、0 非零仓位。该演练会主动关闭 WebSocket，不提交订单，
 不能替代外部长时间运行验证。
+
+## Spike 长时间只读监督
+
+先确认 `spike` subcategory 为 disabled，再启动正式 Compose Spike。观察器不启动、不停止、
+不重启 Spike，也不提交订单；它固定启动时的 `instance_id`，每 5 秒核对策略心跳、
+execution/market/bar_stream 门禁、账本与行情健康、one-way 模式及全账户订单/仓位：
+
+```bash
+uv run --env-file .env python scripts/binance_testnet_spike_soak.py \
+  --duration-seconds 3900 \
+  --sample-seconds 5 \
+  --require-flat \
+  --expect-entry-enabled false \
+  --confirm I_UNDERSTAND_THIS_OBSERVES_THE_TESTNET_ACCOUNT \
+  --report reports/testnet_spike_soak.json
+```
+
+正式控制面验收建议至少 3900 秒，跨过两次 30 分钟 listenKey keepalive 边界。任一
+`instance_id` 变化、`stale/fatal/stopped`、halt、心跳倒退/停止推进、必需门禁关闭、生产模式、
+Hedge Mode 或控制面 soak 出现挂单/仓位都会返回 `FAIL_CLOSED`。Compose 自动重启产生的新实例
+不能被结束时的健康状态掩盖。自然策略/持仓 soak 不得使用 `--require-flat`，必须单独审批，
+本命令不定义策略收益或退出参数。
 
 ## Campaign 执行与账本闭环
 
@@ -155,7 +187,9 @@ reduceOnly`。脚本使用 `spike_testnet` 的同一 advisory lock，Spike 正�
 已有挂单：
 
 ```bash
-uv run --env-file .env python scripts/binance_testnet_campaign_roundtrip.py \
+docker compose --profile spike run --rm --no-deps \
+  -v "$PWD/reports:/app/reports" spike \
+  python scripts/binance_testnet_campaign_roundtrip.py \
   --symbol BTCUSDT \
   --quantity 0.001 \
   --execute \
@@ -171,8 +205,10 @@ uv run --env-file .env python scripts/binance_testnet_campaign_roundtrip.py \
 紧急清仓示例（先 dry-run，再执行）：
 
 ```bash
-uv run python scripts/binance_testnet_flatten.py --symbols AKEUSDT,BTCUSDT
-uv run python scripts/binance_testnet_flatten.py \
+uv run --env-file .env python scripts/binance_testnet_flatten.py --symbols AKEUSDT,BTCUSDT
+docker compose --profile spike run --rm --no-deps \
+  -v "$PWD/reports:/app/reports" spike \
+  python scripts/binance_testnet_flatten.py \
   --symbols AKEUSDT,BTCUSDT \
   --execute \
   --confirm I_UNDERSTAND_TESTNET_EMERGENCY_FLATTEN \
@@ -232,21 +268,30 @@ uv run python scripts/binance_testnet_flatten.py \
 - User Stream 主动断流演练观察到 disconnect、恢复对账、reconnected 和 listenKey 轮换，
   最终 0 挂单、0 非零仓位；报告为
   `reports/testnet_user_stream_reconnect_20260807.json`。
+- 31 分钟只读监督首次运行在外部网络断流后发现旧、新 WebSocket 生命周期竞态，日志出现
+  `NoneType.sock`；修复后旧连接的回调和 task 完成事件不能再清理或重连当前连接。
+  修复后的主动断流演练再次返回 `RECONNECT_OK`，最终 0 挂单、0 非零仓位；报告为
+  `reports/testnet_user_stream_reconnect_post_race_fix_20260807.json`。
+- 修复后的同一 Spike 实例完成 120 秒只读监督，共 23 个样本，最大心跳延迟 4.894 秒，
+  execution/market/bar_stream 门禁始终开启，账户始终 0 挂单、0 非零仓位且无瞬时错误；报告为
+  `reports/testnet_spike_soak_post_reconnect_fix_20260807.json`。该结果仅为短时回归，不替代
+  3900 秒正式长稳验收。
 - PostgreSQL 迁移 `0003` 的策略运行状态已通过 Compose 回归：Spike 每 5 秒写入心跳，
   15 秒未更新显示为 `stale`；API/Web 分开呈现账本健康与策略状态。默认数据库已从
   `0002` 升到 `0003`；准入关闭的 Spike testnet 实例实际写入 `running` 且
   `entry_enabled=false`，优雅停止后写入 `stopped`，启停前后均为空仓空单。
 - 本轮宿主机全量结果为 `431 passed, 33 skipped, 1 warning`。
-- 本轮 Compose 全量结果为 `460 passed, 1 skipped, 1 warning`。
+- 本轮 Compose 相关组合回归为 `174 passed, 1 warning`；最终全量回归为
+  `485 passed, 34 skipped, 1 warning`。
 
-验收结束后 `spike` subcategory 已设置为 disabled，Spike 容器已停止；再次运行前必须经过新的
-人工准入操作。
+当前 `spike` subcategory 为 disabled，Spike 以 `entry_enabled=false` 运行只读控制面验证，
+账户为 0 挂单、0 非零仓位；启用交易准入前必须经过新的人工操作。
 
 AKEUSDT 的 `MIN_NOTIONAL` 为 5 USDT。三档权重为 30/40/30，因此 10 USDT 总金额会形成
 3/4/3 USDT 的必然无效订单。进程会在连接交易所、读取 symbol rules 后验证最小档必须严格
 高于交易所最小名义金额；当前 Compose testnet 默认使用 20 USDT。
 
 上述结果已证明 REST harness、紧急清仓以及完整策略进程的 User Stream、Campaign、部分成交、
-启动恢复和受控主动断流恢复路径；外部长时间运行、持续未知回报外部处置、外部告警通道、
+启动恢复和受控主动断流恢复路径；3900 秒外部长时间运行、持续未知回报外部处置、外部告警通道、
 Web 身份权限、正式 live 阈值和自然策略信号退出仍未验收。`candidate-v1` 保持冻结，
 正式退出参数冻结前不得启动 live。

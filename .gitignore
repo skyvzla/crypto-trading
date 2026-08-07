@@ -12,6 +12,7 @@ dist/
 data/
 logs/
 reports/*
+backups/
 !reports/active_alt100_final.csv
 !reports/dynamic_final_run1/
 !reports/dynamic_final_run1/**

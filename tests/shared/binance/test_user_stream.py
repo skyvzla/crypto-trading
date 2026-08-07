@@ -20,7 +20,7 @@ class FakeWebSocketApp:
         self.closed = True
 
 
-async def _idle_forever():
+async def _idle_forever(*_args):
     await asyncio.Future()
 
 
@@ -41,7 +41,7 @@ async def test_start_waits_until_websocket_is_really_open(monkeypatch):
     await asyncio.sleep(0)
 
     assert start.done() is False
-    FakeWebSocketApp.instance.callbacks["on_open"](None)
+    FakeWebSocketApp.instance.callbacks["on_open"](FakeWebSocketApp.instance)
     await asyncio.wait_for(start, timeout=1)
     assert stream.connected is True
 
@@ -72,7 +72,7 @@ async def test_reconnect_callback_runs_only_after_new_websocket_is_open(monkeypa
     await asyncio.sleep(0)
 
     recovered.assert_not_awaited()
-    FakeWebSocketApp.instance.callbacks["on_open"](None)
+    FakeWebSocketApp.instance.callbacks["on_open"](FakeWebSocketApp.instance)
     await asyncio.wait_for(reconnect, timeout=1)
     recovered.assert_awaited_once()
 
@@ -119,7 +119,7 @@ async def test_reconnect_remains_disconnected_across_repeated_failures(monkeypat
     assert stream.connected is False
     assert reconnect.done() is False
     recovered.assert_not_awaited()
-    FakeWebSocketApp.instance.callbacks["on_open"](None)
+    FakeWebSocketApp.instance.callbacks["on_open"](FakeWebSocketApp.instance)
     await asyncio.wait_for(reconnect, timeout=1)
 
     disconnected.assert_awaited_once()
@@ -217,7 +217,8 @@ async def test_callbacks_from_websocket_thread_are_returned_to_event_loop(monkey
 
     thread = threading.Thread(
         target=lambda: FakeWebSocketApp.instance.callbacks["on_message"](
-            None, '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}'
+            FakeWebSocketApp.instance,
+            '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}',
         )
     )
     thread.start()
@@ -255,7 +256,7 @@ async def test_account_updates_are_returned_to_event_loop_as_complete_events(mon
     )
     thread = threading.Thread(
         target=lambda: FakeWebSocketApp.instance.callbacks["on_message"](
-            None, message
+            FakeWebSocketApp.instance, message
         )
     )
     thread.start()
@@ -287,17 +288,70 @@ async def test_close_schedules_only_one_reconnect_and_stop_cancels_it(monkeypatc
     await stream._connect_ws()
     on_close = FakeWebSocketApp.instance.callbacks["on_close"]
 
-    on_close(None, 1006, "closed")
+    on_close(FakeWebSocketApp.instance, 1006, "closed")
     first = stream._reconnect_task
-    on_close(None, 1006, "closed again")
+    on_close(FakeWebSocketApp.instance, 1006, "closed again")
     assert stream._reconnect_task is first
     await asyncio.wait_for(reconnect_started.wait(), timeout=1)
     assert stream._reconnect.await_count == 1
 
     await stream.stop()
     assert first.cancelled()
-    on_close(None, 1006, "after stop")
+    on_close(FakeWebSocketApp.instance, 1006, "after stop")
     assert stream._reconnect_task is None
+
+
+@pytest.mark.asyncio
+async def test_stale_websocket_close_does_not_disconnect_or_reconnect(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(create_listen_key=AsyncMock(return_value="listen-key"))
+    stream = UserDataStream(rest)
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._connected_event = asyncio.Event()
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+
+    await stream._connect_ws()
+    stale_ws = stream.ws
+    stale_on_close = stale_ws.callbacks["on_close"]
+    await stream._close_ws_connection()
+    await stream._connect_ws()
+    current_ws = stream.ws
+    current_ws.callbacks["on_open"](current_ws)
+    await asyncio.sleep(0)
+
+    stale_on_close(stale_ws, 1006, "late close")
+    await asyncio.sleep(0)
+
+    assert stream.ws is current_ws
+    assert stream.connected is True
+    assert stream._reconnect_task is None
+    await stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_stale_websocket_task_done_does_not_reconnect():
+    rest = Mock(create_listen_key=AsyncMock(return_value="listen-key"))
+    stream = UserDataStream(rest)
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream._connected_event = asyncio.Event()
+    stream._connected_event.set()
+    stale_task = asyncio.create_task(asyncio.sleep(0))
+    await stale_task
+    current_task = asyncio.create_task(_idle_forever())
+    stream._ws_thread = current_task
+
+    stream._ws_task_done(stale_task)
+
+    assert stream.connected is True
+    assert stream._reconnect_task is None
+    current_task.cancel()
+    await asyncio.gather(current_task, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -337,7 +391,8 @@ async def test_callback_failure_sets_fatal_signal(monkeypatch):
     await stream._connect_ws()
 
     FakeWebSocketApp.instance.callbacks["on_message"](
-        None, '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}'
+        FakeWebSocketApp.instance,
+        '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}',
     )
 
     failure = await asyncio.wait_for(stream.wait_fatal(), timeout=1)
@@ -360,7 +415,9 @@ async def test_malformed_execution_message_sets_fatal_signal(monkeypatch):
     stream._run_ws = AsyncMock(side_effect=_idle_forever)
     await stream._connect_ws()
 
-    FakeWebSocketApp.instance.callbacks["on_message"](None, "not-json")
+    FakeWebSocketApp.instance.callbacks["on_message"](
+        FakeWebSocketApp.instance, "not-json"
+    )
 
     failure = await asyncio.wait_for(stream.wait_fatal(), timeout=1)
     assert isinstance(failure, ValueError)
@@ -395,7 +452,8 @@ async def test_stop_waits_for_in_flight_callback_within_drain_timeout(monkeypatc
     stream._run_ws = AsyncMock()
     await stream._connect_ws()
     FakeWebSocketApp.instance.callbacks["on_message"](
-        None, '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}'
+        FakeWebSocketApp.instance,
+        '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}',
     )
     await asyncio.wait_for(callback_started.wait(), timeout=1)
 
@@ -438,7 +496,8 @@ async def test_stop_cancels_callback_after_bounded_drain_timeout(monkeypatch):
     stream._run_ws = AsyncMock()
     await stream._connect_ws()
     FakeWebSocketApp.instance.callbacks["on_message"](
-        None, '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}'
+        FakeWebSocketApp.instance,
+        '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}',
     )
     await asyncio.wait_for(callback_started.wait(), timeout=1)
 

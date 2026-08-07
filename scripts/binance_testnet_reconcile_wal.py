@@ -14,11 +14,15 @@ import json
 import os
 import sys
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from trading_platform.shared.binance.rest_client import BinanceRestClient
+from trading_platform.shared.config import BinanceConfig
 from trading_platform.shared.execution_recovery import OrderWAL
+from trading_platform.shared.postgres_lease import ExecutionLeaseUnavailableError
+from trading_platform.shared.testnet_harness import exclusive_testnet_account
 
 
 TESTNET_HOST = "demo-fapi.binance.com"
@@ -29,6 +33,7 @@ KNOWN_STATUSES = {
     "FILLED",
     "CANCELED",
     "EXPIRED",
+    "REJECTED",
 }
 
 
@@ -40,7 +45,12 @@ def fail(code: str, message: str) -> None:
 def validate_environment(execute: bool, confirmation: str | None) -> tuple[str, str, str]:
     if os.getenv("BINANCE_TESTNET", "").strip().lower() != "true":
         fail("TESTNET_FLAG_REQUIRED", "BINANCE_TESTNET must be exactly true")
-    base_url = os.getenv("BINANCE_BASE_URL", "").strip().rstrip("/")
+    explicit_base_url = os.getenv("BINANCE_BASE_URL")
+    base_url = (
+        explicit_base_url.strip().rstrip("/")
+        if explicit_base_url is not None
+        else BinanceConfig().base_url
+    )
     parsed = urlsplit(base_url)
     if (
         parsed.scheme != "https"
@@ -98,7 +108,19 @@ async def reconcile(args: argparse.Namespace) -> dict:
         "orders": [],
     }
     client = BinanceRestClient(api_key=key, api_secret=secret, base_url=base_url)
+    stack = AsyncExitStack()
     try:
+        if args.execute:
+            try:
+                await stack.enter_async_context(
+                    exclusive_testnet_account(args.account_id)
+                )
+            except ExecutionLeaseUnavailableError:
+                fail(
+                    "EXECUTION_LEASE_UNAVAILABLE",
+                    "Spike or another harness already owns the testnet account",
+                )
+        resolved_records = []
         for record in sorted(records, key=lambda item: item.client_order_id):
             response = await client.query_order(
                 record.symbol,
@@ -124,16 +146,23 @@ async def reconcile(args: argparse.Namespace) -> dict:
                 item["reason"] = "unknown_exchange_status"
             else:
                 item["resolved"] = True
-                if args.execute:
-                    wal.record_exchange_status(
-                        record,
-                        response,
-                        recorded_at=int(time.time() * 1000),
-                    )
-                    item["wal_written"] = True
+                resolved_records.append((record, response, item))
             report["orders"].append(item)
+
+        # Validate every exchange fact before mutating the append-only WAL. A
+        # missing or mismatched order therefore cannot leave a partially
+        # reconciled batch behind.
+        if args.execute and all(item["resolved"] for item in report["orders"]):
+            for record, response, item in resolved_records:
+                wal.record_exchange_status(
+                    record,
+                    response,
+                    recorded_at=int(time.time() * 1000),
+                )
+                item["wal_written"] = True
     finally:
         await client.close()
+        await stack.aclose()
     if any(not item["resolved"] for item in report["orders"]):
         report["result"] = "FAIL_CLOSED"
     return report
@@ -155,7 +184,15 @@ def main() -> int:
     except SystemExit:
         raise
     except Exception as exc:
-        print(json.dumps({"result": "FAIL_CLOSED", "error": {"code": type(exc).__name__, "message": str(exc)}}))
+        # Exception strings from HTTP clients may contain signed URLs, API keys,
+        # or request bodies. Keep CLI output useful without echoing those values.
+        print(json.dumps({
+            "result": "FAIL_CLOSED",
+            "error": {
+                "code": type(exc).__name__,
+                "message": "unexpected reconciliation failure",
+            },
+        }))
         return 2
     print(json.dumps(report, ensure_ascii=True, sort_keys=True))
     return 0 if report["result"] == "WAL_RECONCILE_OK" else 2

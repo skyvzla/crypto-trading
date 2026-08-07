@@ -202,6 +202,8 @@ class UserDataStream:
 
         def on_message(ws, message):
             """WebSocket 消息回调"""
+            if ws is not self.ws:
+                return
             try:
                 data = json.loads(message)
                 event_type = data.get('e')
@@ -223,10 +225,14 @@ class UserDataStream:
 
         def on_error(ws, error):
             """WebSocket 错误回调"""
+            if ws is not self.ws:
+                return
             logger.error(f"WebSocket error: {error}")
 
         def on_close(ws, close_status_code, close_msg):
             """WebSocket 关闭回调"""
+            if ws is not self.ws:
+                return
             logger.warning(f"WebSocket closed: {close_status_code} {close_msg}")
             loop = self._loop
             if loop and not loop.is_closed():
@@ -236,30 +242,34 @@ class UserDataStream:
 
         def on_open(ws):
             """WebSocket 打开回调"""
+            if ws is not self.ws:
+                return
             logger.info("User Data Stream connected")
             loop = self._loop
             if loop and not loop.is_closed():
                 loop.call_soon_threadsafe(self._mark_connected)
 
-        self.ws = websocket.WebSocketApp(
+        ws = websocket.WebSocketApp(
             ws_url,
             on_message=on_message,
             on_error=on_error,
             on_close=on_close,
             on_open=on_open,
         )
+        self.ws = ws
 
         # 在独立线程中运行 WebSocket
-        self._ws_thread = asyncio.create_task(self._run_ws())
+        self._ws_thread = asyncio.create_task(self._run_ws(ws))
         self._ws_thread.add_done_callback(self._ws_task_done)
 
-    async def _run_ws(self) -> None:
+    async def _run_ws(self, ws: websocket.WebSocketApp | None = None) -> None:
         """在事件循环中运行 WebSocket"""
-        if not self.ws:
+        ws = ws or self.ws
+        if not ws:
             return
 
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self.ws.run_forever)
+        await loop.run_in_executor(None, ws.run_forever)
 
     async def _wait_until_connected(self) -> None:
         event = self._connected_event
@@ -348,20 +358,21 @@ class UserDataStream:
             self._connected_event.clear()
 
     async def _close_ws_connection(self) -> None:
-        if self.ws:
-            self.ws.close()
-            self.ws = None
+        ws = self.ws
         task = self._ws_thread
+        self.ws = None
+        self._ws_thread = None
+        if ws:
+            ws.close()
         if task and not task.done():
             task.cancel()
             try:
                 await task
             except asyncio.CancelledError:
                 pass
-        self._ws_thread = None
 
     def _ws_task_done(self, task: asyncio.Task) -> None:
-        if task.cancelled() or not self._running:
+        if task is not self._ws_thread or task.cancelled() or not self._running:
             return
         try:
             task.result()

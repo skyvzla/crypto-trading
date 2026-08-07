@@ -8,7 +8,11 @@ from pydantic import ValidationError
 
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
 from trading_platform.shared.events import Bar1s, OrderIntent, StrategyAuditEvent
-from trading_platform.shared.execution_recovery import OrderWAL
+from trading_platform.shared.execution_recovery import (
+    OrderWAL,
+    Resolution,
+    SubmitUnknownPollingService,
+)
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.spike_live import (
     LIVE_CONFIRMATION,
@@ -797,6 +801,168 @@ async def test_runtime_status_ownership_loss_halts_execution():
 
     assert process.gate.condition("execution") is False
     assert risk.halted is True
+
+
+@pytest.mark.asyncio
+async def test_background_task_normal_exit_is_fatal():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    strategy = StrategyStub()
+    process.gate = CompositeEntryGate(strategy)
+    process.gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    process.coordinator = Mock(risk_guard=risk)
+    process.start = AsyncMock()
+    process.stop = AsyncMock()
+    process._try_publish_fatal_status = AsyncMock()
+    process._tasks = [
+        asyncio.create_task(asyncio.sleep(0), name="unexpected-worker")
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match="background task exited unexpectedly: unexpected-worker",
+    ):
+        await process.run()
+
+    assert process.gate.condition("execution") is False
+    assert risk.halted is True
+    process._try_publish_fatal_status.assert_awaited_once()
+    process.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_event_remains_normal_shutdown():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process.start = AsyncMock()
+    process.stop = AsyncMock()
+    process.request_stop()
+
+    await process.run()
+
+    assert process._runtime_fatal_reason is None
+    process.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_background_failure_wins_when_explicit_stop_is_also_ready():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    strategy = StrategyStub()
+    process.gate = CompositeEntryGate(strategy)
+    process.gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    process.coordinator = Mock(risk_guard=risk)
+    process.start = AsyncMock()
+    process.stop = AsyncMock()
+    process._try_publish_fatal_status = AsyncMock()
+
+    async def fail_worker():
+        raise RuntimeError("worker failed")
+
+    worker = asyncio.create_task(fail_worker(), name="failing-worker")
+    await asyncio.sleep(0)
+    process._tasks = [worker]
+    process.request_stop()
+
+    with pytest.raises(RuntimeError, match="worker failed"):
+        await process.run()
+
+    assert process.gate.condition("execution") is False
+    assert risk.halted is True
+    process._try_publish_fatal_status.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_full_process_exits_fatal_when_submit_unknown_attempts_exhausted():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    strategy = StrategyStub()
+    process.gate = CompositeEntryGate(strategy)
+    for name in ("execution", "market", "bar_stream", "campaign"):
+        process.gate.set_condition(name, True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    resolver = Mock(
+        resolve_recovered_unknowns_once=AsyncMock(
+            return_value={
+                "unknown-order": Resolution(
+                    False, None, reason="order_not_found"
+                )
+            }
+        )
+    )
+    poller = SubmitUnknownPollingService(
+        resolver,
+        poll_interval_seconds=0,
+        max_attempts=2,
+    )
+    runtime = Mock(
+        unknown_poller=poller,
+        stop=AsyncMock(side_effect=poller.stop),
+    )
+    process.runtime = runtime
+    process.coordinator = Mock(risk_guard=risk, stop=AsyncMock())
+    process.db = Mock(upsert_strategy_runtime_status=AsyncMock(return_value=True))
+
+    async def start_process():
+        await process._publish_runtime_status()
+        poller.start()
+        process._tasks.append(
+            asyncio.create_task(
+                process._submit_unknown_fatal_loop(),
+                name="spike-submit-unknown-fatal",
+            )
+        )
+
+    process.start = start_process
+
+    with pytest.raises(RuntimeError, match="SUBMIT_UNKNOWN recovery failed"):
+        await process.run()
+
+    assert resolver.resolve_recovered_unknowns_once.await_count == 2
+    assert process.gate.condition("execution") is False
+    assert risk.halted is True
+    assert risk.halt_reason == "SUBMIT_UNKNOWN resolution attempts exhausted"
+    statuses = [
+        call.args[0]
+        for call in process.db.upsert_strategy_runtime_status.await_args_list
+    ]
+    assert [status.status for status in statuses] == ["running", "fatal", "fatal"]
+    assert statuses[-1].stopped_at is not None
+    runtime.stop.assert_awaited_once()
 
 
 def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():

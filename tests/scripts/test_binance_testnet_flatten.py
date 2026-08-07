@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
 
@@ -13,8 +14,25 @@ flatten = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(flatten)
 
 
+@pytest.fixture(autouse=True)
+def isolated_execution_lease(monkeypatch):
+    events = []
+
+    @asynccontextmanager
+    async def lease(account_id):
+        events.append(("acquire", account_id))
+        try:
+            yield
+        finally:
+            events.append(("release", account_id))
+
+    monkeypatch.setattr(flatten, "exclusive_testnet_account", lease)
+    return events
+
+
 def _args(*, execute=False):
     return argparse.Namespace(
+        account_id="spike_testnet",
         symbols=("BTCUSDT",),
         execute=execute,
         confirm=flatten.CONFIRMATION if execute else None,
@@ -81,7 +99,9 @@ class FakeClient:
 
 
 @pytest.mark.asyncio
-async def test_flatten_cancels_orders_and_closes_short_reduce_only(monkeypatch):
+async def test_flatten_cancels_orders_and_closes_short_reduce_only(
+    monkeypatch, isolated_execution_lease
+):
     client = FakeClient()
     monkeypatch.setattr(flatten, "BinanceRestClient", lambda **kwargs: client)
     monkeypatch.setenv("BINANCE_TESTNET", "true")
@@ -97,6 +117,55 @@ async def test_flatten_cancels_orders_and_closes_short_reduce_only(monkeypatch):
     assert client.post_calls[0]["side"] == "BUY"
     assert client.post_calls[0]["reduce_only"] is True
     assert result["positions"][0]["position_after"] is None
+    assert isolated_execution_lease == [
+        ("acquire", "spike_testnet"),
+        ("release", "spike_testnet"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_flatten_uses_configured_account_lock(
+    monkeypatch, isolated_execution_lease
+):
+    client = FakeClient()
+    monkeypatch.setattr(flatten, "BinanceRestClient", lambda **kwargs: client)
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
+    monkeypatch.setenv("BINANCE_BASE_URL", "https://demo-fapi.binance.com")
+    monkeypatch.setenv("BINANCE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "test-secret")
+    configured = _args(execute=True)
+    configured.account_id = "configured-account"
+
+    await flatten.flatten(configured)
+
+    assert isolated_execution_lease == [
+        ("acquire", "configured-account"),
+        ("release", "configured-account"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_flatten_refuses_when_spike_owns_account(monkeypatch):
+    client = FakeClient()
+    monkeypatch.setattr(flatten, "BinanceRestClient", lambda **kwargs: client)
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
+    monkeypatch.setenv("BINANCE_BASE_URL", "https://demo-fapi.binance.com")
+    monkeypatch.setenv("BINANCE_API_KEY", "test-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "test-secret")
+
+    @asynccontextmanager
+    async def unavailable(_account_id):
+        raise flatten.ExecutionLeaseUnavailableError("owned")
+        yield
+
+    monkeypatch.setattr(flatten, "exclusive_testnet_account", unavailable)
+
+    with pytest.raises(flatten.FlattenFailure) as failure:
+        await flatten.flatten(_args(execute=True))
+
+    assert failure.value.code == "EXECUTION_LEASE_UNAVAILABLE"
+    assert client.cancel_calls == []
+    assert client.post_calls == []
 
 
 @pytest.mark.asyncio

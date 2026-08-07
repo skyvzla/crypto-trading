@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,6 +12,22 @@ SPEC = importlib.util.spec_from_file_location("binance_testnet_execution_smoke",
 assert SPEC is not None and SPEC.loader is not None
 smoke = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(smoke)
+
+
+@pytest.fixture(autouse=True)
+def isolated_execution_lease(monkeypatch):
+    events = []
+
+    @asynccontextmanager
+    async def lease(account_id):
+        events.append(("acquire", account_id))
+        try:
+            yield
+        finally:
+            events.append(("release", account_id))
+
+    monkeypatch.setattr(smoke, "exclusive_testnet_account", lease)
+    return events
 
 
 def args():
@@ -345,6 +362,55 @@ async def test_cancel_open_scenario_only_prehangs_and_cancels(monkeypatch):
     assert client.post_calls[0]["order_type"] == "LIMIT"
     assert client.post_calls[0].get("reduce_only") is None
     assert client.position_open is False
+    assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_write_scenario_uses_configured_account_lock(
+    monkeypatch, isolated_execution_lease
+):
+    set_testnet_environment(monkeypatch)
+    client = ScenarioClient(fill_entry=False)
+    monkeypatch.setattr(smoke, "BinanceRestClient", lambda **kwargs: client)
+
+    await smoke.run_smoke(
+        scenario_args(
+            "--account-id",
+            "configured-account",
+            "--limit-price",
+            "102",
+            "--quantity",
+            "0.051",
+        ),
+        {},
+    )
+
+    assert isolated_execution_lease == [
+        ("acquire", "configured-account"),
+        ("release", "configured-account"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_write_scenario_refuses_when_spike_owns_account(monkeypatch):
+    set_testnet_environment(monkeypatch)
+    client = ScenarioClient(fill_entry=False)
+    monkeypatch.setattr(smoke, "BinanceRestClient", lambda **kwargs: client)
+
+    @asynccontextmanager
+    async def unavailable(_account_id):
+        raise smoke.ExecutionLeaseUnavailableError("owned")
+        yield
+
+    monkeypatch.setattr(smoke, "exclusive_testnet_account", unavailable)
+
+    with pytest.raises(smoke.SmokeFailure) as failure:
+        await smoke.run_smoke(
+            scenario_args("--limit-price", "102", "--quantity", "0.051"), {}
+        )
+
+    assert failure.value.code == "EXECUTION_LEASE_UNAVAILABLE"
+    assert client.post_calls == []
     assert client.closed is True
 
 
