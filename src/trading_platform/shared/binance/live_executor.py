@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -109,6 +110,69 @@ class BinanceOrderExecutor:
             self._block_unknown(record)
             results[client_order_id] = await self.resolve_submit_unknown(record)
         return results
+
+    def handle_order_trade_update(
+        self,
+        order_data: dict[str, Any],
+    ) -> OrderWALRecord | None:
+        """将属于本执行器的 ``ORDER_TRADE_UPDATE.o`` 同步到 WAL。
+
+        账户级 User Stream 还会包含人工订单或其他执行器订单；不在本 WAL、
+        或 WAL 账户不匹配的 client id 明确忽略。属于本执行器的回报必须完整且
+        与 WAL 身份一致，否则保持原事实并阻塞对应 symbol。
+        """
+        client_order_id = order_data.get("c")
+        if not isinstance(client_order_id, str) or not client_order_id:
+            raise ValueError("missing ORDER_TRADE_UPDATE client order id: c")
+
+        record = self.wal.recover_latest().get(client_order_id)
+        if record is None or record.account_id != self.account_id:
+            return None
+
+        try:
+            symbol = order_data.get("s")
+            if not isinstance(symbol, str) or not symbol:
+                raise ValueError("missing ORDER_TRADE_UPDATE symbol: s")
+            if symbol != record.symbol:
+                raise ValueError(
+                    f"ORDER_TRADE_UPDATE symbol mismatch: {symbol} != {record.symbol}"
+                )
+
+            status = order_data.get("X")
+            if not isinstance(status, str) or not status:
+                raise ValueError("missing ORDER_TRADE_UPDATE status: X")
+
+            exchange_order_id = order_data.get("i")
+            if exchange_order_id is None or exchange_order_id == "":
+                raise ValueError("missing ORDER_TRADE_UPDATE exchange order id: i")
+            if (
+                record.exchange_order_id is not None
+                and str(exchange_order_id) != record.exchange_order_id
+            ):
+                raise ValueError(
+                    "ORDER_TRADE_UPDATE exchange order id mismatch: "
+                    f"{exchange_order_id} != {record.exchange_order_id}"
+                )
+
+            updated = self.wal.record_exchange_status(
+                record,
+                {
+                    "status": status,
+                    "orderId": exchange_order_id,
+                    "user_stream_order": dict(order_data),
+                },
+                recorded_at=self._now_ms(),
+            )
+        except ValueError:
+            if self.risk_guard is not None:
+                self.risk_guard.block_symbol(
+                    record.symbol,
+                    f"invalid ORDER_TRADE_UPDATE:{record.client_order_id}",
+                )
+            raise
+
+        self._refresh_symbol_risk(record.symbol)
+        return updated
 
     def _record_unknown(
         self,

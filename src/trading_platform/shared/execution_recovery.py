@@ -149,7 +149,7 @@ class OrderWAL:
         status = _KNOWN_EXCHANGE_STATUSES.get(response.get("status"))
         if status is None:
             raise ValueError(f"unknown exchange order status: {response.get('status')!r}")
-        if record.status == "SUBMIT_UNKNOWN" and not is_valid_transition(record.status, status):
+        if record.status is not None and not is_valid_transition(record.status, status):
             raise ValueError(f"invalid status transition: {record.status} -> {status}")
         resolved = OrderWALRecord(
             **{
