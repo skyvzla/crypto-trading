@@ -19,8 +19,10 @@
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
 testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴权已成功；执行 smoke
-在提交前发现账户为 Hedge Mode 并 fail-closed，未产生测试订单。当前程序依赖 one-way
-模式和 `reduceOnly`，不能据此声称 testnet 写路径已经验收。
+首次提交前曾发现账户为 Hedge Mode 并 fail-closed。经用户明确授权后，旧 AKEUSDT SHORT
+和 BTCUSDT LONG 已平仓，账户切换为 one-way；AKEUSDT 已真实完成预挂撤单、限价成交、
+reduce-only 退出和紧急清仓。当前可以确认独立 REST 写路径，完整策略进程、User Stream 和
+外部故障竞态仍待验收。
 
 外部 DuckDB 历史源端到端 replay 已验证。固定基准为 AKEUSDT、UTC `2026-07-01` 至
 `2026-08-01`、从 `2026-06-30 08:00 UTC` 开始 16 小时预热、DuckDB 只读源、
@@ -50,7 +52,7 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴�
 | 行情聚合 | aggTrade 到 `Bar1s` 的内存聚合器 | 已实现基础逻辑 |
 | 行情分发 | Redis Pub/Sub、Kline latest Hash | 已通过真实 Redis 服务级集成 |
 | 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新与断线重连已有自动化验证，待进程重启恢复和外部长时间验证 |
-| 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；真实写入待 one-way testnet 账户 |
+| 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；REST harness 已真实写入，完整进程外部验收待完成 |
 | 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory 审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成 |
 | 风控 | 总持仓价值、币种数量、杠杆上限、未知订单币种阻塞 | 仅最小基础能力 |
 | 回测 | UTC 虚拟时钟、16h 预热、简化限价成交、持仓、费用和策略审计报告 | AKEUSDT 外部只读 DuckDB 端到端 replay 已验证；退出与绩效口径仍未冻结 |
@@ -90,7 +92,7 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴�
 - `spike-live` 进程已装配历史 Kline 预热、实时行情、User Stream、账本、Campaign 和准入；
 - 启动强制专用账户、one-way 模式、交易所规则快照和订单/仓位一致性；关机先撤销未终态入场单；
 - 本地与 Compose 已覆盖部分成交、撤单竞态、重连顺序、迟到回报、成交后仓位确认和全局 halt；
-  仍需在专用 one-way testnet 账户验证真实写入、保护退出及外部多轮行为。
+  REST harness 已在 one-way testnet 验证真实写入和保护退出；仍需验证完整策略进程及外部故障行为。
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
@@ -141,8 +143,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 区域 | 缺失能力 | 目标阶段 |
 |---|---|---|
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
-| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁；⏳ 外部 one-way testnet 验收 | Phase 2 |
-| **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、✅ 部分成交/撤单竞态/迟到回报自动化；⏳ 外部 one-way testnet 验收 | Phase 2/3 |
+| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁；⏳ 完整策略进程外部验收 | Phase 2 |
+| **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、✅ 部分成交/撤单竞态/迟到回报自动化、✅ AKEUSDT 真实预挂撤单与成交；⏳ 完整进程外部验收 | Phase 2/3 |
 | **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/具体账户进程/订单仓位启动门禁/规则量化/重连顺序；⏳外部部分成交与保护退出 | Phase 3 |
 | **持仓退出** | ✅ D-007 仅用于 replay/testnet 执行验证；⏳ 最新动能、origin 减半、趋势清仓及参数标定；未完成前 live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞/全局 halt；⏳保证金、日亏损、数据延迟 | Phase 3 |
@@ -156,11 +158,13 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run --extra dev python -m pytest -q`：`268 passed, 11 skipped, 1 warning`
+- 本地 `uv run pytest -q`：`273 passed, 11 skipped, 1 warning`
 - `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`279 passed, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
-- Binance `demo-fapi` 真实只读鉴权成功，`canTrade=true`；真实写入因账户 Hedge Mode 被前置门禁拒绝，未产生订单
+- Binance `demo-fapi` 真实鉴权成功；账户已切换 one-way，AKEUSDT 真实 `SELL LIMIT` 成交
+  1300 后以 reduce-only `BUY MARKET` 成交 1300 并归零
+- AKEUSDT 非市价化 `SELL LIMIT` 真实进入 `NEW` 后撤为 `CANCELED`，成交量为 0 且未产生仓位
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready
@@ -174,8 +178,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过
-- `binance_testnet_flatten.py` 离线单测通过；使用当前 testnet 账户只读前置检查时因 Hedge Mode
-  返回 `HEDGE_MODE_UNSUPPORTED`，未产生撤单或新订单
+- `binance_testnet_flatten.py` 离线单测及真实写入均通过；对 AKEUSDT 空仓使用 reduce-only
+  `BUY MARKET`，退出单明确为 `FILLED`、成交 1300，最终无挂单、无持仓
 
 尚未验证：
 
@@ -183,8 +187,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - subcategory 准入服务接入具体 testnet/live 账户进程及外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
-- Binance Futures testnet one-way 账户上的预挂、撤单、成交、部分成交和 reduce-only 退出；
-  当前账户仍为 Hedge Mode，紧急清仓工具也会在写入前拒绝
+- Binance Futures testnet 完整策略进程的部分成交、User Stream 断流/重连、未知回报和
+  Campaign 恢复；独立 REST harness 的预挂、撤单、成交和 reduce-only 退出已完成
 
 ## 6. 明确不做
 

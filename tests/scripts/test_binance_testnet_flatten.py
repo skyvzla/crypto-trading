@@ -19,6 +19,8 @@ def _args(*, execute=False):
         execute=execute,
         confirm=flatten.CONFIRMATION if execute else None,
         report=None,
+        query_attempts=2,
+        query_interval_seconds=0,
     )
 
 
@@ -33,7 +35,7 @@ class FakeClient:
         return {"dualSidePosition": False}
 
     async def get_exchange_info(self):
-        return flatten.synthetic_exchange_info() if hasattr(flatten, "synthetic_exchange_info") else {
+        return {
             "symbols": [{
                 "symbol": "BTCUSDT", "contractType": "PERPETUAL", "status": "TRADING",
                 "filters": [
@@ -41,6 +43,12 @@ class FakeClient:
                     {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100"},
                     {"filterType": "MARKET_LOT_SIZE", "stepSize": "0.001", "minQty": "0.001", "maxQty": "100"},
                     {"filterType": "MIN_NOTIONAL", "notional": "5"},
+                ],
+            }, {
+                "symbol": "UNRELATEDUSDT", "contractType": "PERPETUAL", "status": "TRADING",
+                "filters": [
+                    {"filterType": "PRICE_FILTER", "tickSize": "0.1", "minPrice": "0", "maxPrice": "1000"},
+                    {"filterType": "LOT_SIZE", "stepSize": "0", "minQty": "0", "maxQty": "0"},
                 ],
             }]
         }
@@ -65,6 +73,9 @@ class FakeClient:
         self.flat = True
         return {"symbol": kwargs["symbol"], "clientOrderId": kwargs["new_client_order_id"], "status": "FILLED", "reduceOnly": True}
 
+    async def query_order(self, symbol, *, orig_client_order_id):
+        return {"symbol": symbol, "clientOrderId": orig_client_order_id, "status": "FILLED", "executedQty": "0.051", "reduceOnly": True}
+
     async def close(self):
         pass
 
@@ -86,6 +97,20 @@ async def test_flatten_cancels_orders_and_closes_short_reduce_only(monkeypatch):
     assert client.post_calls[0]["side"] == "BUY"
     assert client.post_calls[0]["reduce_only"] is True
     assert result["positions"][0]["position_after"] is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_exit_waits_for_filled_order_fact():
+    client = FakeClient()
+    resolved = await flatten.resolve_exit_order(
+        client,
+        symbol="BTCUSDT",
+        client_order_id="flatten-delayed",
+        initial={"symbol": "BTCUSDT", "clientOrderId": "flatten-delayed", "status": "NEW"},
+        attempts=2,
+        interval_seconds=0,
+    )
+    assert resolved["status"] == "FILLED"
 
 
 @pytest.mark.asyncio

@@ -25,6 +25,14 @@ from trading_platform.shared.events import OrderIntent
 
 TESTNET_HOST = "demo-fapi.binance.com"
 CONFIRMATION = "I_UNDERSTAND_TESTNET_EMERGENCY_FLATTEN"
+TERMINAL_ORDER_STATUSES = {
+    "CANCELED",
+    "CANCELLED",
+    "EXPIRED",
+    "EXPIRED_IN_MATCH",
+    "FILLED",
+    "REJECTED",
+}
 
 
 class FlattenFailure(RuntimeError):
@@ -88,6 +96,51 @@ def safe_order(order: dict) -> dict:
     return {field: order[field] for field in fields if field in order}
 
 
+def safe_position(position: dict | None) -> dict | None:
+    if position is None:
+        return None
+    fields = (
+        "symbol",
+        "positionSide",
+        "positionAmt",
+        "entryPrice",
+        "markPrice",
+        "unRealizedProfit",
+        "liquidationPrice",
+        "leverage",
+        "marginType",
+    )
+    return {field: position[field] for field in fields if field in position}
+
+
+async def resolve_exit_order(
+    client: BinanceRestClient,
+    *,
+    symbol: str,
+    client_order_id: str,
+    initial: dict,
+    attempts: int,
+    interval_seconds: float,
+) -> dict:
+    order = initial
+    for attempt in range(attempts):
+        if order.get("symbol") != symbol or order.get("clientOrderId") != client_order_id:
+            raise FlattenFailure("EXIT_IDENTITY_MISMATCH", f"exit identity mismatch on {symbol}")
+        status = order.get("status")
+        if status in TERMINAL_ORDER_STATUSES:
+            if status != "FILLED":
+                raise FlattenFailure("EXIT_NOT_FILLED", f"reduce-only exit ended as {status!r} on {symbol}")
+            return order
+        if attempt + 1 < attempts:
+            await asyncio.sleep(interval_seconds)
+            order = await client.query_order(
+                symbol, orig_client_order_id=client_order_id
+            )
+            if order is None:
+                raise FlattenFailure("EXIT_UNKNOWN", f"reduce-only exit became unknown on {symbol}")
+    raise FlattenFailure("EXIT_NOT_TERMINAL", f"reduce-only exit did not become terminal on {symbol}")
+
+
 async def flatten(args: argparse.Namespace) -> dict:
     base_url, key, secret = validate_environment(execute=args.execute, confirmation=args.confirm)
     client = BinanceRestClient(api_key=key, api_secret=secret, base_url=base_url)
@@ -97,12 +150,14 @@ async def flatten(args: argparse.Namespace) -> dict:
         if mode.get("dualSidePosition") is not False:
             raise FlattenFailure("HEDGE_MODE_UNSUPPORTED", "account is not in one-way mode")
         exchange_info = await client.get_exchange_info()
-        rules = BinanceSymbolRuleBook.from_exchange_info(exchange_info)
+        rules = BinanceSymbolRuleBook.from_exchange_info(
+            exchange_info, symbols=args.symbols
+        )
         for symbol in args.symbols:
             rule = rules.get(symbol)
             position = position_for_symbol(await client.get_position_risk(symbol), symbol)
             open_orders = await client.get_open_orders(symbol)
-            symbol_report = {"symbol": symbol, "position_before": position, "open_orders_before": [safe_order(o) for o in open_orders]}
+            symbol_report = {"symbol": symbol, "position_before": safe_position(position), "open_orders_before": [safe_order(o) for o in open_orders]}
             if args.execute:
                 for order in open_orders:
                     order_id = order.get("orderId")
@@ -126,9 +181,17 @@ async def flatten(args: argparse.Namespace) -> dict:
                     client_id = f"flatten_{symbol[:10]}_{uuid4().hex[:16]}"
                     intent = rule.normalize_intent(OrderIntent(symbol=symbol, side="BUY" if amount < 0 else "SELL", price=mark, quantity=abs(amount), client_order_id=client_id, order_type="MARKET", trigger_reason="manual_emergency_flatten"), reference_price=mark)
                     exited = await client.post_order(symbol=symbol, side=intent.side, order_type="MARKET", quantity=intent.quantity, new_client_order_id=client_id, reduce_only=True)
+                    exited = await resolve_exit_order(
+                        client,
+                        symbol=symbol,
+                        client_order_id=client_id,
+                        initial=exited,
+                        attempts=args.query_attempts,
+                        interval_seconds=args.query_interval_seconds,
+                    )
                     symbol_report["exit"] = safe_order(exited)
                 remaining = position_for_symbol(await client.get_position_risk(symbol), symbol)
-                symbol_report["position_after"] = remaining
+                symbol_report["position_after"] = safe_position(remaining)
                 if remaining is not None:
                     raise FlattenFailure("POSITION_NOT_FLAT", f"position remains on {symbol}")
             report["positions"].append(symbol_report)
@@ -143,6 +206,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--symbols", required=True, type=parse_symbols, help="explicit comma-separated USDT symbols")
     p.add_argument("--execute", action="store_true", help="perform cancellations and reduce-only exits")
     p.add_argument("--confirm", help="required fixed confirmation phrase")
+    p.add_argument("--query-attempts", type=int, default=12)
+    p.add_argument("--query-interval-seconds", type=float, default=5.0)
     p.add_argument("--report", type=Path)
     return p
 
@@ -151,6 +216,11 @@ def main() -> int:
     args = parser().parse_args()
     report = {"started_at": datetime.now(timezone.utc).isoformat()}
     try:
+        if args.query_attempts <= 0 or args.query_interval_seconds < 0:
+            raise FlattenFailure(
+                "QUERY_POLICY_INVALID",
+                "query attempts must be positive and interval non-negative",
+            )
         report.update(asyncio.run(flatten(args)))
         code = 0
     except FlattenFailure as exc:

@@ -112,3 +112,18 @@ uv run python scripts/binance_testnet_flatten.py \
 
 `OPEN_ORDERS_REMAIN`、`POSITION_NOT_FLAT` 或任意未知异常都表示清仓未完成，必须根据报告和
 交易所实际状态人工复核，不得自动重复执行。
+
+## 真实验收记录
+
+2026-08-07 使用现有 Binance Futures testnet 账户完成以下验证：
+
+- 用户授权清理原有 `AKEUSDT SHORT -2791` 和 `BTCUSDT LONG 0.001`，逐笔成交并确认空仓后，
+  账户从 Hedge Mode 切换为 one-way；
+- `AKEUSDT` 预挂 `SELL LIMIT 1300` 进入 `NEW`，随后撤单为 `CANCELED`，成交量为 0；
+- `AKEUSDT` `SELL LIMIT 1300` 成交后出现 `BOTH -1300` 仓位，随后 reduce-only
+  `BUY MARKET 1300` 明确为 `FILLED`，最终空仓；
+- 人工紧急清仓再次以 AKEUSDT 小仓验证，工具查询退出单到 `FILLED` 后才确认仓位为空；
+- 验收结束时账户为 one-way、0 个挂单、0 个非零仓位。
+
+上述结果只证明 REST harness 和紧急清仓路径，不替代完整策略进程的 User Stream、Campaign、
+部分成交、断流、重连和启动恢复外部验收。
