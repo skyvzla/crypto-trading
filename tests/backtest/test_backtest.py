@@ -113,6 +113,11 @@ class TestBacktestEngine(unittest.TestCase):
         result = engine.run()
         self.assertEqual(len(result.fills), 1)
         self.assertEqual(result.fills[0].price, Decimal('110'))
+        self.assertEqual(
+            result.fills[0].commission,
+            Decimal('110') * Decimal(str(engine.config.taker_fee_rate)),
+        )
+        self.assertFalse(result.fills[0].is_maker)
         self.assertEqual(result.orders[0].type, 'MARKET')
 
     def test_warmup_events_update_strategy_without_creating_orders(self):

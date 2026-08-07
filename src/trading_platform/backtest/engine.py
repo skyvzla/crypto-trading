@@ -266,8 +266,11 @@ class BacktestEngine:
         fill_price = order.price
         fill_qty = order.quantity
 
-        # 计算手续费（Maker 费率）
-        commission = fill_qty * fill_price * Decimal(str(self.config.maker_fee_rate))
+        is_maker = order.type != 'MARKET'
+        fee_rate = (
+            self.config.maker_fee_rate if is_maker else self.config.taker_fee_rate
+        )
+        commission = fill_qty * fill_price * Decimal(str(fee_rate))
 
         # 生成成交ID
         fill_id = f"fill_{order.order_id}_{self.virtual_time_ms}"
@@ -282,7 +285,7 @@ class BacktestEngine:
             commission=commission,
             commission_asset='USDT',
             fill_time=self.virtual_time_ms,
-            is_maker=True
+            is_maker=is_maker
         )
 
         # 更新订单状态
