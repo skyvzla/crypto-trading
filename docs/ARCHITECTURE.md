@@ -27,7 +27,7 @@
 
 ## 3. 账本与 Web 控制层
 
-负责 PostgreSQL 中的订单、成交、持仓、控制状态、配置和审计记录；通过 FastAPI 提供查询和控制接口；Web 提供交易池 subcategory 控制、账本查看、盈亏和运行状态。Campaign 的持久生命周期从 `strategy_audit_events` 按 `campaign_id` 查询还原，不建立与 Redis 运行态重复的 Campaign 状态表。
+负责 PostgreSQL 中的订单、成交、持仓、控制状态、配置和审计记录；通过 FastAPI 提供查询和控制接口；Web 提供交易池 subcategory 控制、账本查看、盈亏和运行状态。Campaign 的持久生命周期从 `strategy_audit_events` 按 `campaign_id` 查询还原，不建立与 Redis 运行态重复的 Campaign 状态表。订单意图在提交前显式携带 `campaign_id`，该身份经 WAL、User Stream 和启动回补进入订单/成交表，用于按 Campaign 聚合实际卖出、买回、手续费及净 PnL。
 
 Web 首版是否包含暂停、撤单、紧急平仓、权限和配置管理，以 `decisions.md` 的后续确认结果为准。
 
@@ -37,4 +37,5 @@ Web 首版是否包含暂停、撤单、紧急平仓、权限和配置管理，�
 - 策略层不直接依赖 Web 页面，不把提交成功当成交事实。
 - 账本与 Web 控制层不替代交易所成交事实，不绕过 Campaign 和风控。
 - PostgreSQL Campaign 审计历史不替代 Redis 当前租约；Redis 当前租约也不替代 PostgreSQL 可追溯历史。
+- 不按时间窗口推测订单所属 Campaign；缺少显式归属的旧成交保留为空且不进入 Campaign PnL。
 - 清算地图当前不属于必要输入，不阻塞 replay、testnet 或 live。

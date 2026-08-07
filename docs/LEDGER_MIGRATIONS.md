@@ -25,7 +25,7 @@ uv run ledger-migrate status
 
 ## 新增迁移
 
-1. 新建下一个连续四位版本，例如 `0002_add_example.sql`。
+1. 新建下一个连续四位版本，例如 `0003_add_example.sql`。
 2. 迁移只能向前兼容，不得修改已经应用的 SQL 文件。
 3. 迁移须能在一个 PostgreSQL 事务内执行；不要使用 `CREATE INDEX CONCURRENTLY` 等禁止
    在事务内运行的语句。
@@ -34,3 +34,6 @@ uv run ledger-migrate status
 runner 使用事务级 PostgreSQL advisory lock 串行化并发实例；全部待执行版本、版本记录和
 校验在同一事务中完成，任一失败会整批回滚。`0001_initial.sql` 使用幂等 DDL 接管迁移机制
 上线前已存在的当前数据库，不删除或重建业务表，也不清理已有数据。
+
+当前 `0002_campaign_attribution.sql` 为订单和成交增加可空 `campaign_id` 及查询索引。
+列保持可空是有意设计：升级前的历史退出单无法可靠证明 Campaign 归属，禁止按时间推测回填。

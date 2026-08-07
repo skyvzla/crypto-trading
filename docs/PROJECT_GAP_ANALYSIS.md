@@ -13,8 +13,8 @@
 D-007 保留为简单执行测试；D-028 的逐笔数据评审和后续人工决策完成前，
 `live` 会拒绝启动。
 
-当前本地全量测试为 `369 passed, 19 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
-全量为 `388 passed, 1 warning`。测试已按
+当前本地全量测试为 `385 passed, 31 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
+全量为 `416 passed, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -159,12 +159,12 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁、真实成交后恢复及空仓释放 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、三档幂等、部分成交/撤单竞态/迟到回报自动化及完整进程外部验收 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/订单仓位启动门禁/规则量化/重连顺序/外部部分成交和保护退出；⏳异常断流故障注入 | Phase 3 |
+| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/订单仓位启动门禁/规则量化/重连顺序/重连失败清理/持续未知 fatal/外部部分成交和保护退出；⏳外部长时间断流演练 | Phase 3 |
 | **持仓退出** | ✅ candidate-v1 状态机、特征、origin 减半、趋势/动能/时间退出及 Redis/WAL 恢复；⏸ 依 D-028 暂停调参，先逐笔数据评审；live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞/全局 halt；⏳保证金、日亏损、数据延迟 | Phase 3 |
 | **监听池** | ✅ 5 分钟扫描编排及 subcategory 同节拍刷新；⏳ 真实扫描器、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/缺失拒绝/窗口缺口/部分成交/显式 1s 时间修正；⏳ 滑点、同秒顺序及多数据源一致性门禁 | Phase 2 |
-| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ 实时审计 PostgreSQL 幂等落库与查询 API；⏳ 完整退出 PnL | Phase 2/4 |
+| **审计** | ✅ 信号/计划/失效/首成交/退出及订单/成交/持仓；✅ Campaign 身份显式贯穿 WAL/账本并提供实际买卖均价、手续费和净 PnL API | Phase 2/4 |
 | **Web** | ✅ subcategory 控制已接具体进程、fail-closed 刷新与关闭撤单、账本、PnL、运行状态；⏳ 身份权限 | Phase 4 |
 | **运维** | ✅ testnet/live 隔离、专用账户紧急清仓脚本和运行手册；⏳监控、告警、凭据、回滚及 one-way 外部演练 | Phase 5-6 |
 
@@ -172,8 +172,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run pytest -q`：`369 passed, 19 skipped, 1 warning`
-- Compose 真实 PostgreSQL/Redis：`388 passed, 1 warning`
+- 本地 `uv run pytest -q`：`385 passed, 31 skipped, 1 warning`
+- Compose 真实 PostgreSQL/Redis：`416 passed, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - AKEUSDT 外部执行追加 1 轮非市价 LIMIT 撤单和 3 轮可成交 LIMIT 开空/reduce-only MARKET 平仓；最终独立检查为 0 挂单、0 仓位
 - BTCUSDT 追加 `SELL LIMIT 0.001 @ 100000` 从 `NEW` 到 `CANCELED`，以及
@@ -257,7 +257,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | Campaign | 已接入实时进程 | Redis 原子租约、恢复一致性、成交后仓位确认和订单终态+空仓释放已装配；生命周期由 PostgreSQL `strategy_audit_events` 按 Campaign 查询，不新增独立状态表 |
 | 持仓管理 | 部分完成 | D-007 仅为执行测试；最新 origin/动能/趋势方案待标定，live 已硬阻断 |
 | 环境解耦 | 已完成进程适配 | replay 与 BinanceStrategyAccount 共用策略接口，testnet/live 共用执行进程 |
-| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API、具体进程订单/成交/仓位入账及 Campaign 生命周期审计已有，仍缺完整退出 PnL |
+| 账本查询 | 已完成执行闭环 | PostgreSQL CRUD/PnL/API、具体进程入账及 Campaign 生命周期审计已有；新 Campaign 可查询逐轮执行 PnL，缺失归属的旧成交不猜测回填 |
 | Web V1 | 部分完成 | 账本、PnL、状态、subcategory 已有，缺身份权限和浏览器视觉验收 |
 
 **Phase 0 剩余工作**：
