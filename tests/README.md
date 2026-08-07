@@ -12,7 +12,7 @@
 | `ledger/` | PostgreSQL 账本、回报适配和 Web API |
 | `integration/` | 跨层服务组合测试 |
 | `research/` | 指标研究、参数标定和研究报告生成逻辑 |
-| `scripts/` | 运维与 testnet 验证脚本自身的测试 |
+| `scripts/` | 运维、testnet 执行验证和紧急清仓脚本自身的测试 |
 
 默认按被测模块建立测试文件，例如 `test_live_executor.py`。当某条规则拥有较多独立的
 正常、边界和失败案例，或需要专属 fixture 时，可以单独建立规则测试文件；文件名应表达
