@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from fastapi import FastAPI
 from trading_platform.ledger.api.routes import router
 from trading_platform.ledger.binance_account_updates import BinanceAccountUpdateLedger
 from trading_platform.ledger.binance_reports import BinanceExecutionReportLedger
+from trading_platform.ledger.binance_runtime import BinanceLedgerCallbacks
 from trading_platform.ledger.db.models import (
     LedgerDB,
     Order,
@@ -20,6 +22,10 @@ from trading_platform.ledger.db.models import (
     Trade,
     create_connection_pool,
 )
+from trading_platform.shared.binance import BinanceOrderExecutor
+from trading_platform.shared.events import OrderIntent
+from trading_platform.shared.execution_recovery import OrderWAL
+from trading_platform.shared.risk import RiskConfig, RiskGuard
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("LEDGER_TEST_DSN"),
@@ -325,3 +331,81 @@ async def test_binance_account_update_persists_signed_snapshot_and_rejects_stale
     await writer.handle(event(1780000001000, "0", "0"))
     assert await ledger.count_positions(account_id=account_id) == 0
     assert await ledger.get_positions(account_id=account_id) == []
+
+
+@pytest.mark.asyncio
+async def test_binance_runtime_callbacks_close_wal_order_trade_position_loop(
+    ledger, tmp_path
+):
+    suffix = uuid4().hex[:10]
+    account_id = f"account-{suffix}"
+    client_order_id = f"client-{suffix}"
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(
+        OrderIntent(
+            symbol="BTCUSDT",
+            side="SELL",
+            price=Decimal("100"),
+            quantity=Decimal("1.5"),
+            client_order_id=client_order_id,
+            strategy_id="spike_short",
+        ),
+        account_id=account_id,
+        recorded_at=1779999998000,
+    )
+    wal.record_submit_unknown(
+        intent,
+        recorded_at=1779999999000,
+        error="timeout",
+    )
+    guard = RiskGuard(account_id, RiskConfig())
+    guard.block_symbol("BTCUSDT", f"SUBMIT_UNKNOWN:{client_order_id}")
+    executor = BinanceOrderExecutor(
+        Mock(post_order=AsyncMock(), query_order=AsyncMock()),
+        wal,
+        account_id=account_id,
+        now_ms=lambda: 1780000000000,
+        risk_guard=guard,
+    )
+    callbacks = BinanceLedgerCallbacks(
+        executor,
+        BinanceExecutionReportLedger(
+            ledger, account_id=account_id, strategy_id="spike_short"
+        ),
+        BinanceAccountUpdateLedger(
+            ledger, account_id=account_id, strategy_id="spike_short"
+        ),
+    )
+    order_data = {
+        "s": "BTCUSDT", "c": client_order_id, "i": 123456,
+        "S": "SELL", "o": "LIMIT", "X": "FILLED", "x": "TRADE",
+        "ps": "SHORT", "q": "1.5", "p": "100", "sp": "0",
+        "ap": "99.5", "z": "1.5", "l": "1.5", "L": "99.5",
+        "Y": "149.25", "n": "0.03", "N": "USDT", "rp": "0.75",
+        "m": True, "t": 987654, "T": 1780000000000,
+        "O": 1779999999000,
+    }
+    account_event = {
+        "e": "ACCOUNT_UPDATE", "E": 1780000000010, "T": 1780000000000,
+        "a": {
+            "m": "ORDER",
+            "B": [],
+            "P": [{
+                "s": "BTCUSDT", "pa": "-1.5", "ep": "99.5",
+                "bep": "99.5", "cr": "0.75", "up": "2.5",
+                "mt": "isolated", "iw": "10", "ps": "SHORT",
+                "ma": "USDT",
+            }],
+        },
+    }
+
+    await callbacks.handle_execution_report(order_data)
+    await callbacks.handle_account_update(account_event)
+
+    assert wal.recover_latest()[client_order_id].status == "FILLED"
+    assert "BTCUSDT" not in guard.blocked_symbols
+    assert await ledger.count_orders(account_id=account_id) == 1
+    assert await ledger.count_trades(account_id=account_id) == 1
+    positions = await ledger.get_positions(account_id=account_id)
+    assert len(positions) == 1
+    assert positions[0].quantity == Decimal("-1.5")
