@@ -26,6 +26,8 @@ docker compose --profile spike up --build
 - `fill-and-exit` 场景会真实建立 testnet 空仓，除通用确认外还必须提供独立的开仓确认短语；该场景的 SELL LIMIT 必须位于最近 1m close 到其下方 20 bps 范围内。
 - 账户必须为 one-way position mode；V1 依赖 `reduceOnly`，Hedge Mode 在写入前拒绝。
 - 指定 symbol 在测试前必须空仓且无挂单，client ID 必须从未使用。
+- 人工 smoke/flatten 不得与 Spike 执行进程并发运行。Spike 将未归属 WAL 的
+  client order id 和非托管 symbol 仓位回报视为专用账户边界被破坏，会立即 fatal。
 - 每个入场 `clientOrderId` 只提交一次。提交结果未知时仅用该 ID 查回，绝不重下。
 - 撤单无法确认时 fail-closed，报告 `CANCEL_UNKNOWN`，需要人工对账。
 - 仅支持单向持仓模式。本轮产生仓位时，撤销测试挂单后使用反向 `reduceOnly MARKET` 清仓；对冲模式直接拒绝。
@@ -143,6 +145,13 @@ uv run python scripts/binance_testnet_flatten.py \
 - 覆盖测试注入的 1m Kline 后，在 subcategory version 6 disabled 状态重启；终态 WAL 未重下单，
   空仓事实使 Campaign 释放，最终优雅停止为 `Exited (0)`；
 - 验收结束时账户为 one-way、0 个挂单、0 个非零仓位。
+- 追加覆盖 `tp_cov_cancel_20260807b`：BTCUSDT `SELL LIMIT 0.001 @ 100000`
+  从 `NEW` 到 `CANCELED`，`executedQty=0`；报告为
+  `reports/testnet_20260807_cancel_open_b.json`。
+- 追加覆盖 `tp_cov_fill_20260807b`：BTCUSDT `SELL LIMIT 0.001 @ 65000`
+  成交并形成 `BOTH -0.001`，随后 `BUY MARKET reduceOnly 0.001` 成交；报告为
+  `reports/testnet_20260807_fill_exit_b.json`。独立 dry-run 复核报告
+  `reports/testnet_20260807_final_flat_b.json` 确认 AKEUSDT/BTCUSDT 均无挂单、无持仓。
 
 验收结束后 `spike` subcategory 已设置为 disabled，Spike 容器已停止；再次运行前必须经过新的
 人工准入操作。

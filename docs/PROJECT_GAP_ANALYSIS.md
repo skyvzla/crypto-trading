@@ -2,7 +2,7 @@
 
 > 盘点日期：2026-08-07
 > 盘点依据：当前源码、容器测试、`docs/spike_trader/decisions.md` 与已归档状态快照
-> 状态：实施中；testnet 完整成交链路已验收，正式退出参数按候选证据迭代
+> 状态：实施中；testnet 完整成交链路已验收，策略依 D-028 冻结并等待逐笔数据评审
 
 ## 1. 当前结论
 
@@ -10,10 +10,11 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。Spike 的 testnet/live
 进程已装配行情预热、User Stream、WAL、PostgreSQL、Redis Campaign、subcategory、TTL
 撤单、启动对账和周期安全扫描。candidate-v1 可在 replay/testnet 作为候选执行验证，
-D-007 保留为简单执行测试；对齐数据重新标定并冻结前，`live` 会拒绝启动。
+D-007 保留为简单执行测试；D-028 的逐笔数据评审和后续人工决策完成前，
+`live` 会拒绝启动。
 
-当前本地全量测试为 `340 passed, 15 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
-全量为 `356 passed, 1 warning`。测试已按
+当前本地全量测试为 `369 passed, 19 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
+全量为 `388 passed, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -31,8 +32,9 @@ User Stream `TRADE`、账户仓位确认、剩余档撤单、外部 reduce-only 
 总名义 `1000 USDT`。审计发现 1s 序列相对 Kline 整体早 8 小时；旧报告混合了不同时刻
 的信号指标与执行价格，已全部归档为无效。runner 现支持显式 1s 时间修正并写入
 `run_meta.json`；未带 `bar1s_time_shift_ms: 28800000` 的旧 AKE 报告不得引用。
-candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈值来源同步失效，
-对齐回放、重新标定和 walk-forward 完成前不评价收益，live 仍无条件拒绝。
+candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈值来源同步失效。
+当前仅作为固定数据观察基线，暂停重新标定、walk-forward 和收益寻优；先与用户
+共同审阅逐笔交易事实，live 仍无条件拒绝。
 
 当前文档优先级：
 
@@ -53,7 +55,7 @@ candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈�
 | 行情聚合 | aggTrade 到 `Bar1s` 的内存聚合器 | 已实现基础逻辑 |
 | 行情分发 | Redis Pub/Sub、Kline latest Hash | 已通过真实 Redis 服务级集成 |
 | 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新与断线重连已有自动化验证，待进程重启恢复和外部长时间验证 |
-| 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；REST harness 已真实写入，完整进程空仓启动/重启已验收，外部订单回报待完成 |
+| 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；终态 WAL 补账、回调 fatal/排空、账户单实例和外部订单拒绝已覆盖 |
 | 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory 审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成 |
 | 风控 | 总持仓价值、币种数量、杠杆上限、未知订单币种阻塞 | 仅最小基础能力 |
 | 回测 | UTC 虚拟时钟、16h 预热、部分成交、交易所量化、持仓、费用和策略审计报告 | AKEUSDT 已发现并显式修正 1s `+8h`；对齐后的退出与绩效口径仍未冻结 |
@@ -99,6 +101,12 @@ candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈�
   已终态但仍有残仓的退出允许补清，candidate 与轮换不会并发生成两张退出单。
   首次停机发现“交易所已成交但本地 WAL
   尚为部分成交”的撤单竞态，现会在撤单异常后按原 client ID 查询交易所，明确终态才消解。
+- 订单 TTL 使用首次 intent 不可变时间；终态 WAL 在 PostgreSQL 订单、成交和仓位
+  全部补齐后才记账本 ack。User Stream 回调异常不再被吞掉，关机会有界排空。
+- 同一账户只允许一个执行进程持有 PostgreSQL advisory lock；专用账户出现未归属
+  订单或非托管 symbol 仓位回报时立即 fatal，不写入 Spike 账本。
+- 策略审计已写入 PostgreSQL 并提供 `/api/v1/strategy-audit-events`；本地 Redis 1s Bar
+  任一托管 symbol 超过 10 秒静默时关闭新入场。
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
@@ -152,11 +160,11 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁、真实成交后恢复及空仓释放 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、三档幂等、部分成交/撤单竞态/迟到回报自动化及完整进程外部验收 | Phase 2/3 |
 | **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/订单仓位启动门禁/规则量化/重连顺序/外部部分成交和保护退出；⏳异常断流故障注入 | Phase 3 |
-| **持仓退出** | ✅ candidate-v1 状态机、特征、origin 减半、趋势/动能/时间退出及 Redis/WAL 恢复；⏳ 对齐数据重新标定与 walk-forward；live 禁止启动 | Phase 2/3 |
+| **持仓退出** | ✅ candidate-v1 状态机、特征、origin 减半、趋势/动能/时间退出及 Redis/WAL 恢复；⏸ 依 D-028 暂停调参，先逐笔数据评审；live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞/全局 halt；⏳保证金、日亏损、数据延迟 | Phase 3 |
 | **监听池** | ✅ 5 分钟扫描编排及 subcategory 同节拍刷新；⏳ 真实扫描器、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/缺失拒绝/窗口缺口/部分成交/显式 1s 时间修正；⏳ 滑点、同秒顺序及多数据源一致性门禁 | Phase 2 |
-| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ 具体进程已接 Binance 回报、WAL、风险和账本；⏳ 完整退出 PnL | Phase 2/4 |
+| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ 实时审计 PostgreSQL 幂等落库与查询 API；⏳ 完整退出 PnL | Phase 2/4 |
 | **Web** | ✅ subcategory 控制已接具体进程、fail-closed 刷新与关闭撤单、账本、PnL、运行状态；⏳ 身份权限 | Phase 4 |
 | **运维** | ✅ testnet/live 隔离、专用账户紧急清仓脚本和运行手册；⏳监控、告警、凭据、回滚及 one-way 外部演练 | Phase 5-6 |
 
@@ -164,10 +172,13 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run pytest -q`：`340 passed, 15 skipped, 1 warning`
-- Compose 真实 PostgreSQL/Redis：`356 passed, 1 warning`
+- 本地 `uv run pytest -q`：`369 passed, 19 skipped, 1 warning`
+- Compose 真实 PostgreSQL/Redis：`388 passed, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - AKEUSDT 外部执行追加 1 轮非市价 LIMIT 撤单和 3 轮可成交 LIMIT 开空/reduce-only MARKET 平仓；最终独立检查为 0 挂单、0 仓位
+- BTCUSDT 追加 `SELL LIMIT 0.001 @ 100000` 从 `NEW` 到 `CANCELED`，以及
+  `SELL LIMIT 0.001 @ 65000` 成交后 reduce-only 平仓；独立复核 AKEUSDT/BTCUSDT
+  均为 0 挂单、0 仓位
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
 - Binance `demo-fapi` 真实鉴权成功；账户已切换 one-way，AKEUSDT 真实 `SELL LIMIT` 成交
   1300 后以 reduce-only `BUY MARKET` 成交 1300 并归零

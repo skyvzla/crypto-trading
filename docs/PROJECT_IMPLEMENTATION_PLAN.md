@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.18
+> 版本：v1.19
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -52,8 +52,8 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 当前本地全量测试为 `340 passed, 15 skipped, 1 warning`；Compose 真实
-  PostgreSQL/Redis 全量为 `356 passed, 1 warning`；
+- 当前本地全量测试为 `369 passed, 19 skipped, 1 warning`；Compose 真实
+  PostgreSQL/Redis 全量为 `388 passed, 1 warning`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - replay 数据范围固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
   `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
@@ -110,6 +110,15 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
   仓位全部同步成功前不会 ack，崩溃后仍会重试补账。
 - User Stream 会跟踪所有账本/仓位回调；回调异常立即关闭 execution gate 并终止
   Spike 进程，关机在有界时间内排空回调，超时会显式失败。
+- 账户级 PostgreSQL session advisory lock 保证同一交易账户仅有一个执行进程；
+  锁会话丢失会在有界探测后关闭执行门禁并终止进程。
+- 专用账户的未知 client order id 回报和非托管 symbol 仓位回报会立即 fatal，
+  且不会写入 Spike 账本；人工 testnet harness 不得与 Spike 进程并发运行。
+- 策略审计事件已以确定性键幂等写入 PostgreSQL，可通过
+  `/api/v1/strategy-audit-events` 按账户、策略、symbol、事件类型和 Campaign 查询；
+  写入失败时保留待写事件并 fail-closed。
+- Spike 本地检查每个托管 symbol 的 Redis 1s Bar 交付新鲜度；任一流超过 10 秒
+  静默就关闭入场门禁，不依赖上游健康声明。
 
 当前结果证明离线入场链路、Redis/PostgreSQL 内部服务集成、Binance testnet 公共行情短时
 链路、独立 REST harness 及完整策略进程成交恢复可用；异常断流故障注入和正式退出规则仍未
@@ -152,8 +161,8 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 | 能力 | 状态 | 剩余工作 | 验收 |
 |---|---|---|---|
 | PostgreSQL schema 和模型 | 部分完成 | 迁移版本管理、Campaign 表 | 订单/成交/持仓 CRUD 已通过真实 PostgreSQL 测试；部署会幂等应用当前 schema |
-| 订单/成交/持仓/Campaign 账本 | 部分完成 | Campaign 与具体运行时回调装配 | Binance 订单/成交和账户仓位回报均可原子幂等写入，迟到仓位快照不会覆盖新事实 |
-| FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 分页、总数、PnL 和真实数据库健康检查已验证 |
+| 订单/成交/持仓/Campaign 账本 | 部分完成 | Campaign 独立生命周期表 | Binance 订单/成交/仓位及策略审计均可幂等写入，外部订单不会污染策略账本 |
+| FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 订单、成交、持仓、PnL、策略审计分页查询和真实数据库健康检查已验证 |
 | subcategory 准入控制 | 部分完成 | 接入真实可交易池扫描器并外部验证 | 已接入 Spike 进程；乐观并发、追加审计、fail-closed 刷新和关闭撤单已通过真实 PostgreSQL 测试 |
 | Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供运行状态、账本、PnL 和 subcategory 控制 |
 | 权限与操作审计 | 待确认 | 身份、角色、敏感操作范围 | 所有控制变更可追责 |
@@ -225,6 +234,8 @@ WAL 空仓重启。撤单异常后会按原 client ID 查询交易所，只有�
 断流立即关闭执行门禁，重连对账后才恢复；带仓重启恢复 timing、手续费和 trade-id 幂等。
 订单 TTL 现固定为首次 intent 时间，不会因重启延长；未获账本 ack 的终态 WAL 会继续
 回补 PostgreSQL；User Stream 业务回调失败会进入进程级 fatal，关机必须排空或显式报超时。
+同一 account id 的执行进程由 PostgreSQL session lock 单实例保护；未归属 WAL 的订单回报
+和非托管 symbol 仓位不再写入策略账本，而是直接停止进程。
 剩余外部断流和持续未知回报故障注入，以及正式保护退出规则验收。
 
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
@@ -255,8 +266,10 @@ fail-closed 轮询及关闭撤销未成交入场单已完成，User Stream 到 W
 
 Compose 已覆盖真实 Redis/PostgreSQL 服务级集成，测试编排已使用独立项目隔离且不会重建默认依赖；
 默认行情/账本服务首次部署健康检查及 PostgreSQL 重建后账本恢复脚本已验证；
-Binance testnet 已完成预挂撤单、3 轮开平仓和最终空仓检查；完整策略链路此前已覆盖部分成交
+Binance testnet 已完成预挂撤单、4 轮开平仓和最终空仓检查；完整策略链路此前已覆盖部分成交
 和 Campaign 释放。剩余外部断流/持续未知故障注入、告警和恢复演练。
+最新一轮 BTCUSDT 使用 `SELL LIMIT 0.001 @ 65000` 成交，随后 `BUY MARKET reduceOnly`
+全部成交；独立 dry-run 复核 AKEUSDT/BTCUSDT 均为 0 挂单、0 持仓。
 
 退出条件：至少覆盖下单、部分成交、撤单、拒单、超时、断流、重启、对账、保护退出和
 subcategory 关闭；验收阈值由用户确认后写入决策记录。
@@ -298,8 +311,8 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前本地全量基线为 `340 passed, 15 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
-基线为 `356 passed, 1 warning`。
+当前本地全量基线为 `369 passed, 19 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
+基线为 `388 passed, 1 warning`。
 
 ## 8. 风险与停止条件
 
