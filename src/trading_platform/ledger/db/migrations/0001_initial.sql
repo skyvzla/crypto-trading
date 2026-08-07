@@ -1,5 +1,3 @@
--- Ledger schema. Existing deployments require an explicit migration.
-
 CREATE TABLE IF NOT EXISTS orders (
     id BIGSERIAL PRIMARY KEY,
     account_id VARCHAR(32) NOT NULL,

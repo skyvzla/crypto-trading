@@ -27,6 +27,7 @@ dev = [
 
 [project.scripts]
 spike-live = "trading_platform.strategies.spike_main:main"
+ledger-migrate = "trading_platform.ledger.db.migrations:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -38,6 +39,7 @@ include = ["trading_platform*"]
 
 [tool.setuptools.package-data]
 "trading_platform.ledger" = ["web/*.html", "web/*.css", "web/*.js"]
+"trading_platform.ledger.db" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

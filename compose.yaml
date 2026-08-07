@@ -7,7 +7,6 @@ services:
       POSTGRES_DB: ${DB_DATABASE:-trading_platform}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./src/trading_platform/ledger/db/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     networks:
       - trading_net
     healthcheck:
@@ -61,6 +60,22 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  ledger-migrate:
+    build: *app_build
+    command: ["python", "-m", "trading_platform.ledger.db.migrations", "migrate"]
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_DATABASE: ${DB_DATABASE:-trading_platform}
+    networks:
+      - trading_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   ledger:
     build: *app_build
     command: ["python", "-m", "trading_platform.ledger"]
@@ -80,8 +95,8 @@ services:
     networks:
       - trading_net
     depends_on:
-      postgres:
-        condition: service_healthy
+      ledger-migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/v1/health', timeout=2)"]
       interval: 5s
@@ -129,6 +144,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      ledger-migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
       market:

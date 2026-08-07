@@ -3,7 +3,6 @@
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 from uuid import uuid4
 from unittest.mock import AsyncMock, Mock
 
@@ -23,6 +22,7 @@ from trading_platform.ledger.db.models import (
     Trade,
     create_connection_pool,
 )
+from trading_platform.ledger.db.migrations import apply_migrations, verify_current
 from trading_platform.shared.binance import BinanceOrderExecutor
 from trading_platform.shared.events import (
     Order as StrategyOrder,
@@ -42,9 +42,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 async def ledger():
     pool = await create_connection_pool(os.environ["LEDGER_TEST_DSN"], 1, 4)
-    schema = Path("src/trading_platform/ledger/db/schema.sql").read_text()
-    async with pool.connection() as conn:
-        await conn.execute(schema)
+    await apply_migrations(pool)
+    await verify_current(pool)
     yield LedgerDB(pool)
     await pool.close()
 

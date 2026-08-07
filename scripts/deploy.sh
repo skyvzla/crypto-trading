@@ -21,8 +21,7 @@ fi
 docker compose config -q
 docker compose build
 docker compose up -d --wait postgres redis
-docker compose exec -T postgres sh -c \
-  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
-  < src/trading_platform/ledger/db/schema.sql
+docker compose run --rm --no-deps ledger \
+  python -m trading_platform.ledger.db.migrations migrate
 docker compose up -d --wait market ledger
 docker compose ps

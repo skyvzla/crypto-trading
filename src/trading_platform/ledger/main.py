@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from trading_platform.ledger.db.models import LedgerDB, create_connection_pool
+from trading_platform.ledger.db.migrations import apply_migrations, verify_current
 from trading_platform.ledger.api.routes import router
 from trading_platform.shared.config import load_config
 
@@ -54,22 +55,16 @@ async def lifespan(app: FastAPI):
     )
 
     try:
-        async with pool.connection() as conn:
-            result = await conn.execute(
-                """
-                SELECT COUNT(*)
-                FROM information_schema.tables
-                    WHERE table_schema = 'public'
-                    AND table_name IN ('orders', 'trades', 'positions', 'subcategory_admission', 'subcategory_admission_audit', 'strategy_audit_events')
-                """
-            )
-            tables = await result.fetchone()
-            if not tables or tables[0] != 6:
-                raise RuntimeError("Required ledger tables are missing; apply ledger/db/schema.sql")
-            logger.info("Database tables verified")
+        result = await apply_migrations(pool)
+        current = await verify_current(pool)
+        logger.info(
+            "Database schema verified at version %04d; applied=%s",
+            current,
+            result.applied_versions or "none",
+        )
     except Exception as e:
         await pool.close()
-        raise RuntimeError(f"Failed to verify database tables: {e}") from e
+        raise RuntimeError(f"Failed to migrate or verify database schema: {e}") from e
 
     app.state.ledger_db = LedgerDB(pool)
     logger.info("Database connection pool created")

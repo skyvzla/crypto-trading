@@ -161,7 +161,7 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 
 | 能力 | 状态 | 剩余工作 | 验收 |
 |---|---|---|---|
-| PostgreSQL schema 和模型 | 部分完成 | 迁移版本管理 | 订单/成交/持仓和策略审计已通过真实 PostgreSQL 测试；部署会幂等应用当前 schema |
+| PostgreSQL schema 和模型 | 完成 | 后续变更逐版本追加迁移 | 有序迁移、事务回滚、并发锁、校验和及既有数据接管已通过真实 PostgreSQL 测试；启动会迁移并验证当前版本 |
 | 订单/成交/持仓与 Campaign 生命周期审计 | 部分完成 | 完整退出 PnL | Binance 订单/成交/仓位及策略审计均可幂等写入；Campaign 生命周期通过 `strategy_audit_events` 按 `campaign_id` 查询，不新增重复状态表；外部订单不会污染策略账本 |
 | FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 订单、成交、持仓、PnL、策略审计分页查询和真实数据库健康检查已验证 |
 | subcategory 准入控制 | 部分完成 | 接入真实可交易池扫描器并外部验证 | 已接入 Spike 进程；乐观并发、追加审计、fail-closed 刷新和关闭撤单已通过真实 PostgreSQL 测试 |
@@ -255,8 +255,7 @@ fail-closed 轮询及关闭撤销未成交入场单已完成，User Stream 到 W
 风险门禁和账本的组合回调已通过真实 PostgreSQL 验证，具体 Spike 进程已接入准入状态。
 Campaign 运行时权威状态保留在 Redis 原子租约中；其持久历史已由 PostgreSQL
 `strategy_audit_events` 幂等记录，并可按 `campaign_id` 查询。这里不再新增独立 Campaign
-状态表，避免与 Redis 运行态形成双写权威。剩余：迁移版本管理、完整退出 PnL，以及待确认的
-身份认证和权限。
+状态表，避免与 Redis 运行态形成双写权威。剩余：完整退出 PnL，以及待确认的身份认证和权限。
 
 退出条件：控制变更和完整交易生命周期均可查询；并发修改不会静默覆盖；Web 不可绕过
 策略准入和风控；数据库或 Redis 故障时默认禁止新增风险。
