@@ -16,7 +16,7 @@ def test_testnet_selects_futures_endpoints(monkeypatch):
     monkeypatch.delenv("BINANCE_BASE_URL", raising=False)
     monkeypatch.delenv("BINANCE_WS_BASE_URL", raising=False)
     config = BinanceConfig()
-    assert config.base_url == "https://testnet.binancefuture.com"
+    assert config.base_url == "https://demo-fapi.binance.com"
     assert config.ws_base_url == "wss://stream.binancefuture.com"
 
     _, service = create_app(MarketLayerConfig(), "test-epoch")

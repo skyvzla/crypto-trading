@@ -3,7 +3,11 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from trading_platform.shared.binance import BinanceOrderExecutor
+from trading_platform.shared.binance import (
+    BinanceOrderExecutor,
+    BinanceSymbolRuleBook,
+    BinanceSymbolRules,
+)
 from trading_platform.shared.events import OrderIntent
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
@@ -36,6 +40,106 @@ def _executor(wal: OrderWAL, guard: RiskGuard) -> BinanceOrderExecutor:
         now_ms=lambda: 2000,
         risk_guard=guard,
     )
+
+
+def _rules() -> BinanceSymbolRuleBook:
+    return BinanceSymbolRuleBook(
+        {
+            "BTCUSDT": BinanceSymbolRules(
+                symbol="BTCUSDT",
+                tick_size=Decimal("0.1"),
+                min_price=Decimal("0.1"),
+                max_price=Decimal("1000000"),
+                lot_step_size=Decimal("0.01"),
+                min_quantity=Decimal("0.01"),
+                max_quantity=Decimal("100"),
+                market_step_size=Decimal("0.01"),
+                market_min_quantity=Decimal("0.01"),
+                market_max_quantity=Decimal("100"),
+                min_notional=Decimal("5"),
+            )
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_submit_normalizes_before_wal_and_exchange_request(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    rest = Mock(
+        post_order=AsyncMock(return_value={"status": "NEW", "orderId": 42}),
+        query_order=AsyncMock(),
+    )
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        risk_guard=RiskGuard("account-1", RiskConfig()),
+        symbol_rules=_rules(),
+    )
+    candidate = _intent("cid-normalized")
+    candidate.price = Decimal("100.01")
+    candidate.quantity = Decimal("0.109")
+
+    record = await executor.submit(candidate)
+
+    assert record.price == "100.1"
+    assert record.quantity == "0.10"
+    rest.post_order.assert_awaited_once_with(
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("0.10"),
+        price=Decimal("100.1"),
+        new_client_order_id="cid-normalized",
+        reduce_only=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_risk_rejection_happens_before_wal_or_rest_submission(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    rest = Mock(post_order=AsyncMock(), query_order=AsyncMock())
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        risk_guard=RiskGuard(
+            "account-1",
+            RiskConfig(max_position_value_usdt=Decimal("5")),
+        ),
+        symbol_rules=_rules(),
+    )
+
+    with pytest.raises(PermissionError, match="risk guard"):
+        await executor.submit(_intent("cid-rejected"))
+
+    assert wal.recover_latest() == {}
+    rest.post_order.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reused_client_id_with_different_intent_fails_closed(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    rest = Mock(
+        post_order=AsyncMock(return_value={"status": "NEW", "orderId": 42}),
+        query_order=AsyncMock(),
+    )
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        risk_guard=guard,
+    )
+    await executor.submit(_intent("cid-reused"))
+    changed = _intent("cid-reused")
+    changed.quantity = Decimal("0.2")
+
+    with pytest.raises(ValueError, match="different intent"):
+        await executor.submit(changed)
+
+    assert rest.post_order.await_count == 1
+    assert "BTCUSDT" in guard.blocked_symbols
 
 
 @pytest.mark.parametrize(

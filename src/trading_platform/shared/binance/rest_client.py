@@ -161,6 +161,10 @@ class BinanceRestClient:
 
     # ========== 订单接口 ==========
 
+    async def get_exchange_info(self) -> dict[str, Any]:
+        """读取 USD-M Futures 交易规则；该接口无需签名。"""
+        return await self._request('GET', '/fapi/v1/exchangeInfo', {}, signed=False)
+
     async def post_order(
         self,
         symbol: str,
@@ -305,6 +309,10 @@ class BinanceRestClient:
         """
         return await self._request('GET', '/fapi/v2/account', {})
 
+    async def get_position_mode(self) -> dict[str, Any]:
+        """查询账户是单向持仓还是双向持仓模式。"""
+        return await self._request('GET', '/fapi/v1/positionSide/dual', {})
+
     async def get_position_risk(self, symbol: str | None = None) -> list[dict[str, Any]]:
         """
         查询持仓风险
@@ -320,6 +328,31 @@ class BinanceRestClient:
             params['symbol'] = symbol
 
         return await self._request('GET', '/fapi/v2/positionRisk', params)
+
+    async def get_klines(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        limit: int = 500,
+        end_time: int | None = None,
+    ) -> list[list[Any]]:
+        """读取公开的已完成 K 线候选数据，供实时策略启动预热。"""
+        if not 1 <= limit <= 1500:
+            raise ValueError("limit must be between 1 and 1500")
+        params: dict[str, Any] = {
+            'symbol': symbol,
+            'interval': interval,
+            'limit': limit,
+        }
+        if end_time is not None:
+            params['endTime'] = end_time
+        result = await self._request(
+            'GET', '/fapi/v1/klines', params, signed=False
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("invalid Binance kline response")
+        return result
 
     # ========== User Data Stream 接口 ==========
 

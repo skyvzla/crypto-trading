@@ -47,7 +47,7 @@ class BinanceConfig(BaseSettings):
         """Use Binance Futures testnet endpoints when testnet is enabled."""
         if self.testnet:
             if self.base_url == "https://fapi.binance.com":
-                self.base_url = "https://testnet.binancefuture.com"
+                self.base_url = "https://demo-fapi.binance.com"
             if self.ws_base_url == "wss://fstream.binance.com":
                 self.ws_base_url = "wss://stream.binancefuture.com"
         return self

@@ -31,6 +31,68 @@ from trading_platform.shared.execution import StrategyAccount
 
 MS_PER_SECOND = 1000
 MS_PER_MINUTE = 60 * MS_PER_SECOND
+BINANCE_CLIENT_ORDER_ID_MAX_LENGTH = 36
+
+
+def _base36(value: int) -> str:
+    if value < 0:
+        raise ValueError("base36 value must be non-negative")
+    alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+    if value == 0:
+        return "0"
+    encoded = ""
+    while value:
+        value, remainder = divmod(value, 36)
+        encoded = alphabet[remainder] + encoded
+    return encoded
+
+
+def build_entry_client_order_id(symbol: str, signal_time: int, tier: int) -> str:
+    """生成 Binance 允许的短入场 ID，同时保留可逆的 signal time。"""
+    if not symbol.isalnum() or tier not in {1, 2, 3}:
+        raise ValueError("invalid Spike entry order identity")
+    value = f"s_{symbol}_{_base36(signal_time)}_e{tier}"
+    if len(value) > BINANCE_CLIENT_ORDER_ID_MAX_LENGTH:
+        raise ValueError(f"Spike client order ID exceeds Binance limit: {symbol}")
+    return value
+
+
+def parse_entry_client_order_id(
+    client_order_id: str,
+    *,
+    expected_symbol: str | None = None,
+) -> tuple[str, int] | None:
+    """解析当前短 ID，并兼容已写入旧 WAL 的长格式。"""
+    prefix, separator, tier = client_order_id.rpartition("_e")
+    if separator and tier in {"1", "2", "3"} and prefix.startswith("s_"):
+        symbol, separator, encoded_time = prefix[len("s_") :].rpartition("_")
+        if separator and symbol and encoded_time:
+            try:
+                signal_time = int(encoded_time, 36)
+            except ValueError:
+                return None
+            if expected_symbol is None or symbol == expected_symbol:
+                return symbol, signal_time
+
+    prefix, separator, tier = client_order_id.rpartition("_tier")
+    if not separator or tier not in {"1", "2", "3"} or not prefix.startswith("spike_short_"):
+        return None
+    symbol_and_time = prefix[len("spike_short_") :]
+    symbol, separator, signal_time = symbol_and_time.rpartition("_")
+    if not separator or not signal_time.isdigit():
+        return None
+    if expected_symbol is not None and symbol != expected_symbol:
+        return None
+    return symbol, int(signal_time)
+
+
+def build_exit_client_order_id(symbol: str, event_time: int, reason: str) -> str:
+    if not symbol.isalnum() or reason not in {"t", "r"}:
+        raise ValueError("invalid Spike exit order identity")
+    value = f"x_{symbol}_{_base36(event_time)}_{reason}"
+    if len(value) > BINANCE_CLIENT_ORDER_ID_MAX_LENGTH:
+        raise ValueError(f"Spike client order ID exceeds Binance limit: {symbol}")
+    return value
 
 
 @dataclass
@@ -310,7 +372,9 @@ class DynamicSpikeShortStrategy:
                 side="BUY",
                 price=bar.close,
                 quantity=position.quantity,
-                client_order_id=f"{campaign_id.replace(':', '_')}_rotation_exit",
+                client_order_id=build_exit_client_order_id(
+                    self.symbol, bar.timestamp, "r"
+                ),
                 order_type="MARKET",
                 strategy_id="spike_short",
                 trigger_reason="campaign_rotation_exit",
@@ -366,7 +430,9 @@ class DynamicSpikeShortStrategy:
                 side="BUY",
                 price=bar.close,
                 quantity=position.quantity,
-                client_order_id=f"{self._campaign_id_for_timing or 'spike_short'}_timeout_exit",
+                client_order_id=build_exit_client_order_id(
+                    self.symbol, self.first_fill_time, "t"
+                ),
                 order_type="MARKET",
                 strategy_id="spike_short",
                 trigger_reason="campaign_timeout_exit",
@@ -444,7 +510,7 @@ class DynamicSpikeShortStrategy:
         return intents
 
     def _client_order_id(self, sig: SpikeSignal, tier_idx: int) -> str:
-        return f"spike_short_{self.symbol}_{sig.signal_time}_tier{tier_idx}"
+        return build_entry_client_order_id(self.symbol, sig.signal_time, tier_idx)
 
     def _cancel_signal_orders(self, sig: SpikeSignal) -> int:
         """
@@ -468,15 +534,13 @@ class DynamicSpikeShortStrategy:
     def _campaign_id(self, sig: SpikeSignal) -> str:
         return f"spike_short:{self.symbol}:{sig.signal_time}"
 
-    @staticmethod
-    def _campaign_id_from_client_order(client_order_id: str) -> str | None:
-        prefix, separator, _tier = client_order_id.rpartition("_tier")
-        if not separator or not prefix.startswith("spike_short_"):
+    def _campaign_id_from_client_order(self, client_order_id: str) -> str | None:
+        parsed = parse_entry_client_order_id(
+            client_order_id, expected_symbol=self.symbol
+        )
+        if parsed is None:
             return None
-        symbol_and_time = prefix[len("spike_short_"):]
-        symbol, separator, signal_time = symbol_and_time.rpartition("_")
-        if not separator:
-            return None
+        symbol, signal_time = parsed
         return f"spike_short:{symbol}:{signal_time}"
 
     def _record_signal_terminal(

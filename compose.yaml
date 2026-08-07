@@ -90,6 +90,50 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  spike:
+    profiles: ["spike"]
+    build: *app_build
+    command: ["python", "-m", "trading_platform.strategies.spike_main"]
+    init: true
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_DATABASE: ${DB_DATABASE:-trading_platform}
+      STRATEGY_ACCOUNT_ID: ${SPIKE_ACCOUNT_ID:-spike_testnet}
+      STRATEGY_MARKET_API_URL: http://market:8000
+      STRATEGY_RISK_MAX_POSITION_VALUE_USDT: ${STRATEGY_RISK_MAX_POSITION_VALUE_USDT:-1000}
+      STRATEGY_RISK_MAX_SYMBOLS: ${STRATEGY_RISK_MAX_SYMBOLS:-1}
+      SPIKE_MODE: ${SPIKE_MODE:-testnet}
+      SPIKE_ACCOUNT_ID: ${SPIKE_ACCOUNT_ID:-spike_testnet}
+      SPIKE_SYMBOLS: ${SPIKE_SYMBOLS:-AKEUSDT}
+      SPIKE_TOTAL_NOTIONAL: ${SPIKE_TOTAL_NOTIONAL:-10}
+      SPIKE_WAL_PATH: /app/data/wal/spike_short.jsonl
+      SPIKE_DEDICATED_STRATEGY_ACCOUNT: "true"
+      SPIKE_POLL_INTERVAL_SECONDS: "5"
+      SPIKE_MAX_POLL_ATTEMPTS: "12"
+      BINANCE_API_KEY: ${BINANCE_API_KEY:-}
+      BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      market:
+        condition: service_healthy
+    restart: unless-stopped
+
   strategy_kline:
     profiles: ["examples"]
     build: *app_build

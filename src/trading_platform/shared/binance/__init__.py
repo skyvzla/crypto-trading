@@ -16,6 +16,11 @@ from .user_stream import (
 )
 from .live_executor import BinanceOrderExecutor
 from .runtime import BinanceExecutionRuntime
+from .symbol_rules import (
+    BinanceSymbolRuleBook,
+    BinanceSymbolRules,
+    SymbolRuleViolation,
+)
 
 __all__ = [
     'RateLimiter',
@@ -27,4 +32,7 @@ __all__ = [
     'UserDataStream',
     'BinanceOrderExecutor',
     'BinanceExecutionRuntime',
+    'BinanceSymbolRuleBook',
+    'BinanceSymbolRules',
+    'SymbolRuleViolation',
 ]

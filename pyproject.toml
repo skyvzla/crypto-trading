@@ -25,6 +25,9 @@ dev = [
     "pytest-cov>=6.0",
 ]
 
+[project.scripts]
+spike-live = "trading_platform.strategies.spike_main:main"
+
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"

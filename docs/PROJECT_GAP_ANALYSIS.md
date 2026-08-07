@@ -2,21 +2,24 @@
 
 > 盘点日期：2026-08-07
 > 盘点依据：当前源码、容器测试、`docs/spike_trader/decisions.md` 与已归档状态快照
-> 状态：实施中；成交与退出规则待用户确认
+> 状态：实施中；testnet 执行账户模式与正式退出参数待处理
 
 ## 1. 当前结论
 
 项目已形成“历史数据预热 -> Spike 信号 -> 三档订单 -> 成交/持仓 -> 报告”的
-可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
-执行仍未完成。User Stream 到 WAL/RiskGuard/PostgreSQL 的可复用运行时与组合测试已经完成，
-但尚未建立绑定具体 testnet 账户的长期运行进程和完整交易所启动对账。
+可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。Spike 的 testnet/live
+进程已装配行情预热、User Stream、WAL、PostgreSQL、Redis Campaign、subcategory、TTL
+撤单、启动对账和周期安全扫描。正式退出仍未完成：testnet 仅允许 D-007 简化退出用于
+执行验证，最新动能/趋势退出参数冻结前，`live` 会拒绝启动。
 
-当前 Compose 真实 Redis/PostgreSQL 全量测试为 `179 passed, 1 warning`，包含新增的 Redis
-Campaign 和 5 分钟扫描测试。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前 Compose 真实 Redis/PostgreSQL 全量测试为 `222 passed, 1 warning`。测试已按
+`backtest/market/strategies/shared/ledger/integration/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
-testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 testnet 执行或实盘流程可用。
+testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴权已成功；执行 smoke
+在提交前发现账户为 Hedge Mode 并 fail-closed，未产生测试订单。当前程序依赖 one-way
+模式和 `reduceOnly`，不能据此声称 testnet 写路径已经验收。
 
 外部 DuckDB 历史源端到端 replay 已验证。固定基准为 AKEUSDT、UTC `2026-07-01` 至
 `2026-08-01`、从 `2026-06-30 08:00 UTC` 开始 16 小时预热、DuckDB 只读源、
@@ -46,7 +49,7 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 tes
 | 行情聚合 | aggTrade 到 `Bar1s` 的内存聚合器 | 已实现基础逻辑 |
 | 行情分发 | Redis Pub/Sub、Kline latest Hash | 已通过真实 Redis 服务级集成 |
 | 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新与断线重连已有自动化验证，待进程重启恢复和外部长时间验证 |
-| 执行客户端 | Binance REST、签名、限速、User Data Stream | 基础客户端已实现 |
+| 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；真实写入待 one-way testnet 账户 |
 | 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory 审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成 |
 | 风控 | 总持仓价值、币种数量、杠杆上限、未知订单币种阻塞 | 仅最小基础能力 |
 | 回测 | UTC 虚拟时钟、16h 预热、简化限价成交、持仓、费用和策略审计报告 | AKEUSDT 外部只读 DuckDB 端到端 replay 已验证；退出与绩效口径仍未冻结 |
@@ -57,7 +60,7 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 tes
 
 ### 3.1 测试网端点隔离（已修复）
 
-- `BINANCE_TESTNET=true` 会自动选择 Futures testnet REST/WS URL。
+- `BINANCE_TESTNET=true` 会自动选择可鉴权的 `demo-fapi` REST 与 testnet WS URL。
 - 行情服务使用统一 `BinanceConfig`，不再硬编码生产 WS URL。
 - Compose 默认 testnet，不再用生产 URL 环境默认值抵消配置切换。
 
@@ -81,11 +84,11 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 tes
 - 策略通过最小 `StrategyAccount` 协议查询订单、持仓和撤单
 - `BacktestEngine` 实现该协议，旧 `bind_engine()` 仅保留第三方兼容入口
 
-**仍缺失的实时适配**（Phase 3 修复范围）：
-- testnet/live 账户实现尚未接入 `StrategyAccount`
-- User Stream 订单/账户回报、未知 WAL 启动对账、后台轮询、停止和重连已形成可复用运行时；
-  订单回报会同步 WAL/RiskGuard 和 PostgreSQL，账户回报写入持仓。具体 testnet 账户进程、
-  完整交易所启动对账和迟到回报竞态仍未完成
+**已补齐的实时适配**：
+- `BinanceStrategyAccount` 将 WAL、订单回报和仓位快照投影为同步 `StrategyAccount`；
+- `spike-live` 进程已装配历史 Kline 预热、实时行情、User Stream、账本、Campaign 和准入；
+- 启动强制专用账户、one-way 模式、交易所规则快照和订单/仓位一致性；关机先撤销未终态入场单；
+- 仍需在 one-way testnet 账户验证部分成交、撤单竞态、重连及迟到回报。
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
@@ -139,20 +142,22 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约组件；⏳ 运行时接线、恢复与终态 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/REST 提交/User Stream 同步/未知单启动与后台解析/风险阻塞/生命周期/共享账户拒绝门禁；⏳具体账户进程、完整启动对账、迟到回报 | Phase 3 |
-| **持仓退出** | ✅ D-007 900 秒非正收益退出；保护单、止损、止盈、盈利管理、最终结算 | Phase 2/3 |
+| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/具体账户进程/订单仓位启动门禁/规则量化；⏳真实部分成交、撤单竞态、迟到回报 | Phase 3 |
+| **持仓退出** | ✅ D-007 仅用于 replay/testnet 执行验证；⏳ 最新动能、origin 减半、趋势清仓及参数标定；未完成前 live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞；⏳保证金、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | ✅ 5 分钟扫描编排及 subcategory 同节拍刷新；⏳ 真实扫描器、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/数据集缺失拒绝/窗口缺口门禁/未平仓 MTM；⏳ 部分成交、滑点、同秒顺序最终口径 | Phase 2 |
-| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ Binance 回报到 WAL/风险门禁/账本组合链路；⏳ 具体账户进程和完整 PnL 链路 | Phase 2/4 |
-| **Web** | ✅ subcategory 控制、fail-closed 策略轮询与关闭撤单、账本、PnL、运行状态；⏳ 具体账户进程和身份权限 | Phase 4 |
+| **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ 具体进程已接 Binance 回报、WAL、风险和账本；⏳ 完整退出 PnL | Phase 2/4 |
+| **Web** | ✅ subcategory 控制已接具体进程、fail-closed 刷新与关闭撤单、账本、PnL、运行状态；⏳ 身份权限 | Phase 4 |
 | **运维** | testnet/live 隔离、监控、告警、凭据、回滚、紧急平仓 | Phase 5-6 |
 
 ## 5. 测试现状与缺口
 
 已验证：
 
-- `docker compose -f compose.test.yaml run --rm --build test`：`179 passed, 1 warning`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`222 passed, 1 warning`
+- 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
+- Binance `demo-fapi` 真实只读鉴权成功，`canTrade=true`；真实写入因账户 Hedge Mode 被前置门禁拒绝，未产生订单
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready
@@ -173,7 +178,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - subcategory 准入服务接入具体 testnet/live 账户进程及外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
-- Binance Futures testnet 真实外部执行；Compose 全服务健康与 testnet 配置隔离已验证
+- Binance Futures testnet one-way 账户上的预挂、撤单、成交、部分成交和 reduce-only 退出
 
 ## 6. 明确不做
 
@@ -202,12 +207,12 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 信号检测逻辑 | 已冻结 | 参数与实验脚本对齐，消除未来数据泄漏 |
 | 三档挂单 | 已修复 | `range(3)` 修复，价格计算正确 |
 | 数据连续性检查 | 已实现 | 5s/60s 窗口检查及行情层质量门禁已接入 |
-| 订单幂等 | 部分完成 | `placed_client_order_ids`、订单 WAL、User Stream 同步、启动恢复和后台轮询已有，缺参数确认与具体账户进程 |
-| 失效撤单 | replay 已实现 | `_cancel_signal_orders()` 正确撤单；实时撤单竞态待验证 |
-| Campaign | 部分完成 | 已有全局准入锁、首成交时钟、D-009 轮换退出和 Redis 原子租约组件，缺运行时接线、恢复与终态账本 |
-| 持仓管理 | 部分完成 | D-007 已实现；保护退出、盈利管理和完整已平仓 PnL 待确认 |
-| 环境解耦 | 部分完成 | 已依赖最小账户协议，缺 testnet/live 账户适配器 |
-| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API、回报组合运行时及订单/成交/仓位原子入账已有，缺具体账户进程和 Campaign |
+| 订单幂等 | 已接入实时进程 | WAL、User Stream、启动恢复、5秒×12轮询、client ID 身份冲突门禁；真实竞态待验收 |
+| 失效撤单 | 已接入实时进程 | TTL、失效、subcategory 关闭及关机均撤销入场单；真实撤单竞态待验证 |
+| Campaign | 已接入实时进程 | Redis 原子租约、恢复一致性和订单终态+空仓释放已装配；Campaign 账本仍缺 |
+| 持仓管理 | 部分完成 | D-007 仅为执行测试；最新 origin/动能/趋势方案待标定，live 已硬阻断 |
+| 环境解耦 | 已完成进程适配 | replay 与 BinanceStrategyAccount 共用策略接口，testnet/live 共用执行进程 |
+| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API、具体进程订单/成交/仓位入账已有，缺 Campaign 账本和完整退出 PnL |
 | Web V1 | 部分完成 | 账本、PnL、状态、subcategory 已有，缺身份权限和浏览器视觉验收 |
 
 **Phase 0 剩余工作**：

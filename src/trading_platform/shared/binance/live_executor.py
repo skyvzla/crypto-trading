@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -18,6 +19,7 @@ from trading_platform.shared.execution_recovery import (
 from trading_platform.shared.risk import RiskGuard
 
 from .rest_client import BinanceRestClient
+from .symbol_rules import BinanceSymbolRuleBook
 
 
 class BinanceOrderExecutor:
@@ -31,6 +33,7 @@ class BinanceOrderExecutor:
         account_id: str,
         now_ms: Callable[[], int] | None = None,
         risk_guard: RiskGuard | None = None,
+        symbol_rules: BinanceSymbolRuleBook | None = None,
     ):
         self.rest_client = rest_client
         self.wal = wal
@@ -38,16 +41,30 @@ class BinanceOrderExecutor:
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._resolver = SubmitUnknownResolver(wal, rest_client)
         self.risk_guard = risk_guard
+        self.symbol_rules = symbol_rules
 
     async def submit(
         self,
         intent: OrderIntent,
         *,
         reduce_only: bool = False,
+        reference_price: Decimal | None = None,
+        leverage: int = 1,
     ) -> OrderWALRecord:
         """提交一次订单；相同 ``client_order_id`` 永不自动重复提交。"""
+        if self.symbol_rules is not None:
+            intent = self.symbol_rules.get(intent.symbol).normalize_intent(
+                intent,
+                reference_price=reference_price,
+            )
         existing = self.wal.recover_latest().get(intent.client_order_id)
         if existing is not None:
+            if not self._same_intent(existing, intent):
+                self._block_unknown(existing)
+                raise ValueError(
+                    f"client_order_id reused with different intent: "
+                    f"{intent.client_order_id}"
+                )
             if existing.record_type == "intent":
                 return self._record_unknown(
                     existing,
@@ -56,6 +73,19 @@ class BinanceOrderExecutor:
             if existing.status == "SUBMIT_UNKNOWN":
                 self._block_unknown(existing)
             return existing
+        if not reduce_only and self.risk_guard is not None:
+            notional_price = (
+                intent.price if intent.order_type == "LIMIT" else reference_price
+            )
+            if notional_price is None:
+                raise ValueError("market entry requires reference_price")
+            allowed, reason = self.risk_guard.check_can_open(
+                intent.symbol,
+                intent.quantity * notional_price,
+                leverage=leverage,
+            )
+            if not allowed:
+                raise PermissionError(f"order rejected by risk guard: {reason}")
 
         intent_record = self.wal.record_intent(
             intent,
@@ -210,3 +240,13 @@ class BinanceOrderExecutor:
             self.risk_guard.block_symbol(symbol, "SUBMIT_UNKNOWN pending")
         else:
             self.risk_guard.unblock_symbol(symbol)
+
+    @staticmethod
+    def _same_intent(record: OrderWALRecord, intent: OrderIntent) -> bool:
+        return (
+            record.symbol == intent.symbol
+            and record.side == intent.side
+            and record.order_type == intent.order_type
+            and Decimal(record.quantity) == intent.quantity
+            and Decimal(record.price) == intent.price
+        )
