@@ -11,8 +11,8 @@
 执行仍未完成。User Stream 到 WAL/RiskGuard/PostgreSQL 的可复用运行时与组合测试已经完成，
 但尚未建立绑定具体 testnet 账户的长期运行进程和完整交易所启动对账。
 
-当前本地全量测试为 `158 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`167 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `159 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`168 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
@@ -139,7 +139,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时；⏳ 恢复与终态 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/REST 提交/User Stream 同步/未知单启动与后台解析/风险阻塞/生命周期；⏳具体账户进程、完整启动对账、迟到回报 | Phase 3 |
+| **执行恢复** | ✅ WAL/REST 提交/User Stream 同步/未知单启动与后台解析/风险阻塞/生命周期/共享账户拒绝门禁；⏳具体账户进程、完整启动对账、迟到回报 | Phase 3 |
 | **持仓退出** | ✅ D-007 900 秒非正收益退出；保护单、止损、止盈、盈利管理、最终结算 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞；⏳保证金、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | subcategory、低频发现扫描、监听租约、保护性监听 | Phase 1/4 |
@@ -152,8 +152,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`158 passed, 9 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`167 passed`
+- `uv run --extra dev pytest -q`：`159 passed, 9 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`168 passed`
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready

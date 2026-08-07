@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.8
+> 版本：v1.9
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `158 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `167 passed`；
+- 本地全量测试为 `159 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `168 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 真实 replay 基准已固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
   `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
@@ -63,6 +63,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
   `ORDER_TRADE_UPDATE` 会严格同步 WAL/RiskGuard，并与订单/成交、`ACCOUNT_UPDATE` 持仓
   共同写入 PostgreSQL，组合链路已通过真实数据库测试。测试网真实执行、完整交易所订单/
   成交/仓位启动对账、持仓保护与退出，以及具体运行账户进程仍未完成。
+- 账户级回报不得隐式归属策略：运行时工厂要求显式声明专用策略账户；共享账户在缺少
+  client-order-id 和仓位路由规则时直接拒绝启动。
 
 当前结果证明离线入场链路、Redis/PostgreSQL 内部服务集成及 Binance testnet 公共行情短时
 链路可用，不能证明 testnet 订单执行或正式账户可用。
@@ -241,7 +243,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `158 passed, 9 skipped`；Compose 真实 Redis/PostgreSQL 环境 `167 passed`。
+当前基线：本地 `159 passed, 9 skipped`；Compose 真实 Redis/PostgreSQL 环境 `168 passed`。
 
 ## 8. 风险与停止条件
 
