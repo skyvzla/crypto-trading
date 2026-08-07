@@ -60,6 +60,21 @@ uv run --extra dev python -m trading_platform.backtest.runner \
   --data-dir data/market --total-notional 1000
 ```
 
+已验证的 AKEUSDT 2026 年 7 月只读 DuckDB replay：
+
+```bash
+uv run --extra dev python -m trading_platform.backtest.runner \
+  --strategy spike --symbols AKEUSDT \
+  --start 2026-07-01 --end 2026-08-01 \
+  --duckdb-path /data/projects/quant/crypto/data/market/history.duckdb \
+  --output reports/akeusdt_2026_07_replay \
+  --total-notional 1000
+```
+
+该命令从 `2026-06-30 08:00 UTC` 开始默认 16 小时预热；DuckDB 以只读模式打开。
+当前固定结果只有一个 OPEN Campaign，期末未实现 PnL 仅用于核对末价计价，不作为
+策略绩效基线。
+
 常用停止命令：
 
 ```bash

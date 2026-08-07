@@ -10,12 +10,21 @@
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。持仓保护与退出、测试网
 执行，以及执行回报、账户仓位到账本的完整运行时闭环尚未完成。
 
-当前本地全量测试为 `124 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`131 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `129 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`136 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
 testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 testnet 执行或实盘流程可用。
+
+外部 DuckDB 历史源端到端 replay 已验证。固定基准为 AKEUSDT、UTC `2026-07-01` 至
+`2026-08-01`、从 `2026-06-30 08:00 UTC` 开始 16 小时预热、DuckDB 只读源、
+总名义 `1000 USDT`。运行共处理
+`1,945,737` 个事件：完成 1s Bar `1,887,977`、1m Kline `45,600`、5m Kline `9,120`、
+15m Kline `3,040`。D-004 修复后结果为 `3 orders / 3 fills / 1 OPEN`，入场名义约
+`1000 USDT`，全程只有一个 Campaign。期末未实现 PnL `-15,771.98 USDT` 是 OPEN
+仓位的末价诊断值，不是绩效基线；D-008 盈利管理及完整退出/保护规则未确认前，不据此
+评价策略收益。
 
 当前文档优先级：
 
@@ -39,7 +48,7 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 tes
 | 执行客户端 | Binance REST、签名、限速、User Data Stream | 基础客户端已实现 |
 | 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory 审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成 |
 | 风控 | 总持仓价值、币种数量、杠杆上限、未知订单币种阻塞 | 仅最小基础能力 |
-| 回测 | UTC 虚拟时钟、16h 预热、简化限价成交、持仓、费用和策略审计报告 | replay 入场链路可运行 |
+| 回测 | UTC 虚拟时钟、16h 预热、简化限价成交、持仓、费用和策略审计报告 | AKEUSDT 外部只读 DuckDB 端到端 replay 已验证；退出与绩效口径仍未冻结 |
 | Web | 运行状态、订单、成交、持仓、PnL、subcategory 控制 | V1 已实现，身份权限待确认 |
 | 实验基线 | 100 标的历史研究脚本和报告 | 可作事实对照，不能作生产结论 |
 
@@ -140,11 +149,14 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`124 passed, 7 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`131 passed`
+- `uv run --extra dev pytest -q`：`129 passed, 7 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`136 passed`
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready
+- AKEUSDT 外部 DuckDB 只读 replay：UTC `2026-07-01` 至 `2026-08-01`，16h 预热，
+  处理 `1,945,737` 个事件；D-004 修复后为 `3 orders / 3 fills / 1 OPEN`、单 Campaign，
+  入场名义约 `1000 USDT`
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过
@@ -156,7 +168,6 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
 - Binance Futures testnet 真实外部执行；Compose 全服务健康与 testnet 配置隔离已验证
-- 外部 DuckDB 历史数据上的新平台端到端回测
 
 ## 6. 明确不做
 

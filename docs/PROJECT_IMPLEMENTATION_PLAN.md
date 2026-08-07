@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.5
+> 版本：v1.6
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -37,8 +37,17 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `124 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `131 passed`；
+- 本地全量测试为 `129 passed, 7 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `136 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
+- 真实 replay 基准已固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
+  `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
+  `1000 USDT` 总名义；共处理 `1,945,737`
+  个事件，其中完成 1s Bar `1,887,977`、1m Kline `45,600`、5m Kline `9,120`、
+  15m Kline `3,040`；
+- D-004 全局单 Campaign 修复后，上述真实 replay 产生 `3 orders / 3 fills / 1 OPEN`，
+  入场名义约 `1000 USDT`，且全程只有一个 Campaign；期末未实现 PnL
+  `-15,771.98 USDT` 仅是当前 OPEN 仓位按末价计价的诊断值，不是绩效基线。D-008
+  盈利管理及完整退出/保护规则尚未确认，当前结果不能用于收益评价；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
 - Binance Futures testnet 公共行情短时 smoke 已真实接收 11 条完成 1s Bar 和一条新完成 1m Kline，
@@ -133,8 +142,11 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 成交/费用/持仓/PnL 审计报告。
 
 已完成策略对 `BacktestEngine`/executor 内部结构的解耦、信号/入场计划/失效/首成交基础审计、
-D-007 超时退出及真实 Parquet 输入的三档全成交 CLI 回归。剩余：完成 Campaign 状态机；按确认
-口径实现部分成交、滑点、退出费用、同秒顺序和期末结算；D-008 盈利管理规则确定后补齐。
+D-007 超时退出及真实 Parquet 输入的三档全成交 CLI 回归。AKEUSDT 的只读 DuckDB 外部历史源
+已完成端到端 replay 验证：在固定时间范围和 16 小时预热下处理 `1,945,737` 个事件；D-004
+修复后结果为 `3 orders / 3 fills / 1 OPEN`、单 Campaign、入场名义约 `1000 USDT`。期末未实现
+PnL `-15,771.98 USDT` 不作为绩效基线。剩余：完成 Campaign 状态机；按确认口径实现部分成交、
+滑点、退出费用、同秒顺序和期末结算；D-008 盈利管理规则确定后补齐。
 
 退出条件：同一事件序列在 replay 与实时适配器中产生相同订单意图；所有固定案例通过；
 任何 PnL 均能追溯到订单、成交和费用。
@@ -221,7 +233,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `124 passed, 7 skipped`；Compose 真实 Redis/PostgreSQL 环境 `131 passed`。
+当前基线：本地 `129 passed, 7 skipped`；Compose 真实 Redis/PostgreSQL 环境 `136 passed`。
 
 ## 8. 风险与停止条件
 
