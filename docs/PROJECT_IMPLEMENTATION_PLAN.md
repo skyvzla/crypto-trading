@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.19
+> 版本：v1.20
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -69,7 +69,8 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
 - Binance Futures testnet 公共行情短时 smoke 已真实接收 11 条完成 1s Bar 和一条新完成 1m Kline，
   Redis 交付及质量门禁均为 healthy；该结果不包含鉴权 REST 或订单执行；
-- 账本层已完成订单、成交、持仓 CRUD/PnL 查询、subcategory 准入审计及 Web V1；
+- 账本层已完成订单、成交、持仓 CRUD/PnL 查询、subcategory 准入审计、策略审计
+  （含按 Campaign 查询生命周期）及 Web V1；
 - D-010/D-011 准入服务已实现：按显式周期读取 PostgreSQL，关闭或数据源故障时禁止
   新信号，撤销 `NEW`/`PARTIALLY_FILLED` 入场单，保留退出单和已有仓位；未知提交继续
   fail-closed，解析为已知未终态后再撤销。真实 PostgreSQL 开关到策略撤单已通过组合测试；
@@ -136,7 +137,7 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 | Binance REST/WS testnet 隔离 | 完成 | 鉴权 REST 需随 testnet 执行验证 | 健康 API 暴露环境；外部 smoke 会拒绝非 testnet 服务 |
 | aggTrade/Kline 接入与 combined stream 解包 | 完成 | 外部流长时间运行验证 | testnet 短时 smoke 已接收完成 Bar/Kline，原始与 combined 消息均可解析 |
 | aggTrade 聚合完成 1s Bar | 完成 | 外部流长时间运行验证 | 不重复、不丢失跨多秒完成 Bar |
-| 动态订阅、引用计数、刷新和重连 | 部分完成 | 租约规则、进程重启恢复 | 订阅变更和断线后恢复原 streams |
+| 动态订阅、引用计数、刷新和重连 | 部分完成 | 租约规则、外部长时间验证 | 订阅变更、断线和进程重启后均已验证恢复原 streams |
 | 可交易池扫描编排 | 部分完成 | 接入真实扫描器和运行进程 | 固定每 5 分钟扫描，subcategory 在同一节拍刷新 |
 | Redis 分发和 Kline Store | 完成 | 长时间运行与外部告警通道 | 真实 Redis 读写通过；零订阅者发布会告警，活跃流无消费者时健康检查 503 |
 | 历史 Parquet 数据读取 | 部分完成 | 归档边界、缺口报告 | replay 不联网补数据，缺数据直接拒绝 |
@@ -160,8 +161,8 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 
 | 能力 | 状态 | 剩余工作 | 验收 |
 |---|---|---|---|
-| PostgreSQL schema 和模型 | 部分完成 | 迁移版本管理、Campaign 表 | 订单/成交/持仓 CRUD 已通过真实 PostgreSQL 测试；部署会幂等应用当前 schema |
-| 订单/成交/持仓/Campaign 账本 | 部分完成 | Campaign 独立生命周期表 | Binance 订单/成交/仓位及策略审计均可幂等写入，外部订单不会污染策略账本 |
+| PostgreSQL schema 和模型 | 部分完成 | 迁移版本管理 | 订单/成交/持仓和策略审计已通过真实 PostgreSQL 测试；部署会幂等应用当前 schema |
+| 订单/成交/持仓与 Campaign 生命周期审计 | 部分完成 | 完整退出 PnL | Binance 订单/成交/仓位及策略审计均可幂等写入；Campaign 生命周期通过 `strategy_audit_events` 按 `campaign_id` 查询，不新增重复状态表；外部订单不会污染策略账本 |
 | FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 订单、成交、持仓、PnL、策略审计分页查询和真实数据库健康检查已验证 |
 | subcategory 准入控制 | 部分完成 | 接入真实可交易池扫描器并外部验证 | 已接入 Spike 进程；乐观并发、追加审计、fail-closed 刷新和关闭撤单已通过真实 PostgreSQL 测试 |
 | Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供运行状态、账本、PnL 和 subcategory 控制 |
@@ -191,8 +192,8 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 数据质量门禁。
 
 已完成 Pub/Sub 零消费者告警、行情质量状态 API、实时策略 fail-closed 消费，以及 testnet
-公共 WS 到 Redis 的短时外部 smoke。剩余：长时间运行验证、外部告警通道、进程重启订阅
-恢复，以及待确认的租约规则实现。
+公共 WS 到 Redis 的短时外部 smoke，完整 Spike 进程重启后的订阅恢复也已验证。剩余：
+长时间运行验证、外部告警通道，以及待确认的租约规则实现。
 
 退出条件：断线、乱序、迟到、跨秒、多订阅和依赖故障场景均有自动化验证；故障期间
 不会产生新交易信号。
@@ -252,7 +253,10 @@ WAL 空仓重启。撤单异常后会按原 client ID 查询交易所，只有�
 分页查询、subcategory 乐观并发与追加审计、依赖健康检查和 Web V1；subcategory
 fail-closed 轮询及关闭撤销未成交入场单已完成，User Stream 到 WAL、
 风险门禁和账本的组合回调已通过真实 PostgreSQL 验证，具体 Spike 进程已接入准入状态。
-剩余：Campaign 账本持久化、迁移版本管理，以及待确认的身份认证和权限。
+Campaign 运行时权威状态保留在 Redis 原子租约中；其持久历史已由 PostgreSQL
+`strategy_audit_events` 幂等记录，并可按 `campaign_id` 查询。这里不再新增独立 Campaign
+状态表，避免与 Redis 运行态形成双写权威。剩余：迁移版本管理、完整退出 PnL，以及待确认的
+身份认证和权限。
 
 退出条件：控制变更和完整交易生命周期均可查询；并发修改不会静默覆盖；Web 不可绕过
 策略准入和风控；数据库或 Redis 故障时默认禁止新增风险。

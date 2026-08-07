@@ -54,9 +54,9 @@ candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈�
 | 行情客户端 | Binance WebSocket 客户端、aggTrade/Kline 解析器 | testnet 短时外部 smoke 已通过，待长时间运行验证 |
 | 行情聚合 | aggTrade 到 `Bar1s` 的内存聚合器 | 已实现基础逻辑 |
 | 行情分发 | Redis Pub/Sub、Kline latest Hash | 已通过真实 Redis 服务级集成 |
-| 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新与断线重连已有自动化验证，待进程重启恢复和外部长时间验证 |
+| 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新、断线重连和完整进程重启恢复已验证，待外部长时间验证 |
 | 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；终态 WAL 补账、回调 fatal/排空、账户单实例和外部订单拒绝已覆盖 |
-| 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory 审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成 |
+| 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory/策略审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成；Campaign 生命周期可按审计事件查询 |
 | 风控 | 总持仓价值、币种数量、杠杆上限、未知订单币种阻塞 | 仅最小基础能力 |
 | 回测 | UTC 虚拟时钟、16h 预热、部分成交、交易所量化、持仓、费用和策略审计报告 | AKEUSDT 已发现并显式修正 1s `+8h`；对齐后的退出与绩效口径仍未冻结 |
 | Web | 运行状态、订单、成交、持仓、PnL、subcategory 控制 | V1 已实现，身份权限待确认 |
@@ -237,14 +237,13 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 1. 现有 PostgreSQL、Redis、FastAPI、Compose 和“执行层为库”已作为当前实现基线，是否冻结为 V1 技术方案？
 2. V1 挂单失败或撤销后是否允许本轮重挂？
-3. Redis Campaign 已确认不增加人工或固定冷却门禁；仍需实现并验证交易所事实对账顺序。
-4. 部分成交、手续费、滑点、同秒事件、未平仓结算采用什么回测口径？
-5. 动能指标组合已确认进入测试；仍需根据结果冻结阈值、90 秒后的时间收严曲线、5m/15m 趋势线、下跌通道及“站稳”定义。
-6. 监听租约的入池条件、确认次数、回吐、期限和重入规则是什么？扫描周期已确认为 5 分钟。
-7. Web V1 的身份认证、角色和敏感操作范围是什么？
-8. replay、testnet、live 各自的验收阈值和人工审批条件是什么？
-9. 外部 DuckDB 继续只读挂载，还是迁移为本项目独立数据卷？
-10. `SUBMIT_UNKNOWN` 已确认先按 5 秒一次、最多 12 次进行 testnet 验证；达到上限后持续未知状态的运维处置流程仍需定义。
+3. 部分成交、手续费、滑点、同秒事件、未平仓结算采用什么回测口径？
+4. 动能指标组合已确认进入测试；仍需根据结果冻结阈值、90 秒后的时间收严曲线、5m/15m 趋势线、下跌通道及“站稳”定义。
+5. 监听租约的入池条件、确认次数、回吐、期限和重入规则是什么？扫描周期已确认为 5 分钟。
+6. Web V1 的身份认证、角色和敏感操作范围是什么？
+7. replay、testnet、live 各自的验收阈值和人工审批条件是什么？
+8. 外部 DuckDB 继续只读挂载，还是迁移为本项目独立数据卷？
+9. `SUBMIT_UNKNOWN` 已确认先按 5 秒一次、最多 12 次进行 testnet 验证；达到上限后持续未知状态的运维处置流程仍需定义。
 
 ## 8. 当前代码状态总结（2026-08-07 更新）
 
@@ -255,17 +254,16 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 数据连续性检查 | 已实现 | 5s/60s 窗口检查及行情层质量门禁已接入 |
 | 订单幂等 | 已接入实时进程 | WAL、User Stream、启动恢复、5秒×12轮询、client ID 身份冲突门禁；撤单锁和迟到回报已有自动化覆盖 |
 | 失效撤单 | 已接入实时进程 | TTL、失效、subcategory 关闭及关机均撤销入场单；部分成交/异常撤单竞态已回归 |
-| Campaign | 已接入实时进程 | Redis 原子租约、恢复一致性、成交后仓位确认和订单终态+空仓释放已装配；Campaign 账本仍缺 |
+| Campaign | 已接入实时进程 | Redis 原子租约、恢复一致性、成交后仓位确认和订单终态+空仓释放已装配；生命周期由 PostgreSQL `strategy_audit_events` 按 Campaign 查询，不新增独立状态表 |
 | 持仓管理 | 部分完成 | D-007 仅为执行测试；最新 origin/动能/趋势方案待标定，live 已硬阻断 |
 | 环境解耦 | 已完成进程适配 | replay 与 BinanceStrategyAccount 共用策略接口，testnet/live 共用执行进程 |
-| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API、具体进程订单/成交/仓位入账已有，缺 Campaign 账本和完整退出 PnL |
+| 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API、具体进程订单/成交/仓位入账及 Campaign 生命周期审计已有，仍缺完整退出 PnL |
 | Web V1 | 部分完成 | 账本、PnL、状态、subcategory 已有，缺身份权限和浏览器视觉验收 |
 
 **Phase 0 剩余工作**：
-- 固定案例已完成 4/5（无成交、三档全成交、失效/TTL、冷却）；部分成交待撮合口径确认
-- 对照脚本 CSV 验证差异可解释
+- 固定案例已完成 5/5；仍需结合逐笔数据解释对照脚本 CSV 差异，策略参数继续冻结
 
 **Phase 1 剩余项**：
-- Binance testnet 公共流短时连通已验证；仍需长时间运行验收
-- 外部告警通道和进程重启后的订阅恢复
+- Binance testnet 公共流短时连通和进程重启订阅恢复已验证；仍需长时间运行验收
+- 外部告警通道
 - 待确认的监听租约规则
