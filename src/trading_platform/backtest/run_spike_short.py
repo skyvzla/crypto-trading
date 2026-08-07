@@ -10,6 +10,9 @@ from trading_platform.backtest.engine import BacktestEngine
 from trading_platform.backtest.loader import BacktestDataLoader
 from trading_platform.backtest.result import ResultAnalyzer
 from trading_platform.shared.config import BacktestConfig
+from trading_platform.strategies.spike_legacy_research import (
+    LegacyScriptExitSpikeBacktestStrategy,
+)
 from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
 
 
@@ -52,6 +55,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=16.0,
         help="Indicator warmup period before --start (default: 16)",
+    )
+    parser.add_argument(
+        "--exit-policy",
+        choices=("confirmed", "legacy-script"),
+        default="confirmed",
+        help="Exit policy; legacy-script is replay research only",
     )
     return parser.parse_args()
 
@@ -102,7 +111,12 @@ def main() -> None:
         output_dir=str(output_path),
         trading_start_ms=start_ms,
     )
-    strategy = DynamicSpikeBacktestStrategy(
+    strategy_type = (
+        LegacyScriptExitSpikeBacktestStrategy
+        if args.exit_policy == "legacy-script"
+        else DynamicSpikeBacktestStrategy
+    )
+    strategy = strategy_type(
         symbols=[args.symbol],
         total_notional=args.total_notional,
     )
