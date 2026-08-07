@@ -56,11 +56,16 @@ def create_binance_execution_runtime(
     db: LedgerDB,
     account_id: str,
     strategy_id: str,
+    dedicated_strategy_account: bool,
     ws_base_url: str,
     poll_interval_seconds: float,
     max_poll_attempts: int,
 ) -> BinanceExecutionRuntime:
     """使用显式业务归属和恢复参数构建 testnet/live 共用运行时。"""
+    if not dedicated_strategy_account:
+        raise ValueError(
+            "shared Binance accounts require explicit order and position routing"
+        )
     callbacks = BinanceLedgerCallbacks(
         executor,
         BinanceExecutionReportLedger(
@@ -82,4 +87,3 @@ def create_binance_execution_runtime(
         max_attempts=max_poll_attempts,
     )
     return BinanceExecutionRuntime(user_stream, poller)
-
