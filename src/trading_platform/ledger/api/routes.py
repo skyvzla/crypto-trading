@@ -1,6 +1,6 @@
 """账本查询与 subcategory 交易池准入 API。"""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -131,6 +131,24 @@ class StrategyAuditResponse(BaseModel):
     campaign_id: Optional[str] = None
     details: dict[str, Any]
     created_at: datetime
+
+
+class StrategyRuntimeStatusResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    account_id: str
+    strategy_id: str
+    instance_id: str
+    mode: str
+    status: str
+    effective_status: str
+    entry_enabled: bool
+    halted: bool
+    halt_reason: Optional[str] = None
+    gate_conditions: dict[str, Any]
+    started_at: datetime
+    heartbeat_at: datetime
+    stopped_at: Optional[datetime] = None
 
 
 class AdmissionRequest(BaseModel):
@@ -411,6 +429,36 @@ async def list_strategy_audit_events(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/strategy-runtime-status", response_model=Page)
+async def list_strategy_runtime_status(
+    account_id: Optional[str] = None,
+    strategy_id: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    items, total = await db.list_strategy_runtime_statuses(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        limit=limit,
+        offset=offset,
+    )
+    stale_before = datetime.now(timezone.utc) - timedelta(seconds=15)
+    responses = []
+    for item in items:
+        effective_status = item.status
+        if (
+            item.status in {"running", "degraded"}
+            and item.heartbeat_at is not None
+            and item.heartbeat_at < stale_before
+        ):
+            effective_status = "stale"
+        values = item.__dict__.copy()
+        values["effective_status"] = effective_status
+        responses.append(StrategyRuntimeStatusResponse.model_validate(values))
+    return Page(items=responses, total=total, limit=limit, offset=offset)
 
 
 @router.get("/health")

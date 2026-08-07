@@ -44,6 +44,15 @@ scripts/deploy.sh
 当前已修复 testnet URL 隔离、行情订阅刷新和 combined stream 解包，并有回归测试。
 执行恢复基础（WAL、User Stream 状态同步、未知提交启动/后台恢复、风险阻塞、启动快照对账
 及账本回调生命周期）、具体 Spike testnet 进程和真实 Campaign 执行/账本闭环已经实现；
+真实 User Stream 主动断流演练已验证断开检测、listenKey 轮换、REST 恢复对账和重新连接，
+最终保持 0 挂单、0 仓位。明确业务拒单会记录为 `REJECTED`，与网络结果不明的
+`SUBMIT_UNKNOWN` 分离；模糊错误仍保持未知并 fail-closed。
+
+账本迁移 `0003` 增加策略运行状态：Spike 每 5 秒写入心跳，15 秒未更新显示为 `stale`；
+`/api/v1/strategy-runtime-status` 和 Web 将账本数据库健康与策略实例状态分开展示。
+当前宿主机全量回归为 `431 passed, 33 skipped, 1 warning`，Compose 真实 PostgreSQL/Redis
+全量为 `460 passed, 1 skipped, 1 warning`。外部告警通道、Web 身份权限、
+正式 live 阈值以及自然策略信号下的退出仍未完成，`candidate-v1` 继续冻结；
 自然策略信号下的保护退出与盈利管理仍需依据具体数据评审，因此不要填入正式账户 API Key。
 
 公开 testnet 行情闭环验收（不需要 API Key，且会拒绝非 testnet 行情服务）：

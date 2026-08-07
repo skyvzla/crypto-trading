@@ -709,6 +709,96 @@ async def test_execution_lease_loss_halts_process_fail_closed():
     )
 
 
+@pytest.mark.asyncio
+async def test_fatal_status_write_failure_does_not_mask_stream_failure():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process.runtime = Mock(
+        user_stream=Mock(wait_fatal=AsyncMock(return_value=ValueError("bad report")))
+    )
+    process.gate = Mock(set_condition=Mock())
+    risk = Mock(halt=Mock(), halted=True, halt_reason="callback failed")
+    process.coordinator = Mock(risk_guard=risk)
+    process.db = Mock(
+        upsert_strategy_runtime_status=AsyncMock(
+            side_effect=ConnectionError("postgres unavailable")
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="execution stream callback failed"):
+        await process._execution_stream_fatal_loop()
+
+    process.gate.set_condition.assert_called_once_with("execution", False)
+    risk.halt.assert_called_once_with(
+        "execution stream callback failed: ValueError"
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_heartbeat_failure_halts_process_fail_closed(monkeypatch):
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process.gate = Mock(set_condition=Mock())
+    risk = Mock(halt=Mock())
+    process.coordinator = Mock(risk_guard=risk)
+    process._publish_runtime_status = AsyncMock(
+        side_effect=ConnectionError("postgres unavailable")
+    )
+    monkeypatch.setattr(
+        "trading_platform.strategies.spike_main.asyncio.sleep", AsyncMock()
+    )
+
+    with pytest.raises(RuntimeError, match="runtime status heartbeat failed"):
+        await process._runtime_heartbeat_loop()
+
+    process.gate.set_condition.assert_called_once_with("execution", False)
+    risk.halt.assert_called_once_with(
+        "runtime status heartbeat failed: ConnectionError"
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_ownership_loss_halts_execution():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    strategy = StrategyStub()
+    process.gate = CompositeEntryGate(strategy)
+    process.gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    process.coordinator = Mock(risk_guard=risk)
+    process.db = Mock(upsert_strategy_runtime_status=AsyncMock(return_value=False))
+
+    with pytest.raises(RuntimeError, match="runtime status ownership lost"):
+        await process._publish_runtime_status()
+
+    assert process.gate.condition("execution") is False
+    assert risk.halted is True
+
+
 def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():
     settings = SpikeLiveSettings(
         account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
@@ -1144,6 +1234,43 @@ async def test_submit_unknown_halts_risk_guard_and_closes_execution_gate():
 
     assert risk.halted is True
     assert risk.halt_reason == "submit status unknown"
+    assert gate.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_exchange_rejection_halts_and_aborts_execution():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    for name in ("execution", "market", "subcategory", "campaign"):
+        gate.set_condition(name, True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    executor = Mock(
+        submit=AsyncMock(
+            return_value=Mock(
+                status="REJECTED",
+                client_order_id="cid-rejected",
+                payload={"exchange_response": {"code": -2019}},
+            )
+        )
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(has_pending_cancellations=False),
+        executor=executor,
+        campaign_store=Mock(
+            get_active=AsyncMock(return_value=None),
+            acquire=AsyncMock(return_value=True),
+        ),
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+    )
+
+    with pytest.raises(RuntimeError, match="exchange rejected order cid-rejected"):
+        await coordinator._execute([_entry()], event_time=1_001)
+
+    assert risk.halted is True
+    assert risk.halt_reason == "order rejected by exchange: -2019"
     assert gate.enabled is False
 
 

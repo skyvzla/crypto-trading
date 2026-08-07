@@ -37,5 +37,9 @@ runner 使用事务级 PostgreSQL advisory lock 串行化并发实例；全部�
 校验在同一事务中完成，任一失败会整批回滚。`0001_initial.sql` 使用幂等 DDL 接管迁移机制
 上线前已存在的当前数据库，不删除或重建业务表，也不清理已有数据。
 
-当前 `0002_campaign_attribution.sql` 为订单和成交增加可空 `campaign_id` 及查询索引。
-列保持可空是有意设计：升级前的历史退出单无法可靠证明 Campaign 归属，禁止按时间推测回填。
+`0002_campaign_attribution.sql` 为订单和成交增加可空 `campaign_id` 及查询索引。列保持
+可空是有意设计：升级前的历史退出单无法可靠证明 Campaign 归属，禁止按时间推测回填。
+
+当前版本为 `0003_strategy_runtime_status.sql`，保存每个账户和策略的最新实例状态及心跳。
+不同实例只有更晚的 `started_at` 才能接管，同一实例只接受不早于当前记录的心跳，防止旧进程
+或乱序更新覆盖新状态。

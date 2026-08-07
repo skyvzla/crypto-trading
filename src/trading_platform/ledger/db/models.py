@@ -120,6 +120,22 @@ class StrategyAuditRecord:
 
 
 @dataclass
+class StrategyRuntimeStatus:
+    account_id: str
+    strategy_id: str
+    instance_id: str
+    mode: str
+    status: str
+    entry_enabled: bool
+    halted: bool
+    halt_reason: Optional[str]
+    gate_conditions: dict[str, Any]
+    started_at: datetime
+    heartbeat_at: datetime
+    stopped_at: Optional[datetime]
+
+
+@dataclass
 class CampaignPnLSummary:
     account_id: str
     strategy_id: str
@@ -154,6 +170,42 @@ class CampaignPnLFactsError(RuntimeError):
 
 
 class LedgerDB:
+    _STRATEGY_RUNTIME_STATUS_UPSERT = """
+        INSERT INTO strategy_runtime_status (
+            account_id, strategy_id, instance_id, mode, status,
+            entry_enabled, halted, halt_reason, gate_conditions,
+            started_at, heartbeat_at, stopped_at
+        ) VALUES (
+            %(account_id)s, %(strategy_id)s, %(instance_id)s, %(mode)s,
+            %(status)s, %(entry_enabled)s, %(halted)s, %(halt_reason)s,
+            %(gate_conditions)s, %(started_at)s, %(heartbeat_at)s,
+            %(stopped_at)s
+        )
+        ON CONFLICT (account_id, strategy_id) DO UPDATE
+        SET instance_id = EXCLUDED.instance_id,
+            mode = EXCLUDED.mode,
+            status = EXCLUDED.status,
+            entry_enabled = EXCLUDED.entry_enabled,
+            halted = EXCLUDED.halted,
+            halt_reason = EXCLUDED.halt_reason,
+            gate_conditions = EXCLUDED.gate_conditions,
+            started_at = CASE
+                WHEN strategy_runtime_status.instance_id = EXCLUDED.instance_id
+                    THEN strategy_runtime_status.started_at
+                ELSE EXCLUDED.started_at
+            END,
+            heartbeat_at = EXCLUDED.heartbeat_at,
+            stopped_at = EXCLUDED.stopped_at
+        WHERE (
+                strategy_runtime_status.instance_id = EXCLUDED.instance_id
+                AND strategy_runtime_status.heartbeat_at <= EXCLUDED.heartbeat_at
+              )
+           OR (
+                strategy_runtime_status.instance_id <> EXCLUDED.instance_id
+                AND strategy_runtime_status.started_at < EXCLUDED.started_at
+              )
+        RETURNING account_id
+    """
     _ORDER_UPSERT = """
         INSERT INTO orders (
             account_id, strategy_id, symbol, order_id, client_order_id, campaign_id,
@@ -342,6 +394,64 @@ class LedgerDB:
             total = await (
                 await conn.execute(
                     f"SELECT COUNT(*) FROM strategy_audit_events{where}", params
+                )
+            ).fetchone()
+        return items, int(total[0])
+
+    async def upsert_strategy_runtime_status(
+        self, runtime_status: StrategyRuntimeStatus
+    ) -> bool:
+        """写入运行状态；拒绝旧实例、同启动时间竞争实例和乱序心跳。"""
+        params = runtime_status.__dict__.copy()
+        params["gate_conditions"] = Jsonb(runtime_status.gate_conditions)
+        async with self.pool.connection() as conn:
+            row = await (
+                await conn.execute(self._STRATEGY_RUNTIME_STATUS_UPSERT, params)
+            ).fetchone()
+        return row is not None
+
+    async def get_strategy_runtime_status(
+        self, *, account_id: str, strategy_id: str
+    ) -> StrategyRuntimeStatus | None:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(StrategyRuntimeStatus))
+            await cursor.execute(
+                "SELECT * FROM strategy_runtime_status "
+                "WHERE account_id = %s AND strategy_id = %s",
+                (account_id, strategy_id),
+            )
+            return await cursor.fetchone()
+
+    async def list_strategy_runtime_statuses(
+        self,
+        *,
+        account_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[StrategyRuntimeStatus], int]:
+        parts: list[str] = []
+        params: dict[str, object] = {"limit": limit, "offset": offset}
+        for key, value in (
+            ("account_id", account_id),
+            ("strategy_id", strategy_id),
+        ):
+            if value is not None:
+                parts.append(f"{key} = %({key})s")
+                params[key] = value
+        where = " WHERE " + " AND ".join(parts) if parts else ""
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(StrategyRuntimeStatus))
+            await cursor.execute(
+                "SELECT * FROM strategy_runtime_status"
+                f"{where} ORDER BY account_id, strategy_id "
+                "LIMIT %(limit)s OFFSET %(offset)s",
+                params,
+            )
+            items = await cursor.fetchall()
+            total = await (
+                await conn.execute(
+                    f"SELECT COUNT(*) FROM strategy_runtime_status{where}", params
                 )
             ).fetchone()
         return items, int(total[0])

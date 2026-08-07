@@ -120,6 +120,18 @@ def test_parse_non_trade_order_update_does_not_create_trade():
     assert parsed.trade is None
 
 
+def test_parse_rejected_order_update_as_terminal_without_trade():
+    parsed = parse_execution_report(
+        report(X="REJECTED", x="NEW", t=-1, z="0", l="0", ap="0"),
+        account_id="account-1",
+        strategy_id="spike_short",
+    )
+
+    assert parsed.order.status == "REJECTED"
+    assert parsed.order.filled_quantity == Decimal("0")
+    assert parsed.trade is None
+
+
 @pytest.mark.parametrize(
     "changes",
     [{"X": "UNKNOWN"}, {"S": "HOLD"}, {"i": None}, {"T": "bad"}],

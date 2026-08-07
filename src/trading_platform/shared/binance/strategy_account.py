@@ -14,7 +14,7 @@ from trading_platform.shared.risk import RiskGuard
 from .rest_client import BinanceRestClient
 
 
-_TERMINAL = {"FILLED", "CANCELLED", "EXPIRED"}
+_TERMINAL = {"FILLED", "CANCELLED", "EXPIRED", "REJECTED"}
 
 
 class BinanceStrategyAccount:
@@ -135,7 +135,7 @@ class BinanceStrategyAccount:
                         latest is not None
                         and exchange_order is not None
                         and str(exchange_order.get("status") or "")
-                        in {"FILLED", "CANCELED", "EXPIRED"}
+                        in {"FILLED", "CANCELED", "EXPIRED", "REJECTED"}
                     ):
                         self.wal.record_exchange_status(
                             latest, exchange_order, recorded_at=self._now_ms()

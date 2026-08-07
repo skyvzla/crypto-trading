@@ -16,6 +16,7 @@ _STATUS_MAP = {
     "FILLED": "FILLED",
     "CANCELED": "CANCELLED",
     "EXPIRED": "EXPIRED",
+    "REJECTED": "REJECTED",
 }
 
 

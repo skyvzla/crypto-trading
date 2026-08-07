@@ -44,6 +44,30 @@ function table(target, columns, rows) {
   target.innerHTML = `<thead><tr>${head}</tr></thead><tbody>${body}</tbody>`;
 }
 
+function status(value) {
+  const normalized = String(value ?? "unknown").toLowerCase();
+  const tone = normalized === "running" ? "good"
+    : normalized === "stopped" ? "muted"
+      : "bad";
+  return `<span class="status-label is-${tone}">${escapeHtml(normalized)}</span>`;
+}
+
+function booleanStatus(value, trueLabel, falseLabel) {
+  return `<span class="boolean-status ${value ? "is-true" : "is-false"}">${value ? trueLabel : falseLabel}</span>`;
+}
+
+function haltStatus(value) {
+  return `<span class="boolean-status ${value ? "is-false" : "is-true"}">${value ? "已停机" : "未停机"}</span>`;
+}
+
+function gateConditions(value) {
+  const entries = Object.entries(value || {});
+  if (!entries.length) return "--";
+  return `<div class="gate-list">${entries.map(([name, enabled]) =>
+    `<span><b>${escapeHtml(name)}</b>${booleanStatus(Boolean(enabled), "通过", "阻断")}</span>`
+  ).join("")}</div>`;
+}
+
 const orderColumns = [
   ["时间", (row) => dateTime(row.created_at)],
   ["交易对", (row) => escapeHtml(row.symbol)],
@@ -71,6 +95,15 @@ const positionColumns = [
   ["标记价格", (row) => number(row.mark_price)],
   ["未实现 PnL", (row) => `<span class="${Number(row.unrealized_pnl) >= 0 ? "positive" : "negative"}">${number(row.unrealized_pnl)}</span>`],
 ];
+const runtimeColumns = [
+  ["状态", (row) => status(row.effective_status)],
+  ["账户 / 策略", (row) => `<span class="runtime-identity"><b>${escapeHtml(row.account_id)}</b><small>${escapeHtml(row.strategy_id)}</small></span>`],
+  ["模式", (row) => escapeHtml(row.mode)],
+  ["入场", (row) => booleanStatus(row.entry_enabled, "允许", "关闭")],
+  ["停机", (row) => `<span class="runtime-halt">${haltStatus(row.halted)}<small>${row.halt_reason ? escapeHtml(row.halt_reason) : "--"}</small></span>`],
+  ["心跳", (row) => dateTime(row.heartbeat_at)],
+  ["门禁条件", (row) => gateConditions(row.gate_conditions)],
+];
 
 async function loadHealth() {
   try {
@@ -86,8 +119,11 @@ async function loadHealth() {
 async function loadOverview() {
   const query = filters();
   const account = query.get("account_id");
-  const [orders, trades, positions] = await Promise.all([
+  const runtimeQuery = new URLSearchParams(query);
+  runtimeQuery.delete("symbol");
+  const [orders, trades, positions, runtime] = await Promise.all([
     api(`/orders?${query}&limit=8`), api(`/trades?${query}&limit=1`), api(`/positions?${query}&limit=100`),
+    api(`/strategy-runtime-status?${runtimeQuery}&limit=100`),
   ]);
   let pnl = null;
   if (account) pnl = await api(`/pnl?${query}`);
@@ -95,6 +131,11 @@ async function loadOverview() {
   $("metric-unrealized").textContent = pnl ? number(pnl.total_unrealized_pnl, 2) : "--";
   $("metric-positions").textContent = positions.total;
   $("metric-trades").textContent = trades.total;
+  $("runtime-count").textContent = runtime.total ? `${runtime.total} 个实例` : "未运行";
+  table($("runtime-table"), runtimeColumns, runtime.items);
+  if (!runtime.items.length) {
+    $("runtime-table").querySelector(".empty").textContent = "未运行";
+  }
   $("overview-updated").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
   table($("overview-table"), orderColumns, orders.items);
 }

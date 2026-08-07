@@ -1,0 +1,18 @@
+{
+  "account_id": "spike_testnet",
+  "disconnect_observed": true,
+  "endpoint": "https://demo-fapi.binance.com",
+  "execution_lease_acquired": true,
+  "final_nonzero_positions": 0,
+  "final_open_orders": 0,
+  "finished_at": "2026-08-07T13:31:34.728017+00:00",
+  "initial_connected": true,
+  "initial_listen_key_changed": true,
+  "reconnected": true,
+  "recovery_observed": true,
+  "result": "RECONNECT_OK",
+  "started_at": "2026-08-07T13:31:30.324245+00:00",
+  "strategy_id": "spike_short",
+  "symbol": "BTCUSDT",
+  "ws_endpoint": "wss://stream.binancefuture.com"
+}

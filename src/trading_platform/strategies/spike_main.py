@@ -7,15 +7,21 @@ import logging
 import signal
 import time
 from contextlib import AsyncExitStack
+from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import redis.asyncio as redis
 
 from trading_platform.ledger.binance_runtime import create_binance_execution_runtime
-from trading_platform.ledger.db.models import LedgerDB, create_connection_pool
+from trading_platform.ledger.db.models import (
+    LedgerDB,
+    StrategyRuntimeStatus,
+    create_connection_pool,
+)
 from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.binance.rest_client import BinanceRestClient
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
@@ -54,6 +60,7 @@ from trading_platform.strategies.universe import UNIVERSE_SCAN_INTERVAL_SECONDS
 
 logger = logging.getLogger(__name__)
 BAR_STREAM_STALE_SECONDS = 10.0
+RUNTIME_HEARTBEAT_SECONDS = 5.0
 
 
 def require_viable_entry_notional(
@@ -101,6 +108,10 @@ class SpikeLiveProcess:
         self.gate: CompositeEntryGate | None = None
         self.runtime_callbacks: SpikeRuntimeCallbacks | None = None
         self.execution_lease: PostgresExecutionLease | None = None
+        self.db: LedgerDB | None = None
+        self.instance_id = uuid4().hex
+        self.started_at = datetime.now(timezone.utc)
+        self._runtime_fatal_reason: str | None = None
 
     async def start(self) -> None:
         if self.runtime is not None:
@@ -156,7 +167,15 @@ class SpikeLiveProcess:
                 ),
                 ]
             )
-        except BaseException:
+            await self._publish_runtime_status()
+            self._tasks.append(
+                asyncio.create_task(
+                    self._runtime_heartbeat_loop(),
+                    name="spike-runtime-heartbeat",
+                )
+            )
+        except BaseException as exc:
+            self._runtime_fatal_reason = f"startup failed: {type(exc).__name__}"
             await self.stop()
             raise
 
@@ -201,6 +220,14 @@ class SpikeLiveProcess:
             except BaseException as exc:
                 errors.append(exc)
             self.runtime = None
+        if self.db is not None:
+            try:
+                await self._publish_runtime_status(
+                    status="fatal" if self._runtime_fatal_reason else "stopped",
+                    stopped=True,
+                )
+            except BaseException as exc:
+                errors.append(exc)
         try:
             await self._unregister_market_subscriptions()
         except BaseException as exc:
@@ -219,6 +246,7 @@ class SpikeLiveProcess:
         await self.execution_lease.acquire()
         self._stack.push_async_callback(self.execution_lease.release)
         db = LedgerDB(pool)
+        self.db = db
 
         self.redis = redis.Redis(
             host=self.redis_config.host,
@@ -351,35 +379,103 @@ class SpikeLiveProcess:
     async def _execution_stream_fatal_loop(self) -> None:
         assert self.runtime is not None
         exc = await self.runtime.user_stream.wait_fatal()
-        if self.gate is not None:
-            self.gate.set_condition("execution", False)
-        if self.coordinator is not None:
-            self.coordinator.risk_guard.halt(
-                f"execution stream callback failed: {type(exc).__name__}"
-            )
+        reason = f"execution stream callback failed: {type(exc).__name__}"
+        self._mark_runtime_fatal(reason)
+        await self._try_publish_fatal_status()
         raise RuntimeError("execution stream callback failed") from exc
 
     async def _execution_lease_fatal_loop(self) -> None:
         assert self.execution_lease is not None
         exc = await self.execution_lease.wait_lost()
-        if self.gate is not None:
-            self.gate.set_condition("execution", False)
-        if self.coordinator is not None:
-            self.coordinator.risk_guard.halt(
-                f"execution account lease lost: {type(exc).__name__}"
-            )
+        reason = f"execution account lease lost: {type(exc).__name__}"
+        self._mark_runtime_fatal(reason)
+        await self._try_publish_fatal_status()
         raise RuntimeError("execution account lease lost") from exc
 
     async def _submit_unknown_fatal_loop(self) -> None:
         assert self.runtime is not None
         exc = await self.runtime.unknown_poller.wait_fatal()
+        self._mark_runtime_fatal("SUBMIT_UNKNOWN resolution attempts exhausted")
+        await self._try_publish_fatal_status()
+        raise RuntimeError("SUBMIT_UNKNOWN recovery failed") from exc
+
+    async def _runtime_heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(RUNTIME_HEARTBEAT_SECONDS)
+            try:
+                await self._publish_runtime_status()
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                reason = f"runtime status heartbeat failed: {type(exc).__name__}"
+                self._mark_runtime_fatal(reason)
+                raise RuntimeError(reason) from exc
+
+    def _mark_runtime_fatal(self, reason: str) -> None:
+        self._runtime_fatal_reason = reason
         if self.gate is not None:
             self.gate.set_condition("execution", False)
         if self.coordinator is not None:
-            self.coordinator.risk_guard.halt(
-                "SUBMIT_UNKNOWN resolution attempts exhausted"
+            self.coordinator.risk_guard.halt(reason)
+
+    async def _try_publish_fatal_status(self) -> None:
+        try:
+            await self._publish_runtime_status(status="fatal")
+        except BaseException:
+            logger.exception("Failed to publish Spike fatal runtime status")
+
+    async def _publish_runtime_status(
+        self,
+        *,
+        status: str | None = None,
+        stopped: bool = False,
+    ) -> None:
+        if self.db is None:
+            return
+        now = datetime.now(timezone.utc)
+        gates = {} if self.gate is None else self.gate.snapshot()
+        halted = bool(
+            self.coordinator is not None and self.coordinator.risk_guard.halted
+        )
+        halt_reason = (
+            self._runtime_fatal_reason
+            or (
+                self.coordinator.risk_guard.halt_reason
+                if self.coordinator is not None
+                else None
             )
-        raise RuntimeError("SUBMIT_UNKNOWN recovery failed") from exc
+            or None
+        )
+        if status is None:
+            safety_ready = all(
+                gates.get(name, False)
+                for name in ("execution", "market", "bar_stream")
+            )
+            status = "running" if safety_ready and not halted else "degraded"
+        accepted = await self.db.upsert_strategy_runtime_status(
+            StrategyRuntimeStatus(
+                account_id=self.settings.account_id,
+                strategy_id=STRATEGY_ID,
+                instance_id=self.instance_id,
+                mode=self.settings.mode,
+                status=status,
+                entry_enabled=bool(self.gate and self.gate.enabled),
+                halted=halted,
+                halt_reason=halt_reason,
+                gate_conditions=gates,
+                started_at=self.started_at,
+                heartbeat_at=now,
+                stopped_at=now if stopped else None,
+            )
+        )
+        if not accepted:
+            if self.gate is not None:
+                self.gate.set_condition("execution", False)
+            if self.coordinator is not None:
+                self.coordinator.risk_guard.halt(
+                    "runtime status ownership lost to another instance"
+                )
+            raise RuntimeError("runtime status ownership lost to another instance")
 
     def _restore_execution_gate(self) -> bool:
         if self.gate is None or self.coordinator is None or self.runtime is None:

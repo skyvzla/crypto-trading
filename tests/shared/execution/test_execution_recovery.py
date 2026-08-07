@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 
-from trading_platform.shared.binance import BinanceOrderExecutor
+from trading_platform.shared.binance import BinanceAPIException, BinanceOrderExecutor
 from trading_platform.shared.events import OrderIntent
 from trading_platform.shared.execution_recovery import (
     OrderWAL,
@@ -152,6 +152,75 @@ async def test_resolver_records_explicit_exchange_status(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_resolver_records_explicit_exchange_rejection_as_terminal(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    unknown = wal.record_submit_unknown(
+        wal.record_intent(make_intent(), account_id="a-1", recorded_at=1000),
+        recorded_at=1001,
+        error="timeout",
+    )
+
+    result = await SubmitUnknownResolver(
+        wal, QueryClient({"orderId": 42, "status": "REJECTED"})
+    ).resolve_once(unknown, recorded_at=1002)
+
+    assert result == Resolution(
+        True, "REJECTED", response={"orderId": 42, "status": "REJECTED"}
+    )
+    latest = wal.recover_latest()["cid-1"]
+    assert latest.status == "REJECTED"
+    wal.acknowledge_ledger(latest)
+    assert wal.ledger_acknowledged(latest)
+
+
+def test_wal_accepts_user_stream_rejection_from_intent_or_new(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    direct = wal.record_intent(
+        make_intent("direct-reject"), account_id="a-1", recorded_at=1000
+    )
+    direct_rejected = wal.record_exchange_status(
+        direct, {"orderId": 41, "status": "REJECTED"}, recorded_at=1001
+    )
+    accepted = wal.record_intent(
+        make_intent("new-reject"), account_id="a-1", recorded_at=1002
+    )
+    new = wal.record_exchange_status(
+        accepted, {"orderId": 42, "status": "NEW"}, recorded_at=1003
+    )
+    new_rejected = wal.record_exchange_status(
+        new, {"orderId": 42, "status": "REJECTED"}, recorded_at=1004
+    )
+
+    assert direct_rejected.status == "REJECTED"
+    assert new_rejected.status == "REJECTED"
+
+
+@pytest.mark.parametrize("initial_status", [None, "NEW"])
+def test_live_executor_records_user_stream_rejection_as_terminal(
+    tmp_path, initial_status
+):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(
+        make_intent(), account_id="account-1", recorded_at=1000
+    )
+    if initial_status == "NEW":
+        wal.record_exchange_status(
+            intent, {"orderId": 42, "status": "NEW"}, recorded_at=1001
+        )
+    executor = BinanceOrderExecutor(
+        Mock(), wal, account_id="account-1", now_ms=lambda: 1002
+    )
+
+    record = executor.handle_order_trade_update(
+        {"c": "cid-1", "s": "BTCUSDT", "i": 42, "X": "REJECTED"}
+    )
+
+    assert record is not None
+    assert record.status == "REJECTED"
+    assert wal.recover_latest()["cid-1"].status == "REJECTED"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("response", "reason"),
     [(None, "order_not_found"), ({"status": "UNKNOWN"}, "unknown_exchange_status")],
@@ -248,6 +317,60 @@ async def test_live_executor_transport_failure_stays_unknown_and_does_not_resubm
     assert first.status == "SUBMIT_UNKNOWN"
     assert second == first
     assert rest.post_order.await_count == 1
+    assert "BTCUSDT" in guard.blocked_symbols
+
+
+@pytest.mark.asyncio
+async def test_live_executor_records_definite_api_rejection_without_unknown_risk(tmp_path):
+    rest = Mock(
+        post_order=AsyncMock(
+            side_effect=BinanceAPIException(-2019, "Margin is insufficient")
+        ),
+        query_order=AsyncMock(),
+    )
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = BinanceOrderExecutor(
+        rest,
+        OrderWAL(tmp_path / "orders.jsonl"),
+        account_id="account-1",
+        now_ms=iter([1000, 1001]).__next__,
+        risk_guard=guard,
+    )
+
+    first = await executor.submit(make_intent())
+    second = await executor.submit(make_intent())
+
+    assert first.status == "REJECTED"
+    assert first.payload["exchange_response"] == {
+        "status": "REJECTED",
+        "code": -2019,
+        "msg": "Margin is insufficient",
+    }
+    assert second == first
+    assert rest.post_order.await_count == 1
+    assert "BTCUSDT" not in guard.blocked_symbols
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [-1006, -1007, -1000])
+async def test_live_executor_keeps_ambiguous_api_failure_unknown(tmp_path, code):
+    rest = Mock(
+        post_order=AsyncMock(side_effect=BinanceAPIException(code, "ambiguous")),
+        query_order=AsyncMock(),
+    )
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = BinanceOrderExecutor(
+        rest,
+        OrderWAL(tmp_path / "orders.jsonl"),
+        account_id="account-1",
+        now_ms=iter([1000, 1001]).__next__,
+        risk_guard=guard,
+    )
+
+    record = await executor.submit(make_intent())
+
+    assert record.status == "SUBMIT_UNKNOWN"
+    assert record.payload["error"] == f"submit_api_ambiguous:{code}"
     assert "BTCUSDT" in guard.blocked_symbols
 
 

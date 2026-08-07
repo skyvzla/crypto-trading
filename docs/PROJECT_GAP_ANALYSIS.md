@@ -13,8 +13,8 @@
 D-007 保留为简单执行测试；D-028 的逐笔数据评审和后续人工决策完成前，
 `live` 会拒绝启动。
 
-当前本地全量测试为 `386 passed, 31 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
-全量为 `416 passed, 1 skipped, 1 warning`。测试已按
+当前宿主机全量为 `431 passed, 33 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
+全量为 `460 passed, 1 skipped, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -25,7 +25,9 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴�
 reduce-only 退出和紧急清仓。完整 Spike 进程已真实覆盖三档预挂、部分成交、全部成交、
 User Stream `TRADE`、账户仓位确认、剩余档撤单、外部 reduce-only 清仓及空仓重启恢复。
 空仓启动与人工重启也已通过：User Stream listenKey 正常关闭/重建，市场订阅卸载/恢复后
-1s/1m/5m 三个流重新 ready。
+1s/1m/5m 三个流重新 ready。独立 User Stream harness 又通过了主动关闭 WebSocket 的真实
+断流演练：观察到 disconnect、恢复对账、重新连接和 listenKey 轮换，最终 0 挂单、0 仓位；
+报告为 `reports/testnet_user_stream_reconnect_20260807.json`。该结果不替代外部长时间运行验证。
 
 外部 DuckDB 历史源已完成时间一致性审计。固定范围为 AKEUSDT、UTC `2026-07-01` 至
 `2026-08-01`、从 `2026-06-30 08:00 UTC` 开始 16 小时预热、DuckDB 只读源、
@@ -107,20 +109,28 @@ candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈�
   订单或非托管 symbol 仓位回报时立即 fatal，不写入 Spike 账本。
 - 策略审计已写入 PostgreSQL 并提供 `/api/v1/strategy-audit-events`；本地 Redis 1s Bar
   任一托管 symbol 超过 10 秒静默时关闭新入场。
+- 明确的交易所业务拒单写入不可逆终态 `REJECTED`，保留交易所错误码，不会被恢复流程误判为
+  `SUBMIT_UNKNOWN` 或自动更换 client ID 重试；网络超时等模糊结果仍保持
+  `SUBMIT_UNKNOWN` 并 fail-closed。
+- PostgreSQL 迁移 `0003` 增加策略运行状态；Spike 每 5 秒写入实例心跳、门禁和 halt 事实，
+  15 秒未更新时 API 显示 `stale`。`/api/v1/strategy-runtime-status` 与 Web 将账本数据库健康
+  和策略是否运行分开展示，无运行记录不会显示为正常。
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
 **订单幂等问题**：
 - 策略使用 `client_order_id` 标记已下单
 - 新代码已在 `SpikeSignal.placed_client_order_ids` 中维护幂等集合
-- WAL 已接入 Binance REST 提交适配器：提交前记录意图，网络状态不明时保持 `SUBMIT_UNKNOWN`，重复 client ID 不重下单；启动恢复及后台轮询会持续阻塞对应 symbol，直到全部未知订单解析
+- WAL 已接入 Binance REST 提交适配器：提交前记录意图；明确业务拒绝记录为 `REJECTED`，
+  网络状态不明时保持 `SUBMIT_UNKNOWN`。两者不会互相误分类，重复 client ID 不重下单；
+  启动恢复及后台轮询会持续阻塞对应 symbol，直到全部未知订单解析
 
 **失效撤单已实现**：
 - 新代码通过 `_cancel_signal_orders()` 正确撤销未成交订单
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- 在专用 one-way testnet 账户做 User Stream 异常断流和持续未知回报故障注入
+- User Stream 主动断流重连已通过真实 testnet 演练；仍缺外部长时间运行与持续未知回报处置演练
 - 定义 `SUBMIT_UNKNOWN` 达到 12 次上限后的人工处置流程
 
 ### 3.6 数据质量检查已加强（2026-08-06）
@@ -159,21 +169,21 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁、真实成交后恢复及空仓释放 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、三档幂等、部分成交/撤单竞态/迟到回报自动化及完整进程外部验收 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/订单仓位启动门禁/规则量化/重连顺序/重连失败清理/持续未知 fatal/外部部分成交和保护退出；⏳外部长时间断流演练 | Phase 3 |
+| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/`REJECTED` 分流/订单仓位启动门禁/规则量化/主动断流重连/重连失败清理/持续未知 fatal/外部部分成交和保护退出；⏳外部长时间运行 | Phase 3 |
 | **持仓退出** | ✅ candidate-v1 状态机、特征、origin 减半、趋势/动能/时间退出及 Redis/WAL 恢复；⏸ 依 D-028 暂停调参，先逐笔数据评审；live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞/全局 halt；⏳保证金、日亏损、数据延迟 | Phase 3 |
 | **监听池** | ✅ 5 分钟扫描编排及 subcategory 同节拍刷新；⏳ 真实扫描器、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/缺失拒绝/窗口缺口/部分成交/显式 1s 时间修正；⏳ 滑点、同秒顺序及多数据源一致性门禁 | Phase 2 |
 | **审计** | ✅ 信号/计划/失效/首成交/退出及订单/成交/持仓；✅ Campaign 身份显式贯穿 WAL/账本并提供实际买卖均价、手续费和净 PnL API | Phase 2/4 |
-| **Web** | ✅ subcategory 控制已接具体进程、fail-closed 刷新与关闭撤单、账本、PnL、运行状态；⏳ 身份权限 | Phase 4 |
-| **运维** | ✅ testnet/live 隔离、专用账户紧急清仓脚本和运行手册；⏳监控、告警、凭据、回滚及 one-way 外部演练 | Phase 5-6 |
+| **Web** | ✅ subcategory 控制已接具体进程、fail-closed 刷新与关闭撤单、账本、PnL、策略运行状态；账本健康与策略状态已分离；⏳ 身份权限 | Phase 4 |
+| **运维** | ✅ testnet/live 隔离、专用账户紧急清仓脚本、User Stream 主动断流演练和运行手册；⏳外部告警通道、凭据、回滚及长时间运行 | Phase 5-6 |
 
 ## 5. 测试现状与缺口
 
 已验证：
 
-- 本地 `uv run pytest -q`：`386 passed, 31 skipped, 1 warning`
-- Compose 真实 PostgreSQL/Redis：`416 passed, 1 skipped, 1 warning`
+- 宿主机 `uv run pytest -q`：`431 passed, 33 skipped, 1 warning`
+- Compose 真实 PostgreSQL/Redis：`460 passed, 1 skipped, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - AKEUSDT 外部执行追加 1 轮非市价 LIMIT 撤单和 3 轮可成交 LIMIT 开空/reduce-only MARKET 平仓；最终独立检查为 0 挂单、0 仓位
 - BTCUSDT 追加 `SELL LIMIT 0.001 @ 100000` 从 `NEW` 到 `CANCELED`，以及
@@ -216,18 +226,27 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - 首次停机因本地部分成交状态落后于交易所终态而 fail-closed；新增撤单异常后的 REST 终态
   查询回归。清理后在 subcategory version 6 disabled 状态重启，Campaign 释放、无重下单，
   最终优雅停止为 `Exited (0)`
-- 数据库迁移至 `0002` 后，完整 Spike profile 再次通过迁移 runner、真实 User Stream 连接和
-  健康检查；验收后先停止 Spike，再独立确认 AKEUSDT/BTCUSDT 均为 0 挂单、0 持仓
+- 数据库迁移至 `0002` 后，完整 Spike profile 曾通过迁移 runner、真实 User Stream 连接和
+  健康检查；验收后先停止 Spike，再独立确认 AKEUSDT/BTCUSDT 均为 0 挂单、0 持仓。
+  新增迁移 `0003` 的策略运行状态、5 秒心跳、15 秒 stale 判定和 API/Web 展示已通过
+  Compose 真实 PostgreSQL 回归；默认数据库已从 `0002` 升至 `0003`，准入关闭的真实
+  Spike testnet 进程写入 `running` 且 `entry_enabled=false`，优雅停止后写入 `stopped`，
+  启停前后均复核为 0 挂单、0 持仓
+- 真实 User Stream 主动断流重连演练观察到 disconnect、恢复对账、reconnected 和 listenKey
+  轮换，最终 0 挂单、0 非零仓位；报告为
+  `reports/testnet_user_stream_reconnect_20260807.json`
 
 尚未验证：
 
 - Spike 由自然策略信号触发的正式保护性退出和盈利管理；执行器驱动的完整 Campaign 已平仓
   PnL 已通过真实 testnet 验证
-- subcategory 准入服务的异常断流和持续未知回报外部故障验证
+- subcategory 准入服务的持续未知回报外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
-- Binance 外部 WS 长时间运行和断流故障注入
-- Binance Futures testnet 的 User Stream 异常断流和持续未知回报故障注入；完整进程真实
-  部分成交、成交仓位确认、剩余档撤单、持仓 Campaign 恢复/释放和空仓重启已完成
+- Binance 外部 WS 长时间运行验证；受控 User Stream 主动断流故障注入已通过，但不代表
+  长时间稳定性已验收
+- Binance Futures testnet 的持续未知回报故障注入及人工处置；完整进程真实部分成交、
+  成交仓位确认、剩余档撤单、持仓 Campaign 恢复/释放、空仓重启和主动断流重连已完成
+- 外部告警通道、Web 身份权限、正式 live 风控/验收阈值及自然策略信号退出验收
 
 ## 6. 明确不做
 
@@ -261,7 +280,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 持仓管理 | 部分完成 | D-007 仅为执行测试；最新 origin/动能/趋势方案待标定，live 已硬阻断 |
 | 环境解耦 | 已完成进程适配 | replay 与 BinanceStrategyAccount 共用策略接口，testnet/live 共用执行进程 |
 | 账本查询 | 已完成执行闭环 | PostgreSQL CRUD/PnL/API、具体进程入账及 Campaign 生命周期审计已有；新 Campaign 可查询逐轮执行 PnL，缺失归属的旧成交不猜测回填 |
-| Web V1 | 部分完成 | 账本、PnL、状态、subcategory 已有，缺身份权限和浏览器视觉验收 |
+| Web V1 | 部分完成 | 账本、PnL、subcategory 和独立策略运行状态已有，缺身份权限和浏览器视觉验收 |
 
 **Phase 0 剩余工作**：
 - 固定案例已完成 5/5；仍需结合逐笔数据解释对照脚本 CSV 差异，策略参数继续冻结

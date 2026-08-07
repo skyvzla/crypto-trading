@@ -30,6 +30,7 @@ _KNOWN_EXCHANGE_STATUSES = {
     "FILLED": "FILLED",
     "CANCELED": "CANCELLED",
     "EXPIRED": "EXPIRED",
+    "REJECTED": "REJECTED",
 }
 
 
@@ -66,7 +67,8 @@ class OrderWALRecord:
             raise ValueError(f"unknown WAL record type: {record_type}")
         status = data.get("status")
         if status is not None and status not in {
-            "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELLED", "EXPIRED", "SUBMIT_UNKNOWN"
+            "NEW", "PARTIALLY_FILLED", "FILLED", "CANCELLED", "EXPIRED", "REJECTED",
+            "SUBMIT_UNKNOWN"
         }:
             raise ValueError(f"unknown WAL order status: {status}")
         return cls(
@@ -222,7 +224,7 @@ class OrderWAL:
 
     def acknowledge_ledger(self, record: OrderWALRecord) -> None:
         """持久化终态订单已经完整写入账本的确认点。"""
-        if record.status not in {"FILLED", "CANCELLED", "EXPIRED"}:
+        if record.status not in {"FILLED", "CANCELLED", "EXPIRED", "REJECTED"}:
             raise ValueError("only terminal WAL records can be acknowledged")
         acknowledgement = {
             "client_order_id": record.client_order_id,
@@ -263,7 +265,7 @@ class OrderWAL:
                     status = acknowledgement["status"]
                     exchange_order_id = acknowledgement.get("exchange_order_id")
                     if not isinstance(client_order_id, str) or status not in {
-                        "FILLED", "CANCELLED", "EXPIRED"
+                        "FILLED", "CANCELLED", "EXPIRED", "REJECTED"
                     }:
                         raise ValueError("invalid ledger acknowledgement")
                 except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:

@@ -205,7 +205,8 @@ class Order:
     price: Decimal
     quantity: Decimal
     status: Literal[
-        'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED', 'SUBMIT_UNKNOWN'
+        'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED',
+        'SUBMIT_UNKNOWN'
     ]
 
     created_at: int  # 毫秒时间戳

@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.22
+> 版本：v1.23
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -52,8 +52,8 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 当前本地全量测试为 `386 passed, 31 skipped, 1 warning`；Compose 真实
-  PostgreSQL/Redis 全量为 `416 passed, 1 skipped, 1 warning`；
+- 当前宿主机全量为 `431 passed, 33 skipped, 1 warning`；Compose 真实
+  PostgreSQL/Redis 全量为 `460 passed, 1 skipped, 1 warning`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - replay 数据范围固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
   `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
@@ -120,10 +120,18 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
   写入失败时保留待写事件并 fail-closed。
 - Spike 本地检查每个托管 symbol 的 Redis 1s Bar 交付新鲜度；任一流超过 10 秒
   静默就关闭入场门禁，不依赖上游健康声明。
+- 独立真实 testnet harness 已主动关闭 User Stream WebSocket，并观察到 disconnect、恢复对账、
+  reconnected 和 listenKey 轮换；最终 0 挂单、0 仓位，报告为
+  `reports/testnet_user_stream_reconnect_20260807.json`。该短时演练不替代外部长时间运行验收。
+- 明确业务拒单会写入不可逆终态 `REJECTED` 并保留交易所错误码，不进入
+  `SUBMIT_UNKNOWN`、不更换 client ID 重试；超时等结果模糊错误仍保持未知并 fail-closed。
+- 迁移 `0003` 增加策略运行状态。Spike 每 5 秒发布实例、门禁和 halt 心跳，15 秒未更新时
+  `/api/v1/strategy-runtime-status` 返回 `stale`；Web 将账本数据库健康与策略运行状态分开，
+  无运行记录不会冒充策略正常。
 
 当前结果证明离线入场链路、Redis/PostgreSQL 内部服务集成、Binance testnet 公共行情短时
-链路、独立 REST harness 及完整策略进程成交恢复可用；异常断流故障注入和正式退出规则仍未
-验收，也不能据此启动正式账户。
+链路、独立 REST harness、完整策略进程成交恢复和受控 User Stream 主动断流恢复可用；
+外部长时间运行、外部告警、正式阈值和自然信号退出仍未验收，也不能据此启动正式账户。
 
 ## 4. 功能范围与状态
 
@@ -152,7 +160,7 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 | replay runner 与报告 | 部分完成 | 滑点、同秒顺序及对齐后绩效口径 | 已输出订单、成交、持仓、汇总、策略审计；LIMIT 支持跨 Bar 部分成交，MARKET 使用 Taker 费用，可选交易所 tick/step 快照 |
 | 全局交易准入与首成交计时 | 完成 | 持续做外部故障回归 | 已验证全局互斥、Redis 原子租约、带仓重启首成交/手续费恢复及 D-009 |
 | 入场幂等与失效撤单 | 完成 | 持续做交易所回归 | replay 与 AKEUSDT testnet 已验证预挂、幂等、部分成交、全部成交、撤单和终态 WAL 重启 |
-| User Stream 与启动对账 | 部分完成 | 外部长时间断流演练 | 已完成真实回报、REST 回补、终态 WAL 补账 ack、断流门禁、重连失败资源回收、回调 fatal/有界排空、持续未知 fatal、TRADE 幂等及带仓 Campaign timing 恢复 |
+| User Stream 与启动对账 | 部分完成 | 外部长时间运行与持续未知外部处置演练 | 已完成真实回报、REST 回补、终态 WAL 补账 ack、主动断流重连、listenKey 轮换、重连失败资源回收、回调 fatal/有界排空、持续未知 fatal、TRADE 幂等及带仓 Campaign timing 恢复 |
 | 持仓保护与退出 | 部分完成 | 先与用户逐轮评审买卖点、指标快照和 PnL；未确认前暂停调参 | candidate-v1 已实现 origin 减半、90s 后时间/动能退出及 5m/15m 突破退出；参数仅为候选，旧标定已失效，live 继续拒绝 |
 | 账户级风控 | 部分完成 | 保证金、日亏损、数据延迟、急停 | 已限制持仓价值、币种数、杠杆并阻塞未知订单 symbol；关键事实不一致会全局 halt 新开仓，但保留 reduce-only 退出 |
 | testnet/live 适配 | 部分完成 | 完整策略进程真实多轮验证、最新退出策略 | 已有正式进程与 `BinanceStrategyAccount`；REST harness 已在 one-way testnet 多轮写入；未冻结退出前 live 拒绝启动 |
@@ -163,9 +171,9 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 |---|---|---|---|
 | PostgreSQL schema 和模型 | 完成 | 后续变更逐版本追加迁移 | 有序迁移、事务回滚、并发锁、校验和及既有数据接管已通过真实 PostgreSQL 测试；启动会迁移并验证当前版本 |
 | 订单/成交/持仓与 Campaign 生命周期审计 | 完成 | 旧成交不猜测回填 | `campaign_id` 显式贯穿意图、WAL、User Stream、启动回补和账本；`/api/v1/campaigns/{campaign_id}/pnl` 返回实际卖出/买回均价、数量、USDT 手续费及净 PnL；事实不完整或方向矛盾时拒绝计算 |
-| FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 订单、成交、持仓、PnL、策略审计分页查询和真实数据库健康检查已验证 |
+| FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 订单、成交、持仓、PnL、策略审计、策略运行状态分页查询和真实数据库健康检查已验证 |
 | subcategory 准入控制 | 部分完成 | 接入真实可交易池扫描器并外部验证 | 已接入 Spike 进程；乐观并发、追加审计、fail-closed 刷新和关闭撤单已通过真实 PostgreSQL 测试 |
-| Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供运行状态、账本、PnL 和 subcategory 控制 |
+| Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供独立的账本健康和策略运行状态、账本、PnL 与 subcategory 控制 |
 | 权限与操作审计 | 待确认 | 身份、角色、敏感操作范围 | 所有控制变更可追责 |
 | 监控、告警、备份恢复 | 未开始 | SLO、告警通道、演练 | 关键故障可发现、可恢复 |
 
@@ -222,7 +230,8 @@ D-007、candidate-v1 状态机、部分成交、交易所量化和 Maker/Taker �
 交付物：订单 WAL、`SUBMIT_UNKNOWN` 解析、User Stream、启动对账、撤单竞态处理、交易所
 托管保护单、账户级风控和紧急停止。
 
-已完成订单 WAL、Binance REST 可靠提交适配、启动时逐订单单次 `SUBMIT_UNKNOWN` 查单状态解析、
+已完成订单 WAL、Binance REST 可靠提交适配、明确业务拒单 `REJECTED` 与结果模糊的
+`SUBMIT_UNKNOWN` 分离、启动时逐订单单次 `SUBMIT_UNKNOWN` 查单状态解析、
 未知订单 symbol 风险阻塞与全部解析后解锁、显式参数的后台查单编排、WAL 所属订单/成交与
 管理标的仓位的 REST 启动回补、订单/仓位启动快照一致性门禁，以及 User Stream
 订单/账户回报投递。运行时已组合启动对账、后台轮询、停止和重连；账户级订单回报会严格
@@ -236,8 +245,9 @@ WAL 空仓重启。撤单异常后会按原 client ID 查询交易所，只有�
 订单 TTL 现固定为首次 intent 时间，不会因重启延长；未获账本 ack 的终态 WAL 会继续
 回补 PostgreSQL；User Stream 业务回调失败会进入进程级 fatal，关机必须排空或显式报超时。
 同一 account id 的执行进程由 PostgreSQL session lock 单实例保护；未归属 WAL 的订单回报
-和非托管 symbol 仓位不再写入策略账本，而是直接停止进程。
-剩余外部断流和持续未知回报故障注入，以及正式保护退出规则验收。
+和非托管 symbol 仓位不再写入策略账本，而是直接停止进程。真实 testnet 主动断流演练已观察到
+disconnect、恢复对账、reconnected 和 listenKey 轮换，最终空仓空单。
+剩余外部长时间运行、持续未知回报外部处置演练，以及正式保护退出规则验收。
 
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
 未终态轮次；本地状态以交易所订单、成交和仓位事实为准。
@@ -257,7 +267,8 @@ Campaign 运行时权威状态保留在 Redis 原子租约中；其持久历史�
 `strategy_audit_events` 幂等记录，并可按 `campaign_id` 查询。这里不再新增独立 Campaign
 状态表，避免与 Redis 运行态形成双写权威。新 Campaign 的订单和成交通过 WAL 中显式
 `campaign_id` 归属，并提供逐 Campaign 执行 PnL 查询；旧成交不按时间猜测回填。剩余：
-待确认的身份认证和权限。
+迁移 `0003` 已增加策略运行状态，Spike 每 5 秒写心跳，15 秒未更新显示为 `stale`；
+API/Web 已将账本健康与策略状态分离。仍待确认身份认证和权限。
 
 退出条件：控制变更和完整交易生命周期均可查询；并发修改不会静默覆盖；Web 不可绕过
 策略准入和风控；数据库或 Redis 故障时默认禁止新增风险。
@@ -272,9 +283,14 @@ Campaign 运行时权威状态保留在 Redis 原子租约中；其持久历史�
 Compose 已覆盖真实 Redis/PostgreSQL 服务级集成，测试编排已使用独立项目隔离且不会重建默认依赖；
 默认行情/账本服务首次部署健康检查及 PostgreSQL 重建后账本恢复脚本已验证；
 Binance testnet 已完成预挂撤单、4 轮开平仓和最终空仓检查；完整策略链路此前已覆盖部分成交
-和 Campaign 释放。迁移 `0002` 后再次启动完整 Spike profile，迁移 runner 与 ledger 使用同一
+和 Campaign 释放。迁移 `0002` 后曾再次启动完整 Spike profile，迁移 runner 与 ledger 使用同一
 镜像、User Stream 真实连接且进程 healthy；subcategory version 6 保持 disabled。停止 Spike
-后独立 dry-run 再次确认 AKEUSDT/BTCUSDT 均为空仓空单。剩余外部断流故障注入、告警和恢复演练。
+后独立 dry-run 再次确认 AKEUSDT/BTCUSDT 均为空仓空单。User Stream 主动断流恢复也已通过
+真实 testnet 演练，报告为 `reports/testnet_user_stream_reconnect_20260807.json`。新增迁移
+`0003` 的策略运行状态和 API/Web 已通过 Compose 真实 PostgreSQL 回归；默认数据库也已从
+`0002` 升至 `0003`，准入关闭的 Spike testnet 进程实际写入 `running`、
+`entry_enabled=false`，优雅停止后写入 `stopped`，全程空仓空单。仍缺外部长时间运行、
+持续未知回报处置、外部告警通道和恢复演练。
 最新一轮 BTCUSDT 使用 `SELL LIMIT 0.001 @ 65000` 成交，随后 `BUY MARKET reduceOnly`
 全部成交；独立 dry-run 复核 AKEUSDT/BTCUSDT 均为 0 挂单、0 持仓。最新报告为
 `reports/testnet_20260807_post_migration_flat.json`。
@@ -325,8 +341,8 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前本地全量基线为 `386 passed, 31 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
-基线为 `416 passed, 1 skipped, 1 warning`。
+当前宿主机全量基线为 `431 passed, 33 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
+基线为 `460 passed, 1 skipped, 1 warning`。
 
 ## 8. 风险与停止条件
 

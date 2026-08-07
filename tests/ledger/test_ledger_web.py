@@ -20,10 +20,22 @@ async def test_ledger_web_assets_are_served():
     assert page.status_code == 200
     assert "Trade Ledger" in page.text
     assert "subcategory" in page.text
+    assert "策略运行状态" in page.text
+    assert "独立于账本服务健康状态" in page.text
+    assert 'id="runtime-count">未运行' in page.text
     assert script.status_code == 200
     assert "/subcategory-admissions" in script.text
+    assert "/strategy-runtime-status" in script.text
+    assert "effective_status" in script.text
+    assert "entry_enabled" in script.text
+    assert "halt_reason" in script.text
+    assert "heartbeat_at" in script.text
+    assert "gate_conditions" in script.text
+    assert 'textContent = "未运行"' in script.text
+    assert 'textContent = "账本服务正常"' in script.text
     assert styles.status_code == 200
     assert "--accent" in styles.text
+    assert ".runtime-table-wrap" in styles.text
 
 
 def test_ledger_web_does_not_expose_unconfirmed_controls():

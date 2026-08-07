@@ -111,6 +111,9 @@ class CompositeEntryGate:
     def condition(self, name: str) -> bool:
         return self._conditions.get(name, False)
 
+    def snapshot(self) -> dict[str, bool]:
+        return dict(self._conditions)
+
     def admission_view(self) -> "NamedEntryGate":
         return NamedEntryGate(self, "subcategory")
 
@@ -337,7 +340,7 @@ class SpikeExecutionCoordinator:
         filled_full_exit = bool(filled_exit_reasons & full_exit_reasons)
         exit_requested = any(
             record.payload.get("trigger_reason") in full_exit_reasons
-            and record.status not in {"FILLED", "CANCELLED", "EXPIRED"}
+            and record.status not in {"FILLED", "CANCELLED", "EXPIRED", "REJECTED"}
             for record in owned_records
         )
         if lease is not None and lease.reduced_at_origin:
@@ -474,6 +477,14 @@ class SpikeExecutionCoordinator:
         if record.status == "SUBMIT_UNKNOWN":
             self.gate.set_condition("execution", False)
             self.risk_guard.halt("submit status unknown")
+        if record.status == "REJECTED":
+            response = record.payload.get("exchange_response") or {}
+            code = response.get("code", "unknown")
+            self.gate.set_condition("execution", False)
+            self.risk_guard.halt(f"order rejected by exchange: {code}")
+            raise RuntimeError(
+                f"exchange rejected order {record.client_order_id}: {code}"
+            )
         if intent.ttl_ms is not None and intent.ttl_ms > 0:
             task = self._expiry_tasks.get(intent.client_order_id)
             if task is None or task.done():

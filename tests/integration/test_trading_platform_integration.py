@@ -64,12 +64,16 @@ class TestOrderStates:
         assert is_valid_transition('SUBMIT_UNKNOWN', 'FILLED') == True
         assert is_valid_transition('SUBMIT_UNKNOWN', 'PARTIALLY_FILLED') == True
         assert is_valid_transition('SUBMIT_UNKNOWN', 'EXPIRED') == True
+        assert is_valid_transition('NEW', 'REJECTED') == True
+        assert is_valid_transition('SUBMIT_UNKNOWN', 'REJECTED') == True
 
     def test_invalid_transitions(self):
         """测试非法状态转换"""
         assert is_valid_transition('FILLED', 'NEW') == False
         assert is_valid_transition('CANCELLED', 'NEW') == False
         assert is_valid_transition('NEW', 'SUBMIT_UNKNOWN') == False
+        assert is_valid_transition('PARTIALLY_FILLED', 'REJECTED') == False
+        assert is_valid_transition('REJECTED', 'NEW') == False
 
     def test_same_state_allowed(self):
         """测试同状态转换（重复推送）"""
@@ -81,6 +85,7 @@ class TestOrderStates:
         assert is_terminal_status('FILLED') == True
         assert is_terminal_status('CANCELLED') == True
         assert is_terminal_status('EXPIRED') == True
+        assert is_terminal_status('REJECTED') == True
         assert is_terminal_status('NEW') == False
 
 

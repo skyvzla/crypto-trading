@@ -59,6 +59,21 @@ def test_order_projection_restores_explicit_reduce_only_contract(tmp_path):
     assert order.trigger_reason == "spike_tier1"
 
 
+def test_rejected_order_is_terminal_and_does_not_keep_live_risk(tmp_path):
+    account, _, wal, _ = _account(tmp_path)
+    intent = wal.record_intent(
+        _intent(), account_id="spike-test", recorded_at=1_000
+    )
+    wal.record_exchange_status(
+        intent, {"status": "REJECTED", "orderId": 42}, recorded_at=1_100
+    )
+
+    order = account.iter_orders()[0]
+    assert order.status == "REJECTED"
+    assert account.all_orders_terminal("BTCUSDT") is True
+    assert account.symbols_with_live_risk() == set()
+
+
 def test_order_projection_keeps_original_ttl_after_partial_fill_and_restart_query(
     tmp_path,
 ):

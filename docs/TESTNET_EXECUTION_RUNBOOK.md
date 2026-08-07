@@ -123,6 +123,27 @@ uv run --env-file .env python scripts/binance_testnet_reconcile_wal.py \
 
 任一条 `resolved=false` 或 `FAIL_CLOSED` 都不得重跑、改 client ID 重下或手工解除风险门禁；必须保留账户锁定并进行订单、成交和仓位三方对账。
 
+明确的交易所业务拒单记录为不可逆终态 `REJECTED`，保留交易所错误码，不进入上述
+`SUBMIT_UNKNOWN` 查单循环，也不得更换 client ID 自动重试。网络超时等无法确认交易所是否
+接单的模糊错误仍记录为 `SUBMIT_UNKNOWN`，继续 fail-closed。
+
+## User Stream 主动断流恢复
+
+`scripts/binance_testnet_user_stream_reconnect.py` 用于受控验证真实 testnet User Stream 的
+断流门禁与恢复对账。它会占用 `spike_testnet` 的同一 advisory lock，Spike 或其他人工
+harness 运行时必须拒绝执行；开始和结束都要求全账户 0 挂单、0 非零仓位。
+
+```bash
+uv run --env-file .env python scripts/binance_testnet_user_stream_reconnect.py \
+  --symbol BTCUSDT \
+  --confirm I_UNDERSTAND_THIS_DISCONNECTS_THE_TESTNET_USER_STREAM \
+  --report reports/testnet_user_stream_reconnect.json
+```
+
+成功结果必须为 `RECONNECT_OK`，并同时观察到 disconnect、恢复对账、reconnected 和
+listenKey 轮换；最终仍须为 0 挂单、0 非零仓位。该演练会主动关闭 WebSocket，不提交订单，
+不能替代外部长时间运行验证。
+
 ## Campaign 执行与账本闭环
 
 `scripts/binance_testnet_campaign_roundtrip.py` 不测试策略信号和退出参数，只验证 testnet/live
@@ -208,6 +229,15 @@ uv run python scripts/binance_testnet_flatten.py \
   reduceOnly 0.001`，实际买回均价 `65224.7`。User Stream 写入 2 笔成交，gross PnL
   `-0.02789999 USDT`、手续费 `0.05216860 USDT`、net PnL `-0.08006859 USDT`，最终
   0 挂单、0 仓位。净化报告为 `reports/testnet_campaign_roundtrip_20260807.json`。
+- User Stream 主动断流演练观察到 disconnect、恢复对账、reconnected 和 listenKey 轮换，
+  最终 0 挂单、0 非零仓位；报告为
+  `reports/testnet_user_stream_reconnect_20260807.json`。
+- PostgreSQL 迁移 `0003` 的策略运行状态已通过 Compose 回归：Spike 每 5 秒写入心跳，
+  15 秒未更新显示为 `stale`；API/Web 分开呈现账本健康与策略状态。默认数据库已从
+  `0002` 升到 `0003`；准入关闭的 Spike testnet 实例实际写入 `running` 且
+  `entry_enabled=false`，优雅停止后写入 `stopped`，启停前后均为空仓空单。
+- 本轮宿主机全量结果为 `431 passed, 33 skipped, 1 warning`。
+- 本轮 Compose 全量结果为 `460 passed, 1 skipped, 1 warning`。
 
 验收结束后 `spike` subcategory 已设置为 disabled，Spike 容器已停止；再次运行前必须经过新的
 人工准入操作。
@@ -216,5 +246,7 @@ AKEUSDT 的 `MIN_NOTIONAL` 为 5 USDT。三档权重为 30/40/30，因此 10 USD
 3/4/3 USDT 的必然无效订单。进程会在连接交易所、读取 symbol rules 后验证最小档必须严格
 高于交易所最小名义金额；当前 Compose testnet 默认使用 20 USDT。
 
-上述结果已证明 REST harness、紧急清仓以及完整策略进程的 User Stream、Campaign、部分成交和
-启动恢复路径；异常断流和持续未知回报仍需单独故障注入验收，正式退出参数冻结前不得启动 live。
+上述结果已证明 REST harness、紧急清仓以及完整策略进程的 User Stream、Campaign、部分成交、
+启动恢复和受控主动断流恢复路径；外部长时间运行、持续未知回报外部处置、外部告警通道、
+Web 身份权限、正式 live 阈值和自然策略信号退出仍未验收。`candidate-v1` 保持冻结，
+正式退出参数冻结前不得启动 live。

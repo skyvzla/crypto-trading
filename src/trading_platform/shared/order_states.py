@@ -4,18 +4,20 @@
 from typing import Literal
 
 OrderStatus = Literal[
-    'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED', 'SUBMIT_UNKNOWN'
+    'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED',
+    'SUBMIT_UNKNOWN'
 ]
 
 # 允许的状态转换
 VALID_TRANSITIONS = {
-    'NEW': {'FILLED', 'CANCELLED', 'EXPIRED', 'PARTIALLY_FILLED'},
+    'NEW': {'FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED', 'PARTIALLY_FILLED'},
     'PARTIALLY_FILLED': {'FILLED', 'CANCELLED'},
     'FILLED': set(),  # 终态
     'CANCELLED': set(),  # 终态
     'EXPIRED': set(),  # 终态
+    'REJECTED': set(),  # 终态
     'SUBMIT_UNKNOWN': {
-        'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED'
+        'NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED'
     },  # 查单后以交易所事实为准
 }
 
@@ -41,14 +43,14 @@ def is_valid_transition(old_status: OrderStatus, new_status: OrderStatus) -> boo
 
 def is_terminal_status(status: OrderStatus) -> bool:
     """判断是否为终态"""
-    return status in {'FILLED', 'CANCELLED', 'EXPIRED'}
+    return status in {'FILLED', 'CANCELLED', 'EXPIRED', 'REJECTED'}
 
 
 def map_binance_status(binance_status: str) -> OrderStatus:
     """
     映射 Binance 订单状态到内部状态
 
-    Binance 状态: NEW, PARTIALLY_FILLED, FILLED, CANCELED, EXPIRED
+    Binance 状态: NEW, PARTIALLY_FILLED, FILLED, CANCELED, EXPIRED, REJECTED
     """
     mapping = {
         'NEW': 'NEW',
@@ -56,5 +58,6 @@ def map_binance_status(binance_status: str) -> OrderStatus:
         'FILLED': 'FILLED',
         'CANCELED': 'CANCELLED',
         'EXPIRED': 'EXPIRED',
+        'REJECTED': 'REJECTED',
     }
     return mapping.get(binance_status, 'NEW')

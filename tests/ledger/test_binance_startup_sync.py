@@ -241,6 +241,36 @@ async def test_unacknowledged_cancelled_wal_repairs_stale_new_ledger_order(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_unacknowledged_rejected_wal_backfills_order_without_trade(tmp_path):
+    rejected = query_order(
+        status="REJECTED",
+        executedQty="0",
+        avgPrice="0",
+    )
+    synchronizer, rest, db, wal = make_sync(
+        tmp_path,
+        order_response=rejected,
+        trades=[],
+    )
+    wal.record_exchange_status(
+        wal.recover_latest()[CLIENT_ORDER_ID],
+        rejected,
+        recorded_at=RECORDED_AT + 2,
+    )
+
+    result = await synchronizer.sync_once()
+
+    assert result.order_count == 1
+    assert result.trade_count == 0
+    recovered = db.insert_order.await_args.args[0]
+    assert recovered.status == "REJECTED"
+    assert recovered.filled_quantity == Decimal("0")
+    db.insert_trade.assert_not_awaited()
+    rest.get_account_trades.assert_awaited_once()
+    assert wal.ledger_acknowledged(wal.recover_latest()[CLIENT_ORDER_ID])
+
+
+@pytest.mark.asyncio
 async def test_terminal_wal_is_not_acknowledged_when_position_sync_fails(tmp_path):
     synchronizer, _, _, wal = make_sync(tmp_path, positions=[])
     wal.record_exchange_status(

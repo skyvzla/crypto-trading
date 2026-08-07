@@ -18,8 +18,28 @@ from trading_platform.shared.execution_recovery import (
 )
 from trading_platform.shared.risk import RiskGuard
 
-from .rest_client import BinanceRestClient
+from .rest_client import BinanceAPIException, BinanceRestClient
 from .symbol_rules import BinanceSymbolRuleBook
+
+
+# Binance returned a structured business rejection, so these codes prove the
+# order was not accepted. Transport/timeout and generic server errors remain
+# SUBMIT_UNKNOWN and must be reconciled by client order id.
+_DEFINITE_ORDER_REJECTION_CODES = {
+    *range(-1136, -1099),
+    -1013,
+    -2010,
+    -2018,
+    -2019,
+    -2020,
+    -2021,
+    -2022,
+    -2024,
+    -2025,
+    -2026,
+    -2027,
+    -2028,
+}
 
 
 class BinanceOrderExecutor:
@@ -102,6 +122,23 @@ class BinanceOrderExecutor:
                 price=intent.price if intent.order_type == "LIMIT" else None,
                 new_client_order_id=intent.client_order_id,
                 reduce_only=intent.reduce_only,
+            )
+        except BinanceAPIException as exc:
+            if exc.code in _DEFINITE_ORDER_REJECTION_CODES:
+                rejected = self.wal.record_exchange_status(
+                    intent_record,
+                    {
+                        "status": "REJECTED",
+                        "code": exc.code,
+                        "msg": exc.message,
+                    },
+                    recorded_at=self._now_ms(),
+                )
+                self._refresh_symbol_risk(intent.symbol)
+                return rejected
+            return self._record_unknown(
+                intent_record,
+                error=f"submit_api_ambiguous:{exc.code}",
             )
         except (httpx.TimeoutException, RuntimeError) as exc:
             return self._record_unknown(
