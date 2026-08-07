@@ -22,6 +22,8 @@ uv run ledger-migrate status
 
 也可向两个命令显式传入 `--dsn`。ledger 服务启动时会再次并发安全地应用待执行迁移，
 然后校验数据库已处于当前代码版本；版本缺失、超前或已应用 SQL 的校验和改变都会拒绝启动。
+Compose 中 `ledger` 与 `ledger-migrate` 强制使用同一个镜像制品，避免定向构建后迁移 runner
+仍停留在旧版本并把已升级数据库误判为“高于当前构建”。
 
 ## 新增迁移
 

@@ -13,8 +13,8 @@
 D-007 保留为简单执行测试；D-028 的逐笔数据评审和后续人工决策完成前，
 `live` 会拒绝启动。
 
-当前本地全量测试为 `385 passed, 31 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
-全量为 `416 passed, 1 warning`。测试已按
+当前本地全量测试为 `386 passed, 31 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
+全量为 `416 passed, 1 skipped, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -172,8 +172,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run pytest -q`：`385 passed, 31 skipped, 1 warning`
-- Compose 真实 PostgreSQL/Redis：`416 passed, 1 warning`
+- 本地 `uv run pytest -q`：`386 passed, 31 skipped, 1 warning`
+- Compose 真实 PostgreSQL/Redis：`416 passed, 1 skipped, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - AKEUSDT 外部执行追加 1 轮非市价 LIMIT 撤单和 3 轮可成交 LIMIT 开空/reduce-only MARKET 平仓；最终独立检查为 0 挂单、0 仓位
 - BTCUSDT 追加 `SELL LIMIT 0.001 @ 100000` 从 `NEW` 到 `CANCELED`，以及
@@ -216,13 +216,15 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - 首次停机因本地部分成交状态落后于交易所终态而 fail-closed；新增撤单异常后的 REST 终态
   查询回归。清理后在 subcategory version 6 disabled 状态重启，Campaign 释放、无重下单，
   最终优雅停止为 `Exited (0)`
+- 数据库迁移至 `0002` 后，完整 Spike profile 再次通过迁移 runner、真实 User Stream 连接和
+  健康检查；验收后先停止 Spike，再独立确认 AKEUSDT/BTCUSDT 均为 0 挂单、0 持仓
 
 尚未验证：
 
 - Spike 正式保护性退出、盈利管理、完整已平仓 PnL
 - subcategory 准入服务的异常断流和持续未知回报外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
-- Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
+- Binance 外部 WS 长时间运行和断流故障注入
 - Binance Futures testnet 的 User Stream 异常断流和持续未知回报故障注入；完整进程真实
   部分成交、成交仓位确认、剩余档撤单、持仓 Campaign 恢复/释放和空仓重启已完成
 
