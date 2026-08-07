@@ -123,7 +123,15 @@ uv run python scripts/binance_testnet_flatten.py \
 - `AKEUSDT` `SELL LIMIT 1300` 成交后出现 `BOTH -1300` 仓位，随后 reduce-only
   `BUY MARKET 1300` 明确为 `FILLED`，最终空仓；
 - 人工紧急清仓再次以 AKEUSDT 小仓验证，工具查询退出单到 `FILLED` 后才确认仓位为空；
+- 完整 Spike profile 启动时发现并修复两个循环门禁问题：Redis bar 消费者必须先订阅再等待
+  Pub/Sub 质量；未完成 Kline 只能证明传输健康，不得写入策略 Kline 存储。修复后 aggTrade、
+  1m、5m 均为 healthy，`/quality` 返回 200；
+- 人工重启 Spike 后旧 listenKey 正常关闭、新 listenKey 成功连接，市场订阅重新注册并在
+  `connection_generation=2` 恢复 ready；
 - 验收结束时账户为 one-way、0 个挂单、0 个非零仓位。
+
+验收结束后 `spike` subcategory 已设置为 disabled，Spike 容器已停止；再次运行前必须经过新的
+人工准入操作。
 
 上述结果只证明 REST harness 和紧急清仓路径，不替代完整策略进程的 User Stream、Campaign、
 部分成交、断流、重连和启动恢复外部验收。

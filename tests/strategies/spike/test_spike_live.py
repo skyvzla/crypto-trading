@@ -1,4 +1,5 @@
 from decimal import Decimal
+import asyncio
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -89,6 +90,78 @@ def test_process_rejects_conflicting_account_configuration():
             redis_config=Mock(),
             strategy_config=Mock(account_id="other-account"),
         )
+
+
+@pytest.mark.asyncio
+async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="10"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    events = []
+    blocker = asyncio.Event()
+    account = Mock(
+        refresh_positions=AsyncMock(),
+        has_unresolved_orders=Mock(return_value=False),
+    )
+    coordinator = Mock(
+        restore_campaign_gate=AsyncMock(),
+        account=account,
+        reconcile_entry_expirations=AsyncMock(),
+        validate_recovered_campaign=Mock(),
+        maybe_release_campaign=AsyncMock(),
+        stop=AsyncMock(),
+    )
+    runtime = Mock(start=AsyncMock(), stop=AsyncMock())
+    gate = Mock(set_condition=Mock())
+    admission = Mock(on_universe_scan=AsyncMock())
+
+    async def build_resources():
+        process.coordinator = coordinator
+        process.runtime = runtime
+        process.gate = gate
+        process.admission = admission
+
+    process._build_resources = AsyncMock(side_effect=build_resources)
+    process._register_market_subscriptions = AsyncMock(
+        side_effect=lambda: events.append("registered")
+    )
+    process._warm_strategy_history = AsyncMock(
+        side_effect=lambda: events.append("warmup")
+    )
+
+    async def market_gate(*, require_ready=False):
+        events.append("market_gate")
+        assert "bar_consumer" in events
+        return True
+
+    async def bar_loop(ready):
+        events.append("bar_consumer")
+        ready.set()
+        await blocker.wait()
+
+    async def idle_loop():
+        await blocker.wait()
+
+    process._refresh_market_gate = market_gate
+    process._bar_loop = bar_loop
+    process._kline_loop = idle_loop
+    process._safety_scan_loop = idle_loop
+    process._unregister_market_subscriptions = AsyncMock()
+
+    try:
+        await process.start()
+    finally:
+        await process.stop()
+
+    assert events.index("registered") < events.index("bar_consumer")
+    assert events.index("bar_consumer") < events.index("market_gate")
 
 
 def test_composite_gate_requires_every_condition():

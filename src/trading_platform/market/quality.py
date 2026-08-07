@@ -149,6 +149,23 @@ class MarketDataQualityTracker:
         self._accept(quality, close_time_ms, received_at_ms)
         return True
 
+    def observe_kline_update(
+        self,
+        symbol: str,
+        interval: str,
+        event_time_ms: int,
+        received_at_ms: int,
+    ) -> bool:
+        """未完成 K 线只证明流在传输，不参与完成周期连续性判断。"""
+        stream = f"{symbol.lower()}@kline_{interval}"
+        quality = self._streams.get(stream)
+        if quality is None:
+            return True
+        if quality.status == "degraded":
+            return False
+        self._accept(quality, event_time_ms, received_at_ms)
+        return True
+
     @staticmethod
     def _accept(
         quality: StreamQuality,

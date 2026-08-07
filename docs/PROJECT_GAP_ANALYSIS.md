@@ -22,7 +22,8 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴�
 首次提交前曾发现账户为 Hedge Mode 并 fail-closed。经用户明确授权后，旧 AKEUSDT SHORT
 和 BTCUSDT LONG 已平仓，账户切换为 one-way；AKEUSDT 已真实完成预挂撤单、限价成交、
 reduce-only 退出和紧急清仓。当前可以确认独立 REST 写路径，完整策略进程、User Stream 和
-外部故障竞态仍待验收。
+外部订单故障竞态仍待验收。完整 Spike 进程的空仓启动与一次人工重启已通过：User Stream
+listenKey 正常关闭/重建，市场订阅卸载/恢复后 1s/1m/5m 三个流重新 ready。
 
 外部 DuckDB 历史源端到端 replay 已验证。固定基准为 AKEUSDT、UTC `2026-07-01` 至
 `2026-08-01`、从 `2026-06-30 08:00 UTC` 开始 16 小时预热、DuckDB 只读源、
@@ -52,7 +53,7 @@ reduce-only 退出和紧急清仓。当前可以确认独立 REST 写路径，�
 | 行情聚合 | aggTrade 到 `Bar1s` 的内存聚合器 | 已实现基础逻辑 |
 | 行情分发 | Redis Pub/Sub、Kline latest Hash | 已通过真实 Redis 服务级集成 |
 | 订阅管理 | consumer 声明式订阅、引用计数、instance epoch | 刷新与断线重连已有自动化验证，待进程重启恢复和外部长时间验证 |
-| 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；REST harness 已真实写入，完整进程外部验收待完成 |
+| 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；REST harness 已真实写入，完整进程空仓启动/重启已验收，外部订单回报待完成 |
 | 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory 审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成 |
 | 风控 | 总持仓价值、币种数量、杠杆上限、未知订单币种阻塞 | 仅最小基础能力 |
 | 回测 | UTC 虚拟时钟、16h 预热、简化限价成交、持仓、费用和策略审计报告 | AKEUSDT 外部只读 DuckDB 端到端 replay 已验证；退出与绩效口径仍未冻结 |
@@ -143,7 +144,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 区域 | 缺失能力 | 目标阶段 |
 |---|---|---|
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
-| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁；⏳ 完整策略进程外部验收 | Phase 2 |
+| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁；⏳ 带真实订单的完整策略进程外部验收 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、✅ 部分成交/撤单竞态/迟到回报自动化、✅ AKEUSDT 真实预挂撤单与成交；⏳ 完整进程外部验收 | Phase 2/3 |
 | **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/具体账户进程/订单仓位启动门禁/规则量化/重连顺序；⏳外部部分成交与保护退出 | Phase 3 |
 | **持仓退出** | ✅ D-007 仅用于 replay/testnet 执行验证；⏳ 最新动能、origin 减半、趋势清仓及参数标定；未完成前 live 禁止启动 | Phase 2/3 |
@@ -158,8 +159,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run pytest -q`：`273 passed, 11 skipped, 1 warning`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`279 passed, 1 warning`
+- 本地 `uv run pytest -q`：`275 passed, 11 skipped, 1 warning`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`286 passed, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
 - Binance `demo-fapi` 真实鉴权成功；账户已切换 one-way，AKEUSDT 真实 `SELL LIMIT` 成交
@@ -180,6 +181,11 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - 核心模块导入通过
 - `binance_testnet_flatten.py` 离线单测及真实写入均通过；对 AKEUSDT 空仓使用 reduce-only
   `BUY MARKET`，退出单明确为 `FILLED`、成交 1300，最终无挂单、无持仓
+- 完整 Spike Compose profile 真实连接 User Stream；修复 Redis 消费者启动顺序后，
+  `bar1s:AKEUSDT` 从启动起即有 1 个消费者；修复未完成 Kline 的传输质量判定后，
+  aggTrade、1m 和 5m 三个流均 healthy，`/quality` 返回 200
+- Spike 人工重启时旧 listenKey 正常关闭、新 listenKey 成功连接；市场订阅卸载后重新注册，
+  `connection_generation=2` 并恢复 ready；验收后 subcategory 已关闭、策略容器已停止
 
 尚未验证：
 
@@ -187,8 +193,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - subcategory 准入服务接入具体 testnet/live 账户进程及外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
-- Binance Futures testnet 完整策略进程的部分成交、User Stream 断流/重连、未知回报和
-  Campaign 恢复；独立 REST harness 的预挂、撤单、成交和 reduce-only 退出已完成
+- Binance Futures testnet 完整策略进程带真实订单时的部分成交、User Stream 异常断流、
+  未知回报和 Campaign 恢复；空仓启动/人工重启及独立 REST harness 已完成
 
 ## 6. 明确不做
 

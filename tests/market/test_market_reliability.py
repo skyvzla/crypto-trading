@@ -113,6 +113,34 @@ def test_quality_tracker_detects_completed_kline_gap():
 
 
 @pytest.mark.asyncio
+async def test_in_progress_kline_proves_transport_ready_without_being_stored():
+    service = MarketLayerService(MarketLayerConfig(), AsyncMock(), "test-epoch")
+    stream = "btcusdt@kline_5m"
+    service._current_streams = [stream]
+    service.ws_client.connection_generation = 1
+    service._quality_generation = 1
+    service.quality.begin_connection([stream], generation=1)
+    service.kline_store.store_kline = AsyncMock()
+
+    await service._handle_ws_message(
+        {
+            "e": "kline",
+            "E": 301_000,
+            "s": "BTCUSDT",
+            "k": {
+                "i": "5m",
+                "t": 300_000,
+                "T": 599_999,
+                "x": False,
+            },
+        }
+    )
+
+    assert service.quality.snapshot()[stream]["status"] == "healthy"
+    service.kline_store.store_kline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_health_fails_closed_when_active_pubsub_has_no_consumers():
     from trading_platform.market.main import create_app
 

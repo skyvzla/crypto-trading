@@ -243,6 +243,16 @@ class MarketLayerService:
                 await self._handle_aggtrade(symbol, trade_data)
                 return
 
+            if message.get("e") == "kline" and not message.get("k", {}).get("x"):
+                kline = message["k"]
+                self.quality.observe_kline_update(
+                    symbol=message["s"],
+                    interval=kline["i"],
+                    event_time_ms=int(message["E"]),
+                    received_at_ms=int(time.time() * 1000),
+                )
+                return
+
             # 解析 Kline
             kline_result = parse_kline_message(message)
             if kline_result:

@@ -98,15 +98,17 @@ class SpikeLiveProcess:
             self.gate.set_condition("execution", True)
 
             await self._register_market_subscriptions()
+            await self._start_bar_consumer()
             await self._warm_strategy_history()
             await self._refresh_market_gate(require_ready=True)
             await self.admission.on_universe_scan()
 
-            self._tasks = [
-                asyncio.create_task(self._bar_loop(), name="spike-bar-loop"),
+            self._tasks.extend(
+                [
                 asyncio.create_task(self._kline_loop(), name="spike-kline-loop"),
                 asyncio.create_task(self._safety_scan_loop(), name="spike-safety-scan"),
-            ]
+                ]
+            )
         except BaseException:
             await self.stop()
             raise
@@ -333,12 +335,37 @@ class SpikeLiveProcess:
                 await asyncio.sleep(2)
         raise RuntimeError("market layer is not ready or uses a different environment")
 
-    async def _bar_loop(self) -> None:
+    async def _start_bar_consumer(self) -> None:
+        """订阅 Redis 后才允许等待依赖消费者存在的市场质量门禁。"""
+        ready = asyncio.Event()
+        task = asyncio.create_task(self._bar_loop(ready), name="spike-bar-loop")
+        self._tasks.append(task)
+        waiter = asyncio.create_task(ready.wait(), name="spike-bar-ready")
+        try:
+            done, _ = await asyncio.wait(
+                {task, waiter},
+                timeout=10,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if waiter not in done:
+                if task in done:
+                    task.result()
+                raise RuntimeError("bar consumer did not become ready")
+            if task.done():
+                task.result()
+                raise RuntimeError("bar consumer stopped during startup")
+        finally:
+            waiter.cancel()
+            await asyncio.gather(waiter, return_exceptions=True)
+
+    async def _bar_loop(self, ready: asyncio.Event | None = None) -> None:
         assert self.redis is not None
         assert self.coordinator is not None
         pubsub = self.redis.pubsub()
         try:
             await pubsub.subscribe(*(f"bar1s:{symbol}" for symbol in self.settings.symbols))
+            if ready is not None:
+                ready.set()
             async for message in pubsub.listen():
                 if message.get("type") != "message":
                     continue
