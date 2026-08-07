@@ -26,6 +26,9 @@ from trading_platform.shared.events import OrderIntent
 
 TESTNET_HOST = "demo-fapi.binance.com"
 EXECUTE_CONFIRMATION = "I_UNDERSTAND_TESTNET_ORDERS_ARE_REAL"
+POSITION_CONFIRMATION = "I_UNDERSTAND_THIS_OPENS_A_TESTNET_POSITION"
+SCENARIO_CANCEL_OPEN = "cancel-open"
+SCENARIO_FILL_AND_EXIT = "fill-and-exit"
 OPEN_ORDER_STATUSES = {"NEW", "PARTIALLY_FILLED", "PENDING_CANCEL"}
 TERMINAL_ORDER_STATUSES = {
     "CANCELED",
@@ -93,6 +96,18 @@ def validate_testnet_environment(*, execute: bool, confirmation: str | None) -> 
     return base_url, api_key, api_secret
 
 
+def validate_scenario_authorization(args: argparse.Namespace) -> None:
+    if (
+        args.execute
+        and args.scenario == SCENARIO_FILL_AND_EXIT
+        and args.confirm_position != POSITION_CONFIRMATION
+    ):
+        raise SmokeFailure(
+            "POSITION_CONFIRMATION_REQUIRED",
+            f"--confirm-position must equal {POSITION_CONFIRMATION}",
+        )
+
+
 def safe_order_view(order: dict[str, Any] | None) -> dict[str, Any] | None:
     if order is None:
         return None
@@ -135,6 +150,15 @@ def validate_order_response(order: dict[str, Any], *, symbol: str, client_order_
     if status not in OPEN_ORDER_STATUSES | TERMINAL_ORDER_STATUSES:
         raise SmokeFailure("ORDER_STATUS_UNKNOWN", f"unrecognized order status: {status!r}")
     return str(status)
+
+
+def order_has_fill(order: dict[str, Any]) -> bool:
+    if order.get("status") == "FILLED":
+        return True
+    try:
+        return Decimal(str(order.get("executedQty", "0"))) > 0
+    except InvalidOperation as exc:
+        raise SmokeFailure("ORDER_RESPONSE_INVALID", "invalid executed quantity") from exc
 
 
 async def query_until_known(
@@ -184,6 +208,42 @@ async def query_until_terminal(
     return None
 
 
+async def query_until_position(
+    client: BinanceRestClient,
+    *,
+    symbol: str,
+    attempts: int,
+    interval_seconds: float,
+) -> dict[str, Any] | None:
+    for attempt in range(attempts):
+        position = nonzero_one_way_position(
+            await client.get_position_risk(symbol), symbol=symbol
+        )
+        if position is not None:
+            return position
+        if attempt + 1 < attempts:
+            await asyncio.sleep(interval_seconds)
+    return None
+
+
+async def query_until_flat(
+    client: BinanceRestClient,
+    *,
+    symbol: str,
+    attempts: int,
+    interval_seconds: float,
+) -> dict[str, Any] | None:
+    for attempt in range(attempts):
+        position = nonzero_one_way_position(
+            await client.get_position_risk(symbol), symbol=symbol
+        )
+        if position is None:
+            return None
+        if attempt + 1 < attempts:
+            await asyncio.sleep(interval_seconds)
+    return position
+
+
 async def emergency_cleanup(
     client: BinanceRestClient,
     *,
@@ -202,7 +262,21 @@ async def emergency_cleanup(
         interval_seconds=args.query_interval_seconds,
     )
     if entry is None:
-        result["entry"] = "unknown"
+        try:
+            await client.cancel_order(
+                symbol=args.symbol,
+                orig_client_order_id=args.client_order_id,
+            )
+        except Exception:
+            pass
+        entry = await query_until_terminal(
+            client,
+            symbol=args.symbol,
+            client_order_id=args.client_order_id,
+            attempts=args.query_attempts,
+            interval_seconds=args.query_interval_seconds,
+        )
+        result["entry"] = safe_order_view(entry) if entry else "unknown"
     elif entry.get("status") in OPEN_ORDER_STATUSES:
         try:
             await client.cancel_order(
@@ -221,12 +295,14 @@ async def emergency_cleanup(
         result["entry"] = safe_order_view(entry) if entry else "cancel_unknown"
     else:
         result["entry"] = safe_order_view(entry)
+    result["entry_resolved"] = entry is not None
 
     position = nonzero_one_way_position(
         await client.get_position_risk(args.symbol), symbol=args.symbol
     )
     if position is None:
         result["flat"] = True
+        result["risk_resolved"] = result["entry_resolved"]
         return result
 
     amount = Decimal(str(position["positionAmt"]))
@@ -275,6 +351,7 @@ async def emergency_cleanup(
         await client.get_position_risk(args.symbol), symbol=args.symbol
     )
     result["flat"] = remaining is None
+    result["risk_resolved"] = result["entry_resolved"] and remaining is None
     if remaining is not None:
         result["remaining_position"] = safe_position_view(remaining)
     return result
@@ -307,6 +384,8 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
     report["endpoint"] = base_url
     report["symbol"] = args.symbol
     report["client_order_id"] = args.client_order_id
+    report["scenario"] = args.scenario
+    validate_scenario_authorization(args)
 
     client = BinanceRestClient(api_key=api_key, api_secret=api_secret, base_url=base_url)
     rules = None
@@ -333,12 +412,44 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
             "price": str(entry_intent.price),
             "quantity": str(entry_intent.quantity),
         }
-        report["planned_steps"] = [
-            "submit_sell_limit_once",
-            "query_by_client_order_id",
-            "cancel_if_open",
-            "reduce_only_market_exit_if_position_exists",
-        ]
+        if args.scenario == SCENARIO_CANCEL_OPEN:
+            report["planned_steps"] = [
+                "submit_non_marketable_sell_limit_once",
+                "query_by_client_order_id",
+                "cancel_if_open",
+                "reduce_only_market_exit_if_accidentally_filled",
+            ]
+        else:
+            report["planned_steps"] = [
+                "submit_marketable_sell_limit_once",
+                "verify_entry_filled_and_short_position_visible",
+                "submit_reduce_only_buy_market_once",
+                "verify_exit_filled_and_position_flat",
+            ]
+        klines = await client.get_klines(args.symbol, "1m", limit=1)
+        if not klines or len(klines[0]) < 5:
+            raise SmokeFailure("REFERENCE_PRICE_UNAVAILABLE", "could not read reference price")
+        reference_price = Decimal(str(klines[0][4]))
+        if args.scenario == SCENARIO_CANCEL_OPEN:
+            minimum_limit = reference_price * (
+                Decimal("1") + args.min_distance_bps / Decimal("10000")
+            )
+            if entry_intent.price < minimum_limit:
+                raise SmokeFailure(
+                    "MARKETABLE_ENTRY_REFUSED",
+                    "cancel-open SELL LIMIT is too close to the latest close; increase --limit-price",
+                )
+        else:
+            minimum_fill_limit = reference_price * (
+                Decimal("1") - args.max_fill_distance_bps / Decimal("10000")
+            )
+            if entry_intent.price > reference_price or entry_intent.price < minimum_fill_limit:
+                raise SmokeFailure(
+                    "FILL_PRICE_OUT_OF_RANGE",
+                    "fill-and-exit SELL LIMIT must be at or up to max-fill-distance-bps below the latest close",
+                )
+        report["reference_price"] = str(reference_price)
+
         if not args.execute:
             report["result"] = "DRY_RUN_OK"
             return
@@ -349,18 +460,6 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
                 "HEDGE_MODE_UNSUPPORTED",
                 "testnet execution requires one-way position mode",
             )
-
-        klines = await client.get_klines(args.symbol, "1m", limit=1)
-        if not klines or len(klines[0]) < 5:
-            raise SmokeFailure("REFERENCE_PRICE_UNAVAILABLE", "could not read reference price")
-        reference_price = Decimal(str(klines[0][4]))
-        minimum_limit = reference_price * (Decimal("1") + args.min_distance_bps / Decimal("10000"))
-        if entry_intent.price < minimum_limit:
-            raise SmokeFailure(
-                "MARKETABLE_ENTRY_REFUSED",
-                "SELL LIMIT is too close to the latest close; increase --limit-price",
-            )
-        report["reference_price"] = str(reference_price)
 
         if await client.get_open_orders(args.symbol):
             raise SmokeFailure(
@@ -430,6 +529,23 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
             symbol=args.symbol,
             client_order_id=args.client_order_id,
         )
+        if args.scenario == SCENARIO_FILL_AND_EXIT and status in OPEN_ORDER_STATUSES:
+            filled = await query_until_terminal(
+                client,
+                symbol=args.symbol,
+                client_order_id=args.client_order_id,
+                attempts=args.query_attempts,
+                interval_seconds=args.query_interval_seconds,
+            )
+            if filled is not None:
+                queried = filled
+                status = validate_order_response(
+                    queried,
+                    symbol=args.symbol,
+                    client_order_id=args.client_order_id,
+                )
+                report["queried_order"] = safe_order_view(queried)
+        resolved_entry = queried
         if status in OPEN_ORDER_STATUSES:
             try:
                 canceled = await client.cancel_order(
@@ -468,11 +584,36 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
                         "order did not reach a terminal state after cancel",
                     )
             report["cancel_result"] = safe_order_view(canceled)
+            resolved_entry = canceled
+            if args.scenario == SCENARIO_FILL_AND_EXIT:
+                raise SmokeFailure(
+                    "ENTRY_NOT_FILLED",
+                    "fill-and-exit entry did not fill before timeout and was canceled",
+                )
         else:
             report["cancel_result"] = {"skipped": True, "reason": f"order_{status.lower()}"}
 
-        positions = await client.get_position_risk(args.symbol)
-        position = nonzero_one_way_position(positions, symbol=args.symbol)
+        if args.scenario == SCENARIO_FILL_AND_EXIT and status != "FILLED":
+            raise SmokeFailure(
+                "ENTRY_NOT_FILLED",
+                f"fill-and-exit entry reached terminal status {status!r} without a fill",
+            )
+
+        if args.scenario == SCENARIO_FILL_AND_EXIT or order_has_fill(resolved_entry):
+            position = await query_until_position(
+                client,
+                symbol=args.symbol,
+                attempts=args.query_attempts,
+                interval_seconds=args.query_interval_seconds,
+            )
+            if position is None:
+                raise SmokeFailure(
+                    "FILLED_POSITION_NOT_VISIBLE",
+                    "entry filled but the attributable position was not visible before timeout",
+                )
+        else:
+            positions = await client.get_position_risk(args.symbol)
+            position = nonzero_one_way_position(positions, symbol=args.symbol)
         report["position_before_exit"] = safe_position_view(position) if position else None
         if position is None:
             report["reduce_only_exit"] = {"skipped": True, "reason": "no_position"}
@@ -480,6 +621,11 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
             return
 
         amount = Decimal(str(position["positionAmt"]))
+        if args.scenario == SCENARIO_FILL_AND_EXIT and amount >= 0:
+            raise SmokeFailure(
+                "POSITION_DIRECTION_MISMATCH",
+                "filled SELL entry did not produce a short one-way position",
+            )
         mark_price = Decimal(str(position.get("markPrice") or reference_price))
         exit_side = "BUY" if amount < 0 else "SELL"
         exit_intent = rules.normalize_intent(
@@ -523,16 +669,41 @@ async def run_smoke(args: argparse.Namespace, report: dict[str, Any]) -> None:
                     "EXIT_SUBMIT_UNKNOWN",
                     "reduce-only exit could not be resolved; do not resubmit",
                 )
-        validate_order_response(
+        exit_status = validate_order_response(
             exit_order,
             symbol=args.symbol,
             client_order_id=exit_intent.client_order_id,
         )
+        if exit_status in OPEN_ORDER_STATUSES:
+            exit_order = await query_until_terminal(
+                client,
+                symbol=args.symbol,
+                client_order_id=exit_intent.client_order_id,
+                attempts=args.query_attempts,
+                interval_seconds=args.query_interval_seconds,
+            )
+            if exit_order is None:
+                raise SmokeFailure(
+                    "EXIT_NOT_TERMINAL",
+                    "reduce-only market exit did not reach a terminal state",
+                )
+            exit_status = validate_order_response(
+                exit_order,
+                symbol=args.symbol,
+                client_order_id=exit_intent.client_order_id,
+            )
+        if args.scenario == SCENARIO_FILL_AND_EXIT and exit_status != "FILLED":
+            raise SmokeFailure(
+                "EXIT_NOT_FILLED",
+                f"reduce-only market exit reached terminal status {exit_status!r}",
+            )
         report["reduce_only_exit"] = safe_order_view(exit_order)
 
-        remaining = nonzero_one_way_position(
-            await client.get_position_risk(args.symbol),
+        remaining = await query_until_flat(
+            client,
             symbol=args.symbol,
+            attempts=args.query_attempts,
+            interval_seconds=args.query_interval_seconds,
         )
         report["position_after_exit"] = safe_position_view(remaining) if remaining else None
         if remaining is not None:
@@ -596,11 +767,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--quantity", type=lambda value: parse_decimal(value, name="quantity"), default=Decimal("0.001"))
     parser.add_argument("--limit-price", type=lambda value: parse_decimal(value, name="limit-price"), default=Decimal("100000"))
     parser.add_argument("--client-order-id", default=f"tp_smoke_{uuid4().hex[:20]}")
+    parser.add_argument(
+        "--scenario",
+        choices=(SCENARIO_CANCEL_OPEN, SCENARIO_FILL_AND_EXIT),
+        default=SCENARIO_CANCEL_OPEN,
+        help="safe cancel-open by default; fill-and-exit explicitly opens then closes a position",
+    )
     parser.add_argument("--min-distance-bps", type=lambda value: parse_decimal(value, name="min-distance-bps"), default=Decimal("100"))
+    parser.add_argument(
+        "--max-fill-distance-bps",
+        type=lambda value: parse_decimal(value, name="max-fill-distance-bps"),
+        default=Decimal("20"),
+    )
     parser.add_argument("--query-attempts", type=int, default=12)
     parser.add_argument("--query-interval-seconds", type=float, default=5.0)
     parser.add_argument("--execute", action="store_true", help="allow testnet write operations")
     parser.add_argument("--confirm", help="required fixed phrase for --execute")
+    parser.add_argument(
+        "--confirm-position",
+        help="additional fixed phrase required when fill-and-exit executes",
+    )
     parser.add_argument("--report", type=Path, help="also write the sanitized JSON report to this path")
     parser.add_argument("--self-check", action="store_true", help="offline rule-normalization check")
     return parser

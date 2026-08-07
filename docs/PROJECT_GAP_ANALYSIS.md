@@ -12,8 +12,8 @@
 撤单、启动对账和周期安全扫描。正式退出仍未完成：testnet 仅允许 D-007 简化退出用于
 执行验证，最新动能/趋势退出参数冻结前，`live` 会拒绝启动。
 
-当前本地全量测试为 `259 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-全量测试为 `270 passed, 1 warning`。测试已按
+当前本地全量测试为 `268 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
+全量测试为 `279 passed, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -156,8 +156,9 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run --extra dev python -m pytest -q`：`259 passed, 11 skipped, 1 warning`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`270 passed, 1 warning`
+- 本地 `uv run --extra dev python -m pytest -q`：`268 passed, 11 skipped, 1 warning`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`279 passed, 1 warning`
+- testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
 - Binance `demo-fapi` 真实只读鉴权成功，`canTrade=true`；真实写入因账户 Hedge Mode 被前置门禁拒绝，未产生订单
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过

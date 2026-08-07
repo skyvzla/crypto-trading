@@ -37,8 +37,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 当前本地全量测试为 `259 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-  全量测试为 `270 passed, 1 warning`；
+- 当前本地全量测试为 `268 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
+  全量测试为 `279 passed, 1 warning`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 真实 replay 基准已固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
   `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
@@ -69,6 +69,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 - 账户级回报不得隐式归属策略：运行时工厂要求显式声明专用策略账户；共享账户在缺少
   client-order-id 和仓位路由规则时直接拒绝启动。
 - Compose 使用显式 `spike` profile 装配交易进程；默认服务启动不承担下单风险。
+- testnet 执行 harness 已区分默认预挂撤单 `cancel-open` 与显式成交退出 `fill-and-exit`；
+  后者需要额外开仓确认，并验证 LIMIT 成交、仓位可见、reduce-only MARKET 退出和最终空仓。
 - 可交易池扫描节拍已冻结为 5 分钟，subcategory 准入刷新复用同一节拍；扫描编排组件
   已完成，接入具体行情/策略进程后再进行外部验收。
 - Redis 全局 Campaign 互斥存储组件已完成：原子获取、不自动过期、仅持有者可释放；
@@ -254,8 +256,8 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前本地全量基线为 `259 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-基线为 `270 passed, 1 warning`。
+当前本地全量基线为 `268 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
+基线为 `279 passed, 1 warning`。
 
 ## 8. 风险与停止条件
 
