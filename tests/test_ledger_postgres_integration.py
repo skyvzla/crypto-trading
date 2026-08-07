@@ -23,9 +23,10 @@ from trading_platform.ledger.db.models import (
     create_connection_pool,
 )
 from trading_platform.shared.binance import BinanceOrderExecutor
-from trading_platform.shared.events import OrderIntent
+from trading_platform.shared.events import Order as StrategyOrder, OrderIntent
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
+from trading_platform.strategies.admission import SubcategoryAdmissionService
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("LEDGER_TEST_DSN"),
@@ -409,3 +410,57 @@ async def test_binance_runtime_callbacks_close_wal_order_trade_position_loop(
     positions = await ledger.get_positions(account_id=account_id)
     assert len(positions) == 1
     assert positions[0].quantity == Decimal("-1.5")
+
+
+@pytest.mark.asyncio
+async def test_subcategory_admission_service_reads_db_and_cancels_on_close(ledger):
+    subcategory = f"spike-{uuid4().hex[:10]}"
+    admission = await ledger.set_subcategory_admission(
+        subcategory,
+        True,
+        expected_version=0,
+        updated_by="integration-test",
+    )
+    gate = Mock(set_entry_enabled=Mock())
+    account = Mock(
+        iter_orders=Mock(return_value=(
+            StrategyOrder(
+                order_id="entry-1",
+                client_order_id="client-entry-1",
+                account_id="account-1",
+                symbol="BTCUSDT",
+                side="SELL",
+                type="LIMIT",
+                price=Decimal("100"),
+                quantity=Decimal("1"),
+                status="NEW",
+                created_at=1_000,
+                strategy_id="spike_short",
+                trigger_reason="spike_tier1",
+            ),
+        )),
+        cancel_order=Mock(return_value=True),
+    )
+    service = SubcategoryAdmissionService(
+        source=ledger,
+        gate=gate,
+        account=account,
+        subcategory=subcategory,
+        strategy_id="spike_short",
+        entry_trigger_reasons={"spike_tier1", "spike_tier2", "spike_tier3"},
+        poll_interval_seconds=5,
+    )
+
+    opened = await service.refresh_once()
+    await ledger.set_subcategory_admission(
+        subcategory,
+        False,
+        expected_version=admission.version,
+        updated_by="integration-test",
+    )
+    closed = await service.refresh_once()
+
+    assert opened.enabled is True
+    assert closed.enabled is False
+    assert gate.set_entry_enabled.call_args_list[-2:] == [((True,),), ((False,),)]
+    account.cancel_order.assert_called_once_with("entry-1")
