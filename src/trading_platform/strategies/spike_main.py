@@ -112,9 +112,10 @@ class SpikeLiveProcess:
             await self.coordinator.account.refresh_positions()
             await self.coordinator.reconcile_entry_expirations()
             self.coordinator.validate_recovered_campaign()
+            await self.coordinator.restore_campaign_timing()
             for symbol in self.settings.symbols:
                 await self.coordinator.maybe_release_campaign(symbol)
-            self.gate.set_condition("execution", True)
+            self._restore_execution_gate()
 
             await self._register_market_subscriptions()
             await self._start_bar_consumer()
@@ -259,6 +260,7 @@ class SpikeLiveProcess:
             risk_guard=risk,
             gate=self.gate,
             account_id=self.settings.account_id,
+            trade_source=db,
         )
         self.admission = SubcategoryAdmissionService(
             source=db,
@@ -294,6 +296,27 @@ class SpikeLiveProcess:
         )
         self.runtime.user_stream.on_execution_report = callbacks.handle_execution_report
         self.runtime.user_stream.on_account_update = callbacks.handle_account_update
+        self.runtime.user_stream.on_disconnect = self._on_execution_stream_disconnected
+        self.runtime.on_recovered = self._restore_execution_gate
+
+    def _on_execution_stream_disconnected(self) -> None:
+        if self.gate is not None:
+            self.gate.set_condition("execution", False)
+
+    def _restore_execution_gate(self) -> bool:
+        if self.gate is None or self.coordinator is None or self.runtime is None:
+            return False
+        try:
+            ready = (
+                self.runtime.user_stream.connected
+                and not self.coordinator.risk_guard.halted
+                and not self.coordinator.account.has_unresolved_orders()
+            )
+        except Exception:
+            self.coordinator.risk_guard.halt("execution readiness check failed")
+            ready = False
+        self.gate.set_condition("execution", ready)
+        return ready
 
     async def _register_market_subscriptions(self) -> None:
         assert self.http is not None
@@ -429,11 +452,10 @@ class SpikeLiveProcess:
             await self.admission.on_universe_scan()
             await self.coordinator.restore_campaign_gate()
             await self.coordinator.reconcile_entry_expirations()
-            if (
-                self.runtime is not None
-                and self.runtime.is_running
-                and not self.coordinator.account.has_unresolved_orders()
-            ):
+            if self.runtime is not None and self.runtime.is_running:
+                if self.coordinator.account.has_unresolved_orders():
+                    self.gate.set_condition("execution", False)
+                    continue
                 reconciler = self.runtime.startup_reconciler
                 if reconciler is not None:
                     try:
@@ -441,7 +463,7 @@ class SpikeLiveProcess:
                     except Exception:
                         self.gate.set_condition("execution", False)
                     else:
-                        self.gate.set_condition("execution", True)
+                        self._restore_execution_gate()
 
     @property
     def _consumer_id(self) -> str:

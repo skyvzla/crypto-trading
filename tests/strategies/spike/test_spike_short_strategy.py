@@ -233,6 +233,122 @@ class TestDynamicSpikeShortStrategy:
         assert [event.event_type for event in audit] == ["signal_invalidated"]
         assert audit[0].details == {"cancelled_orders": 1}
 
+    def test_signal_invalidation_cancels_partially_filled_entry_order(self):
+        class FakeAccount:
+            def __init__(self):
+                self.cancelled = []
+                self.order = Order(
+                    order_id="order-1",
+                    client_order_id="spike_short_BTCUSDT_1000_tier1",
+                    account_id="backtest",
+                    symbol="BTCUSDT",
+                    side="SELL",
+                    type="LIMIT",
+                    price=Decimal("108.5"),
+                    quantity=Decimal("1"),
+                    status="PARTIALLY_FILLED",
+                    created_at=2_000,
+                    strategy_id="spike_short",
+                )
+
+            def iter_orders(self):
+                return (self.order,)
+
+            def cancel_order(self, order_id):
+                self.cancelled.append(order_id)
+                self.order.status = "CANCELLED"
+                return True
+
+        account = FakeAccount()
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000"), account=account
+        )
+        signal = SpikeSignal(
+            signal_time=1_000,
+            trigger_price=Decimal("100"),
+            spike_high=Decimal("120"),
+            origin_price=Decimal("90"),
+            atr=Decimal("10"),
+            tier_prices=[Decimal("108.5"), Decimal("112.5"), Decimal("116.5")],
+            tier_weights=list(strategy.TIER_WEIGHTS),
+            invalid_price=Decimal("125"),
+            active_time=2_000,
+            expire_time=182_000,
+            placed_client_order_ids={account.order.client_order_id},
+        )
+        strategy.active_signals.append(signal)
+        bar = Bar1s(
+            symbol="BTCUSDT", timestamp=3_000, available_time=4_000,
+            open=Decimal("124"), high=Decimal("126"), low=Decimal("123"),
+            close=Decimal("125"), volume=Decimal("1"), trade_count=1,
+            vwap=Decimal("125"),
+        )
+
+        assert strategy._manage_signals(bar) == []
+        assert account.cancelled == ["order-1"]
+        assert strategy.drain_audit_events()[0].details == {"cancelled_orders": 1}
+
+    def test_signal_expiration_cancels_new_and_partially_filled_entry_orders(self):
+        class FakeAccount:
+            def __init__(self):
+                self.cancelled = []
+                self.orders = tuple(
+                    Order(
+                        order_id=f"order-{tier}",
+                        client_order_id=f"spike_short_BTCUSDT_1000_tier{tier}",
+                        account_id="backtest",
+                        symbol="BTCUSDT",
+                        side="SELL",
+                        type="LIMIT",
+                        price=Decimal("108.5"),
+                        quantity=Decimal("1"),
+                        status=status,
+                        created_at=2_000,
+                        strategy_id="spike_short",
+                    )
+                    for tier, status in ((1, "NEW"), (2, "PARTIALLY_FILLED"))
+                )
+
+            def iter_orders(self):
+                return self.orders
+
+            def cancel_order(self, order_id):
+                self.cancelled.append(order_id)
+                return True
+
+        account = FakeAccount()
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000"), account=account
+        )
+        signal = SpikeSignal(
+            signal_time=1_000,
+            trigger_price=Decimal("100"),
+            spike_high=Decimal("120"),
+            origin_price=Decimal("90"),
+            atr=Decimal("10"),
+            tier_prices=[Decimal("108.5"), Decimal("112.5"), Decimal("116.5")],
+            tier_weights=list(strategy.TIER_WEIGHTS),
+            invalid_price=Decimal("155"),
+            active_time=2_000,
+            expire_time=182_000,
+            placed_client_order_ids={
+                order.client_order_id for order in account.orders
+            },
+        )
+        strategy.active_signals.append(signal)
+        bar = Bar1s(
+            symbol="BTCUSDT", timestamp=182_000, available_time=183_000,
+            open=Decimal("100"), high=Decimal("101"), low=Decimal("99"),
+            close=Decimal("100"), volume=Decimal("1"), trade_count=1,
+            vwap=Decimal("100"),
+        )
+
+        assert strategy._manage_signals(bar) == []
+        assert account.cancelled == ["order-1", "order-2"]
+        audit = strategy.drain_audit_events()
+        assert [event.event_type for event in audit] == ["signal_expired"]
+        assert audit[0].details == {"cancelled_orders": 2}
+
     def test_d007_non_positive_position_exits_at_900_seconds(self):
         class Account:
             def __init__(self):
@@ -467,6 +583,70 @@ class TestDynamicSpikeShortStrategy:
         adapter.on_bar1s(bar("BBBUSDT"))
         assert adapter.active_symbol == "BBBUSDT"
         assert len(second.active_signals) == 1
+
+    def test_multi_symbol_adapter_keeps_campaign_for_partially_filled_entry(self):
+        class FakeAccount:
+            def __init__(self):
+                self.order = Order(
+                    order_id="order-1",
+                    client_order_id="spike_short_AAAUSDT_1000_tier1",
+                    account_id="backtest",
+                    symbol="AAAUSDT",
+                    side="SELL",
+                    type="LIMIT",
+                    price=Decimal("100"),
+                    quantity=Decimal("1"),
+                    status="PARTIALLY_FILLED",
+                    created_at=1_000,
+                    strategy_id="spike_short",
+                )
+
+            def has_open_position(self, symbol):
+                return False
+
+            def iter_orders(self):
+                return (self.order,)
+
+        class FakeStrategy:
+            def __init__(self, should_trigger):
+                self.active_signals = []
+                self.entry_enabled = True
+                self.should_trigger = should_trigger
+
+            def set_entry_enabled(self, enabled):
+                self.entry_enabled = enabled
+
+            def on_bar1s(self, bar):
+                if self.entry_enabled and self.should_trigger:
+                    self.active_signals.append(object())
+                return []
+
+            def reset_campaign_timing(self):
+                pass
+
+        account = FakeAccount()
+        adapter = DynamicSpikeBacktestStrategy(
+            ["AAAUSDT", "BBBUSDT"], Decimal("1000"), account=account
+        )
+        first = FakeStrategy(should_trigger=False)
+        second = FakeStrategy(should_trigger=True)
+        adapter.strategies = {"AAAUSDT": first, "BBBUSDT": second}
+        adapter.active_symbol = "AAAUSDT"
+
+        def bar(symbol):
+            return Bar1s(
+                symbol=symbol, timestamp=1_000, available_time=2_000,
+                open=Decimal("100"), high=Decimal("100"), low=Decimal("100"),
+                close=Decimal("100"), volume=Decimal("1"), trade_count=1,
+                vwap=Decimal("100"),
+            )
+
+        adapter.on_bar1s(bar("AAAUSDT"))
+        adapter.on_bar1s(bar("BBBUSDT"))
+
+        assert adapter.active_symbol == "AAAUSDT"
+        assert second.entry_enabled is False
+        assert second.active_signals == []
 
     def test_multi_symbol_adapter_exposes_global_entry_gate(self):
         adapter = DynamicSpikeBacktestStrategy(

@@ -110,6 +110,26 @@ async def test_runtime_reconnect_reconciles_before_restarting_poller():
 
 
 @pytest.mark.asyncio
+async def test_runtime_marks_recovered_only_after_reconciliation_and_poller_restart():
+    runtime, stream, poller, _ = _runtime()
+    reconciler = Mock(reconcile_once=AsyncMock())
+    recovered = Mock()
+    runtime = BinanceExecutionRuntime(
+        stream, poller, reconciler, on_recovered=recovered
+    )
+    runtime._previous_reconnect = None
+    calls = []
+    poller.stop.side_effect = lambda: calls.append("stop-poller")
+    reconciler.reconcile_once.side_effect = lambda: calls.append("snapshot")
+    poller.start.side_effect = lambda: calls.append("poller")
+    recovered.side_effect = lambda: calls.append("recovered")
+
+    await stream.on_reconnect()
+
+    assert calls == ["stop-poller", "snapshot", "poller", "recovered"]
+
+
+@pytest.mark.asyncio
 async def test_runtime_reconnect_recovery_failure_keeps_poller_stopped():
     previous = AsyncMock()
     runtime, stream, poller, _ = _runtime()

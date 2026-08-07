@@ -521,6 +521,49 @@ def test_trade_id_zero_is_valid_and_malformed_first_report_does_not_poison_dedup
     assert account._commissions["BTCUSDT"] == Decimal("0.01")
 
 
+@pytest.mark.asyncio
+async def test_restored_trade_state_keeps_old_trade_id_idempotent(tmp_path):
+    account, _, wal, _ = _account(tmp_path)
+    intent_record = wal.record_intent(_intent(), account_id="spike-test", recorded_at=1_000)
+    wal.record_exchange_status(
+        intent_record, {"status": "FILLED", "orderId": 42}, recorded_at=1_100
+    )
+    await account.handle_account_update(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "T": 1_200,
+            "a": {
+                "P": [
+                    {
+                        "s": "BTCUSDT",
+                        "pa": "-1",
+                        "ep": "101",
+                        "up": "0",
+                        "ps": "BOTH",
+                    }
+                ]
+            },
+        }
+    )
+    account.restore_trade_state("BTCUSDT", Decimal("0.01"), {"7"})
+
+    duplicate = account.handle_execution_report(
+        {
+            "c": "cid-1",
+            "x": "TRADE",
+            "l": "1",
+            "L": "101",
+            "n": "0.01",
+            "t": 7,
+            "T": 1_200,
+        }
+    )
+
+    assert duplicate is None
+    assert account._commissions["BTCUSDT"] == Decimal("0.01")
+    assert account.get_position("BTCUSDT").total_commission == Decimal("0.01")
+
+
 def test_unresolved_intent_keeps_account_fail_closed(tmp_path):
     account, _, wal, _ = _account(tmp_path)
     wal.record_intent(_intent(), account_id="spike-test", recorded_at=1_000)

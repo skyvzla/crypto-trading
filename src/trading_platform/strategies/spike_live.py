@@ -7,7 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NoReturn, Protocol
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -116,6 +116,18 @@ class AuditSink(Protocol):
         ...
 
 
+class CampaignTradeSource(Protocol):
+    async def get_trades_by_client_order_ids(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        symbol: str,
+        client_order_ids: list[str],
+    ) -> list[Any]:
+        ...
+
+
 class SpikeExecutionCoordinator:
     """串行处理市场事件、Campaign 互斥、风险检查与可靠订单提交。"""
 
@@ -129,6 +141,7 @@ class SpikeExecutionCoordinator:
         risk_guard: RiskGuard,
         gate: CompositeEntryGate,
         account_id: str,
+        trade_source: CampaignTradeSource | None = None,
         audit_sink: AuditSink | None = None,
         now_ms: Callable[[], int] | None = None,
     ):
@@ -139,6 +152,7 @@ class SpikeExecutionCoordinator:
         self.risk_guard = risk_guard
         self.gate = gate
         self.account_id = account_id
+        self.trade_source = trade_source
         self.audit_sink = audit_sink
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._lock = asyncio.Lock()
@@ -174,6 +188,89 @@ class SpikeExecutionCoordinator:
         if live_symbols != {parts[1]}:
             self.gate.set_condition("campaign", False)
             raise RuntimeError("recovered live risk spans multiple symbols")
+
+    async def restore_campaign_timing(self) -> None:
+        """用 Redis Campaign、WAL 身份和 PostgreSQL 成交恢复带仓计时。"""
+        positioned = {
+            symbol
+            for symbol in self.account.symbols_with_live_risk()
+            if self.account.get_position(symbol) is not None
+        }
+        if not positioned:
+            return
+        self.validate_recovered_campaign()
+        campaign_id = self._owned_campaign_id
+        assert campaign_id is not None
+        _, symbol, raw_signal_time = campaign_id.split(":")
+        try:
+            signal_time = int(raw_signal_time)
+        except ValueError:
+            self._fail_campaign_recovery("recovered Campaign has invalid signal time")
+
+        latest = self.account.wal.recover_latest().values()
+        owned_records = [
+            record
+            for record in latest
+            if record.account_id == self.account_id
+            and record.symbol == symbol
+            and record.recorded_at >= signal_time
+            and record.payload.get("strategy_id") == STRATEGY_ID
+        ]
+        entry_ids = {
+            record.client_order_id
+            for record in owned_records
+            if record.payload.get("trigger_reason") in ENTRY_REASONS
+            and parse_entry_client_order_id(
+                record.client_order_id, expected_symbol=symbol
+            )
+            == (symbol, signal_time)
+        }
+        if not entry_ids:
+            self._fail_campaign_recovery(
+                "recovered Campaign has no matching WAL entry orders"
+            )
+        if self.trade_source is None:
+            self._fail_campaign_recovery("PostgreSQL Campaign trade source is unavailable")
+
+        client_order_ids = sorted(
+            {record.client_order_id for record in owned_records}
+        )
+        trades = await self.trade_source.get_trades_by_client_order_ids(
+            account_id=self.account_id,
+            strategy_id=STRATEGY_ID,
+            symbol=symbol,
+            client_order_ids=client_order_ids,
+        )
+        if any(trade.client_order_id not in client_order_ids for trade in trades):
+            self._fail_campaign_recovery("PostgreSQL returned a trade outside Campaign WAL")
+        entry_trades = [
+            trade
+            for trade in trades
+            if trade.client_order_id in entry_ids and trade.side == "SELL"
+        ]
+        if not entry_trades:
+            self._fail_campaign_recovery(
+                "recovered Campaign has no PostgreSQL entry trade"
+            )
+        if any(trade.exchange_time is None for trade in trades):
+            self._fail_campaign_recovery("recovered Campaign trade has no exchange time")
+
+        first_fill_time = min(
+            round(trade.exchange_time.timestamp() * 1000) for trade in entry_trades
+        )
+        total_commission = sum(
+            (trade.commission for trade in trades), start=Decimal("0")
+        )
+        self.account.restore_trade_state(
+            symbol,
+            total_commission,
+            {str(trade.trade_id) for trade in trades},
+        )
+        self.strategy.restore_campaign_timing(symbol, campaign_id, first_fill_time)
+
+    def _fail_campaign_recovery(self, message: str) -> NoReturn:
+        self.gate.set_condition("campaign", False)
+        raise RuntimeError(message)
 
     async def on_bar1s(self, bar: Bar1s) -> None:
         async with self._lock:

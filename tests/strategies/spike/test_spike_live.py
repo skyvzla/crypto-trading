@@ -125,6 +125,7 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
         account=account,
         reconcile_entry_expirations=AsyncMock(),
         validate_recovered_campaign=Mock(),
+        restore_campaign_timing=AsyncMock(),
         maybe_release_campaign=AsyncMock(),
         stop=AsyncMock(),
     )
@@ -184,6 +185,57 @@ def test_composite_gate_requires_every_condition():
     gate.set_condition("market", True)
     assert gate.enabled is True
     assert strategy.enabled is True
+
+
+def test_stream_disconnect_closes_execution_gate_immediately():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process.gate = Mock(set_condition=Mock())
+
+    process._on_execution_stream_disconnected()
+
+    process.gate.set_condition.assert_called_once_with("execution", False)
+
+
+def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    gate = Mock(set_condition=Mock())
+    risk = Mock(halted=False)
+    account = Mock(has_unresolved_orders=Mock(return_value=False))
+    process.gate = gate
+    process.coordinator = Mock(risk_guard=risk, account=account)
+    process.runtime = Mock(user_stream=Mock(connected=True))
+
+    assert process._restore_execution_gate() is True
+    gate.set_condition.assert_called_with("execution", True)
+
+    gate.reset_mock()
+    account.has_unresolved_orders.return_value = True
+    assert process._restore_execution_gate() is False
+    gate.set_condition.assert_called_with("execution", False)
+
+    gate.reset_mock()
+    account.has_unresolved_orders.return_value = False
+    risk.halted = True
+    assert process._restore_execution_gate() is False
+    gate.set_condition.assert_called_with("execution", False)
 
 
 @pytest.mark.asyncio

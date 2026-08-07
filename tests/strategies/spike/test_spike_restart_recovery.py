@@ -1,0 +1,189 @@
+from datetime import datetime, timezone
+from decimal import Decimal
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+
+from trading_platform.ledger.db.models import Trade
+from trading_platform.shared.events import Bar1s, Position
+from trading_platform.shared.execution_recovery import OrderWAL, OrderWALRecord
+from trading_platform.shared.risk import RiskConfig, RiskGuard
+from trading_platform.strategies.spike_live import (
+    CompositeEntryGate,
+    SpikeExecutionCoordinator,
+)
+from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
+
+
+def _wal_record(client_order_id: str, *, recorded_at: int, reason: str) -> OrderWALRecord:
+    return OrderWALRecord(
+        record_type="exchange_status",
+        recorded_at=recorded_at,
+        account_id="spike-test",
+        client_order_id=client_order_id,
+        symbol="AKEUSDT",
+        side="SELL" if reason.startswith("spike_tier") else "BUY",
+        order_type="LIMIT" if reason.startswith("spike_tier") else "MARKET",
+        quantity="1",
+        price="1",
+        status="FILLED",
+        exchange_order_id=client_order_id,
+        payload={"strategy_id": "spike_short", "trigger_reason": reason},
+    )
+
+
+def _coordinator(tmp_path, *, trades: list[Trade]):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    entry_id = "s_AKEUSDT_rs_e1"
+    wal.append(_wal_record(entry_id, recorded_at=1_100, reason="spike_tier1"))
+    wal.append(
+        _wal_record(
+            "x_AKEUSDT_12kw_r",
+            recorded_at=1_500,
+            reason="campaign_rotation_exit",
+        )
+    )
+    position = Position(
+        symbol="AKEUSDT",
+        side="SHORT",
+        entry_price=Decimal("1"),
+        quantity=Decimal("10"),
+        total_commission=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        realized_pnl=Decimal("0"),
+        opened_at=2_000,
+    )
+    account = Mock(
+        wal=wal,
+        symbols_with_live_risk=Mock(return_value={"AKEUSDT"}),
+        get_position=Mock(return_value=position),
+        restore_trade_state=Mock(),
+    )
+    strategy = DynamicSpikeBacktestStrategy(
+        ["AKEUSDT"], Decimal("20"), account=account
+    )
+    gate = CompositeEntryGate(strategy)
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+        trade_source=Mock(
+            get_trades_by_client_order_ids=AsyncMock(return_value=trades)
+        ),
+    )
+    coordinator._owned_campaign_id = "spike_short:AKEUSDT:1000"
+    return coordinator, strategy, account, entry_id
+
+
+@pytest.mark.asyncio
+async def test_restart_restores_first_fill_and_all_owned_campaign_commission(tmp_path):
+    entry_time = datetime.fromtimestamp(1.2, timezone.utc)
+    exit_time = datetime.fromtimestamp(1.6, timezone.utc)
+    coordinator, strategy, account, entry_id = _coordinator(
+        tmp_path,
+        trades=[
+            Trade(
+                account_id="spike-test",
+                strategy_id="spike_short",
+                symbol="AKEUSDT",
+                trade_id="1",
+                client_order_id="s_AKEUSDT_rs_e1",
+                side="SELL",
+                commission=Decimal("0.01"),
+                exchange_time=entry_time,
+            ),
+            Trade(
+                account_id="spike-test",
+                strategy_id="spike_short",
+                symbol="AKEUSDT",
+                trade_id="2",
+                client_order_id="x_AKEUSDT_12kw_r",
+                side="BUY",
+                commission=Decimal("0.02"),
+                exchange_time=exit_time,
+            ),
+        ],
+    )
+
+    await coordinator.restore_campaign_timing()
+
+    symbol_strategy = strategy.strategies["AKEUSDT"]
+    assert symbol_strategy.first_fill_time == 1_200
+    assert symbol_strategy._campaign_id_for_timing == "spike_short:AKEUSDT:1000"
+    assert strategy.active_symbol == "AKEUSDT"
+    account.restore_trade_state.assert_called_once_with(
+        "AKEUSDT", Decimal("0.03"), {"1", "2"}
+    )
+    requested_ids = coordinator.trade_source.get_trades_by_client_order_ids.await_args.kwargs[
+        "client_order_ids"
+    ]
+    assert set(requested_ids) == {"s_AKEUSDT_rs_e1", "x_AKEUSDT_12kw_r"}
+
+
+@pytest.mark.asyncio
+async def test_restart_with_position_but_no_entry_trade_fails_closed(tmp_path):
+    coordinator, _, account, _ = _coordinator(tmp_path, trades=[])
+    coordinator.gate.set_condition("campaign", True)
+
+    with pytest.raises(RuntimeError, match="entry trade"):
+        await coordinator.restore_campaign_timing()
+
+    assert coordinator.gate.enabled is False
+    account.restore_trade_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_with_position_but_campaign_not_in_wal_fails_closed(tmp_path):
+    coordinator, _, account, _ = _coordinator(tmp_path, trades=[])
+    coordinator._owned_campaign_id = "spike_short:AKEUSDT:999"
+    coordinator.gate.set_condition("campaign", True)
+
+    with pytest.raises(RuntimeError, match="WAL entry orders"):
+        await coordinator.restore_campaign_timing()
+
+    assert coordinator.gate.enabled is False
+    account.restore_trade_state.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_restart_restored_timing_requests_timeout_exit_only_once(tmp_path):
+    coordinator, strategy, account, _ = _coordinator(
+        tmp_path,
+        trades=[
+            Trade(
+                account_id="spike-test",
+                strategy_id="spike_short",
+                symbol="AKEUSDT",
+                trade_id="1",
+                client_order_id="s_AKEUSDT_rs_e1",
+                side="SELL",
+                commission=Decimal("0.01"),
+                exchange_time=datetime.fromtimestamp(1.2, timezone.utc),
+            )
+        ],
+    )
+    await coordinator.restore_campaign_timing()
+    symbol_strategy = strategy.strategies["AKEUSDT"]
+    bar = Bar1s(
+        symbol="AKEUSDT",
+        timestamp=901_200,
+        available_time=901_200,
+        open=Decimal("2"),
+        high=Decimal("2"),
+        low=Decimal("2"),
+        close=Decimal("2"),
+        volume=Decimal("1"),
+        trade_count=1,
+        vwap=Decimal("2"),
+    )
+
+    first = symbol_strategy._manage_non_positive_timeout(bar)
+    second = symbol_strategy._manage_non_positive_timeout(bar)
+
+    assert len(first) == 1
+    assert first[0].trigger_reason == "campaign_timeout_exit"
+    assert second == []

@@ -303,6 +303,36 @@ class LedgerDB:
             )
             return await cursor.fetchall()
 
+    async def get_trades_by_client_order_ids(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        symbol: str,
+        client_order_ids: Sequence[str],
+    ) -> list[Trade]:
+        """按执行 WAL 的订单身份读取某个 Campaign 的成交事实。"""
+        if not client_order_ids:
+            return []
+        params = {
+            "account_id": account_id,
+            "strategy_id": strategy_id,
+            "symbol": symbol,
+            "client_order_ids": list(client_order_ids),
+        }
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(Trade))
+            await cursor.execute(
+                "SELECT * FROM trades "
+                "WHERE account_id = %(account_id)s "
+                "AND strategy_id = %(strategy_id)s "
+                "AND symbol = %(symbol)s "
+                "AND client_order_id = ANY(%(client_order_ids)s) "
+                "ORDER BY exchange_time ASC, id ASC",
+                params,
+            )
+            return await cursor.fetchall()
+
     async def count_trades(self, **filters: object) -> int:
         return await self._count("trades", **filters)
 

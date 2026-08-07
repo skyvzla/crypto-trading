@@ -20,6 +20,65 @@ class FakeWebSocketApp:
         self.closed = True
 
 
+async def _idle_forever():
+    await asyncio.Future()
+
+
+@pytest.mark.asyncio
+async def test_start_waits_until_websocket_is_really_open(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    stream = UserDataStream(rest)
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+
+    start = asyncio.create_task(stream.start())
+    await asyncio.sleep(0)
+
+    assert start.done() is False
+    FakeWebSocketApp.instance.callbacks["on_open"](None)
+    await asyncio.wait_for(start, timeout=1)
+    assert stream.connected is True
+
+    await stream.stop()
+    assert stream.connected is False
+
+
+@pytest.mark.asyncio
+async def test_reconnect_callback_runs_only_after_new_websocket_is_open(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="new-listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    recovered = AsyncMock()
+    stream = UserDataStream(rest, on_reconnect=recovered)
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "old-listen-key"
+    stream._reconnect_delay = 0
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+
+    reconnect = asyncio.create_task(stream._reconnect())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    recovered.assert_not_awaited()
+    FakeWebSocketApp.instance.callbacks["on_open"](None)
+    await asyncio.wait_for(reconnect, timeout=1)
+    recovered.assert_awaited_once()
+
+    await stream.stop()
+
+
 @pytest.mark.asyncio
 async def test_callbacks_from_websocket_thread_are_returned_to_event_loop(monkeypatch):
     monkeypatch.setattr(

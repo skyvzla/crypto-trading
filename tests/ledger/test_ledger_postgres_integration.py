@@ -257,6 +257,49 @@ async def test_binance_execution_report_is_atomically_idempotent(ledger):
 
 
 @pytest.mark.asyncio
+async def test_campaign_trade_query_is_scoped_to_wal_client_order_ids(ledger):
+    suffix = uuid4().hex[:10]
+    account_id = f"campaign-{suffix}"
+    now = datetime.now(timezone.utc)
+    for trade_id, client_order_id, commission in (
+        ("1", f"entry-{suffix}", Decimal("0.01")),
+        ("2", f"exit-{suffix}", Decimal("0.02")),
+        ("3", f"unrelated-{suffix}", Decimal("99")),
+    ):
+        await ledger.insert_trade(
+            Trade(
+                account_id=account_id,
+                strategy_id="spike_short",
+                symbol="AKEUSDT",
+                trade_id=trade_id,
+                client_order_id=client_order_id,
+                side="SELL",
+                quantity=Decimal("1"),
+                price=Decimal("1"),
+                quote_quantity=Decimal("1"),
+                commission=commission,
+                commission_asset="USDT",
+                exchange_time=now,
+            )
+        )
+
+    trades = await ledger.get_trades_by_client_order_ids(
+        account_id=account_id,
+        strategy_id="spike_short",
+        symbol="AKEUSDT",
+        client_order_ids=[f"entry-{suffix}", f"exit-{suffix}"],
+    )
+
+    assert {trade.client_order_id for trade in trades} == {
+        f"entry-{suffix}",
+        f"exit-{suffix}",
+    }
+    assert sum((trade.commission for trade in trades), Decimal("0")) == Decimal(
+        "0.03"
+    )
+
+
+@pytest.mark.asyncio
 async def test_binance_account_update_persists_signed_snapshot_and_rejects_stale(
     ledger, client
 ):

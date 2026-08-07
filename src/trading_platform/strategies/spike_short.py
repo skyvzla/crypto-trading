@@ -251,6 +251,18 @@ class DynamicSpikeShortStrategy:
         self._pending_rotation = None
         self._rotation_exit_requested = False
 
+    def restore_campaign_timing(self, campaign_id: str, first_fill_time: int) -> None:
+        """从持久化执行事实恢复当前持仓的退出计时状态。"""
+        expected_prefix = f"spike_short:{self.symbol}:"
+        if not campaign_id.startswith(expected_prefix) or first_fill_time <= 0:
+            raise ValueError("invalid recovered Spike campaign timing")
+        self.first_fill_time = first_fill_time
+        self._campaign_id_for_timing = campaign_id
+        self._timeout_checked = False
+        self._exit_requested = False
+        self._pending_rotation = None
+        self._rotation_exit_requested = False
+
     def drain_audit_events(self) -> List[StrategyAuditEvent]:
         """返回并清空尚未被运行适配器收集的审计事件。"""
         events = self._audit_events
@@ -331,7 +343,7 @@ class DynamicSpikeShortStrategy:
             return True
         return any(
             order.symbol == self.symbol
-            and order.status in {"NEW", "SUBMIT_UNKNOWN"}
+            and order.status in {"NEW", "PARTIALLY_FILLED", "SUBMIT_UNKNOWN"}
             and order.strategy_id == "spike_short"
             for order in self._account.iter_orders()
         )
@@ -525,7 +537,7 @@ class DynamicSpikeShortStrategy:
         for order in self._account.iter_orders():
             if order.client_order_id not in sig.placed_client_order_ids:
                 continue
-            if order.status != "NEW":
+            if order.status not in {"NEW", "PARTIALLY_FILLED"}:
                 continue
             if self._account.cancel_order(order.order_id):
                 cancelled += 1
@@ -816,6 +828,15 @@ class DynamicSpikeBacktestStrategy:
         if strategy is not None:
             strategy.on_fill(fill)
 
+    def restore_campaign_timing(
+        self, symbol: str, campaign_id: str, first_fill_time: int
+    ) -> None:
+        strategy = self.strategies.get(symbol)
+        if strategy is None:
+            raise ValueError(f"unknown Spike symbol: {symbol}")
+        strategy.restore_campaign_timing(campaign_id, first_fill_time)
+        self.active_symbol = symbol
+
     def drain_audit_events(self) -> List[StrategyAuditEvent]:
         events: List[StrategyAuditEvent] = []
         for strategy in self.strategies.values():
@@ -832,7 +853,7 @@ class DynamicSpikeBacktestStrategy:
             return True
         return any(
             order.symbol == symbol
-            and order.status in {"NEW", "SUBMIT_UNKNOWN"}
+            and order.status in {"NEW", "PARTIALLY_FILLED", "SUBMIT_UNKNOWN"}
             and order.strategy_id == "spike_short"
             for order in self._account.iter_orders()
         )

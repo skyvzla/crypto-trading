@@ -33,6 +33,8 @@ class UserDataStream:
         on_execution_report: Callable[[dict[str, Any]], None] | None = None,
         on_account_update: Callable[[dict[str, Any]], None] | None = None,
         on_reconnect: Callable[[], None] | None = None,
+        on_disconnect: Callable[[], None] | None = None,
+        connect_timeout_seconds: float = 10.0,
     ):
         """
         Args:
@@ -41,12 +43,17 @@ class UserDataStream:
             on_execution_report: executionReport 事件回调
             on_account_update: ACCOUNT_UPDATE 完整事件回调
             on_reconnect: 重连完成回调
+            on_disconnect: 连接断开回调
         """
+        if connect_timeout_seconds <= 0:
+            raise ValueError("connect_timeout_seconds must be positive")
         self.rest_client = rest_client
         self.ws_base_url = ws_base_url.rstrip('/')
         self.on_execution_report = on_execution_report
         self.on_account_update = on_account_update
         self.on_reconnect = on_reconnect
+        self.on_disconnect = on_disconnect
+        self.connect_timeout_seconds = connect_timeout_seconds
 
         self.listen_key: str | None = None
         self.ws: websocket.WebSocketApp | None = None
@@ -54,6 +61,7 @@ class UserDataStream:
         self._ws_thread: asyncio.Task | None = None
         self._reconnect_task: Future | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._connected_event: asyncio.Event | None = None
         self._running = False
         self._reconnect_delay = 1.0  # 初始重连延迟（秒）
         self._max_reconnect_delay = 60.0  # 最大重连延迟
@@ -66,6 +74,7 @@ class UserDataStream:
 
         self._running = True
         self._loop = asyncio.get_running_loop()
+        self._connected_event = asyncio.Event()
 
         try:
             # 创建 listenKey
@@ -77,6 +86,7 @@ class UserDataStream:
 
             # 启动 WebSocket 连接
             await self._connect_ws()
+            await self._wait_until_connected()
         except Exception:
             await self.stop()
             raise
@@ -89,6 +99,7 @@ class UserDataStream:
             return
 
         self._running = False
+        self._mark_disconnected()
 
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
@@ -131,6 +142,11 @@ class UserDataStream:
         self.listen_key = None
         self._loop = None
 
+    @property
+    def connected(self) -> bool:
+        event = self._connected_event
+        return event is not None and event.is_set()
+
     async def _keepalive_loop(self) -> None:
         """
         listenKey keepalive 循环
@@ -151,6 +167,9 @@ class UserDataStream:
         """建立 WebSocket 连接"""
         if not self.listen_key:
             raise RuntimeError("listenKey not created")
+        if self._connected_event is None:
+            self._connected_event = asyncio.Event()
+        self._mark_disconnected()
 
         ws_url = f"{self.ws_base_url}/ws/{self.listen_key}"
 
@@ -181,6 +200,9 @@ class UserDataStream:
         def on_close(ws, close_status_code, close_msg):
             """WebSocket 关闭回调"""
             logger.warning(f"WebSocket closed: {close_status_code} {close_msg}")
+            loop = self._loop
+            if loop and not loop.is_closed():
+                loop.call_soon_threadsafe(self._mark_disconnected)
             if self._running:
                 self._schedule_reconnect()
 
@@ -188,6 +210,9 @@ class UserDataStream:
             """WebSocket 打开回调"""
             logger.info("User Data Stream connected")
             self._reconnect_delay = 1.0  # 重置重连延迟
+            loop = self._loop
+            if loop and not loop.is_closed():
+                loop.call_soon_threadsafe(self._mark_connected)
 
         self.ws = websocket.WebSocketApp(
             ws_url,
@@ -208,35 +233,75 @@ class UserDataStream:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self.ws.run_forever)
 
+    async def _wait_until_connected(self) -> None:
+        event = self._connected_event
+        ws_task = self._ws_thread
+        if event is None or ws_task is None:
+            raise RuntimeError("User Data Stream connection was not initialized")
+        connected = asyncio.create_task(event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {connected, ws_task},
+                timeout=self.connect_timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if connected in done and connected.result():
+                return
+            if ws_task in done:
+                await ws_task
+                raise RuntimeError("User Data Stream closed before opening")
+            raise TimeoutError("User Data Stream connection timed out")
+        finally:
+            if not connected.done():
+                connected.cancel()
+                await asyncio.gather(connected, return_exceptions=True)
+
     async def _reconnect(self) -> None:
         """重连逻辑"""
-        if not self._running:
-            return
+        while self._running:
+            logger.info(f"Reconnecting in {self._reconnect_delay} seconds...")
+            await asyncio.sleep(self._reconnect_delay)
+            self._reconnect_delay = min(
+                self._reconnect_delay * 2, self._max_reconnect_delay
+            )
+            try:
+                old_listen_key = self.listen_key
+                if old_listen_key:
+                    try:
+                        await self.rest_client.close_listen_key(old_listen_key)
+                    except Exception:
+                        logger.warning("Failed to close stale listenKey", exc_info=True)
+                self.listen_key = await self.rest_client.create_listen_key()
+                logger.info(f"Recreated listenKey: {self.listen_key[:10]}...")
+                await self._connect_ws()
+                await self._wait_until_connected()
+                if self.on_reconnect:
+                    result = self.on_reconnect()
+                    if inspect.isawaitable(result):
+                        await result
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Reconnect failed: {e}", exc_info=True)
 
-        logger.info(f"Reconnecting in {self._reconnect_delay} seconds...")
-        await asyncio.sleep(self._reconnect_delay)
-
-        # 指数退避
-        self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
-
-        try:
-            # 重新创建 listenKey
-            self.listen_key = await self.rest_client.create_listen_key()
-            logger.info(f"Recreated listenKey: {self.listen_key[:10]}...")
-
-            # 重新连接 WebSocket
-            await self._connect_ws()
-
-            # 触发重连回调
-            if self.on_reconnect:
-                result = self.on_reconnect()
+    async def _reconnect_after_disconnect(self) -> None:
+        if self.on_disconnect:
+            try:
+                result = self.on_disconnect()
                 if inspect.isawaitable(result):
                     await result
+            except Exception:
+                logger.error("User Data Stream disconnect callback failed", exc_info=True)
+        await self._reconnect()
 
-        except Exception as e:
-            logger.error(f"Reconnect failed: {e}", exc_info=True)
-            # 继续重试
-            await self._reconnect()
+    def _mark_connected(self) -> None:
+        if self._connected_event is not None:
+            self._connected_event.set()
+
+    def _mark_disconnected(self) -> None:
+        if self._connected_event is not None:
+            self._connected_event.clear()
 
     def _schedule(self, coro) -> None:
         """将 websocket-client 线程中的协程安全投递到主事件循环。"""
@@ -266,7 +331,9 @@ class UserDataStream:
         if not loop or loop.is_closed():
             return
         try:
-            self._reconnect_task = asyncio.run_coroutine_threadsafe(self._reconnect(), loop)
+            self._reconnect_task = asyncio.run_coroutine_threadsafe(
+                self._reconnect_after_disconnect(), loop
+            )
             self._reconnect_task.add_done_callback(self._log_scheduled_error)
         except RuntimeError:
             self._reconnect_task = None

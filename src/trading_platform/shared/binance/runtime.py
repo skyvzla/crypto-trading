@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Protocol
+from typing import Callable, Protocol
 
 from trading_platform.shared.execution_recovery import SubmitUnknownPollingService
 
@@ -23,10 +23,13 @@ class BinanceExecutionRuntime:
         user_stream: UserDataStream,
         unknown_poller: SubmitUnknownPollingService,
         startup_reconciler: StartupReconciler | None = None,
+        *,
+        on_recovered: Callable[[], object] | None = None,
     ):
         self.user_stream = user_stream
         self.unknown_poller = unknown_poller
         self.startup_reconciler = startup_reconciler
+        self.on_recovered = on_recovered
         self._running = False
         self._previous_reconnect = user_stream.on_reconnect
         user_stream.on_reconnect = self._on_reconnect
@@ -65,6 +68,14 @@ class BinanceExecutionRuntime:
         if self.startup_reconciler is not None:
             await self.startup_reconciler.reconcile_once()
         self.unknown_poller.start()
+        if self.on_recovered is not None:
+            try:
+                result = self.on_recovered()
+                if inspect.isawaitable(result):
+                    await result
+            except BaseException:
+                await self.unknown_poller.stop()
+                raise
         callback = self._previous_reconnect
         if callback is None:
             return

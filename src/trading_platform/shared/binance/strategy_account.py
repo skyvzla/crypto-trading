@@ -70,6 +70,22 @@ class BinanceStrategyAccount:
         position = self._positions.get(symbol)
         return position if position is not None and position.quantity > 0 else None
 
+    def restore_trade_state(
+        self,
+        symbol: str,
+        commission: Decimal,
+        trade_ids: set[str],
+    ) -> None:
+        """用持久化成交事实恢复手续费和进程内成交幂等状态。"""
+        if commission < 0:
+            raise ValueError("commission must be non-negative")
+        position = self.get_position(symbol)
+        if position is None:
+            raise RuntimeError(f"cannot restore commission without position: {symbol}")
+        self._commissions[symbol] = commission
+        self._processed_trade_ids.update((symbol, trade_id) for trade_id in trade_ids)
+        position.total_commission = commission
+
     def cancel_order(self, order_id: str) -> bool:
         order = self.get_order(order_id)
         if order is None or order.status not in {"NEW", "PARTIALLY_FILLED"}:
