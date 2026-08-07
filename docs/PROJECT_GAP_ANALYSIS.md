@@ -12,7 +12,7 @@
 但尚未建立绑定具体 testnet 账户的长期运行进程和完整交易所启动对账。
 
 当前本地上次全量测试为 `159 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`174 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+`175 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
@@ -153,7 +153,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 已验证：
 
 - `uv run --extra dev pytest -q`：`159 passed, 9 skipped`
-- `docker compose -f compose.test.yaml run --rm test`：`174 passed`
+- `docker compose -f compose.test.yaml run --rm test`：`175 passed`
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready
