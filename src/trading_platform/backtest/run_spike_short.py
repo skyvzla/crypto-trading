@@ -33,8 +33,14 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Total notional allocated to each signal",
     )
-    parser.add_argument(
-        "--data-dir", default="data/market", help="Market data directory"
+    source_group = parser.add_mutually_exclusive_group()
+    source_group.add_argument(
+        "--data-dir", default=None, help="Parquet market data directory"
+    )
+    source_group.add_argument(
+        "--duckdb-path",
+        default=None,
+        help="Read-only DuckDB candles archive",
     )
     parser.add_argument(
         "--output",
@@ -65,19 +71,22 @@ def main() -> None:
         print("Error: --warmup-hours must not be negative", file=sys.stderr)
         raise SystemExit(2)
     load_start_ms = start_ms - int(args.warmup_hours * 3_600_000)
+    data_dir = args.data_dir or "data/market"
+    data_source = args.duckdb_path or data_dir
 
     print("=== Dynamic Spike Short Strategy Backtest ===")
     print(f"Symbol: {args.symbol}")
     print(f"Period: {args.start} to {args.end}")
-    print(f"Data directory: {args.data_dir}")
+    print(f"Data source: {data_source}")
 
     loader = BacktestDataLoader(
-        data_dir=args.data_dir,
+        data_dir=data_dir,
         symbols=[args.symbol],
         start_ms=load_start_ms,
         end_ms=end_ms,
         require_aggtrades=True,
         required_kline_intervals=["1m", "5m"],
+        duckdb_path=args.duckdb_path,
     )
     events = loader.load_all()
     if not events:
@@ -89,7 +98,7 @@ def main() -> None:
 
     output_path = Path(args.output)
     config = BacktestConfig(
-        data_dir=args.data_dir,
+        data_dir=data_source,
         output_dir=str(output_path),
         trading_start_ms=start_ms,
     )

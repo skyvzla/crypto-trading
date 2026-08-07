@@ -32,6 +32,7 @@ class BacktestResult:
     fills: list[Fill]
     positions: list[Position]
     config: BacktestConfig
+    events_processed: int = 0
     audit_events: list[StrategyAuditEvent] = field(default_factory=list)
 
     def to_dataframes(self) -> dict[str, pd.DataFrame]:
@@ -383,11 +384,7 @@ class ResultAnalyzer:
             'run_id': run_id,
             'virtual_time_start': self.result.virtual_time_start,
             'virtual_time_end': self.result.virtual_time_end,
-            'total_events': (
-                len(self.result.orders)
-                + len(self.result.fills)
-                + len(self.result.audit_events)
-            ),
+            'total_events': self.result.events_processed,
             'config': {
                 'data_dir': self.result.config.data_dir,
                 'maker_fee_rate': self.result.config.maker_fee_rate,

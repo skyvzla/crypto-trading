@@ -442,5 +442,6 @@ class BacktestEngine:
             fills=self.fill_records,
             positions=self.position_records,
             config=self.config,
+            events_processed=len(self.events),
             audit_events=self.audit_records,
         )

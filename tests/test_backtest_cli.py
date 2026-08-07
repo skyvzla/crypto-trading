@@ -123,8 +123,10 @@ def test_spike_cli_runs_on_sample_data(tmp_path, monkeypatch, entrypoint):
     summary_path = output_dir / "summary.json"
     assert summary_path.exists()
     summary = json.loads(summary_path.read_text())
+    run_meta = json.loads((output_dir / "run_meta.json").read_text())
     assert summary["orders"]["total"] == 0
     assert summary["pnl"]["total_profit"] == 0.0
+    assert run_meta["total_events"] == 4
     assert (output_dir / "audit_events.parquet").exists()
 
 
