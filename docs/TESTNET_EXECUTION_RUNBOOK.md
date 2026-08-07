@@ -152,6 +152,11 @@ uv run python scripts/binance_testnet_flatten.py \
   成交并形成 `BOTH -0.001`，随后 `BUY MARKET reduceOnly 0.001` 成交；报告为
   `reports/testnet_20260807_fill_exit_b.json`。独立 dry-run 复核报告
   `reports/testnet_20260807_final_flat_b.json` 确认 AKEUSDT/BTCUSDT 均无挂单、无持仓。
+- 新版 Spike profile 启动时第一次遇到 Binance 公共 WS TLS 握手重置，进程 fail-closed 关闭
+  listenKey 和订阅；Compose 自动重启后第二次连接成功，market `/health`/`/quality`
+  ready，`bar1s:AKEUSDT` 有 1 个消费者。
+- 同账户第二个 Spike 实例在创建 Redis/Binance 资源前被 PostgreSQL advisory lock 拒绝；
+  主实例停止后独立复核 AKEUSDT/BTCUSDT 仍为 0 挂单、0 持仓（`final_flat_c`）。
 
 验收结束后 `spike` subcategory 已设置为 disabled，Spike 容器已停止；再次运行前必须经过新的
 人工准入操作。
