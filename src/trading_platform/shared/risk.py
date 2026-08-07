@@ -38,6 +38,8 @@ class RiskGuard:
         # 阻塞的币种（SUBMIT_UNKNOWN 等待解决）
         self.blocked_symbols: Set[str] = set()
         self.block_reasons: Dict[str, str] = {}
+        self._halted = False
+        self._halt_reason = ""
 
     def check_can_open(
         self,
@@ -51,6 +53,8 @@ class RiskGuard:
         Returns:
             (can_open, reason)
         """
+        if self._halted:
+            return False, f"Risk guard halted: {self._halt_reason}"
         if value_usdt <= 0:
             return False, "Position value must be positive"
 
@@ -75,6 +79,24 @@ class RiskGuard:
             return False, f"Max position value exceeded: {total_value} > {self.config.max_position_value_usdt}"
 
         return True, "ok"
+
+    @property
+    def halted(self) -> bool:
+        """进程级停止新增风险状态；只能由进程重启清除。"""
+        return self._halted
+
+    @property
+    def halt_reason(self) -> str:
+        return self._halt_reason
+
+    def halt(self, reason: str) -> None:
+        """关键事实无法证明一致时，停止所有新开仓。"""
+        if not reason:
+            raise ValueError("halt reason is required")
+        if not self._halted:
+            self._halted = True
+            self._halt_reason = reason
+            logger.error("[%s] Risk guard halted: %s", self.account_id, reason)
 
     def block_symbol(self, symbol: str, reason: str) -> None:
         """阻塞币种（SUBMIT_UNKNOWN 场景）"""

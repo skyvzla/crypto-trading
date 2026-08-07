@@ -266,6 +266,7 @@ class SpikeLiveProcess:
             account=account,
             coordinator=self.coordinator,
             gate=self.gate,
+            risk_guard=risk,
         )
         self.runtime.user_stream.on_execution_report = callbacks.handle_execution_report
         self.runtime.user_stream.on_account_update = callbacks.handle_account_update

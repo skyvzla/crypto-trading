@@ -179,7 +179,7 @@ class SpikeExecutionCoordinator:
         async with self._lock:
             intents = self.strategy.on_bar1s(bar)
             await self._execute(intents, event_time=bar.available_time)
-            await self.account.flush_cancellations()
+            await self._flush_cancellations()
             await self._publish_audit()
             await self.maybe_release_campaign(bar.symbol)
 
@@ -187,7 +187,7 @@ class SpikeExecutionCoordinator:
         async with self._lock:
             intents = self.strategy.on_kline(kline)
             await self._execute(intents, event_time=kline.available_time)
-            await self.account.flush_cancellations()
+            await self._flush_cancellations()
             await self._publish_audit()
 
     async def on_fill(self, fill: Fill) -> None:
@@ -218,27 +218,27 @@ class SpikeExecutionCoordinator:
                     self._expire_order(order.client_order_id, remaining_seconds)
                 )
         if cancel_due:
-            await self.account.flush_cancellations()
+            await self._flush_cancellations()
 
     async def _execute(self, intents: list[OrderIntent], *, event_time: int) -> None:
         entries = [intent for intent in intents if intent.trigger_reason in ENTRY_REASONS]
         exits = [intent for intent in intents if intent.trigger_reason not in ENTRY_REASONS]
-        if entries:
-            if not self.gate.enabled:
-                return
+        if entries and self.gate.enabled:
             campaign_id = self._campaign_id(entries[0])
             if not await self._acquire_campaign(campaign_id, entries[0].symbol, event_time):
                 self.gate.set_condition("campaign", False)
-                return
-            total_value = sum(intent.price * intent.quantity for intent in entries)
-            allowed, reason = self.risk_guard.check_can_open(
-                entries[0].symbol, total_value
-            )
-            if not allowed:
-                self.risk_guard.block_symbol(entries[0].symbol, f"entry rejected:{reason}")
-                return
-            for intent in entries:
-                await self._submit(intent, reduce_only=False)
+            else:
+                total_value = sum(intent.price * intent.quantity for intent in entries)
+                allowed, reason = self.risk_guard.check_can_open(
+                    entries[0].symbol, total_value
+                )
+                if not allowed:
+                    self.risk_guard.block_symbol(
+                        entries[0].symbol, f"entry rejected:{reason}"
+                    )
+                else:
+                    for intent in entries:
+                        await self._submit(intent, reduce_only=False)
         for intent in exits:
             await self._submit(intent, reduce_only=True)
 
@@ -250,6 +250,7 @@ class SpikeExecutionCoordinator:
         )
         if record.status == "SUBMIT_UNKNOWN":
             self.gate.set_condition("execution", False)
+            self.risk_guard.halt("submit status unknown")
         if intent.ttl_ms is not None and intent.ttl_ms > 0:
             task = self._expiry_tasks.get(intent.client_order_id)
             if task is None or task.done():
@@ -270,7 +271,7 @@ class SpikeExecutionCoordinator:
             )
             if order is not None and order.status in {"NEW", "PARTIALLY_FILLED"}:
                 self.account.cancel_order(order.order_id)
-                await self.account.flush_cancellations()
+                await self._flush_cancellations()
                 await self.maybe_release_campaign(order.symbol)
         finally:
             self._expiry_tasks.pop(client_order_id, None)
@@ -299,6 +300,14 @@ class SpikeExecutionCoordinator:
             return False
         if self.account.has_open_position(symbol):
             return False
+        # An execution report can precede ACCOUNT_UPDATE. Keep the Campaign
+        # lease until the position fact confirms the fill, even if the WAL is
+        # already terminal.
+        has_pending_position_update = getattr(
+            self.account, "has_pending_position_update", None
+        )
+        if has_pending_position_update is not None and has_pending_position_update(symbol):
+            return False
         if not self.account.all_orders_terminal(symbol):
             return False
         released = await self.campaign_store.release(campaign_id)
@@ -319,7 +328,7 @@ class SpikeExecutionCoordinator:
                 and order.status in {"NEW", "PARTIALLY_FILLED"}
             ):
                 self.account.cancel_order(order.order_id)
-        await self.account.flush_cancellations()
+        await self._flush_cancellations()
         remaining = [
             order.client_order_id
             for order in self.account.iter_orders()
@@ -329,6 +338,12 @@ class SpikeExecutionCoordinator:
         if remaining:
             self.gate.set_condition("execution", False)
             raise RuntimeError(f"entry orders remain open during shutdown: {remaining}")
+
+    async def _flush_cancellations(self) -> None:
+        await self.account.flush_cancellations()
+        if self.account.has_pending_cancellations:
+            self.risk_guard.halt("entry cancellation unresolved")
+            self.gate.set_condition("execution", False)
 
     async def _publish_audit(self) -> None:
         events = tuple(self.strategy.drain_audit_events())
@@ -364,11 +379,13 @@ class SpikeRuntimeCallbacks:
         account: BinanceStrategyAccount,
         coordinator: SpikeExecutionCoordinator,
         gate: CompositeEntryGate,
+        risk_guard: RiskGuard | None = None,
     ):
         self.delegate = delegate
         self.account = account
         self.coordinator = coordinator
         self.gate = gate
+        self.risk_guard = risk_guard
 
     async def handle_execution_report(self, order_data: dict[str, Any]) -> None:
         try:
@@ -382,6 +399,8 @@ class SpikeRuntimeCallbacks:
                 await self.coordinator.maybe_release_campaign(symbol)
         except BaseException:
             self.gate.set_condition("execution", False)
+            if self.risk_guard is not None:
+                self.risk_guard.halt("execution report handling failed")
             raise
 
     async def handle_account_update(self, event: dict[str, Any]) -> None:
@@ -393,4 +412,6 @@ class SpikeRuntimeCallbacks:
                 await self.coordinator.maybe_release_campaign(symbol)
         except BaseException:
             self.gate.set_condition("execution", False)
+            if self.risk_guard is not None:
+                self.risk_guard.halt("account update handling failed")
             raise

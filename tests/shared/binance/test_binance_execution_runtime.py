@@ -71,6 +71,7 @@ async def test_runtime_reconnect_restarts_recovery_and_preserves_callback():
 
     await stream.on_reconnect()
 
+    poller.stop.assert_awaited_once()
     poller.start.assert_called_once()
     previous.assert_awaited_once()
 
@@ -99,12 +100,31 @@ async def test_runtime_reconnect_reconciles_before_restarting_poller():
     runtime = BinanceExecutionRuntime(stream, poller, reconciler)
     runtime._previous_reconnect = None
     calls = []
+    poller.stop.side_effect = lambda: calls.append("stop-poller")
     reconciler.reconcile_once.side_effect = lambda: calls.append("snapshot")
     poller.start.side_effect = lambda: calls.append("poller")
 
     await stream.on_reconnect()
 
-    assert calls == ["snapshot", "poller"]
+    assert calls == ["stop-poller", "snapshot", "poller"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_reconnect_recovery_failure_keeps_poller_stopped():
+    previous = AsyncMock()
+    runtime, stream, poller, _ = _runtime()
+    reconciler = Mock(
+        reconcile_once=AsyncMock(side_effect=RuntimeError("recovery mismatch"))
+    )
+    runtime = BinanceExecutionRuntime(stream, poller, reconciler)
+    runtime._previous_reconnect = previous
+
+    with pytest.raises(RuntimeError, match="recovery mismatch"):
+        await stream.on_reconnect()
+
+    poller.stop.assert_awaited_once()
+    poller.start.assert_not_called()
+    previous.assert_not_awaited()
 
 
 @pytest.mark.asyncio

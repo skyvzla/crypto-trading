@@ -175,6 +175,19 @@ class TestRiskGuard:
         can_open, reason = guard.check_can_open("BTCUSDT", Decimal("1000"))
         assert can_open == True
 
+    def test_halt_rejects_all_new_positions_and_preserves_first_reason(self):
+        guard = RiskGuard("account_a", RiskConfig())
+
+        guard.halt("execution report handling failed")
+        guard.halt("later account update failure")
+
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            can_open, reason = guard.check_can_open(symbol, Decimal("1000"))
+            assert can_open is False
+            assert reason == "Risk guard halted: execution report handling failed"
+        assert guard.halted is True
+        assert guard.halt_reason == "execution report handling failed"
+
 
 class TestBacktestEngine:
     """测试回测引擎"""

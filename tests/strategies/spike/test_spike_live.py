@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from pydantic import ValidationError
 
+from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
 from trading_platform.shared.events import OrderIntent
+from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.spike_live import (
     LIVE_CONFIRMATION,
@@ -111,6 +113,7 @@ async def test_entry_acquires_campaign_then_submits_and_exit_is_reduce_only():
         has_open_position=Mock(return_value=False),
         all_orders_terminal=Mock(return_value=False),
         flush_cancellations=AsyncMock(return_value=()),
+        has_pending_cancellations=False,
     )
     executor = Mock(submit=AsyncMock(return_value=Mock(status="NEW")))
     store = Mock(
@@ -152,6 +155,183 @@ async def test_entry_acquires_campaign_then_submits_and_exit_is_reduce_only():
 
 
 @pytest.mark.asyncio
+async def test_halted_risk_rejects_entry_but_still_submits_reduce_only_exit():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    for name in ("execution", "market", "subcategory", "campaign"):
+        gate.set_condition(name, True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    risk.halt("execution fact unknown")
+    executor = Mock(submit=AsyncMock(return_value=Mock(status="NEW")))
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=executor,
+        campaign_store=Mock(
+            get_active=AsyncMock(return_value=None),
+            acquire=AsyncMock(return_value=True),
+        ),
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+    )
+    exit_intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="BUY",
+        price=Decimal("99"),
+        quantity=Decimal("1"),
+        client_order_id="exit-after-halt",
+        order_type="MARKET",
+        strategy_id="spike_short",
+        trigger_reason="campaign_timeout_exit",
+    )
+
+    await coordinator._execute([_entry(), exit_intent], event_time=1_001)
+
+    executor.submit.assert_awaited_once_with(
+        exit_intent, reduce_only=True, reference_price=Decimal("99")
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("has_position", "orders_terminal", "expected"),
+    [
+        (True, True, False),
+        (False, False, False),
+        (False, True, True),
+    ],
+)
+async def test_campaign_release_requires_flat_position_and_terminal_orders(
+    has_position, orders_terminal, expected
+):
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("campaign", False)
+    store = Mock(release=AsyncMock(return_value=True))
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(
+            has_open_position=Mock(return_value=has_position),
+            has_pending_position_update=Mock(return_value=False),
+            all_orders_terminal=Mock(return_value=orders_terminal),
+        ),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+    )
+    coordinator._owned_campaign_id = "spike_short:BTCUSDT:1000"
+
+    assert await coordinator.maybe_release_campaign("BTCUSDT") is expected
+
+    if expected:
+        store.release.assert_awaited_once_with("spike_short:BTCUSDT:1000")
+        assert coordinator._owned_campaign_id is None
+        assert gate.enabled is True
+    else:
+        store.release.assert_not_awaited()
+        assert coordinator._owned_campaign_id == "spike_short:BTCUSDT:1000"
+        assert gate.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_failed_campaign_release_keeps_lease_owned_and_gate_closed():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("campaign", False)
+    store = Mock(release=AsyncMock(return_value=False))
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(
+            has_open_position=Mock(return_value=False),
+            has_pending_position_update=Mock(return_value=False),
+            all_orders_terminal=Mock(return_value=True),
+        ),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+    )
+    coordinator._owned_campaign_id = "spike_short:BTCUSDT:1000"
+
+    assert await coordinator.maybe_release_campaign("BTCUSDT") is False
+    assert coordinator._owned_campaign_id == "spike_short:BTCUSDT:1000"
+    assert gate.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_trade_fill_blocks_campaign_release_until_account_update(tmp_path):
+    rest = Mock(get_position_risk=AsyncMock(return_value=[]))
+    risk = RiskGuard("spike-test", RiskConfig())
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    account = BinanceStrategyAccount(
+        rest,
+        wal,
+        account_id="spike-test",
+        strategy_id="spike_short",
+        risk_guard=risk,
+    )
+    intent = _entry()
+    intent_record = wal.record_intent(intent, account_id="spike-test", recorded_at=1_000)
+    wal.record_exchange_status(
+        intent_record, {"status": "FILLED", "orderId": 42}, recorded_at=1_100
+    )
+    account.handle_execution_report(
+        {
+            "c": intent.client_order_id,
+            "x": "TRADE",
+            "X": "FILLED",
+            "l": "1",
+            "L": "100",
+            "t": 7,
+            "T": 2_000,
+        }
+    )
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("campaign", False)
+    store = Mock(release=AsyncMock(return_value=True))
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+    )
+    coordinator._owned_campaign_id = "spike_short:BTCUSDT:1000"
+
+    assert await coordinator.maybe_release_campaign("BTCUSDT") is False
+    store.release.assert_not_awaited()
+
+    await account.handle_account_update(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "T": 2_000,
+            "a": {
+                "P": [
+                    {
+                        "s": "BTCUSDT",
+                        "pa": "-1",
+                        "ep": "100",
+                        "up": "0",
+                        "ps": "BOTH",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert account.has_pending_position_update("BTCUSDT") is False
+    assert await coordinator.maybe_release_campaign("BTCUSDT") is False
+    store.release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_foreign_campaign_prevents_entry_submission():
     strategy = StrategyStub()
     gate = CompositeEntryGate(strategy)
@@ -183,6 +363,63 @@ async def test_foreign_campaign_prevents_entry_submission():
 
 
 @pytest.mark.asyncio
+async def test_submit_unknown_halts_risk_guard_and_closes_execution_gate():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    for name in ("execution", "market", "subcategory", "campaign"):
+        gate.set_condition(name, True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    account = Mock(has_pending_cancellations=False)
+    executor = Mock(submit=AsyncMock(return_value=Mock(status="SUBMIT_UNKNOWN")))
+    store = Mock(
+        get_active=AsyncMock(return_value=None),
+        acquire=AsyncMock(return_value=True),
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=executor,
+        campaign_store=store,
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+    )
+
+    await coordinator._execute([_entry()], event_time=1_001)
+
+    assert risk.halted is True
+    assert risk.halt_reason == "submit status unknown"
+    assert gate.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_pending_cancellation_halts_risk_guard_and_closes_execution_gate():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    account = Mock(
+        flush_cancellations=AsyncMock(return_value=()),
+        has_pending_cancellations=True,
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+    )
+
+    await coordinator._flush_cancellations()
+
+    assert risk.halted is True
+    assert risk.halt_reason == "entry cancellation unresolved"
+    assert gate.enabled is False
+
+
+@pytest.mark.asyncio
 async def test_shutdown_cancels_every_open_entry_order():
     strategy = StrategyStub()
     gate = CompositeEntryGate(strategy)
@@ -202,6 +439,7 @@ async def test_shutdown_cancels_every_open_entry_order():
         iter_orders=Mock(side_effect=[(open_order,), (closed_order,)]),
         cancel_order=Mock(return_value=True),
         flush_cancellations=AsyncMock(return_value=("entry-1",)),
+        has_pending_cancellations=False,
     )
     coordinator = SpikeExecutionCoordinator(
         strategy=strategy,
@@ -235,6 +473,7 @@ async def test_restart_immediately_cancels_entry_whose_wal_ttl_elapsed():
         iter_orders=Mock(return_value=(expired,)),
         cancel_order=Mock(return_value=True),
         flush_cancellations=AsyncMock(return_value=("entry-expired",)),
+        has_pending_cancellations=False,
     )
     coordinator = SpikeExecutionCoordinator(
         strategy=strategy,
@@ -312,4 +551,56 @@ async def test_callback_failure_closes_execution_gate():
     with pytest.raises(RuntimeError, match="db unavailable"):
         await callbacks.handle_execution_report({"s": "BTCUSDT"})
 
+    assert gate.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_execution_report_callback_failure_halts_risk_guard():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    delegate = Mock(
+        handle_execution_report=AsyncMock(side_effect=RuntimeError("wal unavailable")),
+        handle_account_update=AsyncMock(),
+    )
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=delegate,
+        account=Mock(has_pending_cancellations=False),
+        coordinator=Mock(),
+        gate=gate,
+        risk_guard=risk,
+    )
+
+    with pytest.raises(RuntimeError, match="wal unavailable"):
+        await callbacks.handle_execution_report({"s": "BTCUSDT"})
+
+    assert risk.halted is True
+    assert risk.halt_reason == "execution report handling failed"
+    assert gate.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_account_update_callback_failure_halts_risk_guard():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    delegate = Mock(
+        handle_execution_report=AsyncMock(),
+        handle_account_update=AsyncMock(side_effect=RuntimeError("ledger unavailable")),
+    )
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=delegate,
+        account=Mock(has_pending_cancellations=False),
+        coordinator=Mock(),
+        gate=gate,
+        risk_guard=risk,
+    )
+
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        await callbacks.handle_account_update({"a": {"P": []}})
+
+    assert risk.halted is True
+    assert risk.halt_reason == "account update handling failed"
     assert gate.enabled is False

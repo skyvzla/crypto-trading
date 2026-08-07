@@ -42,8 +42,10 @@ class BinanceStrategyAccount:
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._positions: dict[str, Position] = {}
         self._position_update_ms: dict[str, int] = {}
+        self._pending_position_update_ms: dict[str, int] = {}
         self._commissions: dict[str, Decimal] = {}
         self._cancel_requests: set[str] = set()
+        self._cancel_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
 
     def get_order(self, order_id: str) -> Order | None:
@@ -77,30 +79,48 @@ class BinanceStrategyAccount:
     async def flush_cancellations(self) -> tuple[str, ...]:
         """提交已登记撤单；失败时保留请求并阻塞该 symbol。"""
         cancelled: list[str] = []
-        for client_order_id in tuple(self._cancel_requests):
-            record = self.wal.recover_latest().get(client_order_id)
-            if record is None or record.status in _TERMINAL:
+        async with self._cancel_lock:
+            for client_order_id in tuple(self._cancel_requests):
+                record = self.wal.recover_latest().get(client_order_id)
+                if record is None or record.status in _TERMINAL:
+                    self._cancel_requests.discard(client_order_id)
+                    continue
+                try:
+                    response = await self.rest_client.cancel_order(
+                        record.symbol,
+                        orig_client_order_id=client_order_id,
+                    )
+                    latest = self.wal.recover_latest().get(client_order_id)
+                    if latest is None:
+                        raise RuntimeError("cancelled order disappeared from WAL")
+                    if latest.status not in _TERMINAL:
+                        self.wal.record_exchange_status(
+                            latest, response, recorded_at=self._now_ms()
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    latest = self.wal.recover_latest().get(client_order_id)
+                    if latest is not None and latest.status in _TERMINAL:
+                        self._cancel_requests.discard(client_order_id)
+                        cancelled.append(client_order_id)
+                        continue
+                    self.risk_guard.block_symbol(
+                        record.symbol,
+                        f"cancel unresolved:{client_order_id}:{type(exc).__name__}",
+                    )
+                    continue
                 self._cancel_requests.discard(client_order_id)
-                continue
-            try:
-                response = await self.rest_client.cancel_order(
-                    record.symbol,
-                    orig_client_order_id=client_order_id,
-                )
-                self.wal.record_exchange_status(
-                    record, response, recorded_at=self._now_ms()
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                self.risk_guard.block_symbol(
-                    record.symbol,
-                    f"cancel unresolved:{client_order_id}:{type(exc).__name__}",
-                )
-                continue
-            self._cancel_requests.discard(client_order_id)
-            cancelled.append(client_order_id)
+                cancelled.append(client_order_id)
         return tuple(cancelled)
+
+    @property
+    def has_pending_cancellations(self) -> bool:
+        return bool(self._cancel_requests)
+
+    def has_pending_position_update(self, symbol: str) -> bool:
+        """Return whether a fill still awaits a matching account position fact."""
+        return symbol in self._pending_position_update_ms
 
     async def refresh_positions(self) -> None:
         """以 REST 快照初始化/修复本地仓位；较新的流事件不会被旧快照覆盖。"""
@@ -118,6 +138,8 @@ class BinanceStrategyAccount:
                     continue
                 amount = self._decimal(raw, "positionAmt")
                 position_side = str(raw.get("positionSide") or "BOTH")
+                if position_side != "BOTH":
+                    raise RuntimeError("Binance position snapshot is not one-way")
                 self._apply_position(
                     symbol=symbol,
                     amount=amount,
@@ -125,6 +147,7 @@ class BinanceStrategyAccount:
                     unrealized_pnl=self._decimal(raw, "unRealizedProfit", default="0"),
                     update_ms=update_ms,
                     position_side=position_side,
+                    confirms_stream_fill=False,
                 )
                 seen.add(symbol)
 
@@ -142,13 +165,17 @@ class BinanceStrategyAccount:
                     raise ValueError("ACCOUNT_UPDATE position missing symbol")
                 if update_ms < self._position_update_ms.get(symbol, -1):
                     continue
+                position_side = str(raw.get("ps") or "BOTH")
+                if position_side != "BOTH":
+                    raise RuntimeError("Binance account update is not one-way")
                 self._apply_position(
                     symbol=symbol,
                     amount=self._decimal(raw, "pa"),
                     entry_price=self._decimal(raw, "ep"),
                     unrealized_pnl=self._decimal(raw, "up"),
                     update_ms=update_ms,
-                    position_side=str(raw.get("ps") or "BOTH"),
+                    position_side=position_side,
+                    confirms_stream_fill=True,
                 )
 
     def handle_execution_report(self, order_data: dict[str, Any]) -> Fill | None:
@@ -162,6 +189,12 @@ class BinanceStrategyAccount:
         record = self.wal.recover_latest().get(client_order_id)
         if record is None or record.account_id != self.account_id:
             return None
+        fill_time = int(order_data.get("T") or self._now_ms())
+        if fill_time > self._position_update_ms.get(record.symbol, -1):
+            self._pending_position_update_ms[record.symbol] = max(
+                fill_time,
+                self._pending_position_update_ms.get(record.symbol, -1),
+            )
         commission = self._decimal(order_data, "n", default="0")
         self._commissions[record.symbol] = (
             self._commissions.get(record.symbol, Decimal("0")) + commission
@@ -175,7 +208,7 @@ class BinanceStrategyAccount:
             quantity=quantity,
             commission=commission,
             commission_asset=str(order_data.get("N") or ""),
-            fill_time=int(order_data.get("T") or self._now_ms()),
+            fill_time=fill_time,
             is_maker=bool(order_data.get("m", False)),
         )
 
@@ -185,7 +218,10 @@ class BinanceStrategyAccount:
             for record in self.wal.recover_latest().values()
             if record.account_id == self.account_id and record.symbol == symbol
         ]
-        return all(record.status in _TERMINAL for record in records)
+        return (
+            not self.has_pending_position_update(symbol)
+            and all(record.status in _TERMINAL for record in records)
+        )
 
     def has_unresolved_orders(self) -> bool:
         return any(
@@ -216,7 +252,13 @@ class BinanceStrategyAccount:
         unrealized_pnl: Decimal,
         update_ms: int,
         position_side: str,
+        confirms_stream_fill: bool,
     ) -> None:
+        if (
+            confirms_stream_fill
+            and update_ms >= self._pending_position_update_ms.get(symbol, update_ms + 1)
+        ):
+            self._pending_position_update_ms.pop(symbol, None)
         if position_side not in {"BOTH", "SHORT", "LONG"}:
             raise ValueError(f"unknown position side: {position_side}")
         if amount == 0:

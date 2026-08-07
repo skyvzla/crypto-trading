@@ -12,7 +12,8 @@
 撤单、启动对账和周期安全扫描。正式退出仍未完成：testnet 仅允许 D-007 简化退出用于
 执行验证，最新动能/趋势退出参数冻结前，`live` 会拒绝启动。
 
-当前 Compose 真实 Redis/PostgreSQL 全量测试为 `247 passed, 1 warning`。测试已按
+当前本地全量测试为 `259 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
+全量测试为 `270 passed, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -88,7 +89,8 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴�
 - `BinanceStrategyAccount` 将 WAL、订单回报和仓位快照投影为同步 `StrategyAccount`；
 - `spike-live` 进程已装配历史 Kline 预热、实时行情、User Stream、账本、Campaign 和准入；
 - 启动强制专用账户、one-way 模式、交易所规则快照和订单/仓位一致性；关机先撤销未终态入场单；
-- 仍需在 one-way testnet 账户验证部分成交、撤单竞态、重连及迟到回报。
+- 本地与 Compose 已覆盖部分成交、撤单竞态、重连顺序、迟到回报、成交后仓位确认和全局 halt；
+  仍需在专用 one-way testnet 账户验证真实写入、保护退出及外部多轮行为。
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
@@ -139,9 +141,9 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 区域 | 缺失能力 | 目标阶段 |
 |---|---|---|
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
-| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约组件；⏳ 运行时接线、恢复与终态 | Phase 2 |
-| **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/具体账户进程/订单仓位启动门禁/规则量化；⏳真实部分成交、撤单竞态、迟到回报 | Phase 3 |
+| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁；⏳ 外部 one-way testnet 验收 | Phase 2 |
+| **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、✅ 部分成交/撤单竞态/迟到回报自动化；⏳ 外部 one-way testnet 验收 | Phase 2/3 |
+| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/具体账户进程/订单仓位启动门禁/规则量化/重连顺序；⏳外部部分成交与保护退出 | Phase 3 |
 | **持仓退出** | ✅ D-007 仅用于 replay/testnet 执行验证；⏳ 最新动能、origin 减半、趋势清仓及参数标定；未完成前 live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞；⏳保证金、日亏损、数据延迟、紧急停止 | Phase 3 |
 | **监听池** | ✅ 5 分钟扫描编排及 subcategory 同节拍刷新；⏳ 真实扫描器、监听租约、保护性监听 | Phase 1/4 |
@@ -154,7 +156,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`247 passed, 1 warning`
+- 本地 `uv run --extra dev python -m pytest -q`：`259 passed, 11 skipped, 1 warning`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`270 passed, 1 warning`
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
 - Binance `demo-fapi` 真实只读鉴权成功，`canTrade=true`；真实写入因账户 Hedge Mode 被前置门禁拒绝，未产生订单
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
@@ -206,9 +209,9 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 信号检测逻辑 | 已冻结 | 参数与实验脚本对齐，消除未来数据泄漏 |
 | 三档挂单 | 已修复 | `range(3)` 修复，价格计算正确 |
 | 数据连续性检查 | 已实现 | 5s/60s 窗口检查及行情层质量门禁已接入 |
-| 订单幂等 | 已接入实时进程 | WAL、User Stream、启动恢复、5秒×12轮询、client ID 身份冲突门禁；真实竞态待验收 |
-| 失效撤单 | 已接入实时进程 | TTL、失效、subcategory 关闭及关机均撤销入场单；真实撤单竞态待验证 |
-| Campaign | 已接入实时进程 | Redis 原子租约、恢复一致性和订单终态+空仓释放已装配；Campaign 账本仍缺 |
+| 订单幂等 | 已接入实时进程 | WAL、User Stream、启动恢复、5秒×12轮询、client ID 身份冲突门禁；撤单锁和迟到回报已有自动化覆盖 |
+| 失效撤单 | 已接入实时进程 | TTL、失效、subcategory 关闭及关机均撤销入场单；部分成交/异常撤单竞态已回归 |
+| Campaign | 已接入实时进程 | Redis 原子租约、恢复一致性、成交后仓位确认和订单终态+空仓释放已装配；Campaign 账本仍缺 |
 | 持仓管理 | 部分完成 | D-007 仅为执行测试；最新 origin/动能/趋势方案待标定，live 已硬阻断 |
 | 环境解耦 | 已完成进程适配 | replay 与 BinanceStrategyAccount 共用策略接口，testnet/live 共用执行进程 |
 | 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API、具体进程订单/成交/仓位入账已有，缺 Campaign 账本和完整退出 PnL |

@@ -60,7 +60,8 @@ class BinanceExecutionRuntime:
             await self.unknown_poller.stop()
 
     async def _on_reconnect(self) -> None:
-        """重连后重新检查 WAL；轮询器重复启动是幂等的。"""
+        """重连后串行恢复 WAL，再重新启动未知订单轮询。"""
+        await self.unknown_poller.stop()
         if self.startup_reconciler is not None:
             await self.startup_reconciler.reconcile_once()
         self.unknown_poller.start()
