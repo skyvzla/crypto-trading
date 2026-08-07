@@ -80,6 +80,93 @@ async def test_reconnect_callback_runs_only_after_new_websocket_is_open(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_reconnect_remains_disconnected_across_repeated_failures(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(
+            side_effect=[
+                RuntimeError("network down 1"),
+                RuntimeError("network down 2"),
+                "recovered-listen-key",
+            ]
+        ),
+        close_listen_key=AsyncMock(),
+    )
+    disconnected = AsyncMock()
+    recovered = AsyncMock()
+    stream = UserDataStream(
+        rest,
+        on_disconnect=disconnected,
+        on_reconnect=recovered,
+    )
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "stale-listen-key"
+    stream._connected_event = asyncio.Event()
+    stream._connected_event.set()
+    stream._mark_disconnected()
+    stream._reconnect_delay = 0
+    stream._max_reconnect_delay = 0
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+
+    reconnect = asyncio.create_task(stream._reconnect_after_disconnect())
+    while rest.create_listen_key.await_count < 3:
+        await asyncio.sleep(0)
+
+    assert stream.connected is False
+    assert reconnect.done() is False
+    recovered.assert_not_awaited()
+    FakeWebSocketApp.instance.callbacks["on_open"](None)
+    await asyncio.wait_for(reconnect, timeout=1)
+
+    disconnected.assert_awaited_once()
+    recovered.assert_awaited_once()
+    assert stream.connected is True
+    await stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_cleans_failed_websocket_before_next_attempt():
+    rest = Mock(
+        create_listen_key=AsyncMock(side_effect=["key-1", "key-2"]),
+        close_listen_key=AsyncMock(),
+    )
+    stream = UserDataStream(rest)
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream._reconnect_delay = 0
+    stream._max_reconnect_delay = 0
+    failed_ws = Mock(close=Mock())
+    failed_task = None
+    attempts = 0
+
+    async def connect_ws():
+        nonlocal attempts, failed_task
+        attempts += 1
+        stream.ws = failed_ws if attempts == 1 else Mock(close=Mock())
+        stream._ws_thread = asyncio.create_task(_idle_forever())
+        if attempts == 1:
+            failed_task = stream._ws_thread
+
+    async def wait_until_connected():
+        if attempts == 1:
+            raise TimeoutError("open timed out")
+
+    stream._connect_ws = AsyncMock(side_effect=connect_ws)
+    stream._wait_until_connected = AsyncMock(side_effect=wait_until_connected)
+
+    await asyncio.wait_for(stream._reconnect(), timeout=1)
+
+    assert attempts == 2
+    failed_ws.close.assert_called_once()
+    assert failed_task is not None and failed_task.cancelled()
+    await stream.stop()
+
+
+@pytest.mark.asyncio
 async def test_callbacks_from_websocket_thread_are_returned_to_event_loop(monkeypatch):
     monkeypatch.setattr(
         "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",

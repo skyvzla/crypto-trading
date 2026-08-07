@@ -355,12 +355,24 @@ class SubmitUnknownPollingService:
         self.max_attempts = max_attempts
         self._sleep = sleep
         self._task: asyncio.Task[dict[str, Resolution]] | None = None
+        self._fatal_event = asyncio.Event()
+        self._fatal_exception: RuntimeError | None = None
         self.attempts = 0
         self.last_error: Exception | None = None
 
     @property
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
+
+    @property
+    def fatal_exception(self) -> RuntimeError | None:
+        return self._fatal_exception
+
+    async def wait_fatal(self) -> RuntimeError:
+        """等待有限轮询耗尽且仍存在无法确认的提交。"""
+        await self._fatal_event.wait()
+        assert self._fatal_exception is not None
+        return self._fatal_exception
 
     def start(self) -> asyncio.Task[dict[str, Resolution]]:
         """启动一个后台轮询任务；重复调用返回同一个运行中任务。"""
@@ -402,4 +414,8 @@ class SubmitUnknownPollingService:
                     return results
             if self.attempts < self.max_attempts:
                 await self._sleep(self.poll_interval_seconds)
+        self._fatal_exception = RuntimeError(
+            "SUBMIT_UNKNOWN resolution attempts exhausted"
+        )
+        self._fatal_event.set()
         return last_results

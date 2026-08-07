@@ -173,6 +173,31 @@ async def test_reused_client_id_with_different_intent_fails_closed(tmp_path):
     assert "BTCUSDT" in guard.blocked_symbols
 
 
+@pytest.mark.asyncio
+async def test_repeated_submit_unknown_intent_never_posts_duplicate_order(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    rest = Mock(
+        post_order=AsyncMock(side_effect=RuntimeError("submit timeout")),
+        query_order=AsyncMock(),
+    )
+    guard = RiskGuard("account-1", RiskConfig())
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        risk_guard=guard,
+    )
+    intent = _intent("cid-unknown")
+
+    first = await executor.submit(intent)
+    second = await executor.submit(intent)
+
+    assert first.status == second.status == "SUBMIT_UNKNOWN"
+    assert rest.post_order.await_count == 1
+    assert wal.recover_latest()["cid-unknown"].status == "SUBMIT_UNKNOWN"
+    assert "BTCUSDT" in guard.blocked_symbols
+
+
 def test_startup_query_response_advances_owned_wal_and_unblocks_symbol(tmp_path):
     wal = OrderWAL(tmp_path / "orders.jsonl")
     unknown = _unknown(wal, "cid-recovered")

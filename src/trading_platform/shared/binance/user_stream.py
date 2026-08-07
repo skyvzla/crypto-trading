@@ -120,18 +120,7 @@ class UserDataStream:
                 pass
         self._reconnect_task = None
 
-        # 关闭 WebSocket
-        if self.ws:
-            self.ws.close()
-            self.ws = None
-
-        if self._ws_thread and not self._ws_thread.done():
-            self._ws_thread.cancel()
-            try:
-                await self._ws_thread
-            except asyncio.CancelledError:
-                pass
-        self._ws_thread = None
+        await self._close_ws_connection()
 
         # 取消 keepalive 任务
         if self._keepalive_task:
@@ -313,6 +302,8 @@ class UserDataStream:
                 raise
             except Exception as e:
                 logger.error(f"Reconnect failed: {e}", exc_info=True)
+                await self._close_ws_connection()
+                self._mark_disconnected()
 
     async def _reconnect_after_disconnect(self) -> None:
         if self.on_disconnect:
@@ -331,6 +322,19 @@ class UserDataStream:
     def _mark_disconnected(self) -> None:
         if self._connected_event is not None:
             self._connected_event.clear()
+
+    async def _close_ws_connection(self) -> None:
+        if self.ws:
+            self.ws.close()
+            self.ws = None
+        task = self._ws_thread
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._ws_thread = None
 
     def _schedule(self, coro) -> None:
         """将 websocket-client 线程中的协程安全投递到主事件循环。"""

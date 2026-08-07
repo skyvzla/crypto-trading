@@ -150,6 +150,10 @@ class SpikeLiveProcess:
                     self._execution_stream_fatal_loop(),
                     name="spike-execution-stream-fatal",
                 ),
+                asyncio.create_task(
+                    self._submit_unknown_fatal_loop(),
+                    name="spike-submit-unknown-fatal",
+                ),
                 ]
             )
         except BaseException:
@@ -365,6 +369,17 @@ class SpikeLiveProcess:
                 f"execution account lease lost: {type(exc).__name__}"
             )
         raise RuntimeError("execution account lease lost") from exc
+
+    async def _submit_unknown_fatal_loop(self) -> None:
+        assert self.runtime is not None
+        exc = await self.runtime.unknown_poller.wait_fatal()
+        if self.gate is not None:
+            self.gate.set_condition("execution", False)
+        if self.coordinator is not None:
+            self.coordinator.risk_guard.halt(
+                "SUBMIT_UNKNOWN resolution attempts exhausted"
+            )
+        raise RuntimeError("SUBMIT_UNKNOWN recovery failed") from exc
 
     def _restore_execution_gate(self) -> bool:
         if self.gate is None or self.coordinator is None or self.runtime is None:

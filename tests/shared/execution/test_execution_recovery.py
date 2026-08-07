@@ -405,6 +405,8 @@ async def test_unknown_poller_attempt_limit_keeps_symbol_blocked(tmp_path):
     assert rest.query_order.await_count == 2
     assert wal.recover_latest()["cid-1"].status == "SUBMIT_UNKNOWN"
     assert "BTCUSDT" in guard.blocked_symbols
+    failure = await asyncio.wait_for(poller.wait_fatal(), timeout=1)
+    assert str(failure) == "SUBMIT_UNKNOWN resolution attempts exhausted"
 
 
 @pytest.mark.asyncio
@@ -434,6 +436,7 @@ async def test_unknown_poller_query_errors_fail_closed(tmp_path):
     assert rest.query_order.await_count == 2
     assert wal.recover_latest()["cid-1"].status == "SUBMIT_UNKNOWN"
     assert "BTCUSDT" in guard.blocked_symbols
+    assert poller.fatal_exception is not None
 
 
 @pytest.mark.asyncio

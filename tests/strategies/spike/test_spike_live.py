@@ -631,6 +631,35 @@ async def test_stream_callback_failure_halts_process_fail_closed():
 
 
 @pytest.mark.asyncio
+async def test_submit_unknown_attempt_exhaustion_halts_process_fail_closed():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    failure = RuntimeError("SUBMIT_UNKNOWN resolution attempts exhausted")
+    process.runtime = Mock(
+        unknown_poller=Mock(wait_fatal=AsyncMock(return_value=failure))
+    )
+    process.gate = Mock(set_condition=Mock())
+    risk = Mock(halt=Mock())
+    process.coordinator = Mock(risk_guard=risk)
+
+    with pytest.raises(RuntimeError, match="SUBMIT_UNKNOWN recovery failed"):
+        await process._submit_unknown_fatal_loop()
+
+    process.gate.set_condition.assert_called_once_with("execution", False)
+    risk.halt.assert_called_once_with(
+        "SUBMIT_UNKNOWN resolution attempts exhausted"
+    )
+
+
+@pytest.mark.asyncio
 async def test_execution_lease_loss_halts_process_fail_closed():
     settings = SpikeLiveSettings(
         account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
@@ -694,6 +723,38 @@ def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():
     process.execution_lease = Mock(held=False)
     assert process._restore_execution_gate() is False
     gate.set_condition.assert_called_with("execution", False)
+
+
+def test_disconnect_recovery_sequence_waits_for_resolved_orders_before_reopening():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    gate = Mock(set_condition=Mock())
+    risk = Mock(halted=False)
+    account = Mock(has_unresolved_orders=Mock(return_value=True))
+    stream = Mock(connected=False)
+    process.gate = gate
+    process.coordinator = Mock(risk_guard=risk, account=account)
+    process.runtime = Mock(user_stream=stream)
+
+    process._on_execution_stream_disconnected()
+    stream.connected = True
+    assert process._restore_execution_gate() is False
+    account.has_unresolved_orders.return_value = False
+    assert process._restore_execution_gate() is True
+
+    assert gate.set_condition.call_args_list == [
+        (("execution", False),),
+        (("execution", False),),
+        (("execution", True),),
+    ]
 
 
 @pytest.mark.asyncio
