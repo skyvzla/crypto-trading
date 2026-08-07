@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Literal, NoReturn, Protocol
 
@@ -42,7 +42,7 @@ class SpikeLiveSettings(BaseSettings):
     )
 
     mode: Literal["testnet", "live"] = "testnet"
-    exit_policy: Literal["execution-test-d007"] = "execution-test-d007"
+    exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007"
     live_confirmation: str = ""
     account_id: str
     dedicated_strategy_account: bool = True
@@ -157,17 +157,20 @@ class SpikeExecutionCoordinator:
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._lock = asyncio.Lock()
         self._owned_campaign_id: str | None = None
+        self._owned_campaign_lease: CampaignLease | None = None
         self._expiry_tasks: dict[str, asyncio.Task] = {}
 
     async def restore_campaign_gate(self) -> None:
         """恢复 Redis 互斥事实；不依据本地状态猜测或删除已有 lease。"""
         lease = await self.campaign_store.get_active()
+        self._owned_campaign_id = None
+        self._owned_campaign_lease = None
         if lease is None:
-            self._owned_campaign_id = None
             self.gate.set_condition("campaign", True)
             return
         if lease.strategy_id == STRATEGY_ID and lease.symbol in self.strategy.strategies:
             self._owned_campaign_id = lease.campaign_id
+            self._owned_campaign_lease = lease
         self.gate.set_condition("campaign", self._owned_campaign_id is not None)
 
     def validate_recovered_campaign(self) -> None:
@@ -216,6 +219,9 @@ class SpikeExecutionCoordinator:
             and record.recorded_at >= signal_time
             and record.payload.get("strategy_id") == STRATEGY_ID
         ]
+        trigger_reasons = {
+            record.payload.get("trigger_reason") for record in owned_records
+        }
         entry_ids = {
             record.client_order_id
             for record in owned_records
@@ -266,7 +272,39 @@ class SpikeExecutionCoordinator:
             total_commission,
             {str(trade.trade_id) for trade in trades},
         )
-        self.strategy.restore_campaign_timing(symbol, campaign_id, first_fill_time)
+        lease = self._owned_campaign_lease
+        reduced_at_origin = "candidate_origin_reduce" in trigger_reasons
+        exit_requested = bool(
+            trigger_reasons
+            & {
+                "candidate_time_risk_exit",
+                "candidate_momentum_exit",
+                "candidate_trend_exit",
+            }
+        )
+        if lease is not None and (
+            lease.reduced_at_origin and not reduced_at_origin
+            or lease.exit_requested and not exit_requested
+        ):
+            self._fail_campaign_recovery(
+                "Redis candidate exit state has no matching WAL order"
+            )
+        self.strategy.restore_campaign_timing(
+            symbol,
+            campaign_id,
+            first_fill_time,
+            origin_price=(
+                None
+                if lease is None or lease.origin_price is None
+                else Decimal(lease.origin_price)
+            ),
+            origin_checked=(
+                reduced_at_origin
+                or (False if lease is None else lease.origin_checked)
+            ),
+            reduced_at_origin=reduced_at_origin,
+            exit_requested=exit_requested,
+        )
 
     def _fail_campaign_recovery(self, message: str) -> NoReturn:
         self.gate.set_condition("campaign", False)
@@ -276,6 +314,7 @@ class SpikeExecutionCoordinator:
         async with self._lock:
             intents = self.strategy.on_bar1s(bar)
             await self._execute(intents, event_time=bar.available_time)
+            await self._persist_exit_state(bar.symbol)
             await self._flush_cancellations()
             await self._publish_audit()
             await self.maybe_release_campaign(bar.symbol)
@@ -284,6 +323,7 @@ class SpikeExecutionCoordinator:
         async with self._lock:
             intents = self.strategy.on_kline(kline)
             await self._execute(intents, event_time=kline.available_time)
+            await self._persist_exit_state(kline.symbol)
             await self._flush_cancellations()
             await self._publish_audit()
 
@@ -381,14 +421,58 @@ class SpikeExecutionCoordinator:
         if active is not None:
             if active.campaign_id == campaign_id and active.strategy_id == STRATEGY_ID:
                 self._owned_campaign_id = campaign_id
+                self._owned_campaign_lease = active
                 return True
             return False
-        acquired = await self.campaign_store.acquire(
-            CampaignLease(campaign_id, STRATEGY_ID, symbol, event_time)
+        origin_getter = getattr(self.strategy, "campaign_origin_price", None)
+        origin_price = (
+            origin_getter(campaign_id) if callable(origin_getter) else None
         )
+        lease = CampaignLease(
+            campaign_id,
+            STRATEGY_ID,
+            symbol,
+            event_time,
+            origin_price=None if origin_price is None else str(origin_price),
+        )
+        acquired = await self.campaign_store.acquire(lease)
         if acquired:
             self._owned_campaign_id = campaign_id
+            self._owned_campaign_lease = lease
         return acquired
+
+    async def _persist_exit_state(self, symbol: str) -> None:
+        lease = self._owned_campaign_lease
+        if lease is None or lease.symbol != symbol:
+            return
+        state_getter = getattr(self.strategy, "campaign_exit_state", None)
+        if not callable(state_getter):
+            return
+        state = state_getter(symbol)
+        if state is None:
+            return
+        origin_checked, reduced_at_origin, exit_requested = state
+        if state == (
+            lease.origin_checked,
+            lease.reduced_at_origin,
+            lease.exit_requested,
+        ):
+            return
+        updated = await self.campaign_store.update_exit_state(
+            lease.campaign_id,
+            origin_checked=origin_checked,
+            reduced_at_origin=reduced_at_origin,
+            exit_requested=exit_requested,
+        )
+        if not updated:
+            self.gate.set_condition("campaign", False)
+            raise RuntimeError("failed to persist candidate exit state")
+        self._owned_campaign_lease = replace(
+            lease,
+            origin_checked=origin_checked,
+            reduced_at_origin=reduced_at_origin,
+            exit_requested=exit_requested,
+        )
 
     async def maybe_release_campaign(self, symbol: str) -> bool:
         campaign_id = self._owned_campaign_id
@@ -409,6 +493,7 @@ class SpikeExecutionCoordinator:
         released = await self.campaign_store.release(campaign_id)
         if released:
             self._owned_campaign_id = None
+            self._owned_campaign_lease = None
             self.gate.set_condition("campaign", True)
         return released
 

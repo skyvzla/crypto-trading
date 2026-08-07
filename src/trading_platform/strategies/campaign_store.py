@@ -13,6 +13,10 @@ class CampaignLease:
     strategy_id: str
     symbol: str
     started_at_ms: int
+    origin_price: str | None = None
+    origin_checked: bool = False
+    reduced_at_origin: bool = False
+    exit_requested: bool = False
 
 
 class RedisCampaignStore:
@@ -52,3 +56,35 @@ if value.campaign_id ~= ARGV[1] then return 0 end
 return redis.call('DEL', KEYS[1])
 """
         return bool(await self.redis.eval(script, 1, self.key, campaign_id))
+
+    async def update_exit_state(
+        self,
+        campaign_id: str,
+        *,
+        origin_checked: bool,
+        reduced_at_origin: bool,
+        exit_requested: bool,
+    ) -> bool:
+        """只允许持有者原子更新 candidate 退出状态。"""
+        script = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local value = cjson.decode(raw)
+if value.campaign_id ~= ARGV[1] then return 0 end
+value.origin_checked = ARGV[2] == '1'
+value.reduced_at_origin = ARGV[3] == '1'
+value.exit_requested = ARGV[4] == '1'
+redis.call('SET', KEYS[1], cjson.encode(value))
+return 1
+"""
+        return bool(
+            await self.redis.eval(
+                script,
+                1,
+                self.key,
+                campaign_id,
+                "1" if origin_checked else "0",
+                "1" if reduced_at_origin else "0",
+                "1" if exit_requested else "0",
+            )
+        )

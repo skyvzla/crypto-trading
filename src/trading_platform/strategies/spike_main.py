@@ -248,6 +248,7 @@ class SpikeLiveProcess:
             self.settings.symbols,
             self.settings.total_notional,
             account=account,
+            exit_policy=self.settings.exit_policy,
         )
         self.gate = CompositeEntryGate(strategy)
         for condition in ("execution", "market", "subcategory", "campaign"):
@@ -324,7 +325,7 @@ class SpikeLiveProcess:
             f"/subscriptions/{self._consumer_id}",
             json={
                 "symbols": self.settings.symbols,
-                "types": ["bar1s", "kline:1m", "kline:5m"],
+                "types": ["bar1s", "kline:1m", "kline:5m", "kline:15m"],
             },
         )
         response.raise_for_status()
@@ -341,11 +342,24 @@ class SpikeLiveProcess:
         assert self.coordinator is not None
         rest = self.coordinator.account.rest_client
         now_ms = int(time.time() * 1000)
+        strategy = self.coordinator.strategy
+        strategy.set_trading_enabled(False)
         for symbol in self.settings.symbols:
-            for interval, limit, minimum in (("1m", 1000, 960), ("5m", 100, 15)):
-                rows = await rest.get_klines(symbol, interval, limit=limit, end_time=now_ms)
-                klines = [self._parse_binance_kline(symbol, interval, row) for row in rows]
-                completed = [kline for kline in klines if kline.close_time < now_ms]
+            for interval, limit, minimum in (
+                ("1m", 1000, 960),
+                ("5m", 100, 15),
+                ("15m", 100, 10),
+            ):
+                rows = await rest.get_klines(
+                    symbol, interval, limit=limit, end_time=now_ms
+                )
+                klines = [
+                    self._parse_binance_kline(symbol, interval, row)
+                    for row in rows
+                ]
+                completed = [
+                    kline for kline in klines if kline.close_time < now_ms
+                ]
                 if len(completed) < minimum:
                     raise RuntimeError(
                         f"insufficient {interval} warmup for {symbol}: "
@@ -354,6 +368,8 @@ class SpikeLiveProcess:
                 for kline in completed:
                     await self.coordinator.on_kline(kline)
                 self._last_kline[(symbol, interval)] = completed[-1].close_time
+        strategy.refresh_candidate_features()
+        strategy.set_trading_enabled(True)
 
     async def _refresh_market_gate(self, *, require_ready: bool = False) -> bool:
         assert self.http is not None

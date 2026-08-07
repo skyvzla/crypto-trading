@@ -202,7 +202,19 @@ def candidate_feature_snapshot(
     minute = momentum_indicators(_frame(klines_1m), config)
     latest_minute = minute.iloc[-1]
     raw_agreement = latest_minute.get("decay_probe_agreement")
-    decay_agreement = None if pd.isna(raw_agreement) else int(raw_agreement)
+    required_momentum = (
+        "fast_log_slope_z",
+        "slow_log_slope_z",
+        "macd_hist_change_bps",
+        "adx_change",
+        "minus_di_change",
+    )
+    decay_agreement = (
+        None
+        if pd.isna(raw_agreement)
+        or any(pd.isna(latest_minute.get(field)) for field in required_momentum)
+        else int(raw_agreement)
+    )
 
     def channel_state(
         klines: Sequence[Kline], lookback: int

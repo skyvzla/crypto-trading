@@ -12,6 +12,7 @@ from trading_platform.strategies.spike_live import (
     CompositeEntryGate,
     SpikeExecutionCoordinator,
 )
+from trading_platform.strategies.campaign_store import CampaignLease
 from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
 
 
@@ -32,7 +33,7 @@ def _wal_record(client_order_id: str, *, recorded_at: int, reason: str) -> Order
     )
 
 
-def _coordinator(tmp_path, *, trades: list[Trade]):
+def _coordinator(tmp_path, *, trades: list[Trade], exit_policy="execution-test-d007"):
     wal = OrderWAL(tmp_path / "orders.jsonl")
     entry_id = "s_AKEUSDT_rs_e1"
     wal.append(_wal_record(entry_id, recorded_at=1_100, reason="spike_tier1"))
@@ -60,7 +61,10 @@ def _coordinator(tmp_path, *, trades: list[Trade]):
         restore_trade_state=Mock(),
     )
     strategy = DynamicSpikeBacktestStrategy(
-        ["AKEUSDT"], Decimal("20"), account=account
+        ["AKEUSDT"],
+        Decimal("20"),
+        account=account,
+        exit_policy=exit_policy,
     )
     gate = CompositeEntryGate(strategy)
     coordinator = SpikeExecutionCoordinator(
@@ -77,6 +81,19 @@ def _coordinator(tmp_path, *, trades: list[Trade]):
     )
     coordinator._owned_campaign_id = "spike_short:AKEUSDT:1000"
     return coordinator, strategy, account, entry_id
+
+
+def _entry_trade(entry_id: str) -> Trade:
+    return Trade(
+        account_id="spike-test",
+        strategy_id="spike_short",
+        symbol="AKEUSDT",
+        trade_id="1",
+        client_order_id=entry_id,
+        side="SELL",
+        commission=Decimal("0.01"),
+        exchange_time=datetime.fromtimestamp(1.2, timezone.utc),
+    )
 
 
 @pytest.mark.asyncio
@@ -122,6 +139,64 @@ async def test_restart_restores_first_fill_and_all_owned_campaign_commission(tmp
         "client_order_ids"
     ]
     assert set(requested_ids) == {"s_AKEUSDT_rs_e1", "x_AKEUSDT_12kw_r"}
+
+
+@pytest.mark.asyncio
+async def test_candidate_restart_derives_origin_reduction_from_wal(tmp_path):
+    coordinator, strategy, account, entry_id = _coordinator(
+        tmp_path, trades=[], exit_policy="candidate-v1"
+    )
+    account.wal.append(
+        _wal_record(
+            "x_AKEUSDT_reduce_h",
+            recorded_at=1_300,
+            reason="candidate_origin_reduce",
+        )
+    )
+    coordinator.trade_source.get_trades_by_client_order_ids.return_value = [
+        _entry_trade(entry_id)
+    ]
+    coordinator._owned_campaign_lease = CampaignLease(
+        "spike_short:AKEUSDT:1000",
+        "spike_short",
+        "AKEUSDT",
+        1_000,
+        origin_price="0.9",
+        origin_checked=True,
+        reduced_at_origin=True,
+    )
+
+    await coordinator.restore_campaign_timing()
+
+    assert strategy.strategies["AKEUSDT"].campaign_exit_state() == (
+        True,
+        True,
+        False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_candidate_restart_rejects_redis_reduction_without_wal_order(tmp_path):
+    coordinator, _, _, entry_id = _coordinator(
+        tmp_path, trades=[], exit_policy="candidate-v1"
+    )
+    coordinator.trade_source.get_trades_by_client_order_ids.return_value = [
+        _entry_trade(entry_id)
+    ]
+    coordinator._owned_campaign_lease = CampaignLease(
+        "spike_short:AKEUSDT:1000",
+        "spike_short",
+        "AKEUSDT",
+        1_000,
+        origin_price="0.9",
+        origin_checked=True,
+        reduced_at_origin=True,
+    )
+
+    with pytest.raises(RuntimeError, match="no matching WAL order"):
+        await coordinator.restore_campaign_timing()
+
+    assert coordinator.gate.enabled is False
 
 
 @pytest.mark.asyncio

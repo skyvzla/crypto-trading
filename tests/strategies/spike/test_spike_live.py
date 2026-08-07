@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
-from trading_platform.shared.events import OrderIntent
+from trading_platform.shared.events import Bar1s, OrderIntent
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.spike_live import (
@@ -17,6 +17,7 @@ from trading_platform.strategies.spike_live import (
     SpikeRuntimeCallbacks,
     require_one_way_position_mode,
 )
+from trading_platform.strategies.campaign_store import CampaignLease
 from trading_platform.strategies.spike_main import (
     SpikeLiveProcess,
     require_viable_entry_notional,
@@ -287,6 +288,76 @@ async def test_entry_acquires_campaign_then_submits_and_exit_is_reduce_only():
     assert executor.submit.await_args_list[1].kwargs == {
         "reference_price": Decimal("99"),
     }
+
+
+@pytest.mark.asyncio
+async def test_candidate_exit_is_submitted_before_redis_state_is_persisted():
+    events = []
+    exit_intent = OrderIntent(
+        symbol="BTCUSDT",
+        side="BUY",
+        price=Decimal("99"),
+        quantity=Decimal("1"),
+        client_order_id="candidate-exit-1",
+        order_type="MARKET",
+        reduce_only=True,
+        strategy_id="spike_short",
+        trigger_reason="candidate_time_risk_exit",
+    )
+    strategy = StrategyStub()
+    strategy.on_bar1s = Mock(return_value=[exit_intent])
+    strategy.campaign_exit_state = Mock(return_value=(False, False, True))
+    gate = CompositeEntryGate(strategy)
+    account = Mock(
+        flush_cancellations=AsyncMock(return_value=()),
+        has_pending_cancellations=False,
+        has_open_position=Mock(return_value=True),
+    )
+
+    async def submit(*args, **kwargs):
+        events.append("submit")
+        return Mock(status="NEW")
+
+    async def persist(*args, **kwargs):
+        events.append("persist")
+        return True
+
+    store = Mock(update_exit_state=AsyncMock(side_effect=persist))
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=Mock(submit=AsyncMock(side_effect=submit)),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+    )
+    coordinator._owned_campaign_id = "spike_short:BTCUSDT:1000"
+    coordinator._owned_campaign_lease = CampaignLease(
+        "spike_short:BTCUSDT:1000", "spike_short", "BTCUSDT", 1_000
+    )
+    bar = Bar1s(
+        symbol="BTCUSDT",
+        timestamp=2_000,
+        available_time=2_000,
+        open=Decimal("99"),
+        high=Decimal("99"),
+        low=Decimal("99"),
+        close=Decimal("99"),
+        volume=Decimal("1"),
+        trade_count=1,
+        vwap=Decimal("99"),
+    )
+
+    await coordinator.on_bar1s(bar)
+
+    assert events == ["submit", "persist"]
+    store.update_exit_state.assert_awaited_once_with(
+        "spike_short:BTCUSDT:1000",
+        origin_checked=False,
+        reduced_at_origin=False,
+        exit_requested=True,
+    )
 
 
 @pytest.mark.asyncio
