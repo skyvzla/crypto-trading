@@ -200,6 +200,17 @@ class SpikeExecutionCoordinator:
             if self.account.get_position(symbol) is not None
         }
         if not positioned:
+            lease = self._owned_campaign_lease
+            if lease is not None:
+                self.strategy.restore_pending_campaign(
+                    lease.symbol,
+                    lease.campaign_id,
+                    origin_price=(
+                        None
+                        if lease.origin_price is None
+                        else Decimal(lease.origin_price)
+                    ),
+                )
             return
         self.validate_recovered_campaign()
         campaign_id = self._owned_campaign_id
@@ -219,8 +230,8 @@ class SpikeExecutionCoordinator:
             and record.recorded_at >= signal_time
             and record.payload.get("strategy_id") == STRATEGY_ID
         ]
-        trigger_reasons = {
-            record.payload.get("trigger_reason") for record in owned_records
+        records_by_client_id = {
+            record.client_order_id: record for record in owned_records
         }
         entry_ids = {
             record.client_order_id
@@ -261,6 +272,14 @@ class SpikeExecutionCoordinator:
         if any(trade.exchange_time is None for trade in trades):
             self._fail_campaign_recovery("recovered Campaign trade has no exchange time")
 
+        filled_exit_reasons = {
+            records_by_client_id[trade.client_order_id].payload.get("trigger_reason")
+            for trade in trades
+            if trade.client_order_id in records_by_client_id
+            and trade.side == "BUY"
+            and trade.quantity > 0
+        }
+
         first_fill_time = min(
             round(trade.exchange_time.timestamp() * 1000) for trade in entry_trades
         )
@@ -273,22 +292,39 @@ class SpikeExecutionCoordinator:
             {str(trade.trade_id) for trade in trades},
         )
         lease = self._owned_campaign_lease
-        reduced_at_origin = "candidate_origin_reduce" in trigger_reasons
-        exit_requested = bool(
-            trigger_reasons
-            & {
-                "candidate_time_risk_exit",
-                "candidate_momentum_exit",
-                "candidate_trend_exit",
-            }
+        wal_reasons = {
+            record.payload.get("trigger_reason") for record in owned_records
+        }
+        reduced_at_origin = "candidate_origin_reduce" in filled_exit_reasons
+        full_exit_reasons = {
+            "candidate_time_risk_exit",
+            "candidate_momentum_exit",
+            "candidate_trend_exit",
+        }
+        filled_full_exit = bool(filled_exit_reasons & full_exit_reasons)
+        exit_requested = any(
+            record.payload.get("trigger_reason") in full_exit_reasons
+            and record.status not in {"FILLED", "CANCELLED", "EXPIRED"}
+            for record in owned_records
         )
-        if lease is not None and (
-            lease.reduced_at_origin and not reduced_at_origin
-            or lease.exit_requested and not exit_requested
-        ):
-            self._fail_campaign_recovery(
-                "Redis candidate exit state has no matching WAL order"
-            )
+        if lease is not None and lease.reduced_at_origin:
+            if "candidate_origin_reduce" not in wal_reasons:
+                self._fail_campaign_recovery(
+                    "Redis candidate exit state has no matching WAL order"
+                )
+            if not reduced_at_origin:
+                self._fail_campaign_recovery(
+                    "Redis candidate reduction has no matching actual trade"
+                )
+        if lease is not None and lease.exit_requested:
+            if not wal_reasons & full_exit_reasons:
+                self._fail_campaign_recovery(
+                    "Redis candidate exit state has no matching WAL order"
+                )
+            if not filled_full_exit:
+                self._fail_campaign_recovery(
+                    "Redis candidate exit has no matching actual trade"
+                )
         self.strategy.restore_campaign_timing(
             symbol,
             campaign_id,
@@ -521,10 +557,14 @@ class SpikeExecutionCoordinator:
             raise RuntimeError(f"entry orders remain open during shutdown: {remaining}")
 
     async def _flush_cancellations(self) -> None:
-        await self.account.flush_cancellations()
+        cancelled = await self.account.flush_cancellations()
         if self.account.has_pending_cancellations:
             self.risk_guard.halt("entry cancellation unresolved")
             self.gate.set_condition("execution", False)
+            return
+        refresh_positions = getattr(self.account, "refresh_positions", None)
+        if cancelled and callable(refresh_positions):
+            await refresh_positions()
 
     async def _publish_audit(self) -> None:
         events = tuple(self.strategy.drain_audit_events())
@@ -567,9 +607,29 @@ class SpikeRuntimeCallbacks:
         self.coordinator = coordinator
         self.gate = gate
         self.risk_guard = risk_guard
+        self._startup_recovery_ready = asyncio.Event()
+        self._startup_recovery_ready.set()
+        self._startup_recovery_failed = False
+
+    def begin_startup_recovery(self) -> None:
+        self._startup_recovery_failed = False
+        self._startup_recovery_ready.clear()
+
+    def finish_startup_recovery(self) -> None:
+        self._startup_recovery_ready.set()
+
+    def abort_startup_recovery(self) -> None:
+        self._startup_recovery_failed = True
+        self._startup_recovery_ready.set()
+
+    async def _wait_for_startup_recovery(self) -> None:
+        await self._startup_recovery_ready.wait()
+        if self._startup_recovery_failed:
+            raise RuntimeError("Spike startup recovery failed")
 
     async def handle_execution_report(self, order_data: dict[str, Any]) -> None:
         try:
+            await self._wait_for_startup_recovery()
             await self.delegate.handle_execution_report(order_data)
             fill = self.account.handle_execution_report(order_data)
             if fill is not None:
@@ -586,6 +646,7 @@ class SpikeRuntimeCallbacks:
 
     async def handle_account_update(self, event: dict[str, Any]) -> None:
         try:
+            await self._wait_for_startup_recovery()
             await self.delegate.handle_account_update(event)
             await self.account.handle_account_update(event)
             positions = event.get("a", {}).get("P", [])

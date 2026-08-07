@@ -177,6 +177,62 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
     assert events.index("bar_consumer") < events.index("market_gate")
 
 
+@pytest.mark.asyncio
+async def test_runtime_callbacks_wait_for_startup_recovery_barrier():
+    delegate = Mock(
+        handle_execution_report=AsyncMock(),
+        handle_account_update=AsyncMock(),
+    )
+    account = Mock(handle_execution_report=Mock(return_value=None))
+    coordinator = Mock(
+        reconcile_entry_expirations=AsyncMock(),
+        maybe_release_campaign=AsyncMock(),
+    )
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=delegate,
+        account=account,
+        coordinator=coordinator,
+        gate=Mock(),
+    )
+    callbacks.begin_startup_recovery()
+    task = asyncio.create_task(callbacks.handle_execution_report({"s": "AKEUSDT"}))
+    await asyncio.sleep(0)
+
+    delegate.handle_execution_report.assert_not_awaited()
+    callbacks.finish_startup_recovery()
+    await task
+    delegate.handle_execution_report.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_kline_loop_consumes_15m_updates():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="10"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    seen_keys = []
+
+    async def hget(key, field):
+        seen_keys.append(key)
+        if key.endswith(":15m"):
+            raise asyncio.CancelledError
+        return None
+
+    process.redis = Mock(hget=AsyncMock(side_effect=hget))
+    process.coordinator = Mock()
+
+    with pytest.raises(asyncio.CancelledError):
+        await process._kline_loop()
+
+    assert "kline:AKEUSDT:15m" in seen_keys
+
+
 def test_composite_gate_requires_every_condition():
     strategy = StrategyStub()
     gate = CompositeEntryGate(strategy)
@@ -627,6 +683,29 @@ async def test_pending_cancellation_halts_risk_guard_and_closes_execution_gate()
 
 
 @pytest.mark.asyncio
+async def test_completed_entry_cancellation_refreshes_position_before_next_exit():
+    strategy = StrategyStub()
+    account = Mock(
+        flush_cancellations=AsyncMock(return_value=("entry-1",)),
+        has_pending_cancellations=False,
+        refresh_positions=AsyncMock(),
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+    )
+
+    await coordinator._flush_cancellations()
+
+    account.refresh_positions.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_shutdown_cancels_every_open_entry_order():
     strategy = StrategyStub()
     gate = CompositeEntryGate(strategy)
@@ -649,6 +728,7 @@ async def test_shutdown_cancels_every_open_entry_order():
         cancel_order=Mock(return_value=True),
         flush_cancellations=AsyncMock(return_value=("entry-1",)),
         has_pending_cancellations=False,
+        refresh_positions=AsyncMock(),
     )
     coordinator = SpikeExecutionCoordinator(
         strategy=strategy,
@@ -684,6 +764,7 @@ async def test_restart_immediately_cancels_entry_whose_wal_ttl_elapsed():
         cancel_order=Mock(return_value=True),
         flush_cancellations=AsyncMock(return_value=("entry-expired",)),
         has_pending_cancellations=False,
+        refresh_positions=AsyncMock(),
     )
     coordinator = SpikeExecutionCoordinator(
         strategy=strategy,

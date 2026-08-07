@@ -144,6 +144,49 @@ def test_candidate_exit_cancels_remaining_entries_before_requesting_order():
     assert second[0].trigger_reason == "candidate_momentum_exit"
 
 
+def test_recovered_candidate_cancels_wal_entry_without_active_signal():
+    strategy, account = _strategy(agreement=3)
+    entry = Mock(
+        order_id="entry-1",
+        client_order_id="s_AKEUSDT_1_e1",
+        status="NEW",
+        reduce_only=False,
+    )
+    account.orders.append(entry)
+
+    assert _evaluate(strategy, elapsed_ms=90_000, price="95") == []
+    assert entry.status == "CANCELLED"
+    assert _evaluate(strategy, elapsed_ms=91_000, price="95")[0].reduce_only is True
+
+
+def test_recovered_candidate_waits_for_unknown_entry_without_mutating_exit_state():
+    strategy, account = _strategy(agreement=3)
+    account.orders.append(
+        Mock(
+            order_id="entry-unknown",
+            client_order_id="s_AKEUSDT_1_e1",
+            status="SUBMIT_UNKNOWN",
+            reduce_only=False,
+        )
+    )
+
+    assert _evaluate(strategy, elapsed_ms=90_000, price="95") == []
+    assert strategy.campaign_exit_state() == (False, False, False)
+
+
+def test_candidate_exit_blocks_campaign_rotation_until_exit_is_settled():
+    strategy, account = _strategy(agreement=3)
+    strategy._candidate_exit_waiting = True
+    rotation = Mock()
+    bar = Mock(available_time=FIRST_FILL_MS + 900_000, close=Decimal("95"))
+
+    assert strategy._prepare_rotation(rotation, bar) == []
+
+    strategy._candidate_exit_waiting = False
+    strategy._candidate_exit_state.exit_requested = True
+    assert strategy._prepare_rotation(rotation, bar) == []
+
+
 def test_origin_without_momentum_decay_holds_and_is_not_rechecked():
     strategy, _ = _strategy(agreement=1)
 

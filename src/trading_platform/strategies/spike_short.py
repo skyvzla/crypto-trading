@@ -202,6 +202,7 @@ class DynamicSpikeShortStrategy:
         self._candidate_features: CandidateFeatureSnapshot | None = None
         self._pending_rotation: SpikeSignal | None = None
         self._rotation_exit_requested = False
+        self._candidate_exit_waiting = False
         self._audit_events: List[StrategyAuditEvent] = []
 
     def bind_account(self, account: StrategyAccount) -> None:
@@ -237,6 +238,7 @@ class DynamicSpikeShortStrategy:
         if order is None or order.strategy_id != "spike_short":
             return
         if self.first_fill_time is None and fill.side == "SELL":
+            recovered_campaign_id = self._campaign_id_for_timing
             self.first_fill_time = fill.fill_time
             self._campaign_id_for_timing = self._campaign_id_from_client_order(
                 order.client_order_id
@@ -251,8 +253,15 @@ class DynamicSpikeShortStrategy:
                     None,
                 )
                 if signal is None:
-                    raise RuntimeError("candidate exit cannot recover origin from active signal")
-                self._campaign_origin_price = signal.origin_price
+                    if (
+                        recovered_campaign_id != self._campaign_id_for_timing
+                        or self._campaign_origin_price is None
+                    ):
+                        raise RuntimeError(
+                            "candidate exit cannot recover origin from Campaign facts"
+                        )
+                else:
+                    self._campaign_origin_price = signal.origin_price
                 self._candidate_features = candidate_feature_snapshot(
                     self.klines_1m,
                     self.klines_5m,
@@ -300,6 +309,7 @@ class DynamicSpikeShortStrategy:
         self._candidate_features = None
         self._pending_rotation = None
         self._rotation_exit_requested = False
+        self._candidate_exit_waiting = False
 
     def restore_campaign_timing(
         self,
@@ -321,6 +331,7 @@ class DynamicSpikeShortStrategy:
         self._exit_requested = False
         self._pending_rotation = None
         self._rotation_exit_requested = False
+        self._candidate_exit_waiting = False
         if self.exit_policy == "candidate-v1" and origin_price is None:
             raise ValueError("candidate-v1 recovery requires origin_price")
         self._campaign_origin_price = origin_price
@@ -329,6 +340,18 @@ class DynamicSpikeShortStrategy:
             reduced_at_origin=reduced_at_origin,
             exit_requested=exit_requested,
         )
+
+    def restore_pending_campaign(
+        self, campaign_id: str, *, origin_price: Decimal | None
+    ) -> None:
+        """为重启时尚未成交的入场单恢复 Campaign 身份。"""
+        if self.exit_policy != "candidate-v1":
+            return
+        expected_prefix = f"spike_short:{self.symbol}:"
+        if not campaign_id.startswith(expected_prefix) or origin_price is None:
+            raise ValueError("candidate-v1 pending Campaign requires origin_price")
+        self._campaign_id_for_timing = campaign_id
+        self._campaign_origin_price = origin_price
 
     def campaign_origin_price(self, campaign_id: str) -> Decimal | None:
         signal = next(
@@ -369,6 +392,9 @@ class DynamicSpikeShortStrategy:
             if self.exit_policy == "candidate-v1"
             else self._manage_non_positive_timeout(bar)
         )
+
+        if timeout_intent:
+            return timeout_intent
 
         if len(self.bars_1s) < self.BAR_BUFFER:
             return timeout_intent
@@ -438,7 +464,12 @@ class DynamicSpikeShortStrategy:
 
     def _prepare_rotation(self, signal: SpikeSignal, bar: Bar1s) -> List[OrderIntent]:
         """D-009：盈利且超过 900 秒时，先排队新信号并平旧仓。"""
-        if self._pending_rotation is not None or self._rotation_exit_requested:
+        if (
+            self._pending_rotation is not None
+            or self._rotation_exit_requested
+            or self._candidate_exit_waiting
+            or self._candidate_exit_state.exit_requested
+        ):
             return []
         if self.first_fill_time is None or self._account is None:
             return []
@@ -581,10 +612,14 @@ class DynamicSpikeShortStrategy:
             stable_breakout_15m=features.stable_breakout_15m,
         )
         preview = replace(self._candidate_exit_state).evaluate(observation)
+        self._candidate_exit_waiting = preview.action != ExitAction.HOLD
         if preview.action != ExitAction.HOLD:
             cancelled = sum(
                 self._cancel_signal_orders(signal)
                 for signal in self.active_signals
+            )
+            blocked_by_recovered_orders = self._block_exit_for_campaign_entries(
+                event_time
             )
             pending_cancellations = bool(
                 getattr(self._account, "has_pending_cancellations", False)
@@ -592,7 +627,7 @@ class DynamicSpikeShortStrategy:
             pending_position_update = getattr(
                 self._account, "has_pending_position_update", None
             )
-            if cancelled or pending_cancellations or (
+            if cancelled or blocked_by_recovered_orders or pending_cancellations or (
                 callable(pending_position_update)
                 and pending_position_update(self.symbol)
             ):
@@ -621,6 +656,8 @@ class DynamicSpikeShortStrategy:
             )
         if decision.action == ExitAction.HOLD:
             return []
+
+        self._candidate_exit_waiting = False
 
         reduce_half = decision.action == ExitAction.REDUCE_HALF
         quantity = position.quantity / 2 if reduce_half else position.quantity
@@ -663,6 +700,36 @@ class DynamicSpikeShortStrategy:
                 trigger_reason=reason,
             )
         ]
+
+    def _block_exit_for_campaign_entries(self, event_time: int) -> bool:
+        """重启后也必须先处理本 Campaign 的全部非 reduce-only 入场单。"""
+        if self._account is None or self._campaign_id_for_timing is None:
+            return False
+        blocked = False
+        for order in self._account.iter_orders():
+            if getattr(order, "reduce_only", False):
+                continue
+            parsed = parse_entry_client_order_id(
+                order.client_order_id, expected_symbol=self.symbol
+            )
+            if parsed is None:
+                continue
+            symbol, signal_time = parsed
+            if f"spike_short:{symbol}:{signal_time}" != self._campaign_id_for_timing:
+                continue
+            if order.status == "SUBMIT_UNKNOWN":
+                blocked = True
+            elif order.status in {"NEW", "PARTIALLY_FILLED"}:
+                self._account.cancel_order(order.order_id)
+                blocked = True
+        if blocked:
+            self._record_audit(
+                event_time=event_time,
+                event_type="candidate_exit_waiting_campaign_entries",
+                campaign_id=self._campaign_id_for_timing,
+                details={},
+            )
+        return blocked
 
     def on_kline(self, kline: Kline) -> List[OrderIntent]:
         """处理已完成 K 线事件"""
@@ -1073,6 +1140,15 @@ class DynamicSpikeBacktestStrategy:
         if strategy is None:
             raise ValueError(f"unknown Spike symbol: {symbol}")
         strategy.restore_campaign_timing(campaign_id, first_fill_time, **exit_state)
+        self.active_symbol = symbol
+
+    def restore_pending_campaign(
+        self, symbol: str, campaign_id: str, *, origin_price: Decimal | None
+    ) -> None:
+        strategy = self.strategies.get(symbol)
+        if strategy is None:
+            raise ValueError(f"unknown Spike symbol: {symbol}")
+        strategy.restore_pending_campaign(campaign_id, origin_price=origin_price)
         self.active_symbol = symbol
 
     def campaign_origin_price(self, campaign_id: str) -> Decimal | None:

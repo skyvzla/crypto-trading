@@ -96,6 +96,7 @@ class SpikeLiveProcess:
         self.coordinator: SpikeExecutionCoordinator | None = None
         self.admission: SubcategoryAdmissionService | None = None
         self.gate: CompositeEntryGate | None = None
+        self.runtime_callbacks: SpikeRuntimeCallbacks | None = None
 
     async def start(self) -> None:
         if self.runtime is not None:
@@ -113,6 +114,8 @@ class SpikeLiveProcess:
             await self.coordinator.reconcile_entry_expirations()
             self.coordinator.validate_recovered_campaign()
             await self.coordinator.restore_campaign_timing()
+            if self.runtime_callbacks is not None:
+                self.runtime_callbacks.finish_startup_recovery()
             for symbol in self.settings.symbols:
                 await self.coordinator.maybe_release_campaign(symbol)
             self._restore_execution_gate()
@@ -155,6 +158,8 @@ class SpikeLiveProcess:
         if self.gate is not None:
             self.gate.set_condition("execution", False)
             self.gate.set_condition("market", False)
+        if self.runtime_callbacks is not None:
+            self.runtime_callbacks.abort_startup_recovery()
         for task in self._tasks:
             task.cancel()
         if self._tasks:
@@ -295,6 +300,8 @@ class SpikeLiveProcess:
             gate=self.gate,
             risk_guard=risk,
         )
+        callbacks.begin_startup_recovery()
+        self.runtime_callbacks = callbacks
         self.runtime.user_stream.on_execution_report = callbacks.handle_execution_report
         self.runtime.user_stream.on_account_update = callbacks.handle_account_update
         self.runtime.user_stream.on_disconnect = self._on_execution_stream_disconnected
@@ -445,7 +452,7 @@ class SpikeLiveProcess:
         assert self.coordinator is not None
         while True:
             for symbol in self.settings.symbols:
-                for interval in ("1m", "5m"):
+                for interval in ("1m", "5m", "15m"):
                     raw = await self.redis.hget(f"kline:{symbol}:{interval}", "latest")
                     if not raw:
                         continue
