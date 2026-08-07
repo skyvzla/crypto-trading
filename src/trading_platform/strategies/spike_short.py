@@ -623,6 +623,7 @@ class DynamicSpikeBacktestStrategy:
             for symbol in symbols
         }
         self._account: Optional[StrategyAccount] = account
+        self._entry_enabled = True
         self.active_symbol: Optional[str] = None
 
     def bind_account(self, account: StrategyAccount) -> None:
@@ -636,6 +637,7 @@ class DynamicSpikeBacktestStrategy:
 
     def set_entry_enabled(self, enabled: bool) -> None:
         """统一控制多币种适配器的新入场准入；已有信号仍继续管理。"""
+        self._entry_enabled = enabled
         for strategy in self.strategies.values():
             strategy.set_entry_enabled(enabled)
 
@@ -644,7 +646,9 @@ class DynamicSpikeBacktestStrategy:
         if strategy is None:
             return []
 
-        strategy.set_entry_enabled(self.active_symbol is None)
+        strategy.set_entry_enabled(
+            self._entry_enabled and self.active_symbol is None
+        )
         intents = strategy.on_bar1s(bar)
 
         if self.active_symbol is None and self._has_live_campaign(bar.symbol):

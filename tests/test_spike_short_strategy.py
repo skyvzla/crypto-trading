@@ -398,6 +398,36 @@ class TestDynamicSpikeShortStrategy:
             for strategy in adapter.strategies.values()
         )
 
+    def test_multi_symbol_adapter_does_not_override_closed_global_entry_gate(self):
+        class FakeStrategy:
+            def __init__(self):
+                self.active_signals = []
+                self.entry_enabled = True
+
+            def set_entry_enabled(self, enabled):
+                self.entry_enabled = enabled
+
+            def on_bar1s(self, bar):
+                if self.entry_enabled:
+                    self.active_signals.append(object())
+                return []
+
+        adapter = DynamicSpikeBacktestStrategy(["AAAUSDT"], Decimal("1000"))
+        fake = FakeStrategy()
+        adapter.strategies = {"AAAUSDT": fake}
+        adapter.set_entry_enabled(False)
+        bar = Bar1s(
+            symbol="AAAUSDT", timestamp=1_000, available_time=2_000,
+            open=Decimal("100"), high=Decimal("100"), low=Decimal("100"),
+            close=Decimal("100"), volume=Decimal("1"), trade_count=1,
+            vwap=Decimal("100"),
+        )
+
+        adapter.on_bar1s(bar)
+
+        assert fake.entry_enabled is False
+        assert fake.active_signals == []
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
