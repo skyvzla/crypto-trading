@@ -57,14 +57,6 @@ class SpikeExitPolicyState:
             timeframe = "5m" if observation.stable_breakout_5m else "15m"
             return ExitDecision(ExitAction.EXIT_ALL, f"stable_trend_breakout_{timeframe}")
 
-        elapsed_ms = observation.event_time - observation.first_fill_time
-        if elapsed_ms >= self.min_risk_age_ms and (
-            observation.time_risk or observation.momentum_risk
-        ):
-            self.exit_requested = True
-            reason = "time_risk" if observation.time_risk else "momentum_risk"
-            return ExitDecision(ExitAction.EXIT_ALL, reason)
-
         if (
             not self.origin_checked
             and observation.price <= observation.origin_price
@@ -76,5 +68,54 @@ class SpikeExitPolicyState:
                 return ExitDecision(ExitAction.REDUCE_HALF, "origin_momentum_decay")
             return ExitDecision(ExitAction.HOLD, "origin_momentum_continues")
 
+        elapsed_ms = observation.event_time - observation.first_fill_time
+        if elapsed_ms >= self.min_risk_age_ms and (
+            observation.time_risk or observation.momentum_risk
+        ):
+            self.exit_requested = True
+            reason = "time_risk" if observation.time_risk else "momentum_risk"
+            return ExitDecision(ExitAction.EXIT_ALL, reason)
+
         return ExitDecision(ExitAction.HOLD, "no_exit_condition")
 
+
+@dataclass(frozen=True)
+class CandidateV1Config:
+    """D-027 的 replay/testnet 候选阈值，不是生产参数。"""
+
+    risk_start_ms: int = 90_000
+    medium_age_ms: int = 300_000
+    strict_age_ms: int = 900_000
+    channel_review_ms: int = 24 * 60 * 60 * 1_000
+
+    def momentum_agreement_required(self, elapsed_ms: int) -> int | None:
+        if elapsed_ms < self.risk_start_ms:
+            return None
+        if elapsed_ms < self.medium_age_ms:
+            return 3
+        if elapsed_ms < self.strict_age_ms:
+            return 2
+        return 1
+
+
+def candidate_v1_risks(
+    *,
+    elapsed_ms: int,
+    decay_agreement: int | None,
+    net_pnl: Decimal,
+    down_channel_5m: bool | None,
+    down_channel_15m: bool | None,
+    config: CandidateV1Config = CandidateV1Config(),
+) -> tuple[bool, bool]:
+    """把候选指标转换成状态机的 time/momentum 风险输入。"""
+    required = config.momentum_agreement_required(elapsed_ms)
+    momentum_risk = (
+        required is not None
+        and decay_agreement is not None
+        and decay_agreement >= required
+    )
+    time_risk = elapsed_ms >= config.strict_age_ms and net_pnl <= 0
+    if elapsed_ms >= config.channel_review_ms:
+        confirmed_down_channel = bool(down_channel_5m and down_channel_15m)
+        time_risk = time_risk or not confirmed_down_channel
+    return time_risk, momentum_risk

@@ -3,9 +3,11 @@ from decimal import Decimal
 import pytest
 
 from trading_platform.strategies.spike_exit_policy import (
+    CandidateV1Config,
     ExitAction,
     ExitObservation,
     SpikeExitPolicyState,
+    candidate_v1_risks,
 )
 
 
@@ -70,3 +72,59 @@ def test_invalid_observation_is_rejected():
     policy = SpikeExitPolicyState()
     with pytest.raises(ValueError, match="predates"):
         policy.evaluate(_observation(event_time=9_999))
+
+
+def test_origin_rule_has_priority_over_generic_momentum_exit():
+    policy = SpikeExitPolicyState()
+    decision = policy.evaluate(
+        _observation(decay_agreement=3, momentum_risk=True)
+    )
+    assert decision.action == ExitAction.REDUCE_HALF
+
+
+@pytest.mark.parametrize(
+    ("elapsed_ms", "agreement", "expected"),
+    [
+        (89_999, 3, False),
+        (90_000, 2, False),
+        (90_000, 3, True),
+        (300_000, 2, True),
+        (900_000, 1, True),
+    ],
+)
+def test_candidate_v1_momentum_threshold_tightens_with_time(
+    elapsed_ms, agreement, expected
+):
+    _, momentum = candidate_v1_risks(
+        elapsed_ms=elapsed_ms,
+        decay_agreement=agreement,
+        net_pnl=Decimal("1"),
+        down_channel_5m=True,
+        down_channel_15m=True,
+    )
+    assert momentum is expected
+
+
+def test_candidate_v1_time_risk_and_24h_channel_review():
+    config = CandidateV1Config()
+    assert candidate_v1_risks(
+        elapsed_ms=config.strict_age_ms,
+        decay_agreement=0,
+        net_pnl=Decimal("-0.01"),
+        down_channel_5m=True,
+        down_channel_15m=True,
+    )[0] is True
+    assert candidate_v1_risks(
+        elapsed_ms=config.channel_review_ms,
+        decay_agreement=0,
+        net_pnl=Decimal("1"),
+        down_channel_5m=True,
+        down_channel_15m=False,
+    )[0] is True
+    assert candidate_v1_risks(
+        elapsed_ms=config.channel_review_ms,
+        decay_agreement=0,
+        net_pnl=Decimal("1"),
+        down_channel_5m=True,
+        down_channel_15m=True,
+    )[0] is False
