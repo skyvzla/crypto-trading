@@ -91,6 +91,7 @@ class BacktestConfig(BaseSettings):
     maker_fee_rate: float = 0.0002  # 0.02%
     taker_fee_rate: float = 0.0004  # 0.04%
     trading_start_ms: int | None = None  # 此前事件只用于指标预热
+    limit_fill_fraction_per_bar: float = Field(default=1.0, gt=0, le=1)
 
 
 def load_config() -> dict:

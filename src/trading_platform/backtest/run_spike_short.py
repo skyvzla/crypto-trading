@@ -9,6 +9,7 @@ from pathlib import Path
 from trading_platform.backtest.engine import BacktestEngine
 from trading_platform.backtest.loader import BacktestDataLoader
 from trading_platform.backtest.result import ResultAnalyzer
+from trading_platform.backtest.runner import load_symbol_rules
 from trading_platform.shared.config import BacktestConfig
 from trading_platform.strategies.spike_legacy_research import (
     LegacyScriptExitSpikeBacktestStrategy,
@@ -62,6 +63,18 @@ def parse_args() -> argparse.Namespace:
         default="confirmed",
         help="Exit policy; legacy-script is replay research only",
     )
+    parser.add_argument(
+        "--limit-fill-fraction",
+        type=float,
+        default=1.0,
+        help="每根穿价 1s Bar 最多成交 LIMIT 原数量的比例（0, 1]",
+    )
+    parser.add_argument(
+        "--exchange-info",
+        type=Path,
+        default=None,
+        help="可选 Binance exchangeInfo JSON 快照，用于 tick/step 量化",
+    )
     return parser.parse_args()
 
 
@@ -110,6 +123,7 @@ def main() -> None:
         data_dir=data_source,
         output_dir=str(output_path),
         trading_start_ms=start_ms,
+        limit_fill_fraction_per_bar=args.limit_fill_fraction,
     )
     strategy_type = (
         LegacyScriptExitSpikeBacktestStrategy
@@ -124,6 +138,7 @@ def main() -> None:
         events=events,
         strategy=strategy,
         config=config,
+        symbol_rules=load_symbol_rules(args.exchange_info, [args.symbol]),
     ).run()
 
     analyzer = ResultAnalyzer(result)

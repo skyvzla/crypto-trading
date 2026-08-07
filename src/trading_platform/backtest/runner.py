@@ -10,6 +10,7 @@
         --output reports/backtest_20260806
 """
 import argparse
+import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from trading_platform.shared.config import BacktestConfig
+from trading_platform.shared.binance.symbol_rules import BinanceSymbolRuleBook
 from .loader import BacktestDataLoader
 from .engine import BacktestEngine
 from .result import ResultAnalyzer
@@ -145,6 +147,20 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        '--limit-fill-fraction',
+        type=float,
+        default=1.0,
+        help='每根穿价 1s Bar 最多成交 LIMIT 原数量的比例（0, 1]，默认 1',
+    )
+
+    parser.add_argument(
+        '--exchange-info',
+        type=Path,
+        default=None,
+        help='可选 Binance exchangeInfo JSON 快照；提供后 replay 按真实 tick/step 量化',
+    )
+
+    parser.add_argument(
         '--log-level',
         type=str,
         default='INFO',
@@ -167,6 +183,15 @@ def parse_date(date_str: str) -> int:
     """
     dt = datetime.strptime(date_str, '%Y-%m-%d').replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
+
+
+def load_symbol_rules(
+    path: Path | None, symbols: list[str]
+) -> BinanceSymbolRuleBook | None:
+    if path is None:
+        return None
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    return BinanceSymbolRuleBook.from_exchange_info(payload, symbols=symbols)
 
 
 def load_strategy(
@@ -321,13 +346,15 @@ def main():
         maker_fee_rate=args.maker_fee,
         taker_fee_rate=args.taker_fee,
         trading_start_ms=start_ms,
+        limit_fill_fraction_per_bar=args.limit_fill_fraction,
     )
 
     engine = BacktestEngine(
         strategy=strategy,
         events=events,
         config=config,
-        account_id=args.account_id
+        account_id=args.account_id,
+        symbol_rules=load_symbol_rules(args.exchange_info, args.symbols),
     )
 
     try:

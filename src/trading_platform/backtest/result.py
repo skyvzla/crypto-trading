@@ -390,6 +390,9 @@ class ResultAnalyzer:
                 'data_dir': self.result.config.data_dir,
                 'maker_fee_rate': self.result.config.maker_fee_rate,
                 'taker_fee_rate': self.result.config.taker_fee_rate,
+                'limit_fill_fraction_per_bar': (
+                    self.result.config.limit_fill_fraction_per_bar
+                ),
             }
         }
 

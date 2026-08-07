@@ -17,6 +17,7 @@ from trading_platform.shared.events import (
     StrategyAuditEvent,
 )
 from trading_platform.shared.config import BacktestConfig
+from trading_platform.shared.binance.symbol_rules import BinanceSymbolRuleBook
 from .executor import BacktestExecutor
 from .result import BacktestResult
 
@@ -70,7 +71,8 @@ class BacktestEngine:
         strategy: Strategy,
         events: list[Event],
         config: BacktestConfig,
-        account_id: str = 'backtest'
+        account_id: str = 'backtest',
+        symbol_rules: BinanceSymbolRuleBook | None = None,
     ):
         """
         Args:
@@ -102,7 +104,7 @@ class BacktestEngine:
         self.audit_records: list[StrategyAuditEvent] = []
 
         # 执行层
-        self.executor = BacktestExecutor(self, account_id)
+        self.executor = BacktestExecutor(self, account_id, symbol_rules=symbol_rules)
 
         self._trading_enabled = (
             config.trading_start_ms is None
@@ -224,7 +226,7 @@ class BacktestEngine:
 
         # 遍历该币种的所有活跃订单
         for order_id, order in list(self.orders.items()):
-            if order.symbol != symbol or order.status != 'NEW':
+            if order.symbol != symbol or order.status not in {'NEW', 'PARTIALLY_FILLED'}:
                 continue
 
             # 1. 先检查 TTL 是否过期（在价格检查之前）
@@ -268,7 +270,14 @@ class BacktestEngine:
         """
         # 保守假设：按挂单价成交（而非触发价）
         fill_price = order.price
-        fill_qty = order.quantity - order.filled_quantity
+        remaining_qty = order.quantity - order.filled_quantity
+        fill_qty = remaining_qty
+        if order.type == 'LIMIT':
+            per_bar_qty = order.quantity * Decimal(
+                str(self.config.limit_fill_fraction_per_bar)
+            )
+            fill_qty = min(fill_qty, per_bar_qty)
+        expire_remainder = False
         if order.reduce_only:
             position = self.positions.get(order.symbol)
             closing_side = (
@@ -277,7 +286,9 @@ class BacktestEngine:
             if position is None or order.side != closing_side:
                 self._expire_order(order)
                 return None
-            fill_qty = min(fill_qty, position.quantity)
+            if fill_qty > position.quantity:
+                fill_qty = position.quantity
+                expire_remainder = True
             if fill_qty <= 0:
                 self._expire_order(order)
                 return None
@@ -318,11 +329,10 @@ class BacktestEngine:
 
         # 更新订单状态
         order.filled_quantity += fill_qty
-        order.status = (
-            'FILLED' if order.filled_quantity == order.quantity else 'EXPIRED'
-        )
+        order.status = 'FILLED' if order.filled_quantity == order.quantity else 'PARTIALLY_FILLED'
         order.fill_time = self.virtual_time_ms
-        if order.status == 'EXPIRED':
+        if expire_remainder:
+            order.status = 'EXPIRED'
             order.cancel_time = self.virtual_time_ms
 
         # 更新持仓（支持多档累加）

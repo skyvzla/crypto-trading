@@ -17,6 +17,10 @@ from trading_platform.shared.config import BacktestConfig
 from trading_platform.backtest.engine import BacktestEngine
 from trading_platform.backtest.executor import BacktestExecutor
 from trading_platform.backtest.result import ResultAnalyzer
+from trading_platform.shared.binance.symbol_rules import (
+    BinanceSymbolRuleBook,
+    BinanceSymbolRules,
+)
 
 
 class MockStrategy:
@@ -88,6 +92,96 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(len(engine.orders), 1)
         self.assertEqual(len(engine.order_records), 1)
+
+    def test_limit_order_can_fill_deterministically_across_multiple_bars(self):
+        class PartialFillStrategy(MockStrategy):
+            def on_bar1s(self, bar):
+                self.bars_received.append(bar)
+                if len(self.bars_received) == 1:
+                    return [OrderIntent(
+                        symbol=bar.symbol, side='SELL', price=Decimal('100'),
+                        quantity=Decimal('2'), client_order_id='partial-entry',
+                    )]
+                return []
+
+        events = [
+            Bar1s(
+                symbol='BTCUSDT', timestamp=index * 1_000,
+                available_time=(index + 1) * 1_000,
+                open=Decimal('101'), high=Decimal('102'), low=Decimal('100'),
+                close=Decimal('101'), volume=Decimal('1'), trade_count=1,
+                vwap=Decimal('101'),
+            )
+            for index in range(3)
+        ]
+        strategy = PartialFillStrategy()
+        result = BacktestEngine(
+            strategy,
+            events,
+            BacktestConfig(limit_fill_fraction_per_bar=0.5),
+        ).run()
+
+        self.assertEqual([fill.quantity for fill in result.fills], [Decimal('1'), Decimal('1')])
+        self.assertEqual(result.orders[0].status, 'FILLED')
+        self.assertEqual(result.orders[0].filled_quantity, Decimal('2'))
+        self.assertEqual(len(strategy.fills_received), 2)
+
+    def test_partial_fill_residual_expires_before_next_price_check(self):
+        engine = BacktestEngine(
+            MockStrategy(),
+            [],
+            BacktestConfig(limit_fill_fraction_per_bar=0.5),
+        )
+        engine.virtual_time_ms = 1_000
+        order = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='SELL', price=Decimal('100'),
+            quantity=Decimal('2'), client_order_id='partial-ttl', ttl_ms=1_000,
+        ))
+        first = Bar1s(
+            symbol='BTCUSDT', timestamp=1_000, available_time=1_500,
+            open=Decimal('101'), high=Decimal('102'), low=Decimal('100'),
+            close=Decimal('101'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('101'),
+        )
+        engine.virtual_time_ms = first.available_time
+        engine._check_fills(first)
+        self.assertEqual(order.status, 'PARTIALLY_FILLED')
+        self.assertEqual(order.filled_quantity, Decimal('1'))
+
+        expired = Bar1s(
+            symbol='BTCUSDT', timestamp=2_000, available_time=2_000,
+            open=Decimal('101'), high=Decimal('102'), low=Decimal('100'),
+            close=Decimal('101'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('101'),
+        )
+        engine.virtual_time_ms = expired.available_time
+        engine._check_fills(expired)
+        self.assertEqual(order.status, 'EXPIRED')
+        self.assertEqual(order.filled_quantity, Decimal('1'))
+
+    def test_replay_executor_applies_same_symbol_rule_normalization(self):
+        rules = BinanceSymbolRules(
+            symbol='BTCUSDT', tick_size=Decimal('0.1'),
+            min_price=Decimal('1'), max_price=Decimal('1000000'),
+            lot_step_size=Decimal('0.01'), min_quantity=Decimal('0.01'),
+            max_quantity=Decimal('1000'), market_step_size=Decimal('0.01'),
+            market_min_quantity=Decimal('0.01'),
+            market_max_quantity=Decimal('1000'), min_notional=Decimal('5'),
+        )
+        book = BinanceSymbolRuleBook({'BTCUSDT': rules})
+        engine = BacktestEngine(
+            MockStrategy(), [], BacktestConfig(), symbol_rules=book
+        )
+        raw = OrderIntent(
+            symbol='BTCUSDT', side='SELL', price=Decimal('100.01'),
+            quantity=Decimal('1.019'), client_order_id='normalized',
+        )
+
+        order = engine.executor.place_order(raw)
+        expected = rules.normalize_intent(raw)
+
+        self.assertEqual(order.price, expected.price)
+        self.assertEqual(order.quantity, expected.quantity)
 
     def test_reduce_only_rejects_empty_position(self):
         engine = BacktestEngine(MockStrategy(), [], BacktestConfig())
