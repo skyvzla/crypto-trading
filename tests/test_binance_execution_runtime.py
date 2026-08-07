@@ -97,6 +97,7 @@ async def test_runtime_reconnect_reconciles_before_restarting_poller():
     runtime, stream, poller, _ = _runtime()
     reconciler = Mock(reconcile_once=AsyncMock())
     runtime = BinanceExecutionRuntime(stream, poller, reconciler)
+    runtime._previous_reconnect = None
     calls = []
     reconciler.reconcile_once.side_effect = lambda: calls.append("snapshot")
     poller.start.side_effect = lambda: calls.append("poller")
