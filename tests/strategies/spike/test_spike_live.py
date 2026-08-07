@@ -122,6 +122,183 @@ async def test_audit_events_are_not_drained_without_a_sink():
     assert strategy.audit_events == [event]
 
 
+@pytest.mark.asyncio
+async def test_campaign_acquire_and_recovery_emit_lifecycle_audit_events():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    acquired_sink = AsyncMock()
+    acquired_store = Mock(
+        get_active=AsyncMock(return_value=None),
+        acquire=AsyncMock(return_value=True),
+    )
+    acquired_strategy = StrategyStub()
+    acquired = SpikeExecutionCoordinator(
+        strategy=acquired_strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=acquired_store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(acquired_strategy),
+        account_id="spike-test",
+        audit_sink=acquired_sink,
+    )
+
+    assert await acquired._acquire_campaign(campaign_id, "BTCUSDT", 1_001)
+    assert await acquired._publish_audit()
+    acquired_sink.assert_awaited_once_with(
+        (
+            StrategyAuditEvent(
+                event_time=1_001,
+                event_type="campaign_acquired",
+                symbol="BTCUSDT",
+                strategy_id="spike_short",
+                campaign_id=campaign_id,
+                details={},
+            ),
+        )
+    )
+
+    recovered_sink = AsyncMock()
+    lease = CampaignLease(
+        campaign_id,
+        "spike_short",
+        "BTCUSDT",
+        1_001,
+        origin_price="100",
+    )
+    recovered_strategy = StrategyStub()
+    recovered = SpikeExecutionCoordinator(
+        strategy=recovered_strategy,
+        account=Mock(symbols_with_live_risk=Mock(return_value=set())),
+        executor=Mock(),
+        campaign_store=Mock(get_active=AsyncMock(return_value=lease)),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(recovered_strategy),
+        account_id="spike-test",
+        audit_sink=recovered_sink,
+        now_ms=lambda: 2_000,
+    )
+
+    await recovered.restore_campaign_gate()
+    assert await recovered._publish_audit()
+    recovered_sink.assert_awaited_once_with(
+        (
+            StrategyAuditEvent(
+                event_time=2_000,
+                event_type="campaign_recovered",
+                symbol="BTCUSDT",
+                strategy_id="spike_short",
+                campaign_id=campaign_id,
+                details={},
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_campaign_exit_state_change_emits_audit_with_persisted_state():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    strategy = StrategyStub()
+    strategy.campaign_exit_state = Mock(return_value=(True, True, False))
+    sink = AsyncMock()
+    store = Mock(update_exit_state=AsyncMock(return_value=True))
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+        audit_sink=sink,
+        now_ms=lambda: 3_000,
+    )
+    coordinator._owned_campaign_id = campaign_id
+    coordinator._owned_campaign_lease = CampaignLease(
+        campaign_id, "spike_short", "BTCUSDT", 1_001
+    )
+
+    await coordinator._persist_exit_state("BTCUSDT")
+    assert await coordinator._publish_audit()
+
+    store.update_exit_state.assert_awaited_once_with(
+        campaign_id,
+        origin_checked=True,
+        reduced_at_origin=True,
+        exit_requested=False,
+    )
+    sink.assert_awaited_once_with(
+        (
+            StrategyAuditEvent(
+                event_time=3_000,
+                event_type="campaign_exit_state_changed",
+                symbol="BTCUSDT",
+                strategy_id="spike_short",
+                campaign_id=campaign_id,
+                details={
+                    "origin_checked": True,
+                    "reduced_at_origin": True,
+                    "exit_requested": False,
+                },
+            ),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_campaign_release_audit_failure_halts_and_retries_same_event():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    gate.set_condition("campaign", False)
+    risk = RiskGuard("spike-test", RiskConfig())
+    sink = AsyncMock(side_effect=[RuntimeError("postgres unavailable"), None])
+    store = Mock(release=AsyncMock(return_value=True))
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(
+            has_open_position=Mock(return_value=False),
+            has_pending_position_update=Mock(return_value=False),
+            all_orders_terminal=Mock(return_value=True),
+        ),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+        audit_sink=sink,
+        now_ms=lambda: 4_000,
+    )
+    coordinator._owned_campaign_id = campaign_id
+    coordinator._owned_campaign_lease = CampaignLease(
+        campaign_id, "spike_short", "BTCUSDT", 1_001
+    )
+    expected = StrategyAuditEvent(
+        event_time=4_000,
+        event_type="campaign_released",
+        symbol="BTCUSDT",
+        strategy_id="spike_short",
+        campaign_id=campaign_id,
+        details={},
+    )
+
+    assert await coordinator.maybe_release_campaign("BTCUSDT") is True
+    store.release.assert_awaited_once_with(campaign_id)
+    assert coordinator._owned_campaign_id is None
+    assert gate.condition("campaign") is True
+    assert gate.condition("execution") is False
+    assert risk.halted is True
+    allowed, reason = risk.check_can_open("BTCUSDT", Decimal("10"))
+    assert allowed is False
+    assert "strategy audit write failed: RuntimeError" in reason
+    sink.assert_awaited_once_with((expected,))
+
+    assert await coordinator._publish_audit() is True
+    assert sink.await_count == 2
+    assert sink.await_args_list[1].args == ((expected,),)
+    assert coordinator._pending_audit_events == ()
+
+
 def test_settings_default_to_testnet_and_live_requires_exact_confirmation():
     settings = SpikeLiveSettings(
         account_id="spike-test", symbols="btcusdt", total_notional="100"

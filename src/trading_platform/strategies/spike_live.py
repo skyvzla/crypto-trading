@@ -193,6 +193,11 @@ class SpikeExecutionCoordinator:
         if lease.strategy_id == STRATEGY_ID and lease.symbol in self.strategy.strategies:
             self._owned_campaign_id = lease.campaign_id
             self._owned_campaign_lease = lease
+            self._queue_campaign_audit(
+                "campaign_recovered",
+                lease,
+                event_time=self._now_ms(),
+            )
         self.gate.set_condition("campaign", self._owned_campaign_id is not None)
 
     def validate_recovered_campaign(self) -> None:
@@ -507,6 +512,11 @@ class SpikeExecutionCoordinator:
         if acquired:
             self._owned_campaign_id = campaign_id
             self._owned_campaign_lease = lease
+            self._queue_campaign_audit(
+                "campaign_acquired",
+                lease,
+                event_time=event_time,
+            )
         return acquired
 
     async def _persist_exit_state(self, symbol: str) -> None:
@@ -541,6 +551,16 @@ class SpikeExecutionCoordinator:
             reduced_at_origin=reduced_at_origin,
             exit_requested=exit_requested,
         )
+        self._queue_campaign_audit(
+            "campaign_exit_state_changed",
+            self._owned_campaign_lease,
+            event_time=self._now_ms(),
+            details={
+                "origin_checked": origin_checked,
+                "reduced_at_origin": reduced_at_origin,
+                "exit_requested": exit_requested,
+            },
+        )
 
     async def maybe_release_campaign(self, symbol: str) -> bool:
         campaign_id = self._owned_campaign_id
@@ -560,9 +580,17 @@ class SpikeExecutionCoordinator:
             return False
         released = await self.campaign_store.release(campaign_id)
         if released:
+            lease = self._owned_campaign_lease
             self._owned_campaign_id = None
             self._owned_campaign_lease = None
             self.gate.set_condition("campaign", True)
+            if lease is not None:
+                self._queue_campaign_audit(
+                    "campaign_released",
+                    lease,
+                    event_time=self._now_ms(),
+                )
+                await self._publish_audit()
         return released
 
     async def stop(self) -> None:
@@ -622,6 +650,25 @@ class SpikeExecutionCoordinator:
     def _close_on_audit_failure(self, reason: str) -> None:
         self.gate.set_condition("execution", False)
         self.risk_guard.halt(reason)
+
+    def _queue_campaign_audit(
+        self,
+        event_type: str,
+        lease: CampaignLease,
+        *,
+        event_time: int,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        self._pending_audit_events += (
+            StrategyAuditEvent(
+                event_time=event_time,
+                event_type=event_type,
+                symbol=lease.symbol,
+                strategy_id=lease.strategy_id,
+                campaign_id=lease.campaign_id,
+                details=details or {},
+            ),
+        )
 
     @staticmethod
     def _campaign_id(intent: OrderIntent) -> str:
