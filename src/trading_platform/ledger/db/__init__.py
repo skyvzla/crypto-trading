@@ -6,6 +6,7 @@ from trading_platform.ledger.db.models import (
     LedgerDB,
     SubcategoryAdmission,
     SubcategoryAdmissionAudit,
+    StrategyAuditRecord,
     VersionConflictError,
     create_connection_pool,
 )
@@ -17,6 +18,7 @@ __all__ = [
     "LedgerDB",
     "SubcategoryAdmission",
     "SubcategoryAdmissionAudit",
+    "StrategyAuditRecord",
     "VersionConflictError",
     "create_connection_pool",
 ]

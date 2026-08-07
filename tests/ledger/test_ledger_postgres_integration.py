@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 from fastapi import FastAPI
+from psycopg.errors import StringDataRightTruncation
 
 from trading_platform.ledger.api.routes import router
 from trading_platform.ledger.binance_account_updates import BinanceAccountUpdateLedger
@@ -23,7 +24,11 @@ from trading_platform.ledger.db.models import (
     create_connection_pool,
 )
 from trading_platform.shared.binance import BinanceOrderExecutor
-from trading_platform.shared.events import Order as StrategyOrder, OrderIntent
+from trading_platform.shared.events import (
+    Order as StrategyOrder,
+    OrderIntent,
+    StrategyAuditEvent,
+)
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.admission import SubcategoryAdmissionService
@@ -134,6 +139,82 @@ async def test_health_pagination_idempotency_and_pnl(ledger, client):
     ).json()
     assert pnl["total_trades"] == 1
     assert Decimal(pnl["net_pnl"]) == Decimal("7")
+
+
+@pytest.mark.asyncio
+async def test_strategy_audit_batch_is_atomic_idempotent_and_queryable(ledger, client):
+    suffix = uuid4().hex[:10]
+    account = f"a-{suffix}"
+    events = (
+        StrategyAuditEvent(
+            event_time=1_700_000_000_001,
+            event_type="signal_triggered",
+            symbol="AKEUSDT",
+            strategy_id="spike_short",
+            campaign_id=f"spike_short:AKEUSDT:{suffix}",
+            details={"trigger_price": "0.1234", "checks": 3},
+        ),
+        StrategyAuditEvent(
+            event_time=1_700_000_000_002,
+            event_type="entry_plan_created",
+            symbol="AKEUSDT",
+            strategy_id="spike_short",
+            campaign_id=f"spike_short:AKEUSDT:{suffix}",
+            details={"tiers": ["0.12", "0.11"]},
+        ),
+    )
+
+    assert await ledger.insert_strategy_audit_events(events, account_id=account) == 2
+    assert await ledger.insert_strategy_audit_events(events, account_id=account) == 0
+    async with ledger.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT event_type, details FROM strategy_audit_events "
+                "WHERE account_id = %s ORDER BY event_time",
+                (account,),
+            )
+        ).fetchall()
+    assert rows == [
+        ("signal_triggered", {"checks": 3, "trigger_price": "0.1234"}),
+        ("entry_plan_created", {"tiers": ["0.12", "0.11"]}),
+    ]
+    response = await client.get(
+        "/api/v1/strategy-audit-events",
+        params={
+            "account_id": account,
+            "campaign_id": f"spike_short:AKEUSDT:{suffix}",
+            "event_type": "signal_triggered",
+        },
+    )
+    assert response.status_code == 200
+    page = response.json()
+    assert page["total"] == 1
+    assert page["items"][0]["details"] == {
+        "checks": 3,
+        "trigger_price": "0.1234",
+    }
+
+    rollback_account = f"rollback-{suffix}"
+    invalid = StrategyAuditEvent(
+        event_time=1_700_000_000_003,
+        event_type="x" * 65,
+        symbol="AKEUSDT",
+        strategy_id="spike_short",
+        campaign_id=None,
+        details={},
+    )
+    with pytest.raises(StringDataRightTruncation, match="value too long"):
+        await ledger.insert_strategy_audit_events(
+            (events[0], invalid), account_id=rollback_account
+        )
+    async with ledger.pool.connection() as conn:
+        count = await (
+            await conn.execute(
+                "SELECT COUNT(*) FROM strategy_audit_events WHERE account_id = %s",
+                (rollback_account,),
+            )
+        ).fetchone()
+    assert count == (0,)
 
 
 @pytest.mark.asyncio

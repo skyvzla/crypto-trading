@@ -32,6 +32,7 @@ from trading_platform.shared.config import (
 from trading_platform.shared.events import Bar1s, Kline
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.logging_config import setup_logger
+from trading_platform.shared.postgres_lease import PostgresExecutionLease
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.admission import SubcategoryAdmissionService
 from trading_platform.strategies.campaign_store import RedisCampaignStore
@@ -52,6 +53,7 @@ from trading_platform.strategies.universe import UNIVERSE_SCAN_INTERVAL_SECONDS
 
 
 logger = logging.getLogger(__name__)
+BAR_STREAM_STALE_SECONDS = 10.0
 
 
 def require_viable_entry_notional(
@@ -90,6 +92,7 @@ class SpikeLiveProcess:
         self._stack = AsyncExitStack()
         self._tasks: list[asyncio.Task] = []
         self._last_kline: dict[tuple[str, str], int] = {}
+        self._last_bar_received_monotonic: dict[str, float] = {}
         self.http: httpx.AsyncClient | None = None
         self.redis: redis.Redis | None = None
         self.runtime = None
@@ -97,6 +100,7 @@ class SpikeLiveProcess:
         self.admission: SubcategoryAdmissionService | None = None
         self.gate: CompositeEntryGate | None = None
         self.runtime_callbacks: SpikeRuntimeCallbacks | None = None
+        self.execution_lease: PostgresExecutionLease | None = None
 
     async def start(self) -> None:
         if self.runtime is not None:
@@ -107,6 +111,14 @@ class SpikeLiveProcess:
             assert self.coordinator is not None
             assert self.gate is not None
             assert self.admission is not None
+
+            if self.execution_lease is not None:
+                self._tasks.append(
+                    asyncio.create_task(
+                        self._execution_lease_fatal_loop(),
+                        name="spike-execution-lease-fatal",
+                    )
+                )
 
             await self.coordinator.restore_campaign_gate()
             await self.runtime.start()
@@ -199,6 +211,9 @@ class SpikeLiveProcess:
     async def _build_resources(self) -> None:
         pool = await create_connection_pool(self.database.dsn)
         self._stack.push_async_callback(pool.close)
+        self.execution_lease = PostgresExecutionLease(pool, self.settings.account_id)
+        await self.execution_lease.acquire()
+        self._stack.push_async_callback(self.execution_lease.release)
         db = LedgerDB(pool)
 
         self.redis = redis.Redis(
@@ -265,7 +280,13 @@ class SpikeLiveProcess:
         )
         strategy.set_trading_enabled(False)
         self.gate = CompositeEntryGate(strategy)
-        for condition in ("execution", "market", "subcategory", "campaign"):
+        for condition in (
+            "execution",
+            "market",
+            "bar_stream",
+            "subcategory",
+            "campaign",
+        ):
             self.gate.set_condition(condition, False)
         self.coordinator = SpikeExecutionCoordinator(
             strategy=strategy,
@@ -276,6 +297,9 @@ class SpikeLiveProcess:
             gate=self.gate,
             account_id=self.settings.account_id,
             trade_source=db,
+            audit_sink=lambda events: db.insert_strategy_audit_events(
+                events, account_id=self.settings.account_id
+            ),
         )
         self.admission = SubcategoryAdmissionService(
             source=db,
@@ -331,12 +355,24 @@ class SpikeLiveProcess:
             )
         raise RuntimeError("execution stream callback failed") from exc
 
+    async def _execution_lease_fatal_loop(self) -> None:
+        assert self.execution_lease is not None
+        exc = await self.execution_lease.wait_lost()
+        if self.gate is not None:
+            self.gate.set_condition("execution", False)
+        if self.coordinator is not None:
+            self.coordinator.risk_guard.halt(
+                f"execution account lease lost: {type(exc).__name__}"
+            )
+        raise RuntimeError("execution account lease lost") from exc
+
     def _restore_execution_gate(self) -> bool:
         if self.gate is None or self.coordinator is None or self.runtime is None:
             return False
         try:
             ready = (
-                self.runtime.user_stream.connected
+                (self.execution_lease is None or self.execution_lease.held)
+                and self.runtime.user_stream.connected
                 and not self.coordinator.risk_guard.halted
                 and not self.coordinator.account.has_unresolved_orders()
             )
@@ -457,7 +493,16 @@ class SpikeLiveProcess:
             async for message in pubsub.listen():
                 if message.get("type") != "message":
                     continue
-                await self.coordinator.on_bar1s(Bar1s.from_json(message["data"]))
+                bar = Bar1s.from_json(message["data"])
+                if bar.symbol not in self.settings.symbols:
+                    raise RuntimeError(
+                        f"unexpected bar symbol on managed subscription: {bar.symbol}"
+                    )
+                self._last_bar_received_monotonic[bar.symbol] = (
+                    asyncio.get_running_loop().time()
+                )
+                self._refresh_bar_stream_gate()
+                await self.coordinator.on_bar1s(bar)
         except asyncio.CancelledError:
             raise
         except BaseException:
@@ -515,6 +560,19 @@ class SpikeLiveProcess:
         while True:
             await asyncio.sleep(5)
             await self._refresh_market_gate()
+            self._refresh_bar_stream_gate()
+
+    def _refresh_bar_stream_gate(self, *, now: float | None = None) -> bool:
+        """检测本进程 Redis 交付是否静默，不依赖上游健康声明。"""
+        assert self.gate is not None
+        current = asyncio.get_running_loop().time() if now is None else now
+        ready = all(
+            current - self._last_bar_received_monotonic.get(symbol, float("-inf"))
+            <= BAR_STREAM_STALE_SECONDS
+            for symbol in self.settings.symbols
+        )
+        self.gate.set_condition("bar_stream", ready)
+        return ready
 
     @property
     def _consumer_id(self) -> str:

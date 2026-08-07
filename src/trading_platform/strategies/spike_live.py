@@ -14,7 +14,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
-from trading_platform.shared.events import Bar1s, Fill, Kline, OrderIntent
+from trading_platform.shared.events import (
+    Bar1s,
+    Fill,
+    Kline,
+    OrderIntent,
+    StrategyAuditEvent,
+)
 from trading_platform.shared.risk import RiskGuard
 from trading_platform.strategies.campaign_store import CampaignLease, RedisCampaignStore
 from trading_platform.strategies.spike_short import (
@@ -119,7 +125,7 @@ class NamedEntryGate:
 
 
 class AuditSink(Protocol):
-    async def __call__(self, events: tuple[object, ...]) -> None:
+    async def __call__(self, events: tuple[StrategyAuditEvent, ...]) -> object:
         ...
 
 
@@ -166,6 +172,7 @@ class SpikeExecutionCoordinator:
         self._owned_campaign_id: str | None = None
         self._owned_campaign_lease: CampaignLease | None = None
         self._expiry_tasks: dict[str, asyncio.Task] = {}
+        self._pending_audit_events: tuple[StrategyAuditEvent, ...] = ()
 
     async def restore_campaign_gate(self) -> None:
         """恢复 Redis 互斥事实；不依据本地状态猜测或删除已有 lease。"""
@@ -591,10 +598,30 @@ class SpikeExecutionCoordinator:
         if cancelled and callable(refresh_positions):
             await refresh_positions()
 
-    async def _publish_audit(self) -> None:
+    async def _publish_audit(self) -> bool:
+        if self.audit_sink is None:
+            return True
         events = tuple(self.strategy.drain_audit_events())
-        if events and self.audit_sink is not None:
-            await self.audit_sink(events)
+        if events:
+            self._pending_audit_events += events
+        if not self._pending_audit_events:
+            return True
+        try:
+            await self.audit_sink(self._pending_audit_events)
+        except asyncio.CancelledError:
+            self._close_on_audit_failure("strategy audit write cancelled")
+            raise
+        except Exception as exc:
+            self._close_on_audit_failure(
+                f"strategy audit write failed: {type(exc).__name__}"
+            )
+            return False
+        self._pending_audit_events = ()
+        return True
+
+    def _close_on_audit_failure(self, reason: str) -> None:
+        self.gate.set_condition("execution", False)
+        self.risk_guard.halt(reason)
 
     @staticmethod
     def _campaign_id(intent: OrderIntent) -> str:

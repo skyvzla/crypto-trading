@@ -1,13 +1,18 @@
 """账本 PostgreSQL 数据访问模型。"""
 
+import hashlib
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import AsyncIterator, Optional, Sequence
+from typing import Any, AsyncIterator, Optional, Sequence
 
 from psycopg.rows import class_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
+
+from trading_platform.shared.events import StrategyAuditEvent
 
 
 @dataclass
@@ -98,6 +103,20 @@ class SubcategoryAdmissionAudit:
     reason: Optional[str] = None
 
 
+@dataclass
+class StrategyAuditRecord:
+    id: Optional[int] = None
+    event_key: str = ""
+    account_id: str = ""
+    event_time: int = 0
+    event_type: str = ""
+    symbol: str = ""
+    strategy_id: str = ""
+    campaign_id: Optional[str] = None
+    details: dict[str, Any] | None = None
+    created_at: Optional[datetime] = None
+
+
 class VersionConflictError(Exception):
     """乐观并发版本冲突。"""
 
@@ -164,6 +183,17 @@ class LedgerDB:
            OR positions.exchange_time <= EXCLUDED.exchange_time
         RETURNING id
     """
+    _STRATEGY_AUDIT_INSERT = """
+        INSERT INTO strategy_audit_events (
+            event_key, account_id, event_time, event_type, symbol,
+            strategy_id, campaign_id, details
+        ) VALUES (
+            %(event_key)s, %(account_id)s, %(event_time)s, %(event_type)s,
+            %(symbol)s, %(strategy_id)s, %(campaign_id)s, %(details)s
+        )
+        ON CONFLICT (event_key) DO NOTHING
+        RETURNING id
+    """
 
     def __init__(self, pool: AsyncConnectionPool):
         self.pool = pool
@@ -178,6 +208,104 @@ class LedgerDB:
         async with self.pool.connection() as conn:
             await conn.execute("SELECT 1")
         return True
+
+    @staticmethod
+    def _strategy_audit_record(
+        account_id: str, event: StrategyAuditEvent
+    ) -> StrategyAuditRecord:
+        canonical_details = json.dumps(
+            event.details,
+            default=str,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        details = json.loads(canonical_details)
+        identity = json.dumps(
+            [
+                account_id,
+                event.event_time,
+                event.event_type,
+                event.symbol,
+                event.strategy_id,
+                event.campaign_id,
+                canonical_details,
+            ],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return StrategyAuditRecord(
+            event_key=hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+            account_id=account_id,
+            event_time=event.event_time,
+            event_type=event.event_type,
+            symbol=event.symbol,
+            strategy_id=event.strategy_id,
+            campaign_id=event.campaign_id,
+            details=details,
+        )
+
+    async def insert_strategy_audit_events(
+        self,
+        events: Sequence[StrategyAuditEvent],
+        *,
+        account_id: str,
+    ) -> int:
+        """原子、幂等写入一批策略审计事件。"""
+        records = [self._strategy_audit_record(account_id, event) for event in events]
+        if not records:
+            return 0
+        inserted = 0
+        async with self.transaction() as conn:
+            for record in records:
+                params = record.__dict__.copy()
+                params["details"] = Jsonb(record.details)
+                row = await (
+                    await conn.execute(self._STRATEGY_AUDIT_INSERT, params)
+                ).fetchone()
+                inserted += int(row is not None)
+        return inserted
+
+    async def list_strategy_audit_events(
+        self,
+        *,
+        account_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        event_type: Optional[str] = None,
+        campaign_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[StrategyAuditRecord], int]:
+        """按执行归属查询策略审计事件。"""
+        parts: list[str] = []
+        params: dict[str, object] = {"limit": limit, "offset": offset}
+        for key, value in (
+            ("account_id", account_id),
+            ("strategy_id", strategy_id),
+            ("symbol", symbol),
+            ("event_type", event_type),
+            ("campaign_id", campaign_id),
+        ):
+            if value is not None:
+                parts.append(f"{key} = %({key})s")
+                params[key] = value
+        where = " WHERE " + " AND ".join(parts) if parts else ""
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(StrategyAuditRecord))
+            await cursor.execute(
+                "SELECT * FROM strategy_audit_events"
+                f"{where} ORDER BY event_time DESC, id DESC "
+                "LIMIT %(limit)s OFFSET %(offset)s",
+                params,
+            )
+            items = await cursor.fetchall()
+            total = await (
+                await conn.execute(
+                    f"SELECT COUNT(*) FROM strategy_audit_events{where}", params
+                )
+            ).fetchone()
+        return items, int(total[0])
 
     async def insert_order(self, order: Order) -> int:
         async with self.pool.connection() as conn:

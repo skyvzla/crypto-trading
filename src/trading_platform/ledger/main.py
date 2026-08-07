@@ -60,11 +60,11 @@ async def lifespan(app: FastAPI):
                 SELECT COUNT(*)
                 FROM information_schema.tables
                     WHERE table_schema = 'public'
-                    AND table_name IN ('orders', 'trades', 'positions', 'subcategory_admission', 'subcategory_admission_audit')
+                    AND table_name IN ('orders', 'trades', 'positions', 'subcategory_admission', 'subcategory_admission_audit', 'strategy_audit_events')
                 """
             )
             tables = await result.fetchone()
-            if not tables or tables[0] != 5:
+            if not tables or tables[0] != 6:
                 raise RuntimeError("Required ledger tables are missing; apply ledger/db/schema.sql")
             logger.info("Database tables verified")
     except Exception as e:

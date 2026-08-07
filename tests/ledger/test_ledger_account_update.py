@@ -122,3 +122,19 @@ async def test_writer_passes_complete_snapshot_batch_as_one_db_operation():
     positions = db.apply_account_update.await_args.args[0]
     assert len(positions) == 1
     assert positions[0].quantity == Decimal("-1.5")
+
+
+@pytest.mark.asyncio
+async def test_writer_rejects_position_outside_managed_symbols_before_db_write():
+    db = AsyncMock()
+    writer = BinanceAccountUpdateLedger(
+        db,
+        account_id="account-1",
+        strategy_id="spike_short",
+        managed_symbols={"AKEUSDT"},
+    )
+
+    with pytest.raises(AccountUpdateError, match="outside managed symbols: BTCUSDT"):
+        await writer.handle(account_update())
+
+    db.apply_account_update.assert_not_awaited()

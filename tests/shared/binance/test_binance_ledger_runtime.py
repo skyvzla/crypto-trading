@@ -10,7 +10,7 @@ from trading_platform.ledger.binance_runtime import (
 
 @pytest.mark.asyncio
 async def test_execution_report_updates_wal_and_ledger():
-    executor = Mock(handle_order_trade_update=Mock())
+    executor = Mock(handle_order_trade_update=Mock(return_value=Mock()))
     execution_ledger = Mock(handle=AsyncMock())
     account_ledger = Mock(handle=AsyncMock())
     callbacks = BinanceLedgerCallbacks(
@@ -25,7 +25,7 @@ async def test_execution_report_updates_wal_and_ledger():
 
 
 @pytest.mark.asyncio
-async def test_execution_report_attempts_ledger_when_wal_update_fails():
+async def test_execution_report_does_not_write_ledger_when_wal_update_fails():
     executor = Mock(
         handle_order_trade_update=Mock(side_effect=ValueError("invalid WAL update"))
     )
@@ -34,15 +34,29 @@ async def test_execution_report_attempts_ledger_when_wal_update_fails():
         executor, execution_ledger, Mock(handle=AsyncMock())
     )
 
-    with pytest.raises(ExceptionGroup, match="ORDER_TRADE_UPDATE handling failed"):
+    with pytest.raises(ValueError, match="invalid WAL update"):
         await callbacks.handle_execution_report({"c": "cid-1"})
 
-    execution_ledger.handle.assert_awaited_once()
+    execution_ledger.handle.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unowned_execution_report_fails_without_polluting_strategy_ledger():
+    executor = Mock(handle_order_trade_update=Mock(return_value=None))
+    execution_ledger = Mock(handle=AsyncMock())
+    callbacks = BinanceLedgerCallbacks(
+        executor, execution_ledger, Mock(handle=AsyncMock())
+    )
+
+    with pytest.raises(RuntimeError, match="not owned"):
+        await callbacks.handle_execution_report({"c": "manual-order"})
+
+    execution_ledger.handle.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_execution_report_attempts_wal_when_ledger_update_fails():
-    executor = Mock(handle_order_trade_update=Mock())
+    executor = Mock(handle_order_trade_update=Mock(return_value=Mock()))
     execution_ledger = Mock(
         handle=AsyncMock(side_effect=RuntimeError("database unavailable"))
     )
@@ -50,7 +64,7 @@ async def test_execution_report_attempts_wal_when_ledger_update_fails():
         executor, execution_ledger, Mock(handle=AsyncMock())
     )
 
-    with pytest.raises(ExceptionGroup, match="ORDER_TRADE_UPDATE handling failed"):
+    with pytest.raises(RuntimeError, match="database unavailable"):
         await callbacks.handle_execution_report({"c": "cid-1"})
 
     executor.handle_order_trade_update.assert_called_once()

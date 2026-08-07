@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trading_platform.ledger.db.models import (
     LedgerDB,
+    StrategyAuditRecord,
     SubcategoryAdmission,
     VersionConflictError,
 )
@@ -112,6 +113,21 @@ class AuditResponse(BaseModel):
     changed_at: datetime
     changed_by: str
     reason: Optional[str] = None
+
+
+class StrategyAuditResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    event_key: str
+    account_id: str
+    event_time: int
+    event_type: str
+    symbol: str
+    strategy_id: str
+    campaign_id: Optional[str] = None
+    details: dict[str, Any]
+    created_at: datetime
 
 
 class AdmissionRequest(BaseModel):
@@ -311,6 +327,34 @@ async def list_audit(
     items, total = await db.list_subcategory_audit(subcategory, limit, offset)
     return Page(
         items=[AuditResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/strategy-audit-events", response_model=Page)
+async def list_strategy_audit_events(
+    account_id: Optional[str] = None,
+    strategy_id: Optional[str] = None,
+    symbol: Optional[str] = None,
+    event_type: Optional[str] = None,
+    campaign_id: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    items, total = await db.list_strategy_audit_events(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        event_type=event_type,
+        campaign_id=campaign_id,
+        limit=limit,
+        offset=offset,
+    )
+    return Page(
+        items=[StrategyAuditResponse.model_validate(item) for item in items],
         total=total,
         limit=limit,
         offset=offset,

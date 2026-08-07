@@ -104,3 +104,19 @@ CREATE TABLE IF NOT EXISTS subcategory_admission_audit (
 
 CREATE INDEX IF NOT EXISTS idx_subcategory_audit_changed_at
     ON subcategory_admission_audit(changed_at DESC);
+
+CREATE TABLE IF NOT EXISTS strategy_audit_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_key CHAR(64) NOT NULL UNIQUE,
+    account_id VARCHAR(32) NOT NULL,
+    event_time BIGINT NOT NULL,
+    event_type VARCHAR(64) NOT NULL,
+    symbol VARCHAR(32) NOT NULL,
+    strategy_id VARCHAR(64) NOT NULL,
+    campaign_id VARCHAR(128),
+    details JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_audit_events_lookup
+    ON strategy_audit_events(account_id, strategy_id, symbol, event_time DESC);

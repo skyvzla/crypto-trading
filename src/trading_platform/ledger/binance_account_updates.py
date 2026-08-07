@@ -169,12 +169,22 @@ def parse_account_update(
 class BinanceAccountUpdateLedger:
     """将解析成功的一批 Binance 仓位快照原子写入 PostgreSQL。"""
 
-    def __init__(self, db: LedgerDB, *, account_id: str, strategy_id: str):
+    def __init__(
+        self,
+        db: LedgerDB,
+        *,
+        account_id: str,
+        strategy_id: str,
+        managed_symbols: set[str] | None = None,
+    ):
         if not account_id or not strategy_id:
             raise ValueError("account_id and strategy_id are required")
         self.db = db
         self.account_id = account_id
         self.strategy_id = strategy_id
+        self.managed_symbols = (
+            frozenset(managed_symbols) if managed_symbols is not None else None
+        )
 
     async def handle(self, event: dict[str, Any]) -> list[int]:
         update = parse_account_update(
@@ -182,4 +192,15 @@ class BinanceAccountUpdateLedger:
             account_id=self.account_id,
             strategy_id=self.strategy_id,
         )
+        if self.managed_symbols is not None:
+            unexpected = {
+                position.symbol
+                for position in update.positions
+                if position.symbol not in self.managed_symbols
+            }
+            if unexpected:
+                names = ", ".join(sorted(unexpected))
+                raise AccountUpdateError(
+                    f"position update outside managed symbols: {names}"
+                )
         return await self.db.apply_account_update(update.positions)

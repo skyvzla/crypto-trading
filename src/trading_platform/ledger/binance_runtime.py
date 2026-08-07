@@ -25,7 +25,7 @@ class OrderUpdateSink(Protocol):
 
 
 class BinanceLedgerCallbacks:
-    """让每条订单回报独立更新 WAL 和数据库，账户回报更新持仓快照。"""
+    """先由 WAL 确认订单归属，再写入数据库。"""
 
     def __init__(
         self,
@@ -38,17 +38,14 @@ class BinanceLedgerCallbacks:
         self.account_ledger = account_ledger
 
     async def handle_execution_report(self, order_data: dict[str, Any]) -> None:
-        errors: list[Exception] = []
-        try:
-            self.executor.handle_order_trade_update(order_data)
-        except Exception as exc:
-            errors.append(exc)
-        try:
-            await self.execution_ledger.handle(order_data)
-        except Exception as exc:
-            errors.append(exc)
-        if errors:
-            raise ExceptionGroup("ORDER_TRADE_UPDATE handling failed", errors)
+        record = self.executor.handle_order_trade_update(order_data)
+        if record is None:
+            client_order_id = order_data.get("c")
+            raise RuntimeError(
+                "execution report is not owned by the dedicated strategy account: "
+                f"{client_order_id}"
+            )
+        await self.execution_ledger.handle(order_data)
 
     async def handle_account_update(self, event: dict[str, Any]) -> None:
         await self.account_ledger.handle(event)
@@ -78,7 +75,10 @@ def create_binance_execution_runtime(
             db, account_id=account_id, strategy_id=strategy_id
         ),
         BinanceAccountUpdateLedger(
-            db, account_id=account_id, strategy_id=strategy_id
+            db,
+            account_id=account_id,
+            strategy_id=strategy_id,
+            managed_symbols=set(managed_symbols),
         ),
     )
     user_stream = UserDataStream(

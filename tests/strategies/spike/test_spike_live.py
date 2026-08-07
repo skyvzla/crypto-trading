@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
-from trading_platform.shared.events import Bar1s, OrderIntent
+from trading_platform.shared.events import Bar1s, OrderIntent, StrategyAuditEvent
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.spike_live import (
@@ -36,6 +36,17 @@ class StrategyStub:
         return []
 
 
+class AuditedStrategyStub(StrategyStub):
+    def __init__(self, events):
+        super().__init__()
+        self.audit_events = list(events)
+
+    def drain_audit_events(self):
+        events = self.audit_events
+        self.audit_events = []
+        return events
+
+
 def _entry(tier=1):
     return OrderIntent(
         symbol="BTCUSDT",
@@ -48,6 +59,67 @@ def _entry(tier=1):
         strategy_id="spike_short",
         trigger_reason=f"spike_tier{tier}",
     )
+
+
+@pytest.mark.asyncio
+async def test_audit_failure_retains_events_and_closes_execution_until_retry():
+    event = StrategyAuditEvent(
+        event_time=1_000,
+        event_type="signal_triggered",
+        symbol="BTCUSDT",
+        strategy_id="spike_short",
+        campaign_id="spike_short:BTCUSDT:1000",
+        details={"trigger_price": "100"},
+    )
+    strategy = AuditedStrategyStub([event])
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    sink = AsyncMock(side_effect=[RuntimeError("postgres unavailable"), None])
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+        audit_sink=sink,
+    )
+
+    assert await coordinator._publish_audit() is False
+    assert gate.condition("execution") is False
+    assert risk.halted is True
+    assert sink.await_args.args == ((event,),)
+
+    assert await coordinator._publish_audit() is True
+    assert sink.await_count == 2
+    assert sink.await_args.args == ((event,),)
+
+
+@pytest.mark.asyncio
+async def test_audit_events_are_not_drained_without_a_sink():
+    event = StrategyAuditEvent(
+        event_time=1_000,
+        event_type="signal_triggered",
+        symbol="BTCUSDT",
+        strategy_id="spike_short",
+        campaign_id=None,
+        details={},
+    )
+    strategy = AuditedStrategyStub([event])
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+    )
+
+    assert await coordinator._publish_audit() is True
+    assert strategy.audit_events == [event]
 
 
 def test_settings_default_to_testnet_and_live_requires_exact_confirmation():
@@ -177,6 +249,35 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
 
     assert events.index("registered") < events.index("bar_consumer")
     assert events.index("bar_consumer") < events.index("market_gate")
+
+
+@pytest.mark.asyncio
+async def test_local_bar_delivery_gate_requires_every_symbol_and_expires():
+    settings = SpikeLiveSettings(
+        account_id="spike-test",
+        symbols=["AKEUSDT", "BTCUSDT"],
+        total_notional="20",
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    strategy = StrategyStub()
+    process.gate = CompositeEntryGate(strategy)
+
+    process._last_bar_received_monotonic = {"AKEUSDT": 100.0}
+    assert process._refresh_bar_stream_gate(now=100.0) is False
+    assert process.gate.condition("bar_stream") is False
+
+    process._last_bar_received_monotonic["BTCUSDT"] = 95.0
+    assert process._refresh_bar_stream_gate(now=100.0) is True
+    assert process.gate.condition("bar_stream") is True
+
+    assert process._refresh_bar_stream_gate(now=110.001) is False
+    assert process.gate.condition("bar_stream") is False
 
 
 @pytest.mark.asyncio
@@ -352,6 +453,33 @@ async def test_stream_callback_failure_halts_process_fail_closed():
     )
 
 
+@pytest.mark.asyncio
+async def test_execution_lease_loss_halts_process_fail_closed():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    failure = ConnectionError("postgres session lost")
+    process.execution_lease = Mock(wait_lost=AsyncMock(return_value=failure))
+    process.gate = Mock(set_condition=Mock())
+    risk = Mock(halt=Mock())
+    process.coordinator = Mock(risk_guard=risk)
+
+    with pytest.raises(RuntimeError, match="execution account lease lost"):
+        await process._execution_lease_fatal_loop()
+
+    process.gate.set_condition.assert_called_once_with("execution", False)
+    risk.halt.assert_called_once_with(
+        "execution account lease lost: ConnectionError"
+    )
+
+
 def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():
     settings = SpikeLiveSettings(
         account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
@@ -381,6 +509,12 @@ def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():
     gate.reset_mock()
     account.has_unresolved_orders.return_value = False
     risk.halted = True
+    assert process._restore_execution_gate() is False
+    gate.set_condition.assert_called_with("execution", False)
+
+    gate.reset_mock()
+    risk.halted = False
+    process.execution_lease = Mock(held=False)
     assert process._restore_execution_gate() is False
     gate.set_condition.assert_called_with("execution", False)
 
