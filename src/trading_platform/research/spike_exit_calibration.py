@@ -23,6 +23,7 @@ class CalibrationConfig:
     symbol: str = "AKEUSDT"
     study_start_ms: int = 1_782_864_000_000  # 2026-07-01 00:00:00 UTC
     study_end_ms: int = 1_785_542_400_000  # 2026-08-01 00:00:00 UTC
+    bar1s_time_shift_ms: int = 0
     fast_slope_bars: int = 5
     slow_slope_bars: int = 15
     volatility_bars: int = 30
@@ -272,6 +273,7 @@ def _first_origin_touch(
     first_fill_ms: int,
     origin_price: float,
 ) -> int | None:
+    shift_ms = config.bar1s_time_shift_ms
     row = connection.execute(
         """
         SELECT min(epoch_ms(close_time))
@@ -281,9 +283,14 @@ def _first_origin_touch(
            AND close_time < to_timestamp(? / 1000.0)
            AND low <= ?
         """,
-        [config.symbol, first_fill_ms, config.study_end_ms, origin_price],
+        [
+            config.symbol,
+            first_fill_ms - shift_ms,
+            config.study_end_ms - shift_ms,
+            origin_price,
+        ],
     ).fetchone()
-    return None if row is None or row[0] is None else int(row[0])
+    return None if row is None or row[0] is None else int(row[0]) + shift_ms
 
 
 def _coverage(
@@ -292,6 +299,7 @@ def _coverage(
     result: dict[str, dict[str, Any]] = {}
     expected = {"1m": 60_000, "5m": 300_000, "15m": 900_000}
     for timeframe in ("1s", "1m", "5m", "15m"):
+        shift_ms = config.bar1s_time_shift_ms if timeframe == "1s" else 0
         count, first_ms, last_ms = connection.execute(
             """
             SELECT count(*), min(epoch_ms(open_time)), max(epoch_ms(close_time))
@@ -300,12 +308,21 @@ def _coverage(
                AND open_time >= to_timestamp(? / 1000.0)
                AND open_time < to_timestamp(? / 1000.0)
             """,
-            [config.symbol, timeframe, config.study_start_ms, config.study_end_ms],
+            [
+                config.symbol,
+                timeframe,
+                config.study_start_ms - shift_ms,
+                config.study_end_ms - shift_ms,
+            ],
         ).fetchone()
         item: dict[str, Any] = {
             "rows": int(count),
-            "first_open_ms": int(first_ms) if first_ms is not None else None,
-            "last_close_ms": int(last_ms) if last_ms is not None else None,
+            "first_open_ms": (
+                int(first_ms) + shift_ms if first_ms is not None else None
+            ),
+            "last_close_ms": (
+                int(last_ms) + shift_ms if last_ms is not None else None
+            ),
         }
         if timeframe in expected:
             expected_rows = (config.study_end_ms - config.study_start_ms) // expected[timeframe]
@@ -588,6 +605,7 @@ def _markdown_report(
         "- 旧 replay 的简单止盈/止损/超时只用于取得真实入场锚点，不截断后续观察；本报告按假设仍持仓的反事实路径观察至 origin、候选突破或月末",
         "- origin：第一笔入场成交后，1s Bar 的 `low <= origin_price` 首次成立；未在 7 月结束前触达的样本按右删失处理",
         "- 指标：只使用信号时点前或观察时点前已经完成的 K 线，不联网、不补数据、不回写 DuckDB",
+        f"- 历史 1s 时间戳显式修正：`{config['bar1s_time_shift_ms']}` ms；该值必须来自数据对账证据，不自动推断",
         "- 1s 归档为有成交秒 Bar，不要求每秒稠密；1m/5m/15m 必须完整，否则工具拒绝运行",
         "",
         "复现命令：",
@@ -595,7 +613,8 @@ def _markdown_report(
         "```bash",
         "PYTHONPATH=src python scripts/calibrate_spike_exits.py \\",
         "  --duckdb-path /data/projects/quant/crypto/data/market/history.duckdb \\",
-        "  --replay-report reports/akeusdt_2026_07_legacy_replay_v2 \\",
+        "  --replay-report reports/akeusdt_2026_07_legacy_replay_aligned \\",
+        "  --bar1s-time-shift-hours 8 \\",
         "  --output reports/akeusdt_2026_07_exit_calibration \\",
         "  --report-file docs/research/AKEUSDT_2026_07_EXIT_CALIBRATION.md",
         "```",
@@ -715,10 +734,10 @@ def _markdown_report(
             "",
             "## 解释限制与下一步",
             "",
-            "- 样本仅为单币种单月且以发生实际入场的 35 个 Campaign 为条件，不能据此冻结通用阈值。",
+            f"- 样本仅为单币种单月且以发生实际入场的 {summary['campaigns']['filled']} 个 Campaign 为条件，不能据此冻结通用阈值。",
             "- 本轮只描述信号分布，未将减半/清仓动作施加到资金曲线，避免用候选规则反向选择最好收益。",
-            "- D-018 的 90 秒后时间风险与动能风险收严曲线尚无用户确认定义，本工具没有猜测该曲线。",
-            "- 建议下一轮增加多币种、多市场阶段样本并做 walk-forward；冻结参数前，需由用户确认指标窗口、探针组合、通道长度和“站稳”根数。",
+            "- D-018 的 90 秒后时间风险与动能风险收严曲线仍是 candidate，本工具不把单月最优值伪装成生产结论。",
+            "- 下一轮增加多币种、多市场阶段样本并做 walk-forward；指标窗口、探针组合、通道长度和“站稳”根数按 D-027 用 replay/testnet 证据迭代，不要求用户凭经验直接给值。",
             "",
         ]
     )
@@ -751,6 +770,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--replay-report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
+        "--bar1s-time-shift-hours",
+        type=float,
+        default=0.0,
+        help="Explicit historical 1s timestamp correction; default 0",
+    )
+    parser.add_argument(
         "--report-file",
         type=Path,
         default=None,
@@ -761,7 +786,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    config = CalibrationConfig()
+    config = CalibrationConfig(
+        bar1s_time_shift_ms=int(args.bar1s_time_shift_hours * 3_600_000)
+    )
     campaigns, snapshots, summary = calibrate(
         duckdb_path=args.duckdb_path,
         audit_path=args.replay_report / "audit_events.parquet",

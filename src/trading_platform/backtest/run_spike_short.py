@@ -59,7 +59,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--exit-policy",
-        choices=("confirmed", "legacy-script"),
+        choices=("confirmed", "candidate-v1", "legacy-script"),
         default="confirmed",
         help="Exit policy; legacy-script is replay research only",
     )
@@ -68,6 +68,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="每根穿价 1s Bar 最多成交 LIMIT 原数量的比例（0, 1]",
+    )
+    parser.add_argument(
+        "--bar1s-time-shift-hours",
+        type=Decimal,
+        default=Decimal("0"),
+        help="显式修正历史 1s 数据时间偏移；默认 0，不自动推断",
     )
     parser.add_argument(
         "--exchange-info",
@@ -93,6 +99,7 @@ def main() -> None:
         print("Error: --warmup-hours must not be negative", file=sys.stderr)
         raise SystemExit(2)
     load_start_ms = start_ms - int(args.warmup_hours * 3_600_000)
+    bar1s_time_shift_ms = int(args.bar1s_time_shift_hours * Decimal("3600000"))
     data_dir = args.data_dir or "data/market"
     data_source = args.duckdb_path or data_dir
 
@@ -107,8 +114,13 @@ def main() -> None:
         start_ms=load_start_ms,
         end_ms=end_ms,
         require_aggtrades=True,
-        required_kline_intervals=["1m", "5m"],
+        required_kline_intervals=(
+            ["1m", "5m", "15m"]
+            if args.exit_policy == "candidate-v1"
+            else ["1m", "5m"]
+        ),
         duckdb_path=args.duckdb_path,
+        bar1s_time_shift_ms=bar1s_time_shift_ms,
     )
     events = loader.load_all()
     if not events:
@@ -124,16 +136,22 @@ def main() -> None:
         output_dir=str(output_path),
         trading_start_ms=start_ms,
         limit_fill_fraction_per_bar=args.limit_fill_fraction,
+        bar1s_time_shift_ms=bar1s_time_shift_ms,
     )
-    strategy_type = (
-        LegacyScriptExitSpikeBacktestStrategy
-        if args.exit_policy == "legacy-script"
-        else DynamicSpikeBacktestStrategy
-    )
-    strategy = strategy_type(
-        symbols=[args.symbol],
-        total_notional=args.total_notional,
-    )
+    if args.exit_policy == "legacy-script":
+        strategy = LegacyScriptExitSpikeBacktestStrategy(
+            symbols=[args.symbol], total_notional=args.total_notional
+        )
+    else:
+        strategy = DynamicSpikeBacktestStrategy(
+            symbols=[args.symbol],
+            total_notional=args.total_notional,
+            exit_policy=(
+                "candidate-v1"
+                if args.exit_policy == "candidate-v1"
+                else "execution-test-d007"
+            ),
+        )
     result = BacktestEngine(
         events=events,
         strategy=strategy,

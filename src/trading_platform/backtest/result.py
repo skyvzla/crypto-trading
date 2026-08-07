@@ -393,6 +393,7 @@ class ResultAnalyzer:
                 'limit_fill_fraction_per_bar': (
                     self.result.config.limit_fill_fraction_per_bar
                 ),
+                'bar1s_time_shift_ms': self.result.config.bar1s_time_shift_ms,
             }
         }
 

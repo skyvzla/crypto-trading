@@ -76,6 +76,25 @@ def test_duckdb_loader_reads_candles_without_mutating_archive(tmp_path):
         check.close()
 
 
+def test_duckdb_loader_applies_explicit_one_second_time_shift(tmp_path):
+    archive = tmp_path / "history.duckdb"
+    _write_candle_archive(archive)
+    loader = BacktestDataLoader(
+        data_dir="unused",
+        duckdb_path=str(archive),
+        symbols=["AKEUSDT"],
+        start_ms=0,
+        end_ms=100_000,
+        bar1s_time_shift_ms=8_000,
+    )
+
+    events = loader.load_all()
+    bar = next(event for event in events if isinstance(event, Bar1s))
+
+    assert bar.timestamp == 9_000
+    assert bar.available_time == 10_000
+
+
 def test_duckdb_loader_rejects_incompatible_archive(tmp_path):
     archive = tmp_path / "invalid.duckdb"
     connection = duckdb.connect(str(archive))

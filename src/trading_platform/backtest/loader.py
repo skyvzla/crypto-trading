@@ -41,6 +41,7 @@ class BacktestDataLoader:
         require_aggtrades: bool = False,
         required_kline_intervals: list[str] | None = None,
         duckdb_path: str | None = None,
+        bar1s_time_shift_ms: int = 0,
     ):
         """
         Args:
@@ -49,6 +50,7 @@ class BacktestDataLoader:
             start_ms: 开始时间（毫秒时间戳）
             end_ms: 结束时间（毫秒时间戳）
             duckdb_path: 可选只读 DuckDB 归档；提供后不读取 Parquet
+            bar1s_time_shift_ms: 已由外部数据对账确认时，显式平移 1s 事件时间
         """
         if start_ms >= end_ms:
             raise ValueError("start_ms must be earlier than end_ms")
@@ -62,6 +64,7 @@ class BacktestDataLoader:
         self.require_aggtrades = require_aggtrades
         self.required_kline_intervals = set(required_kline_intervals or [])
         self.duckdb_path = Path(duckdb_path) if duckdb_path else None
+        self.bar1s_time_shift_ms = int(bar1s_time_shift_ms)
         self._duckdb_connection: duckdb.DuckDBPyConnection | None = None
 
         if self.duckdb_path is not None and not self.duckdb_path.is_file():
@@ -191,13 +194,18 @@ class BacktestDataLoader:
         self._require_columns(df, {'trade_time', 'price', 'qty'}, agg_trades_path)
 
         # 过滤时间范围并按事件时间稳定排序，确保 OHLC 不依赖文件行顺序。
+        raw_start_ms = self.start_ms - self.bar1s_time_shift_ms
+        raw_end_ms = self.end_ms - self.bar1s_time_shift_ms
         df = df[
-            (df['trade_time'] >= self.start_ms) &
-            (df['trade_time'] < self.end_ms)
+            (df['trade_time'] >= raw_start_ms) &
+            (df['trade_time'] < raw_end_ms)
         ].sort_values('trade_time', kind='stable')
 
         if df.empty:
             return []
+        if self.bar1s_time_shift_ms:
+            df = df.copy()
+            df['trade_time'] += self.bar1s_time_shift_ms
 
         # 聚合为 1s Bar
         return self._aggregate_to_1s_bars(df, symbol)
@@ -363,10 +371,14 @@ class BacktestDataLoader:
             symbol,
             "1s",
             time_column="open_time",
+            start_ms=self.start_ms - self.bar1s_time_shift_ms,
+            end_ms=self.end_ms - self.bar1s_time_shift_ms,
         )
         bars: list[Bar1s] = []
         for sequence, row in enumerate(rows):
             open_time, close_time, open_, high, low, close, volume = row
+            open_time = int(open_time) + self.bar1s_time_shift_ms
+            close_time = int(close_time) + self.bar1s_time_shift_ms
             duration_ms = int(close_time) - int(open_time)
             if duration_ms not in {999, 1_000}:
                 raise ValueError(
@@ -426,6 +438,8 @@ class BacktestDataLoader:
         timeframe: str,
         *,
         time_column: str,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
     ) -> list[tuple]:
         if time_column not in {"open_time", "close_time"}:
             raise ValueError(f"unsupported candle time column: {time_column}")
@@ -438,7 +452,12 @@ class BacktestDataLoader:
             f"AND epoch_ms({time_column}) >= ? "
             f"AND epoch_ms({time_column}) < ? "
             "ORDER BY open_time, close_time",
-            [symbol, timeframe, self.start_ms, self.end_ms],
+            [
+                symbol,
+                timeframe,
+                self.start_ms if start_ms is None else start_ms,
+                self.end_ms if end_ms is None else end_ms,
+            ],
         ).fetchall()
 
     def _require_duckdb_connection(self) -> duckdb.DuckDBPyConnection:
