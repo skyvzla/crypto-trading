@@ -16,11 +16,16 @@ from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.binance.rest_client import BinanceRestClient
 from trading_platform.shared.binance.runtime import BinanceExecutionRuntime
 from trading_platform.shared.binance.user_stream import UserDataStream
-from trading_platform.shared.execution_recovery import SubmitUnknownPollingService
+from trading_platform.shared.execution_recovery import (
+    OrderWALRecord,
+    SubmitUnknownPollingService,
+)
 
 
 class OrderUpdateSink(Protocol):
-    def handle_order_trade_update(self, order_data: dict[str, Any]) -> object:
+    def handle_order_trade_update(
+        self, order_data: dict[str, Any]
+    ) -> OrderWALRecord | None:
         ...
 
 
@@ -45,7 +50,7 @@ class BinanceLedgerCallbacks:
                 "execution report is not owned by the dedicated strategy account: "
                 f"{client_order_id}"
             )
-        await self.execution_ledger.handle(order_data)
+        await self.execution_ledger.handle(order_data, record)
 
     async def handle_account_update(self, event: dict[str, Any]) -> None:
         await self.account_ledger.handle(event)

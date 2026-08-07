@@ -24,6 +24,7 @@ class OrderResponse(BaseModel):
     symbol: str
     order_id: str
     client_order_id: str
+    campaign_id: Optional[str] = None
     side: str
     order_type: str
     position_side: Optional[str] = None
@@ -51,6 +52,7 @@ class TradeResponse(BaseModel):
     trade_id: str
     order_id: str
     client_order_id: str
+    campaign_id: Optional[str] = None
     side: str
     position_side: Optional[str] = None
     quantity: Decimal
@@ -151,6 +153,32 @@ class PnLResponse(BaseModel):
     win_rate: float
     avg_win: Decimal
     avg_loss: Decimal
+
+
+class CampaignPnLResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    account_id: str
+    strategy_id: str
+    symbol: str
+    campaign_id: str
+    trade_count: int
+    sell_quantity: Decimal
+    sell_avg_price: Optional[Decimal] = None
+    buy_quantity: Decimal
+    buy_avg_price: Optional[Decimal] = None
+    total_commission: Decimal
+    commission_asset: Optional[str] = None
+    gross_realized_pnl: Decimal
+    net_realized_pnl: Decimal
+    remaining_quantity: Decimal
+    has_open_quantity: bool
+    acquired_at: Optional[datetime] = None
+    first_fill_at: datetime
+    last_fill_at: datetime
+    closed_at: Optional[datetime] = None
+    released_at: Optional[datetime] = None
+    lifecycle_duration_ms: Optional[int] = None
 
 
 router = APIRouter(prefix="/api/v1", tags=["ledger"])
@@ -258,6 +286,26 @@ async def get_pnl(
         win_rate=values["win_count"] / decided if decided else 0.0,
         **values,
     )
+
+
+@router.get(
+    "/campaigns/{campaign_id}/pnl",
+    response_model=CampaignPnLResponse,
+)
+async def get_campaign_pnl(
+    campaign_id: str = Path(min_length=1, max_length=128),
+    account_id: str = Query(min_length=1, max_length=32),
+    strategy_id: str = Query(min_length=1, max_length=64),
+    db: LedgerDB = Depends(get_db),
+) -> CampaignPnLResponse:
+    item = await db.get_campaign_pnl(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        campaign_id=campaign_id,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Campaign trades not found")
+    return CampaignPnLResponse.model_validate(item)
 
 
 @router.get("/subcategory-admissions", response_model=Page)

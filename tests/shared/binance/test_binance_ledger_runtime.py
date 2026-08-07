@@ -10,7 +10,8 @@ from trading_platform.ledger.binance_runtime import (
 
 @pytest.mark.asyncio
 async def test_execution_report_updates_wal_and_ledger():
-    executor = Mock(handle_order_trade_update=Mock(return_value=Mock()))
+    record = Mock()
+    executor = Mock(handle_order_trade_update=Mock(return_value=record))
     execution_ledger = Mock(handle=AsyncMock())
     account_ledger = Mock(handle=AsyncMock())
     callbacks = BinanceLedgerCallbacks(
@@ -21,7 +22,7 @@ async def test_execution_report_updates_wal_and_ledger():
     await callbacks.handle_execution_report(report)
 
     executor.handle_order_trade_update.assert_called_once_with(report)
-    execution_ledger.handle.assert_awaited_once_with(report)
+    execution_ledger.handle.assert_awaited_once_with(report, record)
 
 
 @pytest.mark.asyncio

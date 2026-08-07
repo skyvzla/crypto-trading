@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Protocol
 
 from trading_platform.ledger.db.models import LedgerDB, Order, Position, Trade
+from trading_platform.ledger.binance_reports import campaign_id_from_wal_record
 from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.binance.rest_client import BinanceRestClient
 
@@ -73,7 +74,11 @@ def _datetime_ms(value: Any, *, fact: str, field: str) -> datetime:
 
 
 def parse_query_order(
-    raw: dict[str, Any], *, account_id: str, strategy_id: str
+    raw: dict[str, Any],
+    *,
+    account_id: str,
+    strategy_id: str,
+    campaign_id: str | None = None,
 ) -> Order:
     status_raw = str(_required(raw, "status", fact="query order"))
     status = _STATUS_MAP.get(status_raw)
@@ -102,6 +107,7 @@ def parse_query_order(
             fact="query order",
             field="time",
         ),
+        campaign_id=campaign_id,
     )
 
 
@@ -111,6 +117,7 @@ def parse_account_trade(
     account_id: str,
     strategy_id: str,
     client_order_id: str,
+    campaign_id: str | None = None,
 ) -> Trade:
     quantity = _decimal(raw, "qty", fact="account trade")
     price = _decimal(raw, "price", fact="account trade")
@@ -140,6 +147,7 @@ def parse_account_trade(
             fact="account trade",
             field="time",
         ),
+        campaign_id=campaign_id,
     )
 
 
@@ -238,10 +246,28 @@ class BinanceStartupSynchronizer:
                 raise BinanceStartupSyncError(
                     f"owned order identity mismatch: {record.client_order_id}"
                 ) from exc
+            try:
+                campaign_id = campaign_id_from_wal_record(
+                    recovered_record,
+                    account_id=self.account_id,
+                    strategy_id=self.strategy_id,
+                    symbol=str(response.get("symbol") or ""),
+                    client_order_id=str(response.get("clientOrderId") or ""),
+                    side=str(response.get("side") or ""),
+                    order_type=str(response.get("type") or ""),
+                    quantity=_decimal(response, "origQty", fact="query order"),
+                    exchange_order_id=str(response.get("orderId") or ""),
+                )
+            except Exception as exc:
+                raise BinanceStartupSyncError(
+                    f"owned order has no verified Campaign: "
+                    f"{record.client_order_id}"
+                ) from exc
             order = parse_query_order(
                 response,
                 account_id=self.account_id,
                 strategy_id=self.strategy_id,
+                campaign_id=campaign_id,
             )
             await self.db.insert_order(order)
             recovered_orders[(order.symbol, order.order_id)] = order
@@ -281,6 +307,7 @@ class BinanceStartupSynchronizer:
                         account_id=self.account_id,
                         strategy_id=self.strategy_id,
                         client_order_id=order.client_order_id,
+                        campaign_id=order.campaign_id,
                     )
                     if (
                         trade.symbol != order.symbol

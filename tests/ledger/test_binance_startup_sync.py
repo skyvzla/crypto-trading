@@ -79,7 +79,14 @@ def position(**overrides):
     return value
 
 
-def make_sync(tmp_path, *, order_response=None, trades=None, positions=None):
+def make_sync(
+    tmp_path,
+    *,
+    order_response=None,
+    trades=None,
+    positions=None,
+    campaign_id=f"{STRATEGY_ID}:{SYMBOL}:{RECORDED_AT}",
+):
     wal = OrderWAL(tmp_path / "orders.jsonl")
     intent = wal.record_intent(
         OrderIntent(
@@ -89,6 +96,7 @@ def make_sync(tmp_path, *, order_response=None, trades=None, positions=None):
             quantity=Decimal("0.1"),
             client_order_id=CLIENT_ORDER_ID,
             strategy_id=STRATEGY_ID,
+            campaign_id=campaign_id,
         ),
         account_id=ACCOUNT_ID,
         recorded_at=RECORDED_AT,
@@ -133,6 +141,17 @@ def make_sync(tmp_path, *, order_response=None, trades=None, positions=None):
 
 
 @pytest.mark.asyncio
+async def test_startup_sync_rejects_legacy_order_without_explicit_campaign(tmp_path):
+    synchronizer, _, db, _ = make_sync(tmp_path, campaign_id=None)
+
+    with pytest.raises(BinanceStartupSyncError, match="no verified Campaign"):
+        await synchronizer.sync_once()
+
+    db.insert_order.assert_not_awaited()
+    db.insert_trade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_wal_new_to_filled_backfills_order_trade_position_before_strict(tmp_path):
     synchronizer, rest, db, wal = make_sync(tmp_path)
     events = []
@@ -150,7 +169,9 @@ async def test_wal_new_to_filled_backfills_order_trade_position_before_strict(tm
     assert result == "ok"
     assert [kind for kind, _ in events] == ["order", "trade", "position", "strict"]
     assert events[0][1].status == "FILLED"
+    assert events[0][1].campaign_id == f"{STRATEGY_ID}:{SYMBOL}:{RECORDED_AT}"
     assert events[1][1].client_order_id == CLIENT_ORDER_ID
+    assert events[1][1].campaign_id == f"{STRATEGY_ID}:{SYMBOL}:{RECORDED_AT}"
     assert events[2][1].quantity == Decimal("-0.1")
     assert wal.recover_latest()[CLIENT_ORDER_ID].status == "FILLED"
     rest.query_order.assert_awaited_once_with(

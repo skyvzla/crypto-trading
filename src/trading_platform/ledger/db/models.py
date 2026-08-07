@@ -23,6 +23,7 @@ class Order:
     symbol: str = ""
     order_id: str = ""
     client_order_id: str = ""
+    campaign_id: Optional[str] = None
     side: str = ""
     order_type: str = ""
     position_side: Optional[str] = None
@@ -49,6 +50,7 @@ class Trade:
     trade_id: str = ""
     order_id: str = ""
     client_order_id: str = ""
+    campaign_id: Optional[str] = None
     side: str = ""
     position_side: Optional[str] = None
     quantity: Decimal = Decimal("0")
@@ -117,6 +119,32 @@ class StrategyAuditRecord:
     created_at: Optional[datetime] = None
 
 
+@dataclass
+class CampaignPnLSummary:
+    account_id: str
+    strategy_id: str
+    symbol: str
+    campaign_id: str
+    trade_count: int
+    sell_quantity: Decimal
+    sell_avg_price: Optional[Decimal]
+    buy_quantity: Decimal
+    buy_avg_price: Optional[Decimal]
+    total_commission: Decimal
+    commission_asset: Optional[str]
+    gross_realized_pnl: Decimal
+    net_realized_pnl: Decimal
+    remaining_quantity: Decimal
+    has_open_quantity: bool
+    acquired_at: Optional[datetime]
+    first_fill_at: datetime
+    last_fill_at: datetime
+    closed_at: Optional[datetime]
+    released_at: Optional[datetime]
+    lifecycle_duration_ms: Optional[int]
+    pnl_facts_complete: bool
+
+
 class VersionConflictError(Exception):
     """乐观并发版本冲突。"""
 
@@ -124,19 +152,21 @@ class VersionConflictError(Exception):
 class LedgerDB:
     _ORDER_UPSERT = """
         INSERT INTO orders (
-            account_id, strategy_id, symbol, order_id, client_order_id,
+            account_id, strategy_id, symbol, order_id, client_order_id, campaign_id,
             side, order_type, position_side, quantity, price, stop_price,
             status, filled_quantity, avg_fill_price, commission,
             commission_asset, exchange_created_at
         ) VALUES (
             %(account_id)s, %(strategy_id)s, %(symbol)s, %(order_id)s,
-            %(client_order_id)s, %(side)s, %(order_type)s, %(position_side)s,
+            %(client_order_id)s, %(campaign_id)s, %(side)s, %(order_type)s,
+            %(position_side)s,
             %(quantity)s, %(price)s, %(stop_price)s, %(status)s,
             %(filled_quantity)s, %(avg_fill_price)s, %(commission)s,
             %(commission_asset)s, %(exchange_created_at)s
         )
         ON CONFLICT (account_id, symbol, order_id) DO UPDATE
         SET status = EXCLUDED.status,
+            campaign_id = COALESCE(orders.campaign_id, EXCLUDED.campaign_id),
             filled_quantity = EXCLUDED.filled_quantity,
             avg_fill_price = EXCLUDED.avg_fill_price,
             commission = EXCLUDED.commission,
@@ -146,16 +176,21 @@ class LedgerDB:
                 WHEN EXCLUDED.status = 'FILLED' THEN NOW()
                 ELSE orders.filled_at
             END
+        WHERE orders.campaign_id IS NULL
+           OR EXCLUDED.campaign_id IS NULL
+           OR orders.campaign_id = EXCLUDED.campaign_id
         RETURNING id
     """
     _TRADE_INSERT = """
         INSERT INTO trades (
             account_id, strategy_id, symbol, trade_id, order_id, client_order_id,
+            campaign_id,
             side, position_side, quantity, price, quote_quantity, commission,
             commission_asset, realized_pnl, is_maker, exchange_time
         ) VALUES (
             %(account_id)s, %(strategy_id)s, %(symbol)s, %(trade_id)s,
-            %(order_id)s, %(client_order_id)s, %(side)s, %(position_side)s,
+            %(order_id)s, %(client_order_id)s, %(campaign_id)s, %(side)s,
+            %(position_side)s,
             %(quantity)s, %(price)s, %(quote_quantity)s, %(commission)s,
             %(commission_asset)s, %(realized_pnl)s, %(is_maker)s, %(exchange_time)s
         )
@@ -314,7 +349,18 @@ class LedgerDB:
     async def _insert_order(self, conn: object, order: Order) -> int:
         result = await conn.execute(self._ORDER_UPSERT, order.__dict__)
         row = await result.fetchone()
-        return row[0] if row else 0
+        if row:
+            return row[0]
+        existing = await (
+            await conn.execute(
+                "SELECT campaign_id FROM orders "
+                "WHERE account_id = %s AND symbol = %s AND order_id = %s",
+                (order.account_id, order.symbol, order.order_id),
+            )
+        ).fetchone()
+        if existing is not None and existing[0] != order.campaign_id:
+            raise ValueError("order Campaign attribution is immutable")
+        return 0
 
     async def update_order_status(
         self,
@@ -399,7 +445,18 @@ class LedgerDB:
     async def _insert_trade(self, conn: object, trade: Trade) -> int:
         result = await conn.execute(self._TRADE_INSERT, trade.__dict__)
         row = await result.fetchone()
-        return row[0] if row else 0
+        if row:
+            return row[0]
+        existing = await (
+            await conn.execute(
+                "SELECT campaign_id FROM trades "
+                "WHERE account_id = %s AND symbol = %s AND trade_id = %s",
+                (trade.account_id, trade.symbol, trade.trade_id),
+            )
+        ).fetchone()
+        if existing is not None and existing[0] != trade.campaign_id:
+            raise ValueError("trade Campaign attribution is immutable")
+        return 0
 
     async def apply_execution_report(
         self,
@@ -463,6 +520,98 @@ class LedgerDB:
 
     async def count_trades(self, **filters: object) -> int:
         return await self._count("trades", **filters)
+
+    async def get_campaign_pnl(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        campaign_id: str,
+    ) -> CampaignPnLSummary | None:
+        """Aggregate only trades carrying an explicit Campaign identity."""
+        params = {
+            "account_id": account_id,
+            "strategy_id": strategy_id,
+            "campaign_id": campaign_id,
+        }
+        query = """
+            WITH trade_totals AS (
+                SELECT account_id, strategy_id, symbol, campaign_id,
+                    COUNT(*)::BIGINT AS trade_count,
+                    COALESCE(SUM(quantity) FILTER (WHERE side = 'SELL'), 0)
+                        AS sell_quantity,
+                    COALESCE(SUM(quote_quantity) FILTER (WHERE side = 'SELL'), 0)
+                        AS sell_quote_quantity,
+                    COALESCE(SUM(quantity) FILTER (WHERE side = 'BUY'), 0)
+                        AS buy_quantity,
+                    COALESCE(SUM(quote_quantity) FILTER (WHERE side = 'BUY'), 0)
+                        AS buy_quote_quantity,
+                    COALESCE(SUM(commission), 0) AS total_commission,
+                    CASE WHEN COUNT(DISTINCT commission_asset) = 1
+                        THEN MIN(commission_asset) END AS commission_asset,
+                    BOOL_AND(realized_pnl IS NOT NULL) AS realized_pnl_complete,
+                    COALESCE(SUM(realized_pnl), 0) AS gross_realized_pnl,
+                    MIN(exchange_time) AS first_fill_at,
+                    MAX(exchange_time) AS last_fill_at,
+                    MAX(exchange_time) FILTER (WHERE side = 'BUY') AS last_buy_at
+                FROM trades
+                WHERE account_id = %(account_id)s
+                  AND strategy_id = %(strategy_id)s
+                  AND campaign_id = %(campaign_id)s
+                GROUP BY account_id, strategy_id, symbol, campaign_id
+            ), lifecycle AS (
+                SELECT
+                    MIN(event_time) FILTER (
+                        WHERE event_type = 'campaign_acquired'
+                    ) AS acquired_ms,
+                    MAX(event_time) FILTER (
+                        WHERE event_type = 'campaign_released'
+                    ) AS released_ms
+                FROM strategy_audit_events
+                WHERE account_id = %(account_id)s
+                  AND strategy_id = %(strategy_id)s
+                  AND campaign_id = %(campaign_id)s
+            )
+            SELECT totals.account_id, totals.strategy_id, totals.symbol,
+                totals.campaign_id, totals.trade_count, totals.sell_quantity,
+                totals.sell_quote_quantity / NULLIF(totals.sell_quantity, 0)
+                    AS sell_avg_price,
+                totals.buy_quantity,
+                totals.buy_quote_quantity / NULLIF(totals.buy_quantity, 0)
+                    AS buy_avg_price,
+                totals.total_commission, totals.commission_asset,
+                totals.gross_realized_pnl,
+                totals.gross_realized_pnl - totals.total_commission
+                    AS net_realized_pnl,
+                GREATEST(totals.sell_quantity - totals.buy_quantity, 0)
+                    AS remaining_quantity,
+                totals.sell_quantity > totals.buy_quantity AS has_open_quantity,
+                TO_TIMESTAMP(lifecycle.acquired_ms / 1000.0) AS acquired_at,
+                totals.first_fill_at, totals.last_fill_at,
+                CASE WHEN totals.sell_quantity > 0
+                          AND totals.buy_quantity >= totals.sell_quantity
+                    THEN totals.last_buy_at END AS closed_at,
+                TO_TIMESTAMP(lifecycle.released_ms / 1000.0) AS released_at,
+                CASE WHEN lifecycle.acquired_ms IS NOT NULL
+                          AND lifecycle.released_ms IS NOT NULL
+                    THEN lifecycle.released_ms - lifecycle.acquired_ms END
+                    AS lifecycle_duration_ms,
+                totals.realized_pnl_complete
+                    AND totals.commission_asset = 'USDT'
+                    AND totals.sell_quantity >= totals.buy_quantity
+                    AS pnl_facts_complete
+            FROM trade_totals totals CROSS JOIN lifecycle
+        """
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(CampaignPnLSummary))
+            await cursor.execute(query, params)
+            summary = await cursor.fetchone()
+        if summary is not None and not summary.pnl_facts_complete:
+            raise RuntimeError(
+                "Campaign PnL requires realized PnL, USDT commission, "
+                "and nonnegative short quantity"
+            )
+        return summary
 
     async def upsert_position(self, position: Position) -> int:
         query = """

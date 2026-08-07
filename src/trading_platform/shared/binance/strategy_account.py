@@ -352,6 +352,7 @@ class BinanceStrategyAccount:
             filled_quantity=self._filled_quantity(payload),
             strategy_id=payload.get("strategy_id"),
             trigger_reason=payload.get("trigger_reason"),
+            campaign_id=payload.get("campaign_id"),
         )
 
     @staticmethod

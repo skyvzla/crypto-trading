@@ -5,6 +5,7 @@ import pytest
 
 from trading_platform.shared.events import Bar1s, Kline, OrderIntent, Position
 from trading_platform.shared.risk import RiskConfig, RiskGuard
+from trading_platform.strategies.campaign_store import CampaignLease
 from trading_platform.strategies.spike_live import (
     CompositeEntryGate,
     SpikeExecutionCoordinator,
@@ -233,6 +234,11 @@ async def test_replay_and_live_do_not_prehang_exit_and_submit_it_reduce_only_mar
 
     executor = ExecutorStub()
     coordinator = _coordinator(live_strategy, live_account, executor)
+    campaign_id = "spike_short:BTCUSDT:1"
+    coordinator._owned_campaign_id = campaign_id
+    coordinator._owned_campaign_lease = CampaignLease(
+        campaign_id, "spike_short", "BTCUSDT", 1
+    )
     before_timeout = [_bar(timestamp, "110", "111") for timestamp in range(840_000, 900_000, 1_000)]
     timeout_bar = _bar(900_000, "110", "111")
 

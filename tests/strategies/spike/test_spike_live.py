@@ -1,5 +1,6 @@
-from decimal import Decimal
 import asyncio
+from dataclasses import replace
+from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -583,6 +584,28 @@ async def test_reduce_only_exit_waits_while_execution_stream_is_unavailable():
     assert risk.halted is True
 
 
+@pytest.mark.asyncio
+async def test_order_submission_requires_explicit_owned_campaign():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    executor = Mock(submit=AsyncMock())
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=executor,
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+    )
+
+    with pytest.raises(RuntimeError, match="without an owned Campaign"):
+        await coordinator._submit(_entry())
+
+    executor.submit.assert_not_awaited()
+    assert gate.condition("campaign") is False
+
+
 def test_stream_disconnect_closes_execution_gate_immediately():
     settings = SpikeLiveSettings(
         account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
@@ -799,6 +822,12 @@ async def test_entry_acquires_campaign_then_submits_and_exit_is_reduce_only():
     await coordinator._execute([_entry(), exit_intent], event_time=1_001)
 
     store.acquire.assert_awaited_once()
+    assert executor.submit.await_args_list[0].args[0].campaign_id == (
+        "spike_short:BTCUSDT:1000"
+    )
+    assert executor.submit.await_args_list[1].args[0].campaign_id == (
+        "spike_short:BTCUSDT:1000"
+    )
     assert executor.submit.await_args_list[0].kwargs == {
         "reference_price": Decimal("100"),
     }
@@ -914,7 +943,8 @@ async def test_halted_risk_rejects_entry_but_still_submits_reduce_only_exit():
     await coordinator._execute([_entry(), exit_intent], event_time=1_001)
 
     executor.submit.assert_awaited_once_with(
-        exit_intent, reference_price=Decimal("99")
+        replace(exit_intent, campaign_id="spike_short:BTCUSDT:1000"),
+        reference_price=Decimal("99"),
     )
 
 

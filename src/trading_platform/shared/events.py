@@ -171,6 +171,7 @@ class OrderIntent:
     # 元数据（用于日志和分析）
     strategy_id: str | None = None
     trigger_reason: str | None = None
+    campaign_id: str | None = None
 
 
 @dataclass
@@ -218,6 +219,7 @@ class Order:
     # 策略元数据
     strategy_id: str | None = None
     trigger_reason: str | None = None
+    campaign_id: str | None = None
 
 
 @dataclass

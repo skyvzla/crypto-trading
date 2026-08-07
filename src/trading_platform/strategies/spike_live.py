@@ -453,6 +453,14 @@ class SpikeExecutionCoordinator:
         return True
 
     async def _submit(self, intent: OrderIntent) -> None:
+        campaign_id = self._owned_campaign_id
+        if campaign_id is None:
+            self.gate.set_condition("campaign", False)
+            raise RuntimeError("cannot submit an order without an owned Campaign")
+        if intent.campaign_id not in {None, campaign_id}:
+            self.gate.set_condition("campaign", False)
+            raise RuntimeError("order intent Campaign does not match owned Campaign")
+        intent = replace(intent, campaign_id=campaign_id)
         record = await self.executor.submit(
             intent,
             reference_price=intent.price,

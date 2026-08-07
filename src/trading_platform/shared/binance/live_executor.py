@@ -292,4 +292,5 @@ class BinanceOrderExecutor:
             and Decimal(record.quantity) == intent.quantity
             and Decimal(record.price) == intent.price
             and bool(record.payload.get("reduce_only", False)) == intent.reduce_only
+            and record.payload.get("campaign_id") == intent.campaign_id
         )

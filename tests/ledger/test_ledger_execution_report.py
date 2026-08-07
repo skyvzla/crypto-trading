@@ -8,6 +8,7 @@ from trading_platform.ledger.binance_reports import (
     ExecutionReportError,
     parse_execution_report,
 )
+from trading_platform.shared.execution_recovery import OrderWALRecord
 
 
 def report(**overrides):
@@ -40,6 +41,26 @@ def report(**overrides):
     return value
 
 
+def wal_record(*, campaign_id="spike_short:BTCUSDT:1779999999000"):
+    return OrderWALRecord(
+        record_type="exchange_status",
+        recorded_at=1780000000000,
+        account_id="account-1",
+        client_order_id="client-1",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity="1.5",
+        price="100",
+        status="FILLED",
+        exchange_order_id="123",
+        payload={
+            "strategy_id": "spike_short",
+            "campaign_id": campaign_id,
+        },
+    )
+
+
 def test_parse_trade_report_requires_explicit_ownership_and_maps_facts():
     parsed = parse_execution_report(
         report(), account_id="account-1", strategy_id="spike_short"
@@ -56,6 +77,37 @@ def test_parse_trade_report_requires_explicit_ownership_and_maps_facts():
     assert parsed.trade.realized_pnl == Decimal("0.75")
     assert parsed.trade.is_maker is True
     assert parsed.trade.exchange_time.tzinfo is not None
+
+
+def test_parse_trade_report_uses_only_explicit_identity_matched_wal_campaign():
+    campaign_id = "spike_short:BTCUSDT:1779999999000"
+    parsed = parse_execution_report(
+        report(),
+        account_id="account-1",
+        strategy_id="spike_short",
+        wal_record=wal_record(campaign_id=campaign_id),
+    )
+
+    assert parsed.order.campaign_id == campaign_id
+    assert parsed.trade is not None
+    assert parsed.trade.campaign_id == campaign_id
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        wal_record(campaign_id=None),
+        wal_record(campaign_id="spike_short:ETHUSDT:1779999999000"),
+    ],
+)
+def test_parse_trade_report_rejects_missing_or_mismatched_wal_campaign(record):
+    with pytest.raises(ExecutionReportError, match="campaign_id"):
+        parse_execution_report(
+            report(),
+            account_id="account-1",
+            strategy_id="spike_short",
+            wal_record=record,
+        )
 
 
 def test_parse_non_trade_order_update_does_not_create_trade():
@@ -92,10 +144,12 @@ async def test_writer_passes_order_and_trade_as_one_db_operation():
         db, account_id="account-1", strategy_id="spike_short"
     )
 
-    result = await writer.handle(report())
+    record = wal_record()
+    result = await writer.handle(report(), record)
 
     assert result == (11, 22)
     db.apply_execution_report.assert_awaited_once()
     order, trade = db.apply_execution_report.await_args.args
     assert order.order_id == "123"
+    assert order.campaign_id == record.payload["campaign_id"]
     assert trade.trade_id == "987"

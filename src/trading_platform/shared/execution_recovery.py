@@ -127,6 +127,7 @@ class OrderWAL:
                 "strategy_id": intent.strategy_id,
                 "trigger_reason": intent.trigger_reason,
                 "reduce_only": intent.reduce_only,
+                "campaign_id": intent.campaign_id,
             },
         )
         self.append(record)

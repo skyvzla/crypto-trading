@@ -40,6 +40,16 @@ def test_wal_fsync_and_recover_latest(tmp_path):
     assert unknown.client_order_id == "cid-1"
 
 
+def test_wal_persists_explicit_campaign_identity(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = make_intent()
+    intent.campaign_id = "spike_short:BTCUSDT:1000"
+
+    record = wal.record_intent(intent, account_id="a-1", recorded_at=1000)
+
+    assert record.payload["campaign_id"] == "spike_short:BTCUSDT:1000"
+
+
 def test_wal_preserves_intent_created_at_across_order_statuses_and_restart(tmp_path):
     path = tmp_path / "orders.jsonl"
     wal = OrderWAL(path)

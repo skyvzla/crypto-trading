@@ -7,6 +7,7 @@ from trading_platform.ledger.db.models import (
     SubcategoryAdmission,
     SubcategoryAdmissionAudit,
     StrategyAuditRecord,
+    CampaignPnLSummary,
     VersionConflictError,
     create_connection_pool,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "SubcategoryAdmission",
     "SubcategoryAdmissionAudit",
     "StrategyAuditRecord",
+    "CampaignPnLSummary",
     "VersionConflictError",
     "create_connection_pool",
 ]

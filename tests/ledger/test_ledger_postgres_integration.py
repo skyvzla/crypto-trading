@@ -1,7 +1,8 @@
 """需要 LEDGER_TEST_DSN 指向可清理的真实 PostgreSQL。"""
 
 import os
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 from unittest.mock import AsyncMock, Mock
@@ -29,7 +30,7 @@ from trading_platform.shared.events import (
     OrderIntent,
     StrategyAuditEvent,
 )
-from trading_platform.shared.execution_recovery import OrderWAL
+from trading_platform.shared.execution_recovery import OrderWAL, OrderWALRecord
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.admission import SubcategoryAdmissionService
 
@@ -290,9 +291,11 @@ async def test_unconfirmed_controls_are_not_exposed(client):
 @pytest.mark.asyncio
 async def test_binance_execution_report_is_atomically_idempotent(ledger):
     suffix = uuid4().hex[:10]
+    account_id = f"account-{suffix}"
+    campaign_id = "spike_short:BTCUSDT:1779999999000"
     writer = BinanceExecutionReportLedger(
         ledger,
-        account_id=f"account-{suffix}",
+        account_id=account_id,
         strategy_id="spike_short",
     )
     order_data = {
@@ -320,16 +323,33 @@ async def test_binance_execution_report_is_atomically_idempotent(ledger):
         "T": 1780000000000,
         "O": 1779999999000,
     }
+    record = OrderWALRecord(
+        record_type="exchange_status",
+        recorded_at=1780000000000,
+        account_id=account_id,
+        client_order_id=f"client-{suffix}",
+        symbol="BTCUSDT",
+        side="SELL",
+        order_type="LIMIT",
+        quantity="1.5",
+        price="100",
+        status="FILLED",
+        exchange_order_id="123456",
+        payload={
+            "strategy_id": "spike_short",
+            "campaign_id": campaign_id,
+        },
+    )
 
-    first_order, first_trade = await writer.handle(order_data)
-    second_order, second_trade = await writer.handle(order_data)
+    first_order, first_trade = await writer.handle(order_data, record)
+    second_order, second_trade = await writer.handle(order_data, record)
 
     assert first_order == second_order
     assert first_trade and second_trade == 0
-    account_id = f"account-{suffix}"
     assert await ledger.count_orders(account_id=account_id) == 1
     assert await ledger.count_trades(account_id=account_id) == 1
     stored = (await ledger.get_orders(account_id=account_id))[0]
+    assert stored.campaign_id == campaign_id
     assert stored.status == "FILLED"
     assert stored.filled_quantity == Decimal("1.5")
     trade = (await ledger.get_trades(account_id=account_id))[0]
@@ -377,6 +397,219 @@ async def test_campaign_trade_query_is_scoped_to_wal_client_order_ids(ledger):
     assert sum((trade.commission for trade in trades), Decimal("0")) == Decimal(
         "0.03"
     )
+
+
+@pytest.mark.asyncio
+async def test_campaign_pnl_handles_partial_reductions_close_and_idempotency(
+    ledger, client
+):
+    suffix = uuid4().hex[:8]
+    account_id = f"pnl-{suffix}"
+    campaign_id = f"spike_short:AKEUSDT:{int(uuid4().int % 10**12)}"
+    started_ms = 1_780_000_000_000
+    released_ms = started_ms + 5_000
+    base_time = datetime.fromtimestamp(started_ms / 1000, tz=timezone.utc)
+    await ledger.insert_strategy_audit_events(
+        [
+            StrategyAuditEvent(
+                event_time=started_ms,
+                event_type="campaign_acquired",
+                symbol="AKEUSDT",
+                strategy_id="spike_short",
+                campaign_id=campaign_id,
+                details={},
+            )
+        ],
+        account_id=account_id,
+    )
+
+    async def insert_fill(
+        trade_id: str,
+        side: str,
+        quantity: str,
+        price: str,
+        commission: str,
+        realized_pnl: str,
+        offset_seconds: int,
+    ) -> int:
+        quantity_value = Decimal(quantity)
+        price_value = Decimal(price)
+        return await ledger.insert_trade(
+            Trade(
+                account_id=account_id,
+                strategy_id="spike_short",
+                symbol="AKEUSDT",
+                trade_id=trade_id,
+                order_id=f"order-{trade_id}",
+                client_order_id=f"client-{suffix}-{trade_id}",
+                campaign_id=campaign_id,
+                side=side,
+                position_side="BOTH",
+                quantity=quantity_value,
+                price=price_value,
+                quote_quantity=quantity_value * price_value,
+                commission=Decimal(commission),
+                commission_asset="USDT",
+                realized_pnl=Decimal(realized_pnl),
+                is_maker=False,
+                exchange_time=base_time + timedelta(seconds=offset_seconds),
+            )
+        )
+
+    await insert_fill("sell-1", "SELL", "1", "100", "0.01", "0", 1)
+    await insert_fill("sell-2", "SELL", "0.5", "102", "0.01", "0", 2)
+    await insert_fill("buy-1", "BUY", "0.5", "90", "0.02", "5", 3)
+    await insert_fill("buy-2", "BUY", "0.5", "80", "0.02", "10", 4)
+
+    partial = await ledger.get_campaign_pnl(
+        account_id=account_id,
+        strategy_id="spike_short",
+        campaign_id=campaign_id,
+    )
+    assert partial is not None
+    assert partial.trade_count == 4
+    assert partial.sell_quantity == Decimal("1.5")
+    assert partial.sell_avg_price.quantize(Decimal("0.00000001")) == Decimal(
+        "100.66666667"
+    )
+    assert partial.buy_quantity == Decimal("1.0")
+    assert partial.buy_avg_price == Decimal("85")
+    assert partial.total_commission == Decimal("0.06")
+    assert partial.gross_realized_pnl == Decimal("15")
+    assert partial.net_realized_pnl == Decimal("14.94")
+    assert partial.remaining_quantity == Decimal("0.5")
+    assert partial.has_open_quantity is True
+    assert partial.closed_at is None
+    assert partial.released_at is None
+
+    assert await insert_fill(
+        "buy-2", "BUY", "0.5", "80", "0.02", "10", 4
+    ) == 0
+    await insert_fill("buy-3", "BUY", "0.5", "70", "0.02", "15", 5)
+    await ledger.insert_strategy_audit_events(
+        [
+            StrategyAuditEvent(
+                event_time=released_ms,
+                event_type="campaign_released",
+                symbol="AKEUSDT",
+                strategy_id="spike_short",
+                campaign_id=campaign_id,
+                details={},
+            )
+        ],
+        account_id=account_id,
+    )
+
+    not_owned = await client.get(
+        f"/api/v1/campaigns/{campaign_id}/pnl",
+        params={"account_id": "other-account", "strategy_id": "spike_short"},
+    )
+    assert not_owned.status_code == 404
+    response = await client.get(
+        f"/api/v1/campaigns/{campaign_id}/pnl",
+        params={"account_id": account_id, "strategy_id": "spike_short"},
+    )
+    assert response.status_code == 200
+    complete = response.json()
+    assert complete["trade_count"] == 5
+    assert Decimal(complete["sell_quantity"]) == Decimal("1.5")
+    assert Decimal(complete["buy_quantity"]) == Decimal("1.5")
+    assert Decimal(complete["buy_avg_price"]) == Decimal("80")
+    assert Decimal(complete["total_commission"]) == Decimal("0.08")
+    assert Decimal(complete["gross_realized_pnl"]) == Decimal("30")
+    assert Decimal(complete["net_realized_pnl"]) == Decimal("29.92")
+    assert Decimal(complete["remaining_quantity"]) == Decimal("0")
+    assert complete["has_open_quantity"] is False
+    assert complete["closed_at"] is not None
+    assert complete["acquired_at"] is not None
+    assert complete["released_at"] is not None
+    assert complete["lifecycle_duration_ms"] == 5_000
+
+
+@pytest.mark.asyncio
+async def test_order_and_trade_campaign_attribution_is_immutable(ledger):
+    suffix = uuid4().hex[:8]
+    account_id = f"immutable-{suffix}"
+    now = datetime.now(timezone.utc)
+    order = Order(
+        account_id=account_id,
+        strategy_id="spike_short",
+        symbol="AKEUSDT",
+        order_id=f"order-{suffix}",
+        client_order_id=f"client-{suffix}",
+        campaign_id=f"spike_short:AKEUSDT:{int(uuid4().int % 10**12)}",
+        side="SELL",
+        order_type="LIMIT",
+        quantity=Decimal("1"),
+        price=Decimal("1"),
+        status="FILLED",
+        exchange_created_at=now,
+    )
+    trade = Trade(
+        account_id=account_id,
+        strategy_id="spike_short",
+        symbol="AKEUSDT",
+        trade_id=f"trade-{suffix}",
+        order_id=order.order_id,
+        client_order_id=order.client_order_id,
+        campaign_id=order.campaign_id,
+        side="SELL",
+        position_side="BOTH",
+        quantity=Decimal("1"),
+        price=Decimal("1"),
+        quote_quantity=Decimal("1"),
+        commission=Decimal("0.01"),
+        commission_asset="USDT",
+        realized_pnl=Decimal("0"),
+        exchange_time=now,
+    )
+    await ledger.insert_order(order)
+    await ledger.insert_trade(trade)
+    other_campaign = f"spike_short:AKEUSDT:{int(uuid4().int % 10**12)}"
+
+    with pytest.raises(ValueError, match="order Campaign attribution is immutable"):
+        await ledger.insert_order(replace(order, campaign_id=other_campaign))
+    with pytest.raises(ValueError, match="trade Campaign attribution is immutable"):
+        await ledger.insert_trade(replace(trade, campaign_id=other_campaign))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("side", "commission_asset"),
+    [("SELL", "BNB"), ("BUY", "USDT")],
+)
+async def test_campaign_pnl_rejects_unconvertible_or_inconsistent_facts(
+    ledger, side, commission_asset
+):
+    suffix = uuid4().hex[:8]
+    campaign_id = f"spike_short:AKEUSDT:{int(uuid4().int % 10**12)}"
+    await ledger.insert_trade(
+        Trade(
+            account_id=f"invalid-pnl-{suffix}",
+            strategy_id="spike_short",
+            symbol="AKEUSDT",
+            trade_id=f"trade-{suffix}",
+            order_id=f"order-{suffix}",
+            client_order_id=f"client-{suffix}",
+            campaign_id=campaign_id,
+            side=side,
+            position_side="BOTH",
+            quantity=Decimal("1"),
+            price=Decimal("1"),
+            quote_quantity=Decimal("1"),
+            commission=Decimal("0.01"),
+            commission_asset=commission_asset,
+            realized_pnl=Decimal("0"),
+            exchange_time=datetime.now(timezone.utc),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="requires realized PnL"):
+        await ledger.get_campaign_pnl(
+            account_id=f"invalid-pnl-{suffix}",
+            strategy_id="spike_short",
+            campaign_id=campaign_id,
+        )
 
 
 @pytest.mark.asyncio
@@ -464,6 +697,7 @@ async def test_binance_runtime_callbacks_close_wal_order_trade_position_loop(
     suffix = uuid4().hex[:10]
     account_id = f"account-{suffix}"
     client_order_id = f"client-{suffix}"
+    campaign_id = "spike_short:BTCUSDT:1779999998000"
     wal = OrderWAL(tmp_path / "orders.jsonl")
     intent = wal.record_intent(
         OrderIntent(
@@ -473,6 +707,7 @@ async def test_binance_runtime_callbacks_close_wal_order_trade_position_loop(
             quantity=Decimal("1.5"),
             client_order_id=client_order_id,
             strategy_id="spike_short",
+            campaign_id=campaign_id,
         ),
         account_id=account_id,
         recorded_at=1779999998000,
@@ -530,6 +765,12 @@ async def test_binance_runtime_callbacks_close_wal_order_trade_position_loop(
     assert "BTCUSDT" not in guard.blocked_symbols
     assert await ledger.count_orders(account_id=account_id) == 1
     assert await ledger.count_trades(account_id=account_id) == 1
+    assert (
+        await ledger.get_orders(account_id=account_id)
+    )[0].campaign_id == campaign_id
+    assert (
+        await ledger.get_trades(account_id=account_id)
+    )[0].campaign_id == campaign_id
     positions = await ledger.get_positions(account_id=account_id)
     assert len(positions) == 1
     assert positions[0].quantity == Decimal("-1.5")
