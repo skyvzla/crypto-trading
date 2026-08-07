@@ -145,12 +145,12 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、✅ 部分成交/撤单竞态/迟到回报自动化；⏳ 外部 one-way testnet 验收 | Phase 2/3 |
 | **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/具体账户进程/订单仓位启动门禁/规则量化/重连顺序；⏳外部部分成交与保护退出 | Phase 3 |
 | **持仓退出** | ✅ D-007 仅用于 replay/testnet 执行验证；⏳ 最新动能、origin 减半、趋势清仓及参数标定；未完成前 live 禁止启动 | Phase 2/3 |
-| **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞；⏳保证金、日亏损、数据延迟、紧急停止 | Phase 3 |
+| **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞/全局 halt；⏳保证金、日亏损、数据延迟 | Phase 3 |
 | **监听池** | ✅ 5 分钟扫描编排及 subcategory 同节拍刷新；⏳ 真实扫描器、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/数据集缺失拒绝/窗口缺口门禁/未平仓 MTM；⏳ 部分成交、滑点、同秒顺序最终口径 | Phase 2 |
 | **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ 具体进程已接 Binance 回报、WAL、风险和账本；⏳ 完整退出 PnL | Phase 2/4 |
 | **Web** | ✅ subcategory 控制已接具体进程、fail-closed 刷新与关闭撤单、账本、PnL、运行状态；⏳ 身份权限 | Phase 4 |
-| **运维** | testnet/live 隔离、监控、告警、凭据、回滚、紧急平仓 | Phase 5-6 |
+| **运维** | ✅ testnet/live 隔离、专用账户紧急清仓脚本和运行手册；⏳监控、告警、凭据、回滚及 one-way 外部演练 | Phase 5-6 |
 
 ## 5. 测试现状与缺口
 
@@ -174,6 +174,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过
+- `binance_testnet_flatten.py` 离线单测通过；使用当前 testnet 账户只读前置检查时因 Hedge Mode
+  返回 `HEDGE_MODE_UNSUPPORTED`，未产生撤单或新订单
 
 尚未验证：
 
@@ -181,7 +183,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - subcategory 准入服务接入具体 testnet/live 账户进程及外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
-- Binance Futures testnet one-way 账户上的预挂、撤单、成交、部分成交和 reduce-only 退出
+- Binance Futures testnet one-way 账户上的预挂、撤单、成交、部分成交和 reduce-only 退出；
+  当前账户仍为 Hedge Mode，紧急清仓工具也会在写入前拒绝
 
 ## 6. 明确不做
 
