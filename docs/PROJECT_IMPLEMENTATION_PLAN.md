@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.17
+> 版本：v1.18
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -31,6 +31,21 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 `docs/archive/` 中的内容仅供追溯，不作为实现或验收依据。未写入决策记录“已确认”
 部分的规则，不得根据旧文档或常见做法自行补全。
 
+### 2.1 策略冻结与数据评审门禁
+
+自 2026-08-07 起，策略层暂时冻结为 `candidate-v1`。在用户根据具体交易数据
+确认问题之前，不进行参数搜索、收益寻优、新退出指标猜测或多样本
+walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
+
+- 信号时间、三档预挂价和每笔实际成交；
+- 首次成交、origin、减仓/清仓时间及触发原因；
+- 触发时的价格路径、候选指标快照和执行状态；
+- 卖出/买回均价、数量、手续费和净 PnL。
+
+只有在用户确认具体问题和待验证规则后，才新增一个单变量实验，并同时
+保留基线逐笔对照。执行安全、故障注入、恢复和账本一致性测试不属于
+策略实验，可继续实施。
+
 ## 3. 当前基线
 
 截至 2026-08-07：
@@ -48,7 +63,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
   `--bar1s-time-shift-hours 8` 时修正，不自动猜测数据时区；
 - candidate-v1 已接入 replay/testnet 共用策略核心，Kline 只更新指标，退出订单统一由
   下一根完成 1s Bar 按可执行价格产生；原 candidate-v1 阈值来源受错位数据污染，当前
-  只能作为执行候选，必须在对齐数据上重新标定和 walk-forward，不能作为收益或生产结论；
+  只能作为执行候选和数据观察基线；先完成人工逐笔评审，后续实验需用户再次确认，
+  当前不能作为收益或生产结论；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
 - Binance Futures testnet 公共行情短时 smoke 已真实接收 11 条完成 1s Bar 和一条新完成 1m Kline，
@@ -88,6 +104,12 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 - Candidate 退出状态已写入 Redis Campaign；退出意图先进入 WAL/提交器，再持久化状态。
   重启时 Redis、WAL、PostgreSQL 实际成交和当前仓位必须互相印证，不一致直接 fail-closed；
   残余入场单全部终态并刷新交易所仓位前不生成退出，candidate 与轮换共用单一退出在途约束。
+- 订单 TTL 已绑定不可变的首次 intent 时间，状态更新和重启 REST 对账不会延长
+  预挂单寿命；旧 WAL 从追加日志的首条 intent 兼容恢复。
+- 终态 WAL 新增账本 ack 确认点；`FILLED/CANCELLED/EXPIRED` 在订单、成交数量和
+  仓位全部同步成功前不会 ack，崩溃后仍会重试补账。
+- User Stream 会跟踪所有账本/仓位回调；回调异常立即关闭 execution gate 并终止
+  Spike 进程，关机在有界时间内排空回调，超时会显式失败。
 
 当前结果证明离线入场链路、Redis/PostgreSQL 内部服务集成、Binance testnet 公共行情短时
 链路、独立 REST harness 及完整策略进程成交恢复可用；异常断流故障注入和正式退出规则仍未
@@ -120,8 +142,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | replay runner 与报告 | 部分完成 | 滑点、同秒顺序及对齐后绩效口径 | 已输出订单、成交、持仓、汇总、策略审计；LIMIT 支持跨 Bar 部分成交，MARKET 使用 Taker 费用，可选交易所 tick/step 快照 |
 | 全局交易准入与首成交计时 | 完成 | 持续做外部故障回归 | 已验证全局互斥、Redis 原子租约、带仓重启首成交/手续费恢复及 D-009 |
 | 入场幂等与失效撤单 | 完成 | 持续做交易所回归 | replay 与 AKEUSDT testnet 已验证预挂、幂等、部分成交、全部成交、撤单和终态 WAL 重启 |
-| User Stream 与启动对账 | 部分完成 | 外部断流和持续未知回报故障注入 | 已完成真实订单/成交/仓位回报、REST 回补、断流门禁、TRADE 幂等及带仓 Campaign timing 恢复 |
-| 持仓保护与退出 | 部分完成 | 对齐后重新标定、walk-forward、testnet 异常执行 | candidate-v1 已实现 origin 减半、90s 后时间/动能退出及 5m/15m 突破退出；参数仅为候选，旧标定已失效，live 继续拒绝 |
+| User Stream 与启动对账 | 部分完成 | 外部断流和持续未知回报故障注入 | 已完成真实回报、REST 回补、终态 WAL 补账 ack、断流门禁、回调 fatal/有界排空、TRADE 幂等及带仓 Campaign timing 恢复 |
+| 持仓保护与退出 | 部分完成 | 先与用户逐轮评审买卖点、指标快照和 PnL；未确认前暂停调参 | candidate-v1 已实现 origin 减半、90s 后时间/动能退出及 5m/15m 突破退出；参数仅为候选，旧标定已失效，live 继续拒绝 |
 | 账户级风控 | 部分完成 | 保证金、日亏损、数据延迟、急停 | 已限制持仓价值、币种数、杠杆并阻塞未知订单 symbol；关键事实不一致会全局 halt 新开仓，但保留 reduce-only 退出 |
 | testnet/live 适配 | 部分完成 | 完整策略进程真实多轮验证、最新退出策略 | 已有正式进程与 `BinanceStrategyAccount`；REST harness 已在 one-way testnet 多轮写入；未冻结退出前 live 拒绝启动 |
 
@@ -177,7 +199,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 D-007、candidate-v1 状态机、部分成交、交易所量化和 Maker/Taker 费用。AKEUSDT DuckDB
 对账证实 1s 事件整体早 8 小时，旧端到端 replay 和退出标定已归档为无效；runner 现要求
 显式时间修正并写入运行元数据，对齐回放和 39 个同开仓轮次配对已完成。剩余：先共同查看
-差异集中轮次，再决定需要复核的指标；之后才进入多样本 walk-forward、滑点和同秒顺序口径。
+差异集中轮次的价格路径、指标快照和执行事实，再由用户确认需要验证的规则。
+多样本 walk-forward、滑点参数实验和新退出规则当前暂停。
 
 退出条件：同一事件序列在 replay 与实时适配器中产生相同订单意图；所有固定案例通过；
 任何 PnL 均能追溯到订单、成交和费用。
@@ -200,6 +223,8 @@ one-way testnet 账户已补预挂撤单、3 轮成交/reduce-only 退出、紧�
 `NEW/PARTIALLY_FILLED/FILLED/CANCELED`、TRADE、成交仓位确认、Campaign 恢复/释放和终态
 WAL 空仓重启。撤单异常后会按原 client ID 查询交易所，只有明确终态才解除门禁；User Stream
 断流立即关闭执行门禁，重连对账后才恢复；带仓重启恢复 timing、手续费和 trade-id 幂等。
+订单 TTL 现固定为首次 intent 时间，不会因重启延长；未获账本 ack 的终态 WAL 会继续
+回补 PostgreSQL；User Stream 业务回调失败会进入进程级 fatal，关机必须排空或显式报超时。
 剩余外部断流和持续未知回报故障注入，以及正式保护退出规则验收。
 
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
