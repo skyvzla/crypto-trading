@@ -44,6 +44,7 @@ class BinanceStrategyAccount:
         self._position_update_ms: dict[str, int] = {}
         self._pending_position_update_ms: dict[str, int] = {}
         self._commissions: dict[str, Decimal] = {}
+        self._processed_trade_ids: set[tuple[str, str]] = set()
         self._cancel_requests: set[str] = set()
         self._cancel_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
@@ -210,18 +211,14 @@ class BinanceStrategyAccount:
         record = self.wal.recover_latest().get(client_order_id)
         if record is None or record.account_id != self.account_id:
             return None
+        raw_trade_id = order_data.get("t")
+        if raw_trade_id in (None, -1, "-1"):
+            return None
+        trade_id = str(raw_trade_id)
         fill_time = int(order_data.get("T") or self._now_ms())
-        if fill_time > self._position_update_ms.get(record.symbol, -1):
-            self._pending_position_update_ms[record.symbol] = max(
-                fill_time,
-                self._pending_position_update_ms.get(record.symbol, -1),
-            )
         commission = self._decimal(order_data, "n", default="0")
-        self._commissions[record.symbol] = (
-            self._commissions.get(record.symbol, Decimal("0")) + commission
-        )
-        return Fill(
-            fill_id=str(order_data.get("t")),
+        fill = Fill(
+            fill_id=trade_id,
             order_id=record.exchange_order_id or record.client_order_id,
             symbol=record.symbol,
             side=record.side,
@@ -232,6 +229,19 @@ class BinanceStrategyAccount:
             fill_time=fill_time,
             is_maker=bool(order_data.get("m", False)),
         )
+        trade_key = (record.symbol, trade_id)
+        if trade_key in self._processed_trade_ids:
+            return None
+        self._processed_trade_ids.add(trade_key)
+        if fill_time > self._position_update_ms.get(record.symbol, -1):
+            self._pending_position_update_ms[record.symbol] = max(
+                fill_time,
+                self._pending_position_update_ms.get(record.symbol, -1),
+            )
+        self._commissions[record.symbol] = (
+            self._commissions.get(record.symbol, Decimal("0")) + commission
+        )
+        return fill
 
     def all_orders_terminal(self, symbol: str) -> bool:
         records = [

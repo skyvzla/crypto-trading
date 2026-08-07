@@ -445,6 +445,82 @@ def test_trade_report_returns_strategy_fill(tmp_path):
     assert fill.quantity == Decimal("0.25")
 
 
+def test_duplicate_trade_report_is_ignored_without_duplicate_commission(tmp_path):
+    account, _, wal, _ = _account(tmp_path)
+    intent_record = wal.record_intent(_intent(), account_id="spike-test", recorded_at=1_000)
+    wal.record_exchange_status(
+        intent_record, {"status": "FILLED", "orderId": 42}, recorded_at=1_100
+    )
+    report = {
+        "c": "cid-1",
+        "x": "TRADE",
+        "l": "0.25",
+        "L": "101",
+        "n": "0.01",
+        "N": "USDT",
+        "t": 7,
+        "T": 1_200,
+    }
+
+    first = account.handle_execution_report(report)
+    duplicate = account.handle_execution_report(dict(report))
+
+    assert first is not None
+    assert duplicate is None
+    assert account._commissions["BTCUSDT"] == Decimal("0.01")
+
+
+def test_distinct_trade_reports_are_each_returned_and_counted(tmp_path):
+    account, _, wal, _ = _account(tmp_path)
+    intent_record = wal.record_intent(_intent(), account_id="spike-test", recorded_at=1_000)
+    wal.record_exchange_status(
+        intent_record,
+        {"status": "PARTIALLY_FILLED", "orderId": 42},
+        recorded_at=1_100,
+    )
+    base = {
+        "c": "cid-1",
+        "x": "TRADE",
+        "l": "0.25",
+        "L": "101",
+        "n": "0.01",
+        "N": "USDT",
+        "T": 1_200,
+    }
+
+    first = account.handle_execution_report({**base, "t": 7})
+    second = account.handle_execution_report({**base, "t": 8})
+
+    assert first is not None and first.fill_id == "7"
+    assert second is not None and second.fill_id == "8"
+    assert account._commissions["BTCUSDT"] == Decimal("0.02")
+
+
+def test_trade_id_zero_is_valid_and_malformed_first_report_does_not_poison_dedup(tmp_path):
+    account, _, wal, _ = _account(tmp_path)
+    intent_record = wal.record_intent(_intent(), account_id="spike-test", recorded_at=1_000)
+    wal.record_exchange_status(
+        intent_record, {"status": "PARTIALLY_FILLED", "orderId": 42}, recorded_at=1_100
+    )
+    report = {
+        "c": "cid-1",
+        "x": "TRADE",
+        "l": "0.25",
+        "L": "invalid",
+        "n": "0.01",
+        "N": "USDT",
+        "t": 0,
+        "T": 1_200,
+    }
+
+    with pytest.raises(ValueError, match="invalid decimal field: L"):
+        account.handle_execution_report(report)
+
+    fill = account.handle_execution_report({**report, "L": "101"})
+    assert fill is not None and fill.fill_id == "0"
+    assert account._commissions["BTCUSDT"] == Decimal("0.01")
+
+
 def test_unresolved_intent_keeps_account_fail_closed(tmp_path):
     account, _, wal, _ = _account(tmp_path)
     wal.record_intent(_intent(), account_id="spike-test", recorded_at=1_000)
