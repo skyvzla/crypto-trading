@@ -9,11 +9,11 @@
 项目已形成“历史数据预热 -> Spike 信号 -> 三档订单 -> 成交/持仓 -> 报告”的
 可运行 replay 入场链路；账本查询与最小 Web 控制闭环已经可用。Spike 的 testnet/live
 进程已装配行情预热、User Stream、WAL、PostgreSQL、Redis Campaign、subcategory、TTL
-撤单、启动对账和周期安全扫描。正式退出仍未完成：testnet 仅允许 D-007 简化退出用于
-执行验证，最新动能/趋势退出参数冻结前，`live` 会拒绝启动。
+撤单、启动对账和周期安全扫描。candidate-v1 可在 replay/testnet 作为候选执行验证，
+D-007 保留为简单执行测试；对齐数据重新标定并冻结前，`live` 会拒绝启动。
 
-当前本地全量测试为 `293 passed, 12 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-全量测试为 `301 passed, 4 skipped, 1 warning`。测试已按
+当前本地全量测试为 `340 passed, 15 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
+全量为 `356 passed, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -26,14 +26,13 @@ User Stream `TRADE`、账户仓位确认、剩余档撤单、外部 reduce-only 
 空仓启动与人工重启也已通过：User Stream listenKey 正常关闭/重建，市场订阅卸载/恢复后
 1s/1m/5m 三个流重新 ready。
 
-外部 DuckDB 历史源端到端 replay 已验证。固定基准为 AKEUSDT、UTC `2026-07-01` 至
+外部 DuckDB 历史源已完成时间一致性审计。固定范围为 AKEUSDT、UTC `2026-07-01` 至
 `2026-08-01`、从 `2026-06-30 08:00 UTC` 开始 16 小时预热、DuckDB 只读源、
-总名义 `1000 USDT`。运行共处理
-`1,945,737` 个事件：完成 1s Bar `1,887,977`、1m Kline `45,600`、5m Kline `9,120`、
-15m Kline `3,040`。D-004 修复后结果为 `3 orders / 3 fills / 1 OPEN`，入场名义约
-`1000 USDT`，全程只有一个 Campaign。期末未实现 PnL `-15,771.98 USDT` 是 OPEN
-仓位的末价诊断值，不是绩效基线；D-008 盈利管理及完整退出/保护规则未确认前，不据此
-评价策略收益。
+总名义 `1000 USDT`。审计发现 1s 序列相对 Kline 整体早 8 小时；旧报告混合了不同时刻
+的信号指标与执行价格，已全部归档为无效。runner 现支持显式 1s 时间修正并写入
+`run_meta.json`；未带 `bar1s_time_shift_ms: 28800000` 的旧 AKE 报告不得引用。
+candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈值来源同步失效，
+对齐回放、重新标定和 walk-forward 完成前不评价收益，live 仍无条件拒绝。
 
 当前文档优先级：
 
@@ -57,7 +56,7 @@ User Stream `TRADE`、账户仓位确认、剩余档撤单、外部 reduce-only 
 | 执行客户端 | Binance REST、签名、限速、User Data Stream、规则量化、WAL | live/test 进程已接入；REST harness 已真实写入，完整进程空仓启动/重启已验收，外部订单回报待完成 |
 | 账本 | PostgreSQL 订单/成交/持仓、PnL、subcategory 审计和 FastAPI 查询 | 已通过真实 PostgreSQL 服务级集成 |
 | 风控 | 总持仓价值、币种数量、杠杆上限、未知订单币种阻塞 | 仅最小基础能力 |
-| 回测 | UTC 虚拟时钟、16h 预热、简化限价成交、持仓、费用和策略审计报告 | AKEUSDT 外部只读 DuckDB 端到端 replay 已验证；退出与绩效口径仍未冻结 |
+| 回测 | UTC 虚拟时钟、16h 预热、部分成交、交易所量化、持仓、费用和策略审计报告 | AKEUSDT 已发现并显式修正 1s `+8h`；对齐后的退出与绩效口径仍未冻结 |
 | Web | 运行状态、订单、成交、持仓、PnL、subcategory 控制 | V1 已实现，身份权限待确认 |
 | 实验基线 | 100 标的历史研究脚本和报告 | 可作事实对照，不能作生产结论 |
 
@@ -91,11 +90,13 @@ User Stream `TRADE`、账户仓位确认、剩余档撤单、外部 reduce-only 
 
 **已补齐的实时适配**：
 - `BinanceStrategyAccount` 将 WAL、订单回报和仓位快照投影为同步 `StrategyAccount`；
-- `spike-live` 进程已装配历史 Kline 预热、实时行情、User Stream、账本、Campaign 和准入；
+- `spike-live` 进程已装配历史 Kline 预热、实时 1m/5m/15m 行情、User Stream、账本、Campaign 和准入；
 - 启动强制专用账户、one-way 模式、交易所规则快照和订单/仓位一致性；关机先撤销未终态入场单；
 - 本地与 Compose 已覆盖部分成交、撤单竞态、重连顺序、迟到回报、成交后仓位确认和全局 halt；
   one-way testnet 已验证完整策略进程成交和保护退出。User Stream 断流会立即关闭执行门禁，
   只有重连对账完成才恢复；带仓重启从 Redis/WAL/PostgreSQL 恢复 timing、手续费和成交幂等。
+  Candidate 退出前会按 Campaign 撤净全部入场单并刷新交易所仓位；未知入场单继续阻挡退出，
+  已终态但仍有残仓的退出允许补清，candidate 与轮换不会并发生成两张退出单。
   首次停机发现“交易所已成交但本地 WAL
   尚为部分成交”的撤单竞态，现会在撤单异常后按原 client ID 查询交易所，明确终态才消解。
 
@@ -151,10 +152,10 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁、真实成交后恢复及空仓释放 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、三档幂等、部分成交/撤单竞态/迟到回报自动化及完整进程外部验收 | Phase 2/3 |
 | **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/订单仓位启动门禁/规则量化/重连顺序/外部部分成交和保护退出；⏳异常断流故障注入 | Phase 3 |
-| **持仓退出** | ✅ D-007 仅用于 replay/testnet 执行验证；⏳ 最新动能、origin 减半、趋势清仓及参数标定；未完成前 live 禁止启动 | Phase 2/3 |
+| **持仓退出** | ✅ candidate-v1 状态机、特征、origin 减半、趋势/动能/时间退出及 Redis/WAL 恢复；⏳ 对齐数据重新标定与 walk-forward；live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞/全局 halt；⏳保证金、日亏损、数据延迟 | Phase 3 |
 | **监听池** | ✅ 5 分钟扫描编排及 subcategory 同节拍刷新；⏳ 真实扫描器、监听租约、保护性监听 | Phase 1/4 |
-| **回测可信度** | ✅ 无未来数据/预热/数据集缺失拒绝/窗口缺口门禁/未平仓 MTM；⏳ 部分成交、滑点、同秒顺序最终口径 | Phase 2 |
+| **回测可信度** | ✅ 无未来数据/预热/缺失拒绝/窗口缺口/部分成交/显式 1s 时间修正；⏳ 滑点、同秒顺序及多数据源一致性门禁 | Phase 2 |
 | **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ 具体进程已接 Binance 回报、WAL、风险和账本；⏳ 完整退出 PnL | Phase 2/4 |
 | **Web** | ✅ subcategory 控制已接具体进程、fail-closed 刷新与关闭撤单、账本、PnL、运行状态；⏳ 身份权限 | Phase 4 |
 | **运维** | ✅ testnet/live 隔离、专用账户紧急清仓脚本和运行手册；⏳监控、告警、凭据、回滚及 one-way 外部演练 | Phase 5-6 |
@@ -163,8 +164,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run pytest -q`：`293 passed, 12 skipped, 1 warning`
-- 真实 Redis/PostgreSQL 容器全量：`301 passed, 4 skipped, 1 warning`
+- 本地 `uv run pytest -q`：`340 passed, 15 skipped, 1 warning`
+- Compose 真实 PostgreSQL/Redis：`356 passed, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - AKEUSDT 外部执行追加 1 轮非市价 LIMIT 撤单和 3 轮可成交 LIMIT 开空/reduce-only MARKET 平仓；最终独立检查为 0 挂单、0 仓位
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
@@ -178,9 +179,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
   `ACCOUNT_UPDATE` 随后写入同账户持仓
 - 真实 PostgreSQL 准入回归：Web/数据库开关关闭后策略门禁 fail-closed，并只撤销已知未终态
   入场单；退出单、已有仓位和未知提交保持各自管理路径
-- AKEUSDT 外部 DuckDB 只读 replay：UTC `2026-07-01` 至 `2026-08-01`，16h 预热，
-  处理 `1,945,737` 个事件；D-004 修复后为 `3 orders / 3 fills / 1 OPEN`、单 Campaign，
-  入场名义约 `1000 USDT`
+- AKEUSDT DuckDB 时间一致性审计：1s 与 1m 同分钟中位相对误差约 `2.47%`；1s 显式
+  `+8h` 后降至 `0%`。旧 replay/标定已归档，对齐回放必须记录该修正
 - Python 编译检查通过
 - Compose 配置解析通过
 - 核心模块导入通过

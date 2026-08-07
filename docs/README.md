@@ -8,6 +8,7 @@
 2. [当前三层架构](ARCHITECTURE.md)：行情数据层、策略执行层、账本与 Web 控制层的职责边界。
 3. [项目完整实施计划](PROJECT_IMPLEMENTATION_PLAN.md)：功能状态、阶段、依赖、验收和风险门禁。
 4. [项目功能盘点](PROJECT_GAP_ANALYSIS.md)：当前源码与测试对应的实现快照。
+5. [AKEUSDT 2026 年 7 月对齐 Replay](AKEUSDT_2026_07_ALIGNED_REPLAY.md)：当前有效的逐笔结果与已定位问题。
 
 ## 文档规则
 

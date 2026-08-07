@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.16
+> 版本：v1.17
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -37,18 +37,18 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 当前本地全量测试为 `293 passed, 12 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-  全量测试为 `301 passed, 4 skipped, 1 warning`；
+- 当前本地全量测试为 `340 passed, 15 skipped, 1 warning`；Compose 真实
+  PostgreSQL/Redis 全量为 `356 passed, 1 warning`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
-- 真实 replay 基准已固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
+- replay 数据范围固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
   `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
-  `1000 USDT` 总名义；共处理 `1,945,737`
-  个事件，其中完成 1s Bar `1,887,977`、1m Kline `45,600`、5m Kline `9,120`、
-  15m Kline `3,040`；
-- D-004 全局单 Campaign 修复后，上述真实 replay 产生 `3 orders / 3 fills / 1 OPEN`，
-  入场名义约 `1000 USDT`，且全程只有一个 Campaign；期末未实现 PnL
-  `-15,771.98 USDT` 仅是当前 OPEN 仓位按末价计价的诊断值，不是绩效基线。D-008
-  盈利管理及完整退出/保护规则尚未确认，当前结果不能用于收益评价；
+  `1000 USDT` 总名义。2026-08-07 数据对账证实 DuckDB 的 1s 序列相对 1m Kline
+  整体早 8 小时；同时间对齐的价格中位相对误差从约 `2.47%` 降至 `0%`。旧 replay、
+  legacy 对照和退出标定报告均已归档为无效；新 runner 只在显式传入
+  `--bar1s-time-shift-hours 8` 时修正，不自动猜测数据时区；
+- candidate-v1 已接入 replay/testnet 共用策略核心，Kline 只更新指标，退出订单统一由
+  下一根完成 1s Bar 按可执行价格产生；原 candidate-v1 阈值来源受错位数据污染，当前
+  只能作为执行候选，必须在对齐数据上重新标定和 walk-forward，不能作为收益或生产结论；
 - 行情层已完成 testnet 隔离、订阅刷新、combined stream、重连、多 Bar 发布、Redis
   Pub/Sub/Kline Store 服务级集成和依赖健康检查；Pub/Sub 零订阅者检测、状态 API 和告警日志已补齐；
 - Binance Futures testnet 公共行情短时 smoke 已真实接收 11 条完成 1s Bar 和一条新完成 1m Kline，
@@ -85,6 +85,9 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 - Redis 全局 Campaign 互斥存储组件已完成：原子获取、不自动过期、仅持有者可释放；
   已接入 Spike 进程。真实成交回报先于 `ACCOUNT_UPDATE` 时保持 pending，只有交易所
   订单、成交确认和仓位事实均终态后才释放；撤单竞态、迟到成交和重连顺序已有回归覆盖。
+- Candidate 退出状态已写入 Redis Campaign；退出意图先进入 WAL/提交器，再持久化状态。
+  重启时 Redis、WAL、PostgreSQL 实际成交和当前仓位必须互相印证，不一致直接 fail-closed；
+  残余入场单全部终态并刷新交易所仓位前不生成退出，candidate 与轮换共用单一退出在途约束。
 
 当前结果证明离线入场链路、Redis/PostgreSQL 内部服务集成、Binance testnet 公共行情短时
 链路、独立 REST harness 及完整策略进程成交恢复可用；异常断流故障注入和正式退出规则仍未
@@ -114,11 +117,11 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 |---|---|---|---|
 | Spike 信号与三档价格 | 完成 | 与历史脚本固定案例对账 | 参数与冻结脚本一致，无未来数据 |
 | 16h 预热和连续性检查 | 完成 | 外部质量长时间运行验证 | 预热不下单，窗口缺口阻止信号 |
-| replay runner 与报告 | 部分完成 | 部分成交、滑点及期末口径 | 已输出订单、成交、持仓、汇总、策略审计；实现 D-007，并区分 LIMIT Maker 与 MARKET Taker 费用 |
+| replay runner 与报告 | 部分完成 | 滑点、同秒顺序及对齐后绩效口径 | 已输出订单、成交、持仓、汇总、策略审计；LIMIT 支持跨 Bar 部分成交，MARKET 使用 Taker 费用，可选交易所 tick/step 快照 |
 | 全局交易准入与首成交计时 | 完成 | 持续做外部故障回归 | 已验证全局互斥、Redis 原子租约、带仓重启首成交/手续费恢复及 D-009 |
 | 入场幂等与失效撤单 | 完成 | 持续做交易所回归 | replay 与 AKEUSDT testnet 已验证预挂、幂等、部分成交、全部成交、撤单和终态 WAL 重启 |
 | User Stream 与启动对账 | 部分完成 | 外部断流和持续未知回报故障注入 | 已完成真实订单/成交/仓位回报、REST 回补、断流门禁、TRADE 幂等及带仓 Campaign timing 恢复 |
-| 持仓保护与退出 | 部分完成 | 止损、止盈、盈利管理、退出费用和分批 | D-007 已实现；起涨点处的持有/减半方向已确认，计算阈值和剩余仓位退出待确认 |
+| 持仓保护与退出 | 部分完成 | 对齐后重新标定、walk-forward、testnet 异常执行 | candidate-v1 已实现 origin 减半、90s 后时间/动能退出及 5m/15m 突破退出；参数仅为候选，旧标定已失效，live 继续拒绝 |
 | 账户级风控 | 部分完成 | 保证金、日亏损、数据延迟、急停 | 已限制持仓价值、币种数、杠杆并阻塞未知订单 symbol；关键事实不一致会全局 halt 新开仓，但保留 reduce-only 退出 |
 | testnet/live 适配 | 部分完成 | 完整策略进程真实多轮验证、最新退出策略 | 已有正式进程与 `BinanceStrategyAccount`；REST harness 已在 one-way testnet 多轮写入；未冻结退出前 live 拒绝启动 |
 
@@ -143,8 +146,9 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 交付物：冻结脚本参数、当前三层架构、功能差距、权威计划、决策记录、旧文档归档、
 固定 replay 案例。
 
-固定案例当前完成 4/5：无成交、三档全成交、失效/TTL、冷却。剩余：成交模型确认后
-补部分成交；将新引擎与历史脚本 CSV 的差异逐笔分类。Phase 0 尚未通过验收。
+固定案例当前完成 5/5：无成交、三档全成交、部分成交、失效/TTL、冷却。对齐后的旧脚本
+与 candidate 已有 39 轮可按开仓直接配对；剩余是与用户共同核对差异集中轮次的价格路径、
+指标快照和执行事实。Phase 0 尚未通过验收。
 
 退出条件：文档无冲突；每项规则能追溯到确认记录；固定输入可重复得到相同输出。
 
@@ -169,12 +173,11 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 交付物：环境无关策略核心、逐币种 Campaign、全局协调器、确定性虚拟时钟、订单撮合、
 成交/费用/持仓/PnL 审计报告。
 
-已完成策略对 `BacktestEngine`/executor 内部结构的解耦、信号/入场计划/失效/首成交基础审计、
-D-007 超时退出及真实 Parquet 输入的三档全成交 CLI 回归。AKEUSDT 的只读 DuckDB 外部历史源
-已完成端到端 replay 验证：在固定时间范围和 16 小时预热下处理 `1,945,737` 个事件；D-004
-修复后结果为 `3 orders / 3 fills / 1 OPEN`、单 Campaign、入场名义约 `1000 USDT`。期末未实现
-PnL `-15,771.98 USDT` 不作为绩效基线。剩余：完成 Campaign 状态机；按确认口径实现部分成交、
-滑点、同秒顺序和期末结算；D-008 候选参数按 D-027 通过回测和 testnet 迭代。
+已完成策略对 `BacktestEngine`/executor 内部结构的解耦、信号/入场计划/失效/首成交审计、
+D-007、candidate-v1 状态机、部分成交、交易所量化和 Maker/Taker 费用。AKEUSDT DuckDB
+对账证实 1s 事件整体早 8 小时，旧端到端 replay 和退出标定已归档为无效；runner 现要求
+显式时间修正并写入运行元数据，对齐回放和 39 个同开仓轮次配对已完成。剩余：先共同查看
+差异集中轮次，再决定需要复核的指标；之后才进入多样本 walk-forward、滑点和同秒顺序口径。
 
 退出条件：同一事件序列在 replay 与实时适配器中产生相同订单意图；所有固定案例通过；
 任何 PnL 均能追溯到订单、成交和费用。
@@ -270,8 +273,8 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前本地全量基线为 `293 passed, 12 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-基线为 `301 passed, 4 skipped, 1 warning`。
+当前本地全量基线为 `340 passed, 15 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
+基线为 `356 passed, 1 warning`。
 
 ## 8. 风险与停止条件
 
