@@ -278,6 +278,12 @@ Binance testnet 已完成预挂撤单、4 轮开平仓和最终空仓检查；�
 最新一轮 BTCUSDT 使用 `SELL LIMIT 0.001 @ 65000` 成交，随后 `BUY MARKET reduceOnly`
 全部成交；独立 dry-run 复核 AKEUSDT/BTCUSDT 均为 0 挂单、0 持仓。最新报告为
 `reports/testnet_20260807_post_migration_flat.json`。
+新增 Campaign 账本 roundtrip 通过与正式 Spike 相同的 PostgreSQL 账户锁、执行器、WAL、
+User Stream 和账本链路完成 BTCUSDT `SELL LIMIT 0.001` 与 `BUY MARKET reduceOnly`
+清仓。Campaign `spike_short:BTCUSDT:1786108785578` 聚合 2 笔成交，净已实现 PnL
+`-0.08006859 USDT`（含手续费 `0.05216860 USDT`），最终空仓空单；报告为
+`reports/testnet_campaign_roundtrip_20260807.json`。这只证明执行与会计一致性，不代表策略退出
+规则已经冻结或通过盈利验收。
 
 退出条件：至少覆盖下单、部分成交、撤单、拒单、超时、断流、重启、对账、保护退出和
 subcategory 关闭；验收阈值由用户确认后写入决策记录。

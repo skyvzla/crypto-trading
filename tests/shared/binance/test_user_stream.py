@@ -129,6 +129,35 @@ async def test_reconnect_remains_disconnected_across_repeated_failures(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_reconnect_exhaustion_sets_fatal_and_remains_disconnected():
+    rest = Mock(
+        create_listen_key=AsyncMock(side_effect=RuntimeError("network down")),
+        close_listen_key=AsyncMock(),
+    )
+    recovered = AsyncMock()
+    stream = UserDataStream(
+        rest,
+        on_reconnect=recovered,
+        max_reconnect_attempts=2,
+    )
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "stale-listen-key"
+    stream._connected_event = asyncio.Event()
+    stream._reconnect_delay = 0
+    stream._max_reconnect_delay = 0
+
+    await stream._reconnect()
+
+    failure = await asyncio.wait_for(stream.wait_fatal(), timeout=1)
+    assert str(failure) == "User Data Stream reconnect attempts exhausted: 2"
+    assert rest.create_listen_key.await_count == 2
+    assert stream.connected is False
+    recovered.assert_not_awaited()
+    await stream.stop()
+
+
+@pytest.mark.asyncio
 async def test_reconnect_cleans_failed_websocket_before_next_attempt():
     rest = Mock(
         create_listen_key=AsyncMock(side_effect=["key-1", "key-2"]),
@@ -314,6 +343,27 @@ async def test_callback_failure_sets_fatal_signal(monkeypatch):
     failure = await asyncio.wait_for(stream.wait_fatal(), timeout=1)
     assert isinstance(failure, RuntimeError)
     assert str(failure) == "ledger unavailable"
+    await stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_malformed_execution_message_sets_fatal_signal(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(create_listen_key=AsyncMock(return_value="listen-key"))
+    stream = UserDataStream(rest)
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+    await stream._connect_ws()
+
+    FakeWebSocketApp.instance.callbacks["on_message"](None, "not-json")
+
+    failure = await asyncio.wait_for(stream.wait_fatal(), timeout=1)
+    assert isinstance(failure, ValueError)
     await stream.stop()
 
 

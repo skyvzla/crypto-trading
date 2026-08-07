@@ -123,6 +123,30 @@ uv run --env-file .env python scripts/binance_testnet_reconcile_wal.py \
 
 任一条 `resolved=false` 或 `FAIL_CLOSED` 都不得重跑、改 client ID 重下或手工解除风险门禁；必须保留账户锁定并进行订单、成交和仓位三方对账。
 
+## Campaign 执行与账本闭环
+
+`scripts/binance_testnet_campaign_roundtrip.py` 不测试策略信号和退出参数，只验证 testnet/live
+共用执行链路：PostgreSQL 账户锁、`BinanceOrderExecutor`、WAL、User Stream、PostgreSQL
+订单/成交和 Campaign PnL。入场仍为可成交 `SELL LIMIT`，仅退出使用 `BUY MARKET
+reduceOnly`。脚本使用 `spike_testnet` 的同一 advisory lock，Spike 正在运行时会拒绝执行。
+
+真实写入前必须确保 Spike 已停止。脚本还会拒绝 Hedge Mode、账户任意非零仓位和目标 symbol
+已有挂单：
+
+```bash
+uv run --env-file .env python scripts/binance_testnet_campaign_roundtrip.py \
+  --symbol BTCUSDT \
+  --quantity 0.001 \
+  --execute \
+  --confirm I_UNDERSTAND_TESTNET_ORDERS_ARE_REAL \
+  --confirm-position I_UNDERSTAND_THIS_OPENS_A_TESTNET_POSITION \
+  --report reports/testnet_campaign_roundtrip.json
+```
+
+成功结果必须为 `ROUNDTRIP_OK`，`campaign_pnl.pnl_facts_complete=true`、
+`remaining_quantity=0`，并且 `final_cleanup.flat=true`、`open_orders=0`。报告中的
+`net_realized_pnl` 是扣除 USDT 手续费后的已实现收益，不包含本金。
+
 紧急清仓示例（先 dry-run，再执行）：
 
 ```bash
@@ -179,6 +203,11 @@ uv run python scripts/binance_testnet_flatten.py \
   ready，`bar1s:AKEUSDT` 有 1 个消费者。
 - 同账户第二个 Spike 实例在创建 Redis/Binance 资源前被 PostgreSQL advisory lock 拒绝；
   主实例停止后独立复核 AKEUSDT/BTCUSDT 仍为 0 挂单、0 持仓（`final_flat_c`）。
+- Campaign 账本闭环 `spike_short:BTCUSDT:1786108785578` 通过正式执行器提交
+  `SELL LIMIT 0.001`，实际卖出均价 `65196.8`；随后通过同一执行器提交 `BUY MARKET
+  reduceOnly 0.001`，实际买回均价 `65224.7`。User Stream 写入 2 笔成交，gross PnL
+  `-0.02789999 USDT`、手续费 `0.05216860 USDT`、net PnL `-0.08006859 USDT`，最终
+  0 挂单、0 仓位。净化报告为 `reports/testnet_campaign_roundtrip_20260807.json`。
 
 验收结束后 `spike` subcategory 已设置为 disabled，Spike 容器已停止；再次运行前必须经过新的
 人工准入操作。

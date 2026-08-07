@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 from collections.abc import Awaitable, Callable
@@ -17,6 +18,9 @@ from typing import Any, Literal, Protocol
 
 from trading_platform.shared.events import OrderIntent
 from trading_platform.shared.order_states import OrderStatus, is_valid_transition
+
+
+logger = logging.getLogger(__name__)
 
 
 WALRecordType = Literal["intent", "submit_unknown", "exchange_status"]
@@ -381,7 +385,25 @@ class SubmitUnknownPollingService:
             assert self._task is not None
             return self._task
         self._task = asyncio.create_task(self.run())
+        self._task.add_done_callback(self._task_done)
         return self._task
+
+    def _task_done(self, task: asyncio.Task[dict[str, Resolution]]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except BaseException as exc:
+            self.last_error = exc if isinstance(exc, Exception) else None
+            logger.critical(
+                "SUBMIT_UNKNOWN polling task failed",
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            if self._fatal_exception is None:
+                self._fatal_exception = RuntimeError(
+                    "SUBMIT_UNKNOWN polling task failed"
+                )
+                self._fatal_event.set()
 
     async def stop(self) -> None:
         """取消并等待后台任务结束。"""

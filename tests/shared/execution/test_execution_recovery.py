@@ -10,6 +10,7 @@ from trading_platform.shared.binance import BinanceOrderExecutor
 from trading_platform.shared.events import OrderIntent
 from trading_platform.shared.execution_recovery import (
     OrderWAL,
+    Resolution,
     SubmitUnknownPollingService,
     SubmitUnknownResolver,
 )
@@ -496,3 +497,30 @@ async def test_unknown_poller_start_is_idempotent_and_stop_cancels_task():
     assert first is second
     assert first.cancelled()
     assert poller.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_unknown_poller_background_orchestration_failure_sets_fatal():
+    resolver = Mock(
+        resolve_recovered_unknowns_once=AsyncMock(
+            return_value={"cid": Resolution(False, None, reason="order_not_found")}
+        )
+    )
+
+    async def broken_sleep(_seconds):
+        raise RuntimeError("scheduler unavailable")
+
+    poller = SubmitUnknownPollingService(
+        resolver,
+        poll_interval_seconds=1,
+        max_attempts=2,
+        sleep=broken_sleep,
+    )
+
+    task = poller.start()
+    failure = await asyncio.wait_for(poller.wait_fatal(), timeout=1)
+
+    assert str(failure) == "SUBMIT_UNKNOWN polling task failed"
+    assert isinstance(poller.last_error, RuntimeError)
+    assert str(poller.last_error) == "scheduler unavailable"
+    assert task.done()

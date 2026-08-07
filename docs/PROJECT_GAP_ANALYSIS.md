@@ -221,7 +221,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 尚未验证：
 
-- Spike 正式保护性退出、盈利管理、完整已平仓 PnL
+- Spike 由自然策略信号触发的正式保护性退出和盈利管理；执行器驱动的完整 Campaign 已平仓
+  PnL 已通过真实 testnet 验证
 - subcategory 准入服务的异常断流和持续未知回报外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行和断流故障注入

@@ -1,0 +1,68 @@
+{
+  "account_id": "spike_testnet",
+  "campaign_id": "spike_short:BTCUSDT:1786108785578",
+  "campaign_pnl": {
+    "account_id": "spike_testnet",
+    "acquired_at": null,
+    "buy_avg_price": "65224.700000000000",
+    "buy_quantity": "0.00100000",
+    "campaign_id": "spike_short:BTCUSDT:1786108785578",
+    "closed_at": "2026-08-07 13:19:52.124000+00:00",
+    "commission_asset": "USDT",
+    "first_fill_at": "2026-08-07 13:19:51.434000+00:00",
+    "gross_realized_pnl": "-0.02789999",
+    "has_open_quantity": false,
+    "last_fill_at": "2026-08-07 13:19:52.124000+00:00",
+    "lifecycle_duration_ms": null,
+    "net_realized_pnl": "-0.08006859",
+    "pnl_facts_complete": true,
+    "released_at": null,
+    "remaining_quantity": "0E-8",
+    "sell_avg_price": "65196.800000000000",
+    "sell_quantity": "0.00100000",
+    "strategy_id": "spike_short",
+    "symbol": "BTCUSDT",
+    "total_commission": "0.05216860",
+    "trade_count": 2
+  },
+  "endpoint": "https://demo-fapi.binance.com",
+  "entry_client_order_id": "tpcr_e_1786108785578",
+  "entry_submission": {
+    "client_order_id": "tpcr_e_1786108785578",
+    "exchange_order_id": "28529741762",
+    "order_type": "LIMIT",
+    "quantity": "0.001",
+    "side": "SELL",
+    "status": "NEW",
+    "symbol": "BTCUSDT"
+  },
+  "execution_lease_acquired": true,
+  "exit_client_order_id": "tpcr_x_1786108785578",
+  "exit_submission": {
+    "client_order_id": "tpcr_x_1786108785578",
+    "exchange_order_id": "28529741771",
+    "order_type": "MARKET",
+    "quantity": "0.0010",
+    "side": "BUY",
+    "status": "NEW",
+    "symbol": "BTCUSDT"
+  },
+  "final_cleanup": {
+    "entry_resolved": true,
+    "flat": true,
+    "open_orders": 0
+  },
+  "finished_at": "2026-08-07T13:19:56.150163+00:00",
+  "mode": "execute",
+  "planned_entry": {
+    "order_type": "LIMIT",
+    "price": "65172.20",
+    "quantity": "0.001",
+    "side": "SELL"
+  },
+  "result": "ROUNDTRIP_OK",
+  "started_at": "2026-08-07T13:19:45.502851+00:00",
+  "strategy_id": "spike_short",
+  "symbol": "BTCUSDT",
+  "ws_endpoint": "wss://stream.binancefuture.com"
+}
