@@ -145,9 +145,9 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 | Binance REST/WS testnet 隔离 | 完成 | 鉴权 REST 需随 testnet 执行验证 | 健康 API 暴露环境；外部 smoke 会拒绝非 testnet 服务 |
 | aggTrade/Kline 接入与 combined stream 解包 | 完成 | 外部流长时间运行验证 | testnet 短时 smoke 已接收完成 Bar/Kline，原始与 combined 消息均可解析 |
 | aggTrade 聚合完成 1s Bar | 完成 | 外部流长时间运行验证 | 不重复、不丢失跨多秒完成 Bar |
-| 动态订阅、引用计数、刷新和重连 | 部分完成 | 租约规则、外部长时间验证 | 订阅变更、断线和进程重启后均已验证恢复原 streams |
+| 动态订阅、引用计数、刷新和重连 | 部分完成 | 租约规则、缺口 REST 回补决策 | 长稳发现 26 秒公共 WS 中断；重连恢复 streams，但确定 gap 保持粘性降级 |
 | 可交易池扫描编排 | 部分完成 | 接入真实扫描器和运行进程 | 固定每 5 分钟扫描，subcategory 在同一节拍刷新 |
-| Redis 分发和 Kline Store | 完成 | 长时间运行与外部告警通道 | 真实 Redis 读写通过；零订阅者发布会告警，活跃流无消费者时健康检查 503 |
+| Redis 分发和 Kline Store | 完成 | 外部告警通道 | 真实 Redis 读写通过；零订阅者发布会告警，活跃流无消费者时健康检查 503；长稳故障期间正确关闭策略门禁 |
 | 历史 Parquet 数据读取 | 部分完成 | 归档边界、缺口报告 | replay 不联网补数据，缺数据直接拒绝 |
 | 监听池发现与租约 | 待确认 | 入池、回吐、期限、重入规则 | 规则冻结后补状态机测试 |
 
@@ -160,7 +160,7 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 | replay runner 与报告 | 部分完成 | 滑点、同秒顺序及对齐后绩效口径 | 已输出订单、成交、持仓、汇总、策略审计；LIMIT 支持跨 Bar 部分成交，MARKET 使用 Taker 费用，可选交易所 tick/step 快照 |
 | 全局交易准入与首成交计时 | 完成 | 持续做外部故障回归 | 已验证全局互斥、Redis 原子租约、带仓重启首成交/手续费恢复及 D-009 |
 | 入场幂等与失效撤单 | 完成 | 持续做交易所回归 | replay 与 AKEUSDT testnet 已验证预挂、幂等、部分成交、全部成交、撤单和终态 WAL 重启 |
-| User Stream 与启动对账 | 部分完成 | 外部长时间运行与持续未知外部处置演练 | 已完成真实回报、REST 回补、终态 WAL 补账 ack、主动断流重连、listenKey 轮换、重连失败资源回收、回调 fatal/有界排空、持续未知 fatal、TRADE 幂等及带仓 Campaign timing 恢复 |
+| User Stream 与启动对账 | 部分完成 | 持续未知外部处置演练 | 长稳中多次真实断流均在同一实例约 2 秒恢复；已完成真实回报、REST 回补、终态 WAL 补账 ack、主动断流重连、listenKey 轮换、回调 fatal/有界排空、持续未知 fatal、TRADE 幂等及带仓 Campaign timing 恢复 |
 | 持仓保护与退出 | 部分完成 | 先与用户逐轮评审买卖点、指标快照和 PnL；未确认前暂停调参 | candidate-v1 已实现 origin 减半、90s 后时间/动能退出及 5m/15m 突破退出；参数仅为候选，旧标定已失效，live 继续拒绝 |
 | 账户级风控 | 部分完成 | 保证金、日亏损、数据延迟、急停 | 已限制持仓价值、币种数、杠杆并阻塞未知订单 symbol；关键事实不一致会全局 halt 新开仓，但保留 reduce-only 退出 |
 | testnet/live 适配 | 部分完成 | 完整策略进程真实多轮验证、最新退出策略 | 已有正式进程与 `BinanceStrategyAccount`；REST harness 已在 one-way testnet 多轮写入；未冻结退出前 live 拒绝启动 |
@@ -175,7 +175,7 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 | subcategory 准入控制 | 部分完成 | 接入真实可交易池扫描器并外部验证 | 已接入 Spike 进程；乐观并发、追加审计、fail-closed 刷新和关闭撤单已通过真实 PostgreSQL 测试 |
 | Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供独立的账本健康和策略运行状态、账本、PnL 与 subcategory 控制 |
 | 权限与操作审计 | 待确认 | 身份、角色、敏感操作范围 | 所有控制变更可追责 |
-| 监控、告警、备份恢复 | 未开始 | SLO、告警通道、演练 | 关键故障可发现、可恢复 |
+| 监控、告警、备份恢复 | 部分完成 | SLO、外部告警通道 | runtime heartbeat/API/Web、只读 soak、迁移校验和及 PostgreSQL 备份恢复演练已完成；报告保留失败进度且脱敏 |
 
 ## 5. 分阶段实施
 

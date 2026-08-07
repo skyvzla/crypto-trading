@@ -115,13 +115,18 @@ def validate_runtime_sample(
         raise SoakFailure("INSTANCE_CHANGED", "Spike instance changed during soak")
     if item.get("mode") != "testnet":
         raise SoakFailure("RUNTIME_MODE_INVALID", "runtime mode is not testnet")
-    if item.get("effective_status") != "running":
-        raise SoakFailure(
-            "RUNTIME_NOT_RUNNING",
-            f"runtime effective status is {item.get('effective_status')}",
-        )
     if item.get("halted") is not False:
         raise SoakFailure("RUNTIME_HALTED", "runtime risk guard is halted")
+    effective_status = item.get("effective_status")
+    if effective_status == "degraded":
+        raise SoakFailure(
+            "RUNTIME_DEGRADED", "runtime is temporarily degraded"
+        )
+    if effective_status != "running":
+        raise SoakFailure(
+            "RUNTIME_NOT_RUNNING",
+            f"runtime effective status is {effective_status}",
+        )
     entry_enabled = item.get("entry_enabled")
     if expected_entry_enabled != "any":
         expected = expected_entry_enabled == "true"
@@ -251,6 +256,8 @@ async def run_soak(
     consecutive_errors = 0
     samples: list[dict[str, Any]] = []
     transient_errors: list[dict[str, Any]] = []
+    runtime_recoveries: list[dict[str, Any]] = []
+    recovery_started: float | None = None
     report.update(
         {
             "instance_id": None,
@@ -258,6 +265,7 @@ async def run_soak(
             "actual_duration_seconds": 0.0,
             "last_sample": None,
             "transient_errors": transient_errors,
+            "runtime_recoveries": runtime_recoveries,
         }
     )
     try:
@@ -277,8 +285,27 @@ async def run_soak(
                     require_flat=args.require_flat,
                     now=sample_now,
                 )
-            except SoakFailure:
-                raise
+            except SoakFailure as exc:
+                if (
+                    exc.code != "RUNTIME_DEGRADED"
+                    or args.runtime_recovery_seconds <= 0
+                ):
+                    raise
+                current = monotonic()
+                if recovery_started is None:
+                    recovery_started = current
+                    runtime_recoveries.append(
+                        {
+                            "started_at": sample_now.isoformat(),
+                            "recovered_at": None,
+                            "duration_seconds": None,
+                        }
+                    )
+                if current - recovery_started > args.runtime_recovery_seconds:
+                    raise SoakFailure(
+                        "RUNTIME_RECOVERY_TIMEOUT",
+                        "runtime did not recover within the configured window",
+                    ) from exc
             except Exception as exc:
                 error_type = _transient_dependency_error_type(exc)
                 if error_type is None:
@@ -297,6 +324,16 @@ async def run_soak(
                     ) from exc
             else:
                 consecutive_errors = 0
+                if recovery_started is not None:
+                    runtime_recoveries[-1].update(
+                        {
+                            "recovered_at": sample_now.isoformat(),
+                            "duration_seconds": round(
+                                monotonic() - recovery_started, 3
+                            ),
+                        }
+                    )
+                    recovery_started = None
                 heartbeat = _parse_time(sample["heartbeat_at"], field="heartbeat_at")
                 if instance_id is None:
                     instance_id = sample["instance_id"]
@@ -320,7 +357,13 @@ async def run_soak(
                 "actual_duration_seconds": round(monotonic() - started, 3),
                 "last_sample": samples[-1] if samples else None,
                 "transient_errors": transient_errors,
+                "runtime_recoveries": runtime_recoveries,
             }
+        )
+    if recovery_started is not None:
+        raise SoakFailure(
+            "RUNTIME_NOT_RECOVERED",
+            "runtime was still recovering when the soak duration ended",
         )
     if not samples:
         raise SoakFailure("NO_SAMPLES", "soak completed without a valid sample")
@@ -347,6 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--sample-seconds", type=float, default=5.0)
     parser.add_argument("--heartbeat-max-age-seconds", type=float, default=15.0)
+    parser.add_argument("--runtime-recovery-seconds", type=float, default=0.0)
     parser.add_argument("--max-consecutive-errors", type=int, default=2)
     parser.add_argument("--account-id", default="spike_testnet")
     parser.add_argument("--strategy-id", default="spike_short")
@@ -368,6 +412,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SoakFailure("SAMPLE_INTERVAL_INVALID", "sample interval must be positive")
     if args.heartbeat_max_age_seconds <= 0:
         raise SoakFailure("HEARTBEAT_LIMIT_INVALID", "heartbeat limit must be positive")
+    if args.runtime_recovery_seconds < 0:
+        raise SoakFailure(
+            "RUNTIME_RECOVERY_LIMIT_INVALID",
+            "runtime recovery limit must be non-negative",
+        )
     if args.max_consecutive_errors < 0:
         raise SoakFailure("ERROR_LIMIT_INVALID", "error limit must be non-negative")
 
@@ -380,6 +429,7 @@ async def _run(args: argparse.Namespace, report: dict[str, Any]) -> None:
             "strategy_id": args.strategy_id,
             "duration_seconds": args.duration_seconds,
             "sample_seconds": args.sample_seconds,
+            "runtime_recovery_seconds": args.runtime_recovery_seconds,
             "require_flat": args.require_flat,
             "expect_entry_enabled": args.expect_entry_enabled,
             "endpoint": config.base_url,

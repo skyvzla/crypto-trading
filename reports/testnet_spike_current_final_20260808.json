@@ -1,0 +1,57 @@
+{
+  "account_id": "spike_testnet",
+  "actual_duration_seconds": 10.457,
+  "duration_seconds": 10.0,
+  "endpoint": "https://demo-fapi.binance.com",
+  "expect_entry_enabled": "false",
+  "finished_at": "2026-08-07T16:03:56.371802+00:00",
+  "first_sample": {
+    "entry_enabled": false,
+    "gates": {
+      "bar_stream": true,
+      "campaign": true,
+      "execution": true,
+      "market": true,
+      "subcategory": false
+    },
+    "heartbeat_age_seconds": 3.277,
+    "heartbeat_at": "2026-08-07T16:03:42.636308+00:00",
+    "instance_id": "4fadc3f1e72d49f3a8e9149dadc06ef3",
+    "nonzero_position_count": 0,
+    "nonzero_position_symbols": [],
+    "observed_at": "2026-08-07T16:03:45.913198+00:00",
+    "open_order_count": 0,
+    "open_order_symbols": []
+  },
+  "instance_id": "4fadc3f1e72d49f3a8e9149dadc06ef3",
+  "last_sample": {
+    "entry_enabled": false,
+    "gates": {
+      "bar_stream": true,
+      "campaign": true,
+      "execution": true,
+      "market": true,
+      "subcategory": false
+    },
+    "heartbeat_age_seconds": 3.269,
+    "heartbeat_at": "2026-08-07T16:03:52.647568+00:00",
+    "instance_id": "4fadc3f1e72d49f3a8e9149dadc06ef3",
+    "nonzero_position_count": 0,
+    "nonzero_position_symbols": [],
+    "observed_at": "2026-08-07T16:03:55.916294+00:00",
+    "open_order_count": 0,
+    "open_order_symbols": []
+  },
+  "max_heartbeat_age_seconds": 4.222,
+  "max_nonzero_position_count": 0,
+  "max_open_order_count": 0,
+  "require_flat": true,
+  "result": "SOAK_OK",
+  "runtime_recoveries": [],
+  "runtime_recovery_seconds": 0.0,
+  "sample_count": 3,
+  "sample_seconds": 5.0,
+  "started_at": "2026-08-07T16:03:45.836083+00:00",
+  "strategy_id": "spike_short",
+  "transient_errors": []
+}

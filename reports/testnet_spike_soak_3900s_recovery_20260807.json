@@ -1,0 +1,63 @@
+{
+  "account_id": "spike_testnet",
+  "actual_duration_seconds": 348.065,
+  "duration_seconds": 3900.0,
+  "endpoint": "https://demo-fapi.binance.com",
+  "error": {
+    "code": "RUNTIME_RECOVERY_TIMEOUT",
+    "message": "runtime did not recover within the configured window"
+  },
+  "expect_entry_enabled": "false",
+  "finished_at": "2026-08-07T16:00:17.486258+00:00",
+  "instance_id": "dbb7cc77c1a64dce844e0b5981cf35ae",
+  "last_sample": {
+    "entry_enabled": false,
+    "gates": {
+      "bar_stream": true,
+      "campaign": true,
+      "execution": true,
+      "market": true,
+      "subcategory": false
+    },
+    "heartbeat_age_seconds": 4.116,
+    "heartbeat_at": "2026-08-07T15:59:37.871801+00:00",
+    "instance_id": "dbb7cc77c1a64dce844e0b5981cf35ae",
+    "nonzero_position_count": 0,
+    "nonzero_position_symbols": [],
+    "observed_at": "2026-08-07T15:59:41.987596+00:00",
+    "open_order_count": 0,
+    "open_order_symbols": []
+  },
+  "require_flat": true,
+  "result": "FAIL_CLOSED",
+  "runtime_recoveries": [
+    {
+      "duration_seconds": null,
+      "recovered_at": null,
+      "started_at": "2026-08-07T16:00:02.448525+00:00"
+    }
+  ],
+  "runtime_recovery_seconds": 15.0,
+  "sample_count": 50,
+  "sample_seconds": 5.0,
+  "started_at": "2026-08-07T15:54:29.343959+00:00",
+  "strategy_id": "spike_short",
+  "transient_errors": [
+    {
+      "observed_at": "2026-08-07T15:54:34.810824+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-07T15:55:28.418110+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-07T15:56:10.730294+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-07T15:59:47.430523+00:00",
+      "type": "ConnectTimeout"
+    }
+  ]
+}

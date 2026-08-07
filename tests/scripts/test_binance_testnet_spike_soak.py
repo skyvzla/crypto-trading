@@ -95,6 +95,7 @@ def test_runtime_sample_accepts_healthy_pinned_instance():
         ({"mode": "live"}, None, "false", "RUNTIME_MODE_INVALID"),
         ({"effective_status": "stale"}, None, "false", "RUNTIME_NOT_RUNNING"),
         ({"effective_status": "fatal"}, None, "false", "RUNTIME_NOT_RUNNING"),
+        ({"effective_status": "degraded"}, None, "false", "RUNTIME_DEGRADED"),
         ({"halted": True}, None, "false", "RUNTIME_HALTED"),
         ({"entry_enabled": True}, None, "false", "ENTRY_STATE_MISMATCH"),
         (
@@ -292,6 +293,7 @@ def arguments(**changes):
         "duration_seconds": 10.0,
         "sample_seconds": 5.0,
         "heartbeat_max_age_seconds": 15.0,
+        "runtime_recovery_seconds": 0.0,
         "max_consecutive_errors": 1,
         "account_id": "spike_testnet",
         "strategy_id": "spike_short",
@@ -442,6 +444,84 @@ async def test_run_soak_does_not_treat_application_error_as_transient(monkeypatc
     assert report["transient_errors"] == []
 
 
+@pytest.mark.asyncio
+async def test_run_soak_records_bounded_runtime_recovery(monkeypatch):
+    clock = Clock()
+    calls = 0
+
+    async def sample_with_recovery(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise soak.SoakFailure("RUNTIME_DEGRADED", "runtime degraded")
+        heartbeat = datetime.now(timezone.utc).isoformat()
+        return {
+            "observed_at": heartbeat,
+            "instance_id": "instance-1",
+            "heartbeat_at": heartbeat,
+            "heartbeat_age_seconds": 0.0,
+            "entry_enabled": False,
+            "gates": {name: True for name in soak.REQUIRED_GATES},
+            "open_order_count": 0,
+            "open_order_symbols": [],
+            "nonzero_position_count": 0,
+            "nonzero_position_symbols": [],
+        }
+
+    monkeypatch.setattr(soak, "collect_sample", sample_with_recovery)
+    report = {}
+    await soak.run_soak(
+        arguments(runtime_recovery_seconds=10),
+        report,
+        rest=object(),
+        http=object(),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+    assert report["result"] == "SOAK_OK"
+    assert report["sample_count"] == 2
+    assert report["runtime_recoveries"][0]["duration_seconds"] == 5.0
+    assert report["runtime_recoveries"][0]["recovered_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_run_soak_fails_when_runtime_recovery_exceeds_window(monkeypatch):
+    clock = Clock()
+
+    async def degraded_sample(**kwargs):
+        raise soak.SoakFailure("RUNTIME_DEGRADED", "runtime degraded")
+
+    monkeypatch.setattr(soak, "collect_sample", degraded_sample)
+    report = {}
+    with pytest.raises(soak.SoakFailure) as failure:
+        await soak.run_soak(
+            arguments(duration_seconds=20, runtime_recovery_seconds=6),
+            report,
+            rest=object(),
+            http=object(),
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+        )
+
+    assert failure.value.code == "RUNTIME_RECOVERY_TIMEOUT"
+    assert report["sample_count"] == 0
+    assert report["runtime_recoveries"][0]["recovered_at"] is None
+
+
+def test_runtime_halt_takes_priority_over_degraded_status():
+    with pytest.raises(soak.SoakFailure) as failure:
+        soak.validate_runtime_sample(
+            runtime_item(effective_status="degraded", halted=True),
+            expected_instance_id=None,
+            expected_entry_enabled="false",
+            now=datetime.now(timezone.utc),
+            heartbeat_max_age_seconds=15,
+        )
+
+    assert failure.value.code == "RUNTIME_HALTED"
+
+
 @pytest.mark.parametrize(
     ("changes", "code"),
     [
@@ -449,6 +529,7 @@ async def test_run_soak_does_not_treat_application_error_as_transient(monkeypatc
         ({"sample_seconds": 0}, "SAMPLE_INTERVAL_INVALID"),
         ({"heartbeat_max_age_seconds": 0}, "HEARTBEAT_LIMIT_INVALID"),
         ({"max_consecutive_errors": -1}, "ERROR_LIMIT_INVALID"),
+        ({"runtime_recovery_seconds": -1}, "RUNTIME_RECOVERY_LIMIT_INVALID"),
     ],
 )
 def test_cli_numeric_arguments_fail_closed(changes, code):

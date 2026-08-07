@@ -164,6 +164,7 @@ execution/market/bar_stream 门禁、账本与行情健康、one-way 模式及�
 uv run --env-file .env python scripts/binance_testnet_spike_soak.py \
   --duration-seconds 3900 \
   --sample-seconds 5 \
+  --runtime-recovery-seconds 15 \
   --require-flat \
   --expect-entry-enabled false \
   --confirm I_UNDERSTAND_THIS_OBSERVES_THE_TESTNET_ACCOUNT \
@@ -171,8 +172,10 @@ uv run --env-file .env python scripts/binance_testnet_spike_soak.py \
 ```
 
 正式控制面验收建议至少 3900 秒，跨过两次 30 分钟 listenKey keepalive 边界。任一
-`instance_id` 变化、`stale/fatal/stopped`、halt、心跳倒退/停止推进、必需门禁关闭、生产模式、
-Hedge Mode 或控制面 soak 出现挂单/仓位都会返回 `FAIL_CLOSED`。Compose 自动重启产生的新实例
+`instance_id` 变化、`stale/fatal/stopped`、halt、心跳倒退/停止推进、生产模式、Hedge Mode
+或控制面 soak 出现挂单/仓位都会返回 `FAIL_CLOSED`。默认严格模式下 runtime degraded 也立即
+失败；正式恢复验收可显式设置 `--runtime-recovery-seconds 15`，只允许未 halt 的同一实例在
+窗口内恢复，并在报告记录每次恢复耗时，超时仍失败。Compose 自动重启产生的新实例
 不能被结束时的健康状态掩盖。自然策略/持仓 soak 不得使用 `--require-flat`，必须单独审批，
 本命令不定义策略收益或退出参数。
 
@@ -276,13 +279,22 @@ docker compose --profile spike run --rm --no-deps \
   execution/market/bar_stream 门禁始终开启，账户始终 0 挂单、0 非零仓位且无瞬时错误；报告为
   `reports/testnet_spike_soak_post_reconnect_fix_20260807.json`。该结果仅为短时回归，不替代
   3900 秒正式长稳验收。
+- 3900 秒严格监督运行 1212.575 秒、取得 220 个健康样本后，第二次真实 User Stream
+  断流使 runtime 短暂 degraded，observer 按严格模式立即失败；User Stream 随后约 2 秒内
+  以同一实例恢复，未再出现旧连接竞态。报告为
+  `reports/testnet_spike_soak_3900s_20260807.json`。
+- 启用 15 秒有界 runtime 恢复窗口后的正式监督在 348.065 秒后再次失败：Market 公共 WS
+  ping timeout，26 秒后才完成第三次重连；缺失的 aggTrade 和 1m Kline 分别形成确定 gap，
+  质量按设计粘性降级，策略关闭 market/bar 门禁且账户始终为空。报告为
+  `reports/testnet_spike_soak_3900s_recovery_20260807.json`。未实现 REST 回补前不得通过重连
+  清除该事实；3900 秒验收仍未通过。
 - PostgreSQL 迁移 `0003` 的策略运行状态已通过 Compose 回归：Spike 每 5 秒写入心跳，
   15 秒未更新显示为 `stale`；API/Web 分开呈现账本健康与策略状态。默认数据库已从
   `0002` 升到 `0003`；准入关闭的 Spike testnet 实例实际写入 `running` 且
   `entry_enabled=false`，优雅停止后写入 `stopped`，启停前后均为空仓空单。
 - 本轮宿主机全量结果为 `431 passed, 33 skipped, 1 warning`。
 - 本轮 Compose 相关组合回归为 `174 passed, 1 warning`；最终全量回归为
-  `485 passed, 34 skipped, 1 warning`。
+  `490 passed, 34 skipped, 1 warning`。
 
 当前 `spike` subcategory 为 disabled，Spike 以 `entry_enabled=false` 运行只读控制面验证，
 账户为 0 挂单、0 非零仓位；启用交易准入前必须经过新的人工操作。
@@ -292,6 +304,7 @@ AKEUSDT 的 `MIN_NOTIONAL` 为 5 USDT。三档权重为 30/40/30，因此 10 USD
 高于交易所最小名义金额；当前 Compose testnet 默认使用 20 USDT。
 
 上述结果已证明 REST harness、紧急清仓以及完整策略进程的 User Stream、Campaign、部分成交、
-启动恢复和受控主动断流恢复路径；3900 秒外部长时间运行、持续未知回报外部处置、外部告警通道、
+启动恢复和受控主动断流恢复路径；3900 秒外部长时间运行已验证正确 fail-closed，但受 Market
+缺口后的恢复方式阻塞。持续未知回报外部处置、外部告警通道、
 Web 身份权限、正式 live 阈值和自然策略信号退出仍未验收。`candidate-v1` 保持冻结，
 正式退出参数冻结前不得启动 live。

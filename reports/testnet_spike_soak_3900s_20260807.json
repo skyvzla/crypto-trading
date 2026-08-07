@@ -1,0 +1,38 @@
+{
+  "account_id": "spike_testnet",
+  "actual_duration_seconds": 1212.575,
+  "duration_seconds": 3900.0,
+  "endpoint": "https://demo-fapi.binance.com",
+  "error": {
+    "code": "RUNTIME_NOT_RUNNING",
+    "message": "runtime effective status is degraded"
+  },
+  "expect_entry_enabled": "false",
+  "finished_at": "2026-08-07T15:36:02.138930+00:00",
+  "instance_id": "dbb7cc77c1a64dce844e0b5981cf35ae",
+  "last_sample": {
+    "entry_enabled": false,
+    "gates": {
+      "bar_stream": true,
+      "campaign": true,
+      "execution": true,
+      "market": true,
+      "subcategory": false
+    },
+    "heartbeat_age_seconds": 0.548,
+    "heartbeat_at": "2026-08-07T15:35:56.284491+00:00",
+    "instance_id": "dbb7cc77c1a64dce844e0b5981cf35ae",
+    "nonzero_position_count": 0,
+    "nonzero_position_symbols": [],
+    "observed_at": "2026-08-07T15:35:56.832613+00:00",
+    "open_order_count": 0,
+    "open_order_symbols": []
+  },
+  "require_flat": true,
+  "result": "FAIL_CLOSED",
+  "sample_count": 220,
+  "sample_seconds": 5.0,
+  "started_at": "2026-08-07T15:15:49.485823+00:00",
+  "strategy_id": "spike_short",
+  "transient_errors": []
+}

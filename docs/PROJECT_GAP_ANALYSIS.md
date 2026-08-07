@@ -150,6 +150,10 @@ candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈�
 - 降级期间停止继续发布不完整行情；未实现未经确认的 REST 回补或对账
 - Kline/Tick 实时策略基类消费 `/quality`，质量未知或降级时不处理旧快照和 Pub/Sub Bar
 
+2026-08-08 的正式长稳中，Binance 公共 WS ping timeout 后用 26 秒完成第三次重连；期间
+aggTrade 与 1m Kline 出现确定缺口。Market 保持 503、Spike 关闭 market/bar 门禁且账户为空，
+证明 fail-closed 生效；也证明在确定 REST 回补/对账规则前，单纯重连不能完成自动恢复。
+
 **已修复**（2026-08-06）：新代码中的 `range(1,4)` bug 已改为 `range(3)`，与实验脚本对齐。
 
 三档价格公式（已冻结，来自实验脚本）：
@@ -183,7 +187,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 已验证：
 
 - 宿主机 `uv run pytest -q`：`431 passed, 33 skipped, 1 warning`
-- Compose 真实 PostgreSQL/Redis：`460 passed, 1 skipped, 1 warning`
+- Compose 全量：`490 passed, 34 skipped, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - AKEUSDT 外部执行追加 1 轮非市价 LIMIT 撤单和 3 轮可成交 LIMIT 开空/reduce-only MARKET 平仓；最终独立检查为 0 挂单、0 仓位
 - BTCUSDT 追加 `SELL LIMIT 0.001 @ 100000` 从 `NEW` 到 `CANCELED`，以及
