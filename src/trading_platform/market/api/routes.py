@@ -47,6 +47,13 @@ class UnsubscribeResponse(BaseModel):
     unsubscribed: str = "all"
 
 
+class KlineRangeResponse(BaseModel):
+    symbol: str
+    interval: str
+    klines: list[dict[str, Any]]
+    source: str = "binance_rest"
+
+
 class HealthResponse(BaseModel):
     """健康检查响应"""
     status: str = "ready"

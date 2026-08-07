@@ -77,6 +77,51 @@ class MarketDataQualityTracker:
             for stream in sorted(self._streams)
         }
 
+    def watermarks(self) -> dict[str, tuple[int | None, int | None]]:
+        """Return private continuity watermarks for deterministic recovery."""
+        return {
+            stream: (quality.last_sequence, quality.last_kline_close_time)
+            for stream, quality in self._streams.items()
+        }
+
+    def restore_watermark(
+        self,
+        stream: str,
+        *,
+        last_sequence: int | None = None,
+        last_kline_close_time: int | None = None,
+    ) -> None:
+        quality = self._streams.setdefault(stream, StreamQuality(stream=stream))
+        quality.last_sequence = last_sequence
+        quality.last_kline_close_time = last_kline_close_time
+
+    def restore_watermarks(
+        self, stream: str, watermarks: tuple[int | None, int | None]
+    ) -> None:
+        self.restore_watermark(
+            stream,
+            last_sequence=watermarks[0],
+            last_kline_close_time=watermarks[1],
+        )
+
+    def prepare_backfill(self, streams: list[str]) -> None:
+        """Allow a verified backfill to repair a sticky degraded stream."""
+        for stream in streams:
+            quality = self._streams.get(stream)
+            if quality is not None:
+                quality.status = "awaiting_data"
+                quality.issue = None
+
+    def mark_backfill_failed(self, streams: list[str]) -> None:
+        for stream in streams:
+            self.mark_stream_failed(stream, "backfill_failed")
+
+    def mark_stream_failed(self, stream: str, issue: str) -> None:
+        quality = self._streams.get(stream)
+        if quality is not None:
+            quality.status = "degraded"
+            quality.issue = issue
+
     def observe_aggtrade(
         self,
         symbol: str,

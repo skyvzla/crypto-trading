@@ -1,0 +1,34 @@
+{
+  "test": "market_ws_disconnect_rest_backfill",
+  "environment": "binance_futures_testnet",
+  "symbol": "AKEUSDT",
+  "instance_epoch": "78503437-afcb-4352-b0d0-f955a2f83518",
+  "instance_unchanged": true,
+  "network_disconnect_seconds": 25,
+  "generation_before": 1,
+  "generation_after": 2,
+  "last_disconnected_at_ms": 1786145360678,
+  "last_connected_at_ms": 1786145370959,
+  "rest_requests": {
+    "agg_trades_from_id": 35836108,
+    "kline_start_time_ms": 1786145340000,
+    "kline_end_time_ms": 1786145371416
+  },
+  "result": {
+    "quality_http_status": 200,
+    "quality_ready": true,
+    "data_quality_issues": 0,
+    "aggtrade_status": "healthy",
+    "kline_1m_status": "healthy",
+    "pubsub_delivery_ready": true
+  },
+  "trading": {
+    "spike_running": false,
+    "orders_submitted": 0
+  },
+  "cleanup": {
+    "probe_subscription_removed": true,
+    "active_ws_streams": 0,
+    "market_status": "ready"
+  }
+}

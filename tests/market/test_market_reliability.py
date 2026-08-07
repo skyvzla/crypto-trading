@@ -160,6 +160,24 @@ async def test_health_fails_closed_when_active_pubsub_has_no_consumers():
     assert response.json()["pubsub_delivery_issues"] == 1
 
 
+def test_historical_kline_http_stack_returns_completed_range():
+    from trading_platform.market.main import create_app
+
+    app, service = create_app(MarketLayerConfig(), "http-range-test")
+    service.rest_client.get_klines = AsyncMock(return_value=[
+        [0, "1", "2", "0.5", "1.5", "3", 59_999],
+        [60_000, "1.5", "2", "1", "1.8", "4", 119_999],
+    ])
+
+    response = TestClient(app).get(
+        "/klines/BTCUSDT/1m?start_time=0&end_time=120000&limit=2"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["source"] == "binance_rest"
+    assert len(response.json()["klines"]) == 2
+
+
 @pytest.mark.asyncio
 async def test_websocket_reconnects_with_the_current_streams(monkeypatch):
     first_socket = AsyncMock()

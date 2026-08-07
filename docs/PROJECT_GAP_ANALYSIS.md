@@ -147,7 +147,9 @@ candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈�
 **已补齐**（2026-08-07）：
 - `/health` 和 `/quality` 暴露逐流质量、连接代次和降级原因
 - WebSocket 重连后先进入 `awaiting_data`，aggTrade/Kline 缺口、重复和乱序会粘性降级
-- 降级期间停止继续发布不完整行情；未实现未经确认的 REST 回补或对账
+- 已实现确定性 REST 回补：aggTrade 使用 `fromId`，Kline 使用时间范围；整批校验、重叠去重、
+  满页/上界/冲突/超时失败均 fail-closed，回补成功后才恢复发布
+- 行情层提供 WS 实时订阅与 HTTP 历史 K 线双栈，HTTP 只返回已完成 K 线，不绕过实时门禁
 - Kline/Tick 实时策略基类消费 `/quality`，质量未知或降级时不处理旧快照和 Pub/Sub Bar
 
 2026-08-08 的正式长稳中，Binance 公共 WS ping timeout 后用 26 秒完成第三次重连；期间

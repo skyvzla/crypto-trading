@@ -37,6 +37,7 @@ class Bar1sAggregator:
 
         # 已发布窗口不能再修订，避免迟到成交造成同一秒重复 Bar。
         self._finalized_through: dict[str, int] = {}
+        self._last_finalized_trade_id: dict[str, int] = {}
 
     def add_trade(
         self,
@@ -44,6 +45,7 @@ class Bar1sAggregator:
         price: Decimal,
         quantity: Decimal,
         timestamp: int,
+        aggregate_trade_id: int | None = None,
     ) -> list[Bar1s]:
         """
         添加一笔交易，返回本次完成的全部 Bar
@@ -83,7 +85,7 @@ class Bar1sAggregator:
             windows[second_ts] = TradeWindow(second_ts)
 
         window = windows[second_ts]
-        window.add_trade(price, quantity)
+        window.add_trade(price, quantity, aggregate_trade_id)
 
         # 更新最新时间戳
         if timestamp > last_ts:
@@ -111,6 +113,8 @@ class Bar1sAggregator:
                 window = windows.pop(ts)
                 bar = window.to_bar(symbol)
                 completed_bars.append(bar)
+                if window.last_aggregate_trade_id is not None:
+                    self._last_finalized_trade_id[symbol] = window.last_aggregate_trade_id
                 self._finalized_through[symbol] = max(
                     ts, self._finalized_through.get(symbol, -1)
                 )
@@ -139,8 +143,12 @@ class Bar1sAggregator:
             del self._last_timestamp[symbol]
         if symbol in self._finalized_through:
             del self._finalized_through[symbol]
+        self._last_finalized_trade_id.pop(symbol, None)
 
         return bars
+
+    def last_finalized_trade_id(self, symbol: str) -> int | None:
+        return self._last_finalized_trade_id.get(symbol)
 
     def get_stats(self) -> dict[str, Any]:
         """获取聚合器统计信息"""
@@ -171,8 +179,11 @@ class TradeWindow:
         self.volume = Decimal("0")
         self.trade_count = 0
         self.quote_volume = Decimal("0")  # 用于计算 vwap
+        self.last_aggregate_trade_id: int | None = None
 
-    def add_trade(self, price: Decimal, quantity: Decimal) -> None:
+    def add_trade(
+        self, price: Decimal, quantity: Decimal, aggregate_trade_id: int | None = None
+    ) -> None:
         """添加一笔交易到窗口"""
         if self.open is None:
             self.open = price
@@ -187,6 +198,8 @@ class TradeWindow:
         self.volume += quantity
         self.quote_volume += price * quantity
         self.trade_count += 1
+        if aggregate_trade_id is not None:
+            self.last_aggregate_trade_id = aggregate_trade_id
 
     def to_bar(self, symbol: str) -> Bar1s:
         """转换为 Bar1s"""

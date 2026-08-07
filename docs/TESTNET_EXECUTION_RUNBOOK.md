@@ -285,16 +285,20 @@ docker compose --profile spike run --rm --no-deps \
   `reports/testnet_spike_soak_3900s_20260807.json`。
 - 启用 15 秒有界 runtime 恢复窗口后的正式监督在 348.065 秒后再次失败：Market 公共 WS
   ping timeout，26 秒后才完成第三次重连；缺失的 aggTrade 和 1m Kline 分别形成确定 gap，
-  质量按设计粘性降级，策略关闭 market/bar 门禁且账户始终为空。报告为
-  `reports/testnet_spike_soak_3900s_recovery_20260807.json`。未实现 REST 回补前不得通过重连
-  清除该事实；3900 秒验收仍未通过。
+ 质量按设计粘性降级，策略关闭 market/bar 门禁且账户始终为空。报告为
+ `reports/testnet_spike_soak_3900s_recovery_20260807.json`。现已实施确定性 REST 回补；后续
+ 需重新做主动 Market 断流和 3900 秒长稳，只有 REST/WS 连续性验证通过才可清除 degraded。
 - PostgreSQL 迁移 `0003` 的策略运行状态已通过 Compose 回归：Spike 每 5 秒写入心跳，
   15 秒未更新显示为 `stale`；API/Web 分开呈现账本健康与策略状态。默认数据库已从
   `0002` 升到 `0003`；准入关闭的 Spike testnet 实例实际写入 `running` 且
   `entry_enabled=false`，优雅停止后写入 `stopped`，启停前后均为空仓空单。
-- 本轮宿主机全量结果为 `431 passed, 33 skipped, 1 warning`。
+- 本轮 Compose 全量结果为 `504 passed, 34 skipped, 1 warning`。
 - 本轮 Compose 相关组合回归为 `174 passed, 1 warning`；最终全量回归为
-  `490 passed, 34 skipped, 1 warning`。
+  `509 passed, 34 skipped, 1 warning`。
+- 2026-08-08 确定性 Market 回补实测：同一 Market 实例断网 25 秒后，公共 WS 从 generation
+  1 重连到 2；服务分别调用 aggTrades `fromId=35836108` 和 1m Kline 时间范围回补，整批校验
+  后 `/quality` 恢复 200，两个流均 healthy、0 quality issues。`spike` 全程停止、0 下单，探针
+  订阅已移除。证据：`reports/testnet_market_backfill_recovery_20260808.json`。
 
 当前 `spike` subcategory 为 disabled。正式 soak 后 Market 再次出现确定 gap，Spike 已优雅
 停止，不通过重启清除质量事实；最终 dry-run 确认 AKEUSDT/BTCUSDT 均为 0 挂单、0 非零仓位，

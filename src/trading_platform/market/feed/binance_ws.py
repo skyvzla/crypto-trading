@@ -37,10 +37,14 @@ class BinanceWebSocketClient:
         ws_base_url: str = "wss://fstream.binance.com",
         reconnect_delay: float = 5.0,
         max_reconnect_attempts: int = 0,  # 0 = 无限重试
+        max_message_queue: int = 256,
     ):
         self.ws_base_url = ws_base_url
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
+        if max_message_queue < 1:
+            raise ValueError("max_message_queue must be positive")
+        self.max_message_queue = max_message_queue
         self._ws: ClientConnection | None = None
         self._running = False
         self._reconnect_count = 0
@@ -64,6 +68,7 @@ class BinanceWebSocketClient:
             ping_interval=20,
             ping_timeout=10,
             close_timeout=5,
+            max_queue=self.max_message_queue,
         )
         self.connection_generation += 1
         self.last_connected_at_ms = int(time.time() * 1000)
@@ -98,7 +103,10 @@ class BinanceWebSocketClient:
         if self._ws is not None:
             self.last_disconnected_at_ms = int(time.time() * 1000)
         if self._ws:
-            await self._ws.close()
+            try:
+                await asyncio.wait_for(self._ws.close(), timeout=1.0)
+            except (asyncio.TimeoutError, ConnectionClosed, WebSocketException):
+                logger.warning("WebSocket close handshake timed out; releasing local state")
             self._ws = None
         self._streams = ()
         logger.info("WebSocket 已断开")
@@ -126,7 +134,10 @@ class BinanceWebSocketClient:
                 await self._open_connection()
                 if not self._running:
                     if self._ws is not None:
-                        await self._ws.close()
+                        try:
+                            await asyncio.wait_for(self._ws.close(), timeout=1.0)
+                        except (asyncio.TimeoutError, ConnectionClosed, WebSocketException):
+                            pass
                         self._ws = None
                     return False
                 logger.info(f"WebSocket 重连成功，订阅 {len(self._streams)} 个流")
