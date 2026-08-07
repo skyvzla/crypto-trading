@@ -20,6 +20,7 @@ def _intent(client_order_id: str, symbol: str = "BTCUSDT") -> OrderIntent:
         price=Decimal("100"),
         quantity=Decimal("0.1"),
         client_order_id=client_order_id,
+        campaign_id=f"spike_short:{symbol}:1000",
     )
 
 
@@ -60,6 +61,28 @@ def _rules() -> BinanceSymbolRuleBook:
             )
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_submit_rejects_missing_campaign_before_normalization_wal_or_rest(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    rest = Mock(post_order=AsyncMock(), query_order=AsyncMock())
+    symbol_rules = Mock()
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        symbol_rules=symbol_rules,
+    )
+    intent = _intent("cid-no-campaign")
+    intent.campaign_id = None
+
+    with pytest.raises(ValueError, match="campaign_id is required"):
+        await executor.submit(intent)
+
+    symbol_rules.get.assert_not_called()
+    assert wal.recover_latest() == {}
+    rest.post_order.assert_not_awaited()
 
 
 @pytest.mark.asyncio

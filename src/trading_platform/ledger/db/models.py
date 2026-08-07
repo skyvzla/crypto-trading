@@ -149,6 +149,10 @@ class VersionConflictError(Exception):
     """乐观并发版本冲突。"""
 
 
+class CampaignPnLFactsError(RuntimeError):
+    """Campaign 成交事实不完整或互相冲突，无法可靠计算盈亏。"""
+
+
 class LedgerDB:
     _ORDER_UPSERT = """
         INSERT INTO orders (
@@ -449,13 +453,32 @@ class LedgerDB:
             return row[0]
         existing = await (
             await conn.execute(
-                "SELECT campaign_id FROM trades "
+                "SELECT strategy_id, order_id, client_order_id, campaign_id, side, "
+                "position_side, quantity, price, quote_quantity, commission, "
+                "commission_asset, realized_pnl, is_maker, exchange_time "
+                "FROM trades "
                 "WHERE account_id = %s AND symbol = %s AND trade_id = %s",
                 (trade.account_id, trade.symbol, trade.trade_id),
             )
         ).fetchone()
-        if existing is not None and existing[0] != trade.campaign_id:
-            raise ValueError("trade Campaign attribution is immutable")
+        expected = (
+            trade.strategy_id,
+            trade.order_id,
+            trade.client_order_id,
+            trade.campaign_id,
+            trade.side,
+            trade.position_side,
+            trade.quantity,
+            trade.price,
+            trade.quote_quantity,
+            trade.commission,
+            trade.commission_asset,
+            trade.realized_pnl,
+            trade.is_maker,
+            trade.exchange_time,
+        )
+        if existing is not None and tuple(existing) != expected:
+            raise ValueError("trade facts are immutable")
         return 0
 
     async def apply_execution_report(
@@ -494,6 +517,7 @@ class LedgerDB:
         account_id: str,
         strategy_id: str,
         symbol: str,
+        campaign_id: str,
         client_order_ids: Sequence[str],
     ) -> list[Trade]:
         """按执行 WAL 的订单身份读取某个 Campaign 的成交事实。"""
@@ -503,6 +527,7 @@ class LedgerDB:
             "account_id": account_id,
             "strategy_id": strategy_id,
             "symbol": symbol,
+            "campaign_id": campaign_id,
             "client_order_ids": list(client_order_ids),
         }
         async with self.pool.connection() as conn:
@@ -512,6 +537,7 @@ class LedgerDB:
                 "WHERE account_id = %(account_id)s "
                 "AND strategy_id = %(strategy_id)s "
                 "AND symbol = %(symbol)s "
+                "AND campaign_id = %(campaign_id)s "
                 "AND client_order_id = ANY(%(client_order_ids)s) "
                 "ORDER BY exchange_time ASC, id ASC",
                 params,
@@ -605,9 +631,14 @@ class LedgerDB:
         async with self.pool.connection() as conn:
             cursor = conn.cursor(row_factory=class_row(CampaignPnLSummary))
             await cursor.execute(query, params)
-            summary = await cursor.fetchone()
+            summaries = await cursor.fetchmany(2)
+        if len(summaries) > 1:
+            raise CampaignPnLFactsError(
+                "Campaign trades span multiple symbols"
+            )
+        summary = summaries[0] if summaries else None
         if summary is not None and not summary.pnl_facts_complete:
-            raise RuntimeError(
+            raise CampaignPnLFactsError(
                 "Campaign PnL requires realized PnL, USDT commission, "
                 "and nonnegative short quantity"
             )

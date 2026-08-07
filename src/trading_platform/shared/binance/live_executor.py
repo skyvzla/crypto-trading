@@ -51,6 +51,8 @@ class BinanceOrderExecutor:
         leverage: int = 1,
     ) -> OrderWALRecord:
         """提交一次订单；相同 ``client_order_id`` 永不自动重复提交。"""
+        if not intent.campaign_id:
+            raise ValueError("campaign_id is required before order submission")
         if self.symbol_rules is not None:
             intent = self.symbol_rules.get(intent.symbol).normalize_intent(
                 intent,

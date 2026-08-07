@@ -39,6 +39,7 @@ def _intent(client_order_id="cid-1"):
         ttl_ms=10_000,
         strategy_id="spike_short",
         trigger_reason="spike_tier1",
+        campaign_id="spike_short:BTCUSDT:1000",
     )
 
 

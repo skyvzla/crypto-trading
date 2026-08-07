@@ -16,7 +16,16 @@ from trading_platform.strategies.campaign_store import CampaignLease
 from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
 
 
-def _wal_record(client_order_id: str, *, recorded_at: int, reason: str) -> OrderWALRecord:
+CAMPAIGN_ID = "spike_short:AKEUSDT:1000"
+
+
+def _wal_record(
+    client_order_id: str,
+    *,
+    recorded_at: int,
+    reason: str,
+    campaign_id: str = CAMPAIGN_ID,
+) -> OrderWALRecord:
     return OrderWALRecord(
         record_type="exchange_status",
         recorded_at=recorded_at,
@@ -29,7 +38,11 @@ def _wal_record(client_order_id: str, *, recorded_at: int, reason: str) -> Order
         price="1",
         status="FILLED",
         exchange_order_id=client_order_id,
-        payload={"strategy_id": "spike_short", "trigger_reason": reason},
+        payload={
+            "strategy_id": "spike_short",
+            "trigger_reason": reason,
+            "campaign_id": campaign_id,
+        },
     )
 
 
@@ -79,7 +92,7 @@ def _coordinator(tmp_path, *, trades: list[Trade], exit_policy="execution-test-d
             get_trades_by_client_order_ids=AsyncMock(return_value=trades)
         ),
     )
-    coordinator._owned_campaign_id = "spike_short:AKEUSDT:1000"
+    coordinator._owned_campaign_id = CAMPAIGN_ID
     return coordinator, strategy, account, entry_id
 
 
@@ -90,6 +103,7 @@ def _entry_trade(entry_id: str) -> Trade:
         symbol="AKEUSDT",
         trade_id="1",
         client_order_id=entry_id,
+        campaign_id=CAMPAIGN_ID,
         side="SELL",
         commission=Decimal("0.01"),
         exchange_time=datetime.fromtimestamp(1.2, timezone.utc),
@@ -103,6 +117,7 @@ def _exit_trade(client_order_id: str) -> Trade:
         symbol="AKEUSDT",
         trade_id="2",
         client_order_id=client_order_id,
+        campaign_id=CAMPAIGN_ID,
         side="BUY",
         quantity=Decimal("1"),
         commission=Decimal("0.01"),
@@ -123,6 +138,7 @@ async def test_restart_restores_first_fill_and_all_owned_campaign_commission(tmp
                 symbol="AKEUSDT",
                 trade_id="1",
                 client_order_id="s_AKEUSDT_rs_e1",
+                campaign_id=CAMPAIGN_ID,
                 side="SELL",
                 commission=Decimal("0.01"),
                 exchange_time=entry_time,
@@ -133,6 +149,7 @@ async def test_restart_restores_first_fill_and_all_owned_campaign_commission(tmp
                 symbol="AKEUSDT",
                 trade_id="2",
                 client_order_id="x_AKEUSDT_12kw_r",
+                campaign_id=CAMPAIGN_ID,
                 side="BUY",
                 commission=Decimal("0.02"),
                 exchange_time=exit_time,
@@ -153,6 +170,12 @@ async def test_restart_restores_first_fill_and_all_owned_campaign_commission(tmp
         "client_order_ids"
     ]
     assert set(requested_ids) == {"s_AKEUSDT_rs_e1", "x_AKEUSDT_12kw_r"}
+    assert (
+        coordinator.trade_source.get_trades_by_client_order_ids.await_args.kwargs[
+            "campaign_id"
+        ]
+        == CAMPAIGN_ID
+    )
 
 
 @pytest.mark.asyncio
@@ -304,6 +327,20 @@ async def test_restart_with_position_but_campaign_not_in_wal_fails_closed(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_restart_rejects_trade_from_another_campaign(tmp_path):
+    coordinator, _, account, entry_id = _coordinator(tmp_path, trades=[])
+    trade = _entry_trade(entry_id)
+    trade.campaign_id = "spike_short:AKEUSDT:999"
+    coordinator.trade_source.get_trades_by_client_order_ids.return_value = [trade]
+
+    with pytest.raises(RuntimeError, match="outside the owned Campaign"):
+        await coordinator.restore_campaign_timing()
+
+    assert coordinator.gate.enabled is False
+    account.restore_trade_state.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_restart_restored_timing_requests_timeout_exit_only_once(tmp_path):
     coordinator, strategy, account, _ = _coordinator(
         tmp_path,
@@ -314,6 +351,7 @@ async def test_restart_restored_timing_requests_timeout_exit_only_once(tmp_path)
                 symbol="AKEUSDT",
                 trade_id="1",
                 client_order_id="s_AKEUSDT_rs_e1",
+                campaign_id=CAMPAIGN_ID,
                 side="SELL",
                 commission=Decimal("0.01"),
                 exchange_time=datetime.fromtimestamp(1.2, timezone.utc),

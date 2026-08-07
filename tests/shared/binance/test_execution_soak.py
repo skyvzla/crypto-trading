@@ -81,6 +81,7 @@ async def test_reliable_executor_100_round_soak_never_resubmits_unknown(tmp_path
             client_order_id=f"soak-{index}",
             strategy_id="spike_short",
             trigger_reason="spike_tier1",
+            campaign_id="spike_short:BTCUSDT:1000",
         )
         first = await executor.submit(intent)
         if first.status == "SUBMIT_UNKNOWN":

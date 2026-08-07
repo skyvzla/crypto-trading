@@ -136,6 +136,7 @@ class CampaignTradeSource(Protocol):
         account_id: str,
         strategy_id: str,
         symbol: str,
+        campaign_id: str,
         client_order_ids: list[str],
     ) -> list[Any]:
         ...
@@ -254,8 +255,8 @@ class SpikeExecutionCoordinator:
             for record in latest
             if record.account_id == self.account_id
             and record.symbol == symbol
-            and record.recorded_at >= signal_time
             and record.payload.get("strategy_id") == STRATEGY_ID
+            and record.payload.get("campaign_id") == campaign_id
         ]
         records_by_client_id = {
             record.client_order_id: record for record in owned_records
@@ -283,8 +284,13 @@ class SpikeExecutionCoordinator:
             account_id=self.account_id,
             strategy_id=STRATEGY_ID,
             symbol=symbol,
+            campaign_id=campaign_id,
             client_order_ids=client_order_ids,
         )
+        if any(trade.campaign_id != campaign_id for trade in trades):
+            self._fail_campaign_recovery(
+                "PostgreSQL returned a trade outside the owned Campaign"
+            )
         if any(trade.client_order_id not in client_order_ids for trade in trades):
             self._fail_campaign_recovery("PostgreSQL returned a trade outside Campaign WAL")
         entry_trades = [

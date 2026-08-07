@@ -17,6 +17,7 @@ from trading_platform.ledger.binance_account_updates import BinanceAccountUpdate
 from trading_platform.ledger.binance_reports import BinanceExecutionReportLedger
 from trading_platform.ledger.binance_runtime import BinanceLedgerCallbacks
 from trading_platform.ledger.db.models import (
+    CampaignPnLFactsError,
     LedgerDB,
     Order,
     Position,
@@ -360,6 +361,7 @@ async def test_binance_execution_report_is_atomically_idempotent(ledger):
 async def test_campaign_trade_query_is_scoped_to_wal_client_order_ids(ledger):
     suffix = uuid4().hex[:10]
     account_id = f"campaign-{suffix}"
+    campaign_id = f"spike_short:AKEUSDT:{int(uuid4().int % 10**12)}"
     now = datetime.now(timezone.utc)
     for trade_id, client_order_id, commission in (
         ("1", f"entry-{suffix}", Decimal("0.01")),
@@ -373,6 +375,7 @@ async def test_campaign_trade_query_is_scoped_to_wal_client_order_ids(ledger):
                 symbol="AKEUSDT",
                 trade_id=trade_id,
                 client_order_id=client_order_id,
+                campaign_id=campaign_id,
                 side="SELL",
                 quantity=Decimal("1"),
                 price=Decimal("1"),
@@ -387,6 +390,7 @@ async def test_campaign_trade_query_is_scoped_to_wal_client_order_ids(ledger):
         account_id=account_id,
         strategy_id="spike_short",
         symbol="AKEUSDT",
+        campaign_id=campaign_id,
         client_order_ids=[f"entry-{suffix}", f"exit-{suffix}"],
     )
 
@@ -569,7 +573,7 @@ async def test_order_and_trade_campaign_attribution_is_immutable(ledger):
 
     with pytest.raises(ValueError, match="order Campaign attribution is immutable"):
         await ledger.insert_order(replace(order, campaign_id=other_campaign))
-    with pytest.raises(ValueError, match="trade Campaign attribution is immutable"):
+    with pytest.raises(ValueError, match="trade facts are immutable"):
         await ledger.insert_trade(replace(trade, campaign_id=other_campaign))
 
 
@@ -579,7 +583,7 @@ async def test_order_and_trade_campaign_attribution_is_immutable(ledger):
     [("SELL", "BNB"), ("BUY", "USDT")],
 )
 async def test_campaign_pnl_rejects_unconvertible_or_inconsistent_facts(
-    ledger, side, commission_asset
+    ledger, client, side, commission_asset
 ):
     suffix = uuid4().hex[:8]
     campaign_id = f"spike_short:AKEUSDT:{int(uuid4().int % 10**12)}"
@@ -604,12 +608,82 @@ async def test_campaign_pnl_rejects_unconvertible_or_inconsistent_facts(
         )
     )
 
-    with pytest.raises(RuntimeError, match="requires realized PnL"):
+    with pytest.raises(CampaignPnLFactsError, match="requires realized PnL"):
         await ledger.get_campaign_pnl(
             account_id=f"invalid-pnl-{suffix}",
             strategy_id="spike_short",
             campaign_id=campaign_id,
         )
+
+    response = await client.get(
+        f"/api/v1/campaigns/{campaign_id}/pnl",
+        params={
+            "account_id": f"invalid-pnl-{suffix}",
+            "strategy_id": "spike_short",
+        },
+    )
+    assert response.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_campaign_pnl_rejects_multiple_symbols(ledger):
+    suffix = uuid4().hex[:8]
+    account_id = f"multi-symbol-{suffix}"
+    campaign_id = f"spike_short:AKEUSDT:{int(uuid4().int % 10**12)}"
+    for index, symbol in enumerate(("AKEUSDT", "BTCUSDT"), start=1):
+        await ledger.insert_trade(
+            Trade(
+                account_id=account_id,
+                strategy_id="spike_short",
+                symbol=symbol,
+                trade_id=str(index),
+                order_id=f"order-{index}",
+                client_order_id=f"client-{index}",
+                campaign_id=campaign_id,
+                side="SELL",
+                quantity=Decimal("1"),
+                price=Decimal("1"),
+                quote_quantity=Decimal("1"),
+                commission=Decimal("0.01"),
+                commission_asset="USDT",
+                realized_pnl=Decimal("0"),
+                exchange_time=datetime.now(timezone.utc),
+            )
+        )
+
+    with pytest.raises(CampaignPnLFactsError, match="multiple symbols"):
+        await ledger.get_campaign_pnl(
+            account_id=account_id,
+            strategy_id="spike_short",
+            campaign_id=campaign_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_trade_id_rejects_changed_accounting_facts(ledger):
+    suffix = uuid4().hex[:8]
+    trade = Trade(
+        account_id=f"immutable-{suffix}",
+        strategy_id="spike_short",
+        symbol="AKEUSDT",
+        trade_id=f"trade-{suffix}",
+        order_id=f"order-{suffix}",
+        client_order_id=f"client-{suffix}",
+        campaign_id=f"spike_short:AKEUSDT:{int(uuid4().int % 10**12)}",
+        side="SELL",
+        quantity=Decimal("1"),
+        price=Decimal("1"),
+        quote_quantity=Decimal("1"),
+        commission=Decimal("0.01"),
+        commission_asset="USDT",
+        realized_pnl=Decimal("0"),
+        exchange_time=datetime.now(timezone.utc),
+    )
+    assert await ledger.insert_trade(trade) > 0
+    assert await ledger.insert_trade(trade) == 0
+
+    with pytest.raises(ValueError, match="trade facts are immutable"):
+        await ledger.insert_trade(replace(trade, commission=Decimal("0.02")))
 
 
 @pytest.mark.asyncio

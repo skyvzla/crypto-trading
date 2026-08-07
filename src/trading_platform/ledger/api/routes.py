@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from trading_platform.ledger.db.models import (
+    CampaignPnLFactsError,
     LedgerDB,
     StrategyAuditRecord,
     SubcategoryAdmission,
@@ -298,11 +299,14 @@ async def get_campaign_pnl(
     strategy_id: str = Query(min_length=1, max_length=64),
     db: LedgerDB = Depends(get_db),
 ) -> CampaignPnLResponse:
-    item = await db.get_campaign_pnl(
-        account_id=account_id,
-        strategy_id=strategy_id,
-        campaign_id=campaign_id,
-    )
+    try:
+        item = await db.get_campaign_pnl(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            campaign_id=campaign_id,
+        )
+    except CampaignPnLFactsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if item is None:
         raise HTTPException(status_code=404, detail="Campaign trades not found")
     return CampaignPnLResponse.model_validate(item)

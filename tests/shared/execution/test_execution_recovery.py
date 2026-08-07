@@ -23,6 +23,7 @@ def make_intent(client_order_id: str = "cid-1") -> OrderIntent:
         price=Decimal("100"),
         quantity=Decimal("0.1"),
         client_order_id=client_order_id,
+        campaign_id="spike_short:BTCUSDT:1000",
     )
 
 
@@ -43,7 +44,6 @@ def test_wal_fsync_and_recover_latest(tmp_path):
 def test_wal_persists_explicit_campaign_identity(tmp_path):
     wal = OrderWAL(tmp_path / "orders.jsonl")
     intent = make_intent()
-    intent.campaign_id = "spike_short:BTCUSDT:1000"
 
     record = wal.record_intent(intent, account_id="a-1", recorded_at=1000)
 
