@@ -17,7 +17,10 @@ from trading_platform.strategies.spike_live import (
     SpikeRuntimeCallbacks,
     require_one_way_position_mode,
 )
-from trading_platform.strategies.spike_main import SpikeLiveProcess
+from trading_platform.strategies.spike_main import (
+    SpikeLiveProcess,
+    require_viable_entry_notional,
+)
 
 
 class StrategyStub:
@@ -76,6 +79,13 @@ def test_live_process_requires_explicit_one_way_position_mode():
         require_one_way_position_mode({"dualSidePosition": True})
     with pytest.raises(RuntimeError, match="one-way"):
         require_one_way_position_mode({})
+
+
+def test_entry_notional_must_leave_every_tier_above_exchange_minimum():
+    rules = Mock(symbol="AKEUSDT", min_notional=Decimal("5"))
+    with pytest.raises(ValueError, match="smallest entry tier"):
+        require_viable_entry_notional(Decimal("10"), rules)
+    require_viable_entry_notional(Decimal("20"), rules)
 
 
 def test_process_rejects_conflicting_account_configuration():

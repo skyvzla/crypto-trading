@@ -128,10 +128,18 @@ uv run python scripts/binance_testnet_flatten.py \
   1m、5m 均为 healthy，`/quality` 返回 200；
 - 人工重启 Spike 后旧 listenKey 正常关闭、新 listenKey 成功连接，市场订阅重新注册并在
   `connection_generation=2` 恢复 ready；
+- 受控测试信号通过完整 Spike 进程真实提交三档 AKEUSDT `SELL LIMIT`，数量分别为
+  `1316/1750/1310`，三档均收到 REST 与 User Stream `NEW`；优雅停止后均收到
+  User Stream `CANCELED`、成交量为 0，Campaign 释放；
+- 保留终态 WAL 再次启动，三档没有被重复提交，disabled subcategory 继续阻止新入场；
 - 验收结束时账户为 one-way、0 个挂单、0 个非零仓位。
 
 验收结束后 `spike` subcategory 已设置为 disabled，Spike 容器已停止；再次运行前必须经过新的
 人工准入操作。
+
+AKEUSDT 的 `MIN_NOTIONAL` 为 5 USDT。三档权重为 30/40/30，因此 10 USDT 总金额会形成
+3/4/3 USDT 的必然无效订单。进程会在连接交易所、读取 symbol rules 后验证最小档必须严格
+高于交易所最小名义金额；当前 Compose testnet 默认使用 20 USDT。
 
 上述结果只证明 REST harness 和紧急清仓路径，不替代完整策略进程的 User Stream、Campaign、
 部分成交、断流、重连和启动恢复外部验收。

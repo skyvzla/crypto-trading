@@ -19,7 +19,10 @@ from trading_platform.ledger.db.models import LedgerDB, create_connection_pool
 from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.binance.rest_client import BinanceRestClient
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
-from trading_platform.shared.binance.symbol_rules import BinanceSymbolRuleBook
+from trading_platform.shared.binance.symbol_rules import (
+    BinanceSymbolRuleBook,
+    BinanceSymbolRules,
+)
 from trading_platform.shared.config import (
     BinanceConfig,
     DatabaseConfig,
@@ -41,11 +44,27 @@ from trading_platform.strategies.spike_live import (
     SpikeRuntimeCallbacks,
     require_one_way_position_mode,
 )
-from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
+from trading_platform.strategies.spike_short import (
+    DynamicSpikeBacktestStrategy,
+    DynamicSpikeShortStrategy,
+)
 from trading_platform.strategies.universe import UNIVERSE_SCAN_INTERVAL_SECONDS
 
 
 logger = logging.getLogger(__name__)
+
+
+def require_viable_entry_notional(
+    total_notional: Decimal,
+    rules: BinanceSymbolRules,
+) -> None:
+    """拒绝任何确定会低于交易所最小名义金额的三档配置。"""
+    smallest_tier = total_notional * min(DynamicSpikeShortStrategy.TIER_WEIGHTS)
+    if smallest_tier <= rules.min_notional:
+        raise ValueError(
+            f"{rules.symbol} smallest entry tier must exceed min notional: "
+            f"{smallest_tier} <= {rules.min_notional}"
+        )
 
 
 class SpikeLiveProcess:
@@ -206,7 +225,10 @@ class SpikeLiveProcess:
             await rest.get_exchange_info(), symbols=self.settings.symbols
         )
         for symbol in self.settings.symbols:
-            symbol_rules.get(symbol)
+            require_viable_entry_notional(
+                self.settings.total_notional,
+                symbol_rules.get(symbol),
+            )
         executor = BinanceOrderExecutor(
             rest,
             wal,

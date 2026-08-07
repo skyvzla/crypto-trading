@@ -144,8 +144,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 区域 | 缺失能力 | 目标阶段 |
 |---|---|---|
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
-| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁；⏳ 带真实订单的完整策略进程外部验收 | Phase 2 |
-| **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、✅ 部分成交/撤单竞态/迟到回报自动化、✅ AKEUSDT 真实预挂撤单与成交；⏳ 完整进程外部验收 | Phase 2/3 |
+| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁、真实三档撤单后释放；⏳ 带真实成交的恢复验收 | Phase 2 |
+| **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、✅ 部分成交/撤单竞态/迟到回报自动化、✅ AKEUSDT 真实预挂撤单与成交、✅ 完整进程三档 NEW/User Stream/CANCELED；⏳ 完整进程部分成交 | Phase 2/3 |
 | **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/具体账户进程/订单仓位启动门禁/规则量化/重连顺序；⏳外部部分成交与保护退出 | Phase 3 |
 | **持仓退出** | ✅ D-007 仅用于 replay/testnet 执行验证；⏳ 最新动能、origin 减半、趋势清仓及参数标定；未完成前 live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞/全局 halt；⏳保证金、日亏损、数据延迟 | Phase 3 |
@@ -159,8 +159,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run pytest -q`：`275 passed, 11 skipped, 1 warning`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`286 passed, 1 warning`
+- 本地 `uv run pytest -q`：`276 passed, 11 skipped, 1 warning`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`287 passed, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
 - Binance `demo-fapi` 真实鉴权成功；账户已切换 one-way，AKEUSDT 真实 `SELL LIMIT` 成交
@@ -186,6 +186,14 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
   aggTrade、1m 和 5m 三个流均 healthy，`/quality` 返回 200
 - Spike 人工重启时旧 listenKey 正常关闭、新 listenKey 成功连接；市场订阅卸载后重新注册，
   `connection_generation=2` 并恢复 ready；验收后 subcategory 已关闭、策略容器已停止
+- 受控测试信号经完整 Spike 进程生成三档 AKEUSDT `SELL LIMIT`，交易所数量为
+  `1316/1750/1310`、状态均为 `NEW`；WAL 顺序记录 intent、REST `NEW` 和 User Stream
+  `NEW`。关闭准入并优雅停止后，三档均由 User Stream 确认为 `CANCELED`、成交量 0，
+  Campaign 已释放
+- 带上述终态 WAL 再次启动时没有重下订单，subcategory version 4 保持 disabled；最终仍为
+  0 个挂单、0 个非零仓位
+- AKEUSDT 每档最小名义金额为 5 USDT；进程新增启动前门禁，拒绝总金额 10 导致的
+  3/4/3 USDT 无效配置，Compose testnet 默认总金额调整为 20 USDT
 
 尚未验证：
 
@@ -193,8 +201,9 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 - subcategory 准入服务接入具体 testnet/live 账户进程及外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
-- Binance Futures testnet 完整策略进程带真实订单时的部分成交、User Stream 异常断流、
-  未知回报和 Campaign 恢复；空仓启动/人工重启及独立 REST harness 已完成
+- Binance Futures testnet 完整策略进程带真实订单时的部分成交、成交仓位确认、User Stream
+  异常断流、未知回报和持仓 Campaign 恢复；三档 NEW/CANCELED、终态 WAL 恢复、空仓重启及
+  独立 REST harness 已完成
 
 ## 6. 明确不做
 
