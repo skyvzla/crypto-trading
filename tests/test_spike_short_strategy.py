@@ -294,6 +294,91 @@ class TestDynamicSpikeShortStrategy:
         assert strategy._timeout_checked is True
         assert strategy.drain_audit_events()[0].details["exit_required"] is False
 
+    def test_d009_profitable_old_campaign_is_closed_before_rotation(self):
+        class Account:
+            def __init__(self):
+                self.position = Position(
+                    symbol="BTCUSDT", side="SHORT", entry_price=Decimal("100"),
+                    quantity=Decimal("1"), total_commission=Decimal("0.2"),
+                    unrealized_pnl=Decimal("0"), realized_pnl=Decimal("0"),
+                    opened_at=1_000,
+                )
+
+            def get_position(self, symbol):
+                return self.position if symbol == "BTCUSDT" else None
+
+            def has_open_position(self, symbol):
+                return self.get_position(symbol) is not None
+
+            def iter_orders(self):
+                return ()
+
+            def cancel_order(self, order_id):
+                return True
+
+        account = Account()
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000"), account=account
+        )
+        strategy.first_fill_time = 1_000
+        strategy._campaign_id_for_timing = "spike_short:BTCUSDT:1"
+        signal = SpikeSignal(
+            signal_time=902_000,
+            trigger_price=Decimal("110"),
+            spike_high=Decimal("120"),
+            origin_price=Decimal("90"),
+            atr=Decimal("10"),
+            tier_prices=[Decimal("108.5"), Decimal("112.5"), Decimal("116.5")],
+            tier_weights=list(strategy.TIER_WEIGHTS),
+            invalid_price=Decimal("155"),
+            active_time=903_000,
+            expire_time=1_083_000,
+        )
+        strategy.active_signals.append(signal)
+        bar = Bar1s(
+            symbol="BTCUSDT", timestamp=902_000, available_time=902_000,
+            open=Decimal("90"), high=Decimal("91"), low=Decimal("89"),
+            close=Decimal("90"), volume=Decimal("1"), trade_count=1,
+            vwap=Decimal("90"),
+        )
+
+        rotation = SpikeSignal(
+            signal_time=903_000,
+            trigger_price=Decimal("111"),
+            spike_high=Decimal("121"),
+            origin_price=Decimal("90"),
+            atr=Decimal("10"),
+            tier_prices=[Decimal("109"), Decimal("113"), Decimal("117")],
+            tier_weights=list(strategy.TIER_WEIGHTS),
+            invalid_price=Decimal("156"),
+            active_time=904_000,
+            expire_time=1_084_000,
+        )
+
+        intents = strategy._prepare_rotation(rotation, bar)
+
+        assert len(intents) == 1
+        assert intents[0].trigger_reason == "campaign_rotation_exit"
+        assert intents[0].side == "BUY"
+        assert strategy._pending_rotation is rotation
+        assert strategy.active_signals == []
+
+        account.position = None
+        strategy.set_entry_enabled(False)
+        for timestamp in range(843_000, 903_000, 1_000):
+            strategy._update_cache(Bar1s(
+                symbol="BTCUSDT", timestamp=timestamp,
+                available_time=timestamp + 1_000,
+                open=Decimal("90"), high=Decimal("91"), low=Decimal("89"),
+                close=Decimal("90"), volume=Decimal("1"), trade_count=1,
+                vwap=Decimal("90"),
+            ))
+        strategy.on_bar1s(bar)
+
+        assert strategy._pending_rotation is None
+        assert strategy.active_signals == [rotation]
+        assert strategy.first_fill_time is None
+
     def test_minute_window_requires_every_completed_kline(self):
         strategy = DynamicSpikeShortStrategy(
             "BTCUSDT", total_notional=Decimal("1000")

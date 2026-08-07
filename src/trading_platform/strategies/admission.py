@@ -30,7 +30,11 @@ class AdmissionRefreshResult:
 
 
 class SubcategoryAdmissionService:
-    """按显式周期刷新准入；关闭或数据源异常时 fail-closed。"""
+    """由可交易池扫描驱动准入刷新；关闭或数据源异常时 fail-closed。
+
+    该服务不创建自己的定时任务。调用方应在每次可交易池扫描完成后调用
+    :meth:`on_universe_scan`，使 subcategory 与扫描周期天然一致。
+    """
 
     def __init__(
         self,
@@ -41,7 +45,6 @@ class SubcategoryAdmissionService:
         subcategory: str,
         strategy_id: str,
         entry_trigger_reasons: set[str],
-        poll_interval_seconds: float,
     ):
         if not subcategory:
             raise ValueError("subcategory is required")
@@ -49,24 +52,16 @@ class SubcategoryAdmissionService:
             raise ValueError("strategy_id is required")
         if not entry_trigger_reasons:
             raise ValueError("entry_trigger_reasons must not be empty")
-        if poll_interval_seconds <= 0:
-            raise ValueError("poll_interval_seconds must be positive")
         self.source = source
         self.gate = gate
         self.account = account
         self.subcategory = subcategory
         self.strategy_id = strategy_id
         self.entry_trigger_reasons = frozenset(entry_trigger_reasons)
-        self.poll_interval_seconds = poll_interval_seconds
         self.last_result: AdmissionRefreshResult | None = None
         self.last_error: Exception | None = None
-        self._task: asyncio.Task[None] | None = None
 
-    @property
-    def is_running(self) -> bool:
-        return self._task is not None and not self._task.done()
-
-    async def refresh_once(self) -> AdmissionRefreshResult:
+    async def on_universe_scan(self) -> AdmissionRefreshResult:
         try:
             enabled = await self.source.is_subcategory_enabled(self.subcategory)
         except asyncio.CancelledError:
@@ -120,24 +115,6 @@ class SubcategoryAdmissionService:
         self.last_result = result
         return result
 
-    def start(self) -> asyncio.Task[None]:
-        if self.is_running:
-            assert self._task is not None
-            return self._task
-        self._task = asyncio.create_task(self.run())
-        return self._task
-
-    async def stop(self) -> None:
-        task = self._task
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    async def run(self) -> None:
-        while True:
-            await self.refresh_once()
-            await asyncio.sleep(self.poll_interval_seconds)
+    async def refresh_once(self) -> AdmissionRefreshResult:
+        """兼容旧调用方；新代码应使用 ``on_universe_scan``。"""
+        return await self.on_universe_scan()

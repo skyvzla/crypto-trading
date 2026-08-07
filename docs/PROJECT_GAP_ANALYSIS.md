@@ -11,8 +11,8 @@
 执行仍未完成。User Stream 到 WAL/RiskGuard/PostgreSQL 的可复用运行时与组合测试已经完成，
 但尚未建立绑定具体 testnet 账户的长期运行进程和完整交易所启动对账。
 
-当前本地全量测试为 `159 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`168 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地上次全量测试为 `159 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`174 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
@@ -99,8 +99,8 @@ testnet 真实接收完成 1s Bar 与新完成 1m Kline，但仍不能证明 tes
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- 确认 `SUBMIT_UNKNOWN` 轮询周期/次数和账户/策略归属，建立实际运行进程
-- 交易所全部未终态订单、成交和仓位的完整启动对账
+- 确认 `SUBMIT_UNKNOWN` 轮询周期/次数，按策略类型配置专用账户并建立实际运行进程
+- 交易所成交事实的启动对账（订单和仓位快照一致性门禁已接入）
 - 撤单与迟到回报竞态处理
 
 ### 3.6 数据质量检查已加强（2026-08-06）
@@ -137,7 +137,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 区域 | 缺失能力 | 目标阶段 |
 |---|---|---|
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
-| **Campaign** | ✅ 全局入场互斥、第一笔成交计时；⏳ 恢复与终态 | Phase 2 |
+| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换；⏳ 持久化、恢复与终态 | Phase 2 |
 | **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、⏳ 部分成交、⏳ 撤单竞态 | Phase 2/3 |
 | **执行恢复** | ✅ WAL/REST 提交/User Stream 同步/未知单启动与后台解析/风险阻塞/生命周期/共享账户拒绝门禁；⏳具体账户进程、完整启动对账、迟到回报 | Phase 3 |
 | **持仓退出** | ✅ D-007 900 秒非正收益退出；保护单、止损、止盈、盈利管理、最终结算 | Phase 2/3 |
@@ -153,7 +153,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 已验证：
 
 - `uv run --extra dev pytest -q`：`159 passed, 9 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`168 passed`
+- `docker compose -f compose.test.yaml run --rm test`：`174 passed`
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready
@@ -189,13 +189,13 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 2. V1 挂单失败或撤销后是否允许本轮重挂？
 3. Campaign 是否采用“逐币种状态对象 + 全局协调器只允许一个交易状态”？
 4. 部分成交、手续费、滑点、同秒事件、未平仓结算采用什么回测口径？
-5. 盈利仓位超过 900 秒后的止盈、动能衰减、回撤和分批退出规则是什么？
-6. 监听租约的入池条件、扫描周期、确认次数、回吐、期限和重入规则是什么？
+5. 到达起涨点时，如何计算“下跌动能明显衰减”；减半后的趋势周期、动能阈值、最大持仓时间和最终退出条件是什么？
+6. 可交易池与 subcategory 共用的扫描周期是多少；监听租约的入池条件、确认次数、回吐、期限和重入规则是什么？
 7. Web V1 的身份认证、角色和敏感操作范围是什么？
 8. replay、testnet、live 各自的验收阈值和人工审批条件是什么？
 9. 外部 DuckDB 继续只读挂载，还是迁移为本项目独立数据卷？
-10. testnet API Key 对应账户是否专用于 `spike_short`？共享账户需确认订单和仓位归属规则。
-11. `SUBMIT_UNKNOWN` 后台轮询周期和最大次数采用什么值？
+10. 是否确认前 90 秒不设固定价格止损；90 秒后采用时间衰减价格保护，还是只使用趋势/动能退出？
+11. `SUBMIT_UNKNOWN` 后台轮询周期和最大次数采用什么值？该状态表示下单请求可能已被交易所接受，但本地因超时无法确认，解析前必须阻止同币种重复下单。
 
 ## 8. 当前代码状态总结（2026-08-07 更新）
 
@@ -206,7 +206,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 数据连续性检查 | 已实现 | 5s/60s 窗口检查及行情层质量门禁已接入 |
 | 订单幂等 | 部分完成 | `placed_client_order_ids`、订单 WAL、User Stream 同步、启动恢复和后台轮询已有，缺参数确认与具体账户进程 |
 | 失效撤单 | replay 已实现 | `_cancel_signal_orders()` 正确撤单；实时撤单竞态待验证 |
-| Campaign | 部分完成 | 已有全局准入锁和首成交时钟，缺退出、恢复与持久化 |
+| Campaign | 部分完成 | 已有全局准入锁、首成交时钟和 D-009 轮换退出，缺持久化、恢复与终态账本 |
 | 持仓管理 | 部分完成 | D-007 已实现；保护退出、盈利管理和完整已平仓 PnL 待确认 |
 | 环境解耦 | 部分完成 | 已依赖最小账户协议，缺 testnet/live 账户适配器 |
 | 账本查询 | 部分完成 | PostgreSQL CRUD/PnL/API、回报组合运行时及订单/成交/仓位原子入账已有，缺具体账户进程和 Campaign |

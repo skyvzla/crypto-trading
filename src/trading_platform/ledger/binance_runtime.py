@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from trading_platform.ledger.binance_account_updates import BinanceAccountUpdateLedger
 from trading_platform.ledger.binance_reports import BinanceExecutionReportLedger
+from trading_platform.ledger.binance_reconciliation import BinanceStartupReconciler
 from trading_platform.ledger.db.models import LedgerDB
 from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.binance.rest_client import BinanceRestClient
@@ -86,4 +87,10 @@ def create_binance_execution_runtime(
         poll_interval_seconds=poll_interval_seconds,
         max_attempts=max_poll_attempts,
     )
-    return BinanceExecutionRuntime(user_stream, poller)
+    reconciler = BinanceStartupReconciler(
+        rest_client,
+        db,
+        account_id=account_id,
+        strategy_id=strategy_id,
+    )
+    return BinanceExecutionRuntime(user_stream, poller, reconciler)

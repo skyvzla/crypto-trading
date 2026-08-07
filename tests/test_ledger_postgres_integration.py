@@ -448,7 +448,6 @@ async def test_subcategory_admission_service_reads_db_and_cancels_on_close(ledge
         subcategory=subcategory,
         strategy_id="spike_short",
         entry_trigger_reasons={"spike_tier1", "spike_tier2", "spike_tier3"},
-        poll_interval_seconds=5,
     )
 
     opened = await service.refresh_once()

@@ -120,6 +120,8 @@ class DynamicSpikeShortStrategy:
         self._campaign_id_for_timing: str | None = None
         self._timeout_checked = False
         self._exit_requested = False
+        self._pending_rotation: SpikeSignal | None = None
+        self._rotation_exit_requested = False
         self._audit_events: List[StrategyAuditEvent] = []
 
     def bind_account(self, account: StrategyAccount) -> None:
@@ -161,11 +163,15 @@ class DynamicSpikeShortStrategy:
             )
         elif (
             fill.side == "BUY"
-            and order.trigger_reason == "campaign_timeout_exit"
+            and order.trigger_reason in {"campaign_timeout_exit", "campaign_rotation_exit"}
         ):
             self._record_audit(
                 event_time=fill.fill_time,
-                event_type="campaign_timeout_exit_filled",
+                event_type=(
+                    "campaign_rotation_exit_filled"
+                    if order.trigger_reason == "campaign_rotation_exit"
+                    else "campaign_timeout_exit_filled"
+                ),
                 campaign_id=self._campaign_id_for_timing,
                 details={
                     "order_id": fill.order_id,
@@ -180,6 +186,8 @@ class DynamicSpikeShortStrategy:
         self._campaign_id_for_timing = None
         self._timeout_checked = False
         self._exit_requested = False
+        self._pending_rotation = None
+        self._rotation_exit_requested = False
 
     def drain_audit_events(self) -> List[StrategyAuditEvent]:
         """返回并清空尚未被运行适配器收集的审计事件。"""
@@ -203,9 +211,24 @@ class DynamicSpikeShortStrategy:
 
         timeout_intent = self._manage_non_positive_timeout(bar)
 
+        rotation_intent: List[OrderIntent] = []
+        if self._pending_rotation is not None and not self._has_live_campaign():
+            signal = self._pending_rotation
+            self.reset_campaign_timing()
+            self.active_signals.append(signal)
+            self.last_signal_time = signal.signal_time
+            self._record_audit(
+                event_time=bar.timestamp,
+                event_type="campaign_rotation_activated",
+                campaign_id=self._campaign_id(signal),
+                details={"origin_signal_time": signal.signal_time},
+            )
+
         if self._entry_enabled:
             signal = self._detect_signal(bar)
-            if signal:
+            if signal and self._has_live_campaign():
+                rotation_intent = self._prepare_rotation(signal, bar)
+            elif signal:
                 self.active_signals.append(signal)
                 self.last_signal_time = signal.signal_time
                 campaign_id = self._campaign_id(signal)
@@ -235,7 +258,64 @@ class DynamicSpikeShortStrategy:
                     },
                 )
 
-        return timeout_intent + self._manage_signals(bar)
+        return timeout_intent + rotation_intent + self._manage_signals(bar)
+
+    def _has_live_campaign(self) -> bool:
+        if self.active_signals:
+            return True
+        if self._account is None:
+            return False
+        if self._account.has_open_position(self.symbol):
+            return True
+        return any(
+            order.symbol == self.symbol
+            and order.status in {"NEW", "SUBMIT_UNKNOWN"}
+            and order.strategy_id == "spike_short"
+            for order in self._account.iter_orders()
+        )
+
+    def _prepare_rotation(self, signal: SpikeSignal, bar: Bar1s) -> List[OrderIntent]:
+        """D-009：盈利且超过 900 秒时，先排队新信号并平旧仓。"""
+        if self._pending_rotation is not None or self._rotation_exit_requested:
+            return []
+        if self.first_fill_time is None or self._account is None:
+            return []
+        if bar.available_time < self.first_fill_time + self.NON_POSITIVE_EXIT_AFTER_MS:
+            return []
+        position = self._account.get_position(self.symbol)
+        if position is None or position.side != "SHORT" or position.quantity <= 0:
+            return []
+        net_pnl = (position.entry_price - bar.close) * position.quantity - position.total_commission
+        if net_pnl <= 0:
+            return []
+
+        for active in list(self.active_signals):
+            cancelled = self._cancel_signal_orders(active)
+            self._record_signal_terminal(
+                active, "campaign_rotation_old_signal_closed", bar.timestamp, cancelled
+            )
+        self.active_signals.clear()
+        self._pending_rotation = signal
+        self._rotation_exit_requested = True
+        campaign_id = self._campaign_id(signal)
+        self._record_audit(
+            event_time=bar.available_time,
+            event_type="campaign_rotation_exit_requested",
+            campaign_id=campaign_id,
+            details={"old_campaign_id": self._campaign_id_for_timing, "net_pnl": str(net_pnl)},
+        )
+        return [
+            OrderIntent(
+                symbol=self.symbol,
+                side="BUY",
+                price=bar.close,
+                quantity=position.quantity,
+                client_order_id=f"{campaign_id.replace(':', '_')}_rotation_exit",
+                order_type="MARKET",
+                strategy_id="spike_short",
+                trigger_reason="campaign_rotation_exit",
+            )
+        ]
 
     def _manage_non_positive_timeout(self, bar: Bar1s) -> List[OrderIntent]:
         """执行已确认的 D-007：首成交后 900 秒净收益不为正则退出。
@@ -647,7 +727,8 @@ class DynamicSpikeBacktestStrategy:
             return []
 
         strategy.set_entry_enabled(
-            self._entry_enabled and self.active_symbol is None
+            self._entry_enabled
+            and (self.active_symbol is None or self.active_symbol == bar.symbol)
         )
         intents = strategy.on_bar1s(bar)
 

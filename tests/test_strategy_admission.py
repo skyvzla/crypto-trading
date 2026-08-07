@@ -1,4 +1,3 @@
-import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
 
@@ -45,7 +44,6 @@ def _service(*, enabled=True, orders=(), cancel_result=True):
         subcategory="spike",
         strategy_id="spike_short",
         entry_trigger_reasons={"spike_tier1", "spike_tier2", "spike_tier3"},
-        poll_interval_seconds=5,
     )
     return service, source, gate, account
 
@@ -144,30 +142,8 @@ async def test_order_snapshot_failure_keeps_gate_closed_and_is_reported():
 
 
 @pytest.mark.asyncio
-async def test_background_service_start_is_idempotent_and_stop_cancels():
+async def test_universe_scan_is_the_only_refresh_trigger():
     service, source, _, _ = _service(enabled=True)
-    refreshed = asyncio.Event()
-
-    async def refresh(_subcategory):
-        refreshed.set()
-        return True
-
-    source.is_subcategory_enabled.side_effect = refresh
-    first = service.start()
-    second = service.start()
-
-    assert first is second
-    await refreshed.wait()
-    await service.stop()
-    assert first.cancelled()
-
-
-@pytest.mark.parametrize("interval", [0, -1])
-def test_poll_interval_must_be_explicitly_positive(interval):
-    with pytest.raises(ValueError, match="poll_interval_seconds"):
-        SubcategoryAdmissionService(
-            source=Mock(), gate=Mock(), account=Mock(),
-            subcategory="spike", strategy_id="spike_short",
-            entry_trigger_reasons={"spike_tier1"},
-            poll_interval_seconds=interval,
-        )
+    await service.on_universe_scan()
+    source.is_subcategory_enabled.assert_awaited_once_with("spike")
+    assert not hasattr(service, "poll_interval_seconds")
