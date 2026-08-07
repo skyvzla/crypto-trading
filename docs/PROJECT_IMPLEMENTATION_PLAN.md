@@ -1,6 +1,6 @@
 # 项目完整实施计划
 
-> 版本：v1.7
+> 版本：v1.8
 > 更新日期：2026-08-07
 > 状态：执行中
 > 事实来源：当前源码、自动化测试、`ARCHITECTURE.md` 与 `spike_trader/decisions.md`
@@ -37,7 +37,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 本地全量测试为 `149 passed, 8 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `157 passed`；
+- 本地全量测试为 `158 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为 `167 passed`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 真实 replay 基准已固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
   `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
@@ -53,6 +53,9 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 - Binance Futures testnet 公共行情短时 smoke 已真实接收 11 条完成 1s Bar 和一条新完成 1m Kline，
   Redis 交付及质量门禁均为 healthy；该结果不包含鉴权 REST 或订单执行；
 - 账本层已完成订单、成交、持仓 CRUD/PnL 查询、subcategory 准入审计及 Web V1；
+- D-010/D-011 准入服务已实现：按显式周期读取 PostgreSQL，关闭或数据源故障时禁止
+  新信号，撤销 `NEW`/`PARTIALLY_FILLED` 入场单，保留退出单和已有仓位；未知提交继续
+  fail-closed，解析为已知未终态后再撤销。真实 PostgreSQL 开关到策略撤单已通过组合测试；
 - Spike 已通过 `StrategyAccount` 接口与回测引擎内部结构解耦，并输出基础策略审计事件；
 - 默认 Compose 已验证 PostgreSQL、Redis、行情和账本服务可健康启动；未确认的示例策略仅在
   `--profile examples` 下启动；
@@ -102,7 +105,7 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | PostgreSQL schema 和模型 | 部分完成 | 迁移版本管理、Campaign 表 | 订单/成交/持仓 CRUD 已通过真实 PostgreSQL 测试；部署会幂等应用当前 schema |
 | 订单/成交/持仓/Campaign 账本 | 部分完成 | Campaign 与具体运行时回调装配 | Binance 订单/成交和账户仓位回报均可原子幂等写入，迟到仓位快照不会覆盖新事实 |
 | FastAPI 查询 API | 完成 | 认证确定后补访问控制 | 分页、总数、PnL 和真实数据库健康检查已验证 |
-| subcategory 准入控制 | 部分完成 | 实时轮询、订单关联与关闭后撤单接线 | 乐观并发、409 冲突、追加审计和策略全局新入场开关已验证 |
+| subcategory 准入控制 | 部分完成 | 接入具体账户进程、确认轮询周期并外部验证 | 乐观并发、追加审计、fail-closed 轮询、全局门禁和关闭撤单已通过真实 PostgreSQL 组合测试 |
 | Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供运行状态、账本、PnL 和 subcategory 控制 |
 | 权限与操作审计 | 待确认 | 身份、角色、敏感操作范围 | 所有控制变更可追责 |
 | 监控、告警、备份恢复 | 未开始 | SLO、告警通道、演练 | 关键故障可发现、可恢复 |
@@ -177,7 +180,8 @@ PnL `-15,771.98 USDT` 不作为绩效基线。剩余：完成 Campaign 状态机
 运行状态、控制审计。
 
 已完成订单/成交/持仓 CRUD、Binance 订单/成交回报与 `ACCOUNT_UPDATE` 仓位快照原子幂等入账、数据库聚合 PnL、
-分页查询、subcategory 乐观并发与追加审计、依赖健康检查和 Web V1；User Stream 到 WAL、
+分页查询、subcategory 乐观并发与追加审计、依赖健康检查和 Web V1；subcategory
+fail-closed 轮询及关闭撤销未成交入场单已完成，User Stream 到 WAL、
 风险门禁和账本的组合回调已通过真实 PostgreSQL 验证。剩余：Campaign 持久化、具体账户/
 策略进程、策略轮询准入状态、
 迁移版本管理，以及待确认的身份认证和权限。
@@ -237,7 +241,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前基线：本地 `149 passed, 8 skipped`；Compose 真实 Redis/PostgreSQL 环境 `157 passed`。
+当前基线：本地 `158 passed, 9 skipped`；Compose 真实 Redis/PostgreSQL 环境 `167 passed`。
 
 ## 8. 风险与停止条件
 

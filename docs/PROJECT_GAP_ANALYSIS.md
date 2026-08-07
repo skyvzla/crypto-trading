@@ -11,8 +11,8 @@
 执行仍未完成。User Stream 到 WAL/RiskGuard/PostgreSQL 的可复用运行时与组合测试已经完成，
 但尚未建立绑定具体 testnet 账户的长期运行进程和完整交易所启动对账。
 
-当前本地全量测试为 `149 passed, 8 skipped`，Compose 真实 Redis/PostgreSQL 环境为
-`157 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
+当前本地全量测试为 `158 passed, 9 skipped`，Compose 真实 Redis/PostgreSQL 环境为
+`167 passed`。测试已覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
 PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke 已在 Binance Futures
@@ -145,20 +145,22 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | **监听池** | subcategory、低频发现扫描、监听租约、保护性监听 | Phase 1/4 |
 | **回测可信度** | ✅ 无未来数据/预热/数据集缺失拒绝/窗口缺口门禁/未平仓 MTM；⏳ 部分成交、滑点、同秒顺序最终口径 | Phase 2 |
 | **审计** | ✅ 信号/计划/失效/首成交/基础退出及订单/成交/持仓；✅ Binance 回报到 WAL/风险门禁/账本组合链路；⏳ 具体账户进程和完整 PnL 链路 | Phase 2/4 |
-| **Web** | ✅ subcategory 控制、账本、PnL、运行状态；⏳ 身份与权限 | Phase 4 |
+| **Web** | ✅ subcategory 控制、fail-closed 策略轮询与关闭撤单、账本、PnL、运行状态；⏳ 具体账户进程和身份权限 | Phase 4 |
 | **运维** | testnet/live 隔离、监控、告警、凭据、回滚、紧急平仓 | Phase 5-6 |
 
 ## 5. 测试现状与缺口
 
 已验证：
 
-- `uv run --extra dev pytest -q`：`149 passed, 8 skipped`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`157 passed`
+- `uv run --extra dev pytest -q`：`158 passed, 9 skipped`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`167 passed`
 - 测试 Compose 使用独立项目名，不会重建默认 PostgreSQL/Redis；默认容器 ID 隔离回归已通过
 - `scripts/verify_ledger_dependency_recovery.sh`：PostgreSQL 重建后账本先降级并在 4 秒内恢复
 - `scripts/market_smoke.py e2e`：真实 testnet WS 接收 11 条完成 1s Bar 和一条新完成 1m Kline，质量状态 ready
 - 真实 PostgreSQL 组合回归：`ORDER_TRADE_UPDATE` 同步 WAL、未知订单风险门禁、订单和成交，
   `ACCOUNT_UPDATE` 随后写入同账户持仓
+- 真实 PostgreSQL 准入回归：Web/数据库开关关闭后策略门禁 fail-closed，并只撤销已知未终态
+  入场单；退出单、已有仓位和未知提交保持各自管理路径
 - AKEUSDT 外部 DuckDB 只读 replay：UTC `2026-07-01` 至 `2026-08-01`，16h 预热，
   处理 `1,945,737` 个事件；D-004 修复后为 `3 orders / 3 fills / 1 OPEN`、单 Campaign，
   入场名义约 `1000 USDT`
@@ -169,7 +171,7 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 尚未验证：
 
 - Spike 部分成交、保护性退出、盈利管理、完整已平仓 PnL
-- subcategory 关闭后的实时轮询、订单关联和撤销接线；策略核心已暴露全局新入场准入开关
+- subcategory 准入服务接入具体 testnet/live 账户进程及外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
 - Binance Futures testnet 真实外部执行；Compose 全服务健康与 testnet 配置隔离已验证
