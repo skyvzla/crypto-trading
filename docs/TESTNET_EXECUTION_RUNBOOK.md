@@ -101,6 +101,28 @@ uv run python scripts/binance_testnet_execution_smoke.py \
 
 成功结果是 `EXECUTION_OK`。任何 `FAIL_CLOSED` 都不应自动重跑；先依据错误码和 `client_order_id` 完成交易所侧对账。最终清理中的 `risk_resolved=false` 表示即使当前暂时空仓，订单事实仍未知，不能开始下一轮。特别是 `SUBMIT_UNKNOWN`、`CANCEL_UNKNOWN`、`POSITION_NOT_FLAT` 必须人工确认订单及仓位后才能继续。`HEDGE_MODE_UNSUPPORTED` 需要换用专用 one-way testnet 账户，不能用 `positionSide` 绕过。
 
+## SUBMIT_UNKNOWN 人工对账
+
+进程轮询默认为 5 秒一次、最多 12 次。超过上限后不重下单，Campaign 和 symbol 风险门禁保持阻塞。先停止同账户其他写入流程，再用以下命令只读查询：
+
+```bash
+uv run --env-file .env python scripts/binance_testnet_reconcile_wal.py \
+  --account-id spike_testnet \
+  --wal-path data/wal/spike_short.jsonl
+```
+
+只有核对 symbol、clientOrderId 和交易所状态后，才能显式追加 WAL 事实；该操作不会向交易所写入：
+
+```bash
+uv run --env-file .env python scripts/binance_testnet_reconcile_wal.py \
+  --account-id spike_testnet \
+  --wal-path data/wal/spike_short.jsonl \
+  --execute \
+  --confirm I_UNDERSTAND_WAL_RECONCILIATION_WRITES_LOCAL_STATE
+```
+
+任一条 `resolved=false` 或 `FAIL_CLOSED` 都不得重跑、改 client ID 重下或手工解除风险门禁；必须保留账户锁定并进行订单、成交和仓位三方对账。
+
 紧急清仓示例（先 dry-run，再执行）：
 
 ```bash
