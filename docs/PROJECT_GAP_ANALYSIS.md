@@ -2,7 +2,7 @@
 
 > 盘点日期：2026-08-07
 > 盘点依据：当前源码、容器测试、`docs/spike_trader/decisions.md` 与已归档状态快照
-> 状态：实施中；testnet 执行账户模式与正式退出参数待处理
+> 状态：实施中；testnet 完整成交链路已验收，正式退出参数待确认
 
 ## 1. 当前结论
 
@@ -12,8 +12,8 @@
 撤单、启动对账和周期安全扫描。正式退出仍未完成：testnet 仅允许 D-007 简化退出用于
 执行验证，最新动能/趋势退出参数冻结前，`live` 会拒绝启动。
 
-当前本地全量测试为 `268 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-全量测试为 `279 passed, 1 warning`。测试已按
+当前本地全量测试为 `277 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
+全量测试为 `288 passed, 1 warning`。测试已按
 `backtest/market/strategies/shared/ledger/integration/research/scripts` 归档，并覆盖 Spike 两个 replay CLI、16 小时预热、
 正向信号至三档成交、全局交易准入、必需数据集缺失拒绝、期末未平仓标记、testnet URL
 切换、combined stream 解包、自动重连、订阅刷新、多 Bar 发布、真实 Redis 分发、真实
@@ -21,9 +21,10 @@ PostgreSQL CRUD/API/PnL/subcategory 审计及 Web 静态资源。外部 smoke �
 testnet 真实接收完成 1s Bar 与新完成 1m Kline。`demo-fapi` 真实鉴权已成功；执行 smoke
 首次提交前曾发现账户为 Hedge Mode 并 fail-closed。经用户明确授权后，旧 AKEUSDT SHORT
 和 BTCUSDT LONG 已平仓，账户切换为 one-way；AKEUSDT 已真实完成预挂撤单、限价成交、
-reduce-only 退出和紧急清仓。当前可以确认独立 REST 写路径，完整策略进程、User Stream 和
-外部订单故障竞态仍待验收。完整 Spike 进程的空仓启动与一次人工重启已通过：User Stream
-listenKey 正常关闭/重建，市场订阅卸载/恢复后 1s/1m/5m 三个流重新 ready。
+reduce-only 退出和紧急清仓。完整 Spike 进程已真实覆盖三档预挂、部分成交、全部成交、
+User Stream `TRADE`、账户仓位确认、剩余档撤单、外部 reduce-only 清仓及空仓重启恢复。
+空仓启动与人工重启也已通过：User Stream listenKey 正常关闭/重建，市场订阅卸载/恢复后
+1s/1m/5m 三个流重新 ready。
 
 外部 DuckDB 历史源端到端 replay 已验证。固定基准为 AKEUSDT、UTC `2026-07-01` 至
 `2026-08-01`、从 `2026-06-30 08:00 UTC` 开始 16 小时预热、DuckDB 只读源、
@@ -93,7 +94,8 @@ listenKey 正常关闭/重建，市场订阅卸载/恢复后 1s/1m/5m 三个流�
 - `spike-live` 进程已装配历史 Kline 预热、实时行情、User Stream、账本、Campaign 和准入；
 - 启动强制专用账户、one-way 模式、交易所规则快照和订单/仓位一致性；关机先撤销未终态入场单；
 - 本地与 Compose 已覆盖部分成交、撤单竞态、重连顺序、迟到回报、成交后仓位确认和全局 halt；
-  REST harness 已在 one-way testnet 验证真实写入和保护退出；仍需验证完整策略进程及外部故障行为。
+  one-way testnet 已验证完整策略进程成交和保护退出。首次停机发现“交易所已成交但本地 WAL
+  尚为部分成交”的撤单竞态，现会在撤单异常后按原 client ID 查询交易所，明确终态才消解。
 
 ### 3.5 订单幂等与失效撤单（Phase 2 修复）
 
@@ -107,7 +109,7 @@ listenKey 正常关闭/重建，市场订阅卸载/恢复后 1s/1m/5m 三个流�
 - 通过账户抽象调用 `cancel_order()`，回测模式立即生效
 
 **仍缺失**（Phase 3 范围）：
-- 在专用 one-way testnet 账户验证真实部分成交、撤单与迟到回报竞态
+- 在专用 one-way testnet 账户做 User Stream 异常断流和持续未知回报故障注入
 - 定义 `SUBMIT_UNKNOWN` 达到 12 次上限后的人工处置流程
 
 ### 3.6 数据质量检查已加强（2026-08-06）
@@ -144,9 +146,9 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 | 区域 | 缺失能力 | 目标阶段 |
 |---|---|---|
 | **策略核心** | ✅ `StrategyAccount` 已解耦；⏳ Clock 与实时账户适配 | Phase 2/3 |
-| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁、真实三档撤单后释放；⏳ 带真实成交的恢复验收 | Phase 2 |
-| **入场订单（已部分实现）** | ✅ 固定总名义金额、✅ 三档幂等、✅ 部分成交/撤单竞态/迟到回报自动化、✅ AKEUSDT 真实预挂撤单与成交、✅ 完整进程三档 NEW/User Stream/CANCELED；⏳ 完整进程部分成交 | Phase 2/3 |
-| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/具体账户进程/订单仓位启动门禁/规则量化/重连顺序；⏳外部部分成交与保护退出 | Phase 3 |
+| **Campaign** | ✅ 全局入场互斥、第一笔成交计时、D-009 盈利轮换、Redis 原子租约、成交后仓位确认门禁、真实成交后恢复及空仓释放 | Phase 2 |
+| **入场订单（已部分实现）** | ✅ 固定总名义金额、三档幂等、部分成交/撤单竞态/迟到回报自动化及完整进程外部验收 | Phase 2/3 |
+| **执行恢复** | ✅ WAL/REST/User Stream/未知单恢复/订单仓位启动门禁/规则量化/重连顺序/外部部分成交和保护退出；⏳异常断流故障注入 | Phase 3 |
 | **持仓退出** | ✅ D-007 仅用于 replay/testnet 执行验证；⏳ 最新动能、origin 减半、趋势清仓及参数标定；未完成前 live 禁止启动 | Phase 2/3 |
 | **风控** | ✅ 总持仓/币种数/杠杆/未知订单阻塞/全局 halt；⏳保证金、日亏损、数据延迟 | Phase 3 |
 | **监听池** | ✅ 5 分钟扫描编排及 subcategory 同节拍刷新；⏳ 真实扫描器、监听租约、保护性监听 | Phase 1/4 |
@@ -159,8 +161,8 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
 
 已验证：
 
-- 本地 `uv run pytest -q`：`276 passed, 11 skipped, 1 warning`
-- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`287 passed, 1 warning`
+- 本地 `uv run pytest -q`：`277 passed, 11 skipped, 1 warning`
+- `docker compose -f compose.test.yaml up --build --abort-on-container-exit --exit-code-from test`：`288 passed, 1 warning`
 - testnet harness 自动化覆盖预挂后撤单、意外/部分成交后的只减仓清理、显式成交后 reduce-only 退出、仓位快照延迟和未知订单不宣称风险已解析
 - 执行器 100 轮 soak：每 10 轮注入一次“交易所已接单但 REST 响应超时”，100 个 client ID 均只 POST 一次并完成查回
 - Binance `demo-fapi` 真实鉴权成功；账户已切换 one-way，AKEUSDT 真实 `SELL LIMIT` 成交
@@ -194,16 +196,21 @@ tier_prices = [spike_high - atr * (0.75 - (n - 1) * 0.40) for n in range(3)]
   0 个挂单、0 个非零仓位
 - AKEUSDT 每档最小名义金额为 5 USDT；进程新增启动前门禁，拒绝总金额 10 导致的
   3/4/3 USDT 无效配置，Compose testnet 默认总金额调整为 20 USDT
+- 完整进程受控成交中，e1 数量 1437 先成交 1200 后成交 237，e2 数量 1911 先成交 1201
+  后成交 710，均由 User Stream 从 `PARTIALLY_FILLED` 进入 `FILLED`；e3 数量 1429 撤销，
+  账户确认 AKEUSDT 空头 3348。外部紧急工具以 reduce-only `BUY MARKET 3348` 成交并归零
+- 首次停机因本地部分成交状态落后于交易所终态而 fail-closed；新增撤单异常后的 REST 终态
+  查询回归。清理后在 subcategory version 6 disabled 状态重启，Campaign 释放、无重下单，
+  最终优雅停止为 `Exited (0)`
 
 尚未验证：
 
-- Spike 部分成交、保护性退出、盈利管理、完整已平仓 PnL
-- subcategory 准入服务接入具体 testnet/live 账户进程及外部故障验证
+- Spike 正式保护性退出、盈利管理、完整已平仓 PnL
+- subcategory 准入服务的异常断流和持续未知回报外部故障验证
 - Web 浏览器视觉与兼容性验收（当前环境无法安装受支持的 Playwright 浏览器）
 - Binance 外部 WS 长时间运行、鉴权 HTTP 和完整 User Stream 对账
-- Binance Futures testnet 完整策略进程带真实订单时的部分成交、成交仓位确认、User Stream
-  异常断流、未知回报和持仓 Campaign 恢复；三档 NEW/CANCELED、终态 WAL 恢复、空仓重启及
-  独立 REST harness 已完成
+- Binance Futures testnet 的 User Stream 异常断流和持续未知回报故障注入；完整进程真实
+  部分成交、成交仓位确认、剩余档撤单、持仓 Campaign 恢复/释放和空仓重启已完成
 
 ## 6. 明确不做
 

@@ -12,7 +12,11 @@ from trading_platform.shared.risk import RiskConfig, RiskGuard
 
 
 def _account(tmp_path):
-    rest = Mock(cancel_order=AsyncMock(), get_position_risk=AsyncMock(return_value=[]))
+    rest = Mock(
+        cancel_order=AsyncMock(),
+        query_order=AsyncMock(return_value=None),
+        get_position_risk=AsyncMock(return_value=[]),
+    )
     wal = OrderWAL(tmp_path / "orders.jsonl")
     risk = RiskGuard("spike-test", RiskConfig())
     return BinanceStrategyAccount(
@@ -181,6 +185,31 @@ async def test_cancel_error_after_late_fill_is_resolved_by_terminal_wal_fact(tmp
     fail_request.set()
 
     assert await flush == ("cid-1",)
+    assert wal.recover_latest()["cid-1"].status == "FILLED"
+    assert "BTCUSDT" not in risk.blocked_symbols
+
+
+@pytest.mark.asyncio
+async def test_cancel_error_queries_exchange_and_resolves_terminal_fill(tmp_path):
+    account, rest, wal, risk = _account(tmp_path)
+    intent_record = wal.record_intent(_intent(), account_id="spike-test", recorded_at=1_000)
+    wal.record_exchange_status(
+        intent_record,
+        {"status": "PARTIALLY_FILLED", "orderId": 42, "executedQty": "0.25"},
+        recorded_at=1_100,
+    )
+    rest.cancel_order.side_effect = RuntimeError("unknown order")
+    rest.query_order.return_value = {
+        "status": "FILLED",
+        "orderId": 42,
+        "executedQty": "1",
+    }
+
+    assert account.cancel_order("42") is True
+    assert await account.flush_cancellations() == ("cid-1",)
+    rest.query_order.assert_awaited_once_with(
+        "BTCUSDT", orig_client_order_id="cid-1"
+    )
     assert wal.recover_latest()["cid-1"].status == "FILLED"
     assert "BTCUSDT" not in risk.blocked_symbols
 

@@ -105,6 +105,27 @@ class BinanceStrategyAccount:
                         self._cancel_requests.discard(client_order_id)
                         cancelled.append(client_order_id)
                         continue
+                    try:
+                        exchange_order = await self.rest_client.query_order(
+                            record.symbol,
+                            orig_client_order_id=client_order_id,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        exchange_order = None
+                    if (
+                        latest is not None
+                        and exchange_order is not None
+                        and str(exchange_order.get("status") or "")
+                        in {"FILLED", "CANCELED", "EXPIRED"}
+                    ):
+                        self.wal.record_exchange_status(
+                            latest, exchange_order, recorded_at=self._now_ms()
+                        )
+                        self._cancel_requests.discard(client_order_id)
+                        cancelled.append(client_order_id)
+                        continue
                     self.risk_guard.block_symbol(
                         record.symbol,
                         f"cancel unresolved:{client_order_id}:{type(exc).__name__}",

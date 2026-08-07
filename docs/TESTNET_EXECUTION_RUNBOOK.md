@@ -132,6 +132,16 @@ uv run python scripts/binance_testnet_flatten.py \
   `1316/1750/1310`，三档均收到 REST 与 User Stream `NEW`；优雅停止后均收到
   User Stream `CANCELED`、成交量为 0，Campaign 释放；
 - 保留终态 WAL 再次启动，三档没有被重复提交，disabled subcategory 继续阻止新入场；
+- 第二轮受控信号真实产生部分成交：e1 数量 1437 依次成交 1200、237，e2 数量 1911
+  依次成交 1201、710，两单均经 User Stream `PARTIALLY_FILLED`、TRADE 到 `FILLED`；
+  e3 数量 1429 保持 `NEW` 后撤为 `CANCELED`，账户确认空头仓位为 3348；
+- 首次停止时，本地 WAL 尚为部分成交而交易所已终态，撤单返回 unknown order，进程按
+  fail-closed 退出。实现已补充撤单异常后的 REST 查单：仅明确 `FILLED/CANCELED/EXPIRED`
+  才消解，查询失败或非终态继续阻塞；
+- 使用紧急清仓工具提交 reduce-only `BUY MARKET 3348`，订单 299557055 明确 `FILLED`，
+  随后确认 0 个挂单、0 个非零仓位；
+- 覆盖测试注入的 1m Kline 后，在 subcategory version 6 disabled 状态重启；终态 WAL 未重下单，
+  空仓事实使 Campaign 释放，最终优雅停止为 `Exited (0)`；
 - 验收结束时账户为 one-way、0 个挂单、0 个非零仓位。
 
 验收结束后 `spike` subcategory 已设置为 disabled，Spike 容器已停止；再次运行前必须经过新的
@@ -141,5 +151,5 @@ AKEUSDT 的 `MIN_NOTIONAL` 为 5 USDT。三档权重为 30/40/30，因此 10 USD
 3/4/3 USDT 的必然无效订单。进程会在连接交易所、读取 symbol rules 后验证最小档必须严格
 高于交易所最小名义金额；当前 Compose testnet 默认使用 20 USDT。
 
-上述结果只证明 REST harness 和紧急清仓路径，不替代完整策略进程的 User Stream、Campaign、
-部分成交、断流、重连和启动恢复外部验收。
+上述结果已证明 REST harness、紧急清仓以及完整策略进程的 User Stream、Campaign、部分成交和
+启动恢复路径；异常断流和持续未知回报仍需单独故障注入验收，正式退出参数冻结前不得启动 live。

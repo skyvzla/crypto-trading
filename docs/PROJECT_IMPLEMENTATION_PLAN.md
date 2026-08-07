@@ -37,8 +37,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 
 - 已建立 Git 仓库并提交初始版本；
 - 已确认三层业务架构；
-- 当前本地全量测试为 `268 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-  全量测试为 `279 passed, 1 warning`；
+- 当前本地全量测试为 `277 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
+  全量测试为 `288 passed, 1 warning`；
 - Spike replay 已跑通“预热 -> 信号 -> 三档挂单 -> 成交 -> OPEN 持仓 -> 报告”；
 - 真实 replay 基准已固定为 AKEUSDT：UTC `2026-07-01` 至 `2026-08-01`，从
   `2026-06-30 08:00 UTC` 开始 16 小时预热，使用只读 DuckDB 历史源和
@@ -67,8 +67,9 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
   规则量化、one-way 模式门禁、行情预热、Redis Campaign、subcategory、TTL 撤单和关机
   撤单；`demo-fapi` 鉴权成功，现有 testnet 账户已在清理旧仓位后切换为 one-way。AKEUSDT
   已真实完成限价入场/撤单、限价成交/reduce-only 退出和人工紧急清仓三类验证，最终无挂单、
-  无持仓。完整 Spike profile 已通过空仓启动和人工重启：User Stream listenKey、市场订阅和
-  三类行情流均恢复；带真实策略订单的外部回报与 Campaign 恢复仍待验证。
+  无持仓。完整 Spike profile 已通过空仓启动和人工重启，User Stream listenKey、市场订阅和
+  三类行情流均恢复；真实订单已覆盖 `PARTIALLY_FILLED`、`FILLED`、TRADE、仓位确认、剩余档
+  撤单、reduce-only 清仓及 Campaign 恢复/释放。
 - 账户级回报不得隐式归属策略：运行时工厂要求显式声明专用策略账户；共享账户在缺少
   client-order-id 和仓位路由规则时直接拒绝启动。
 - Compose 使用显式 `spike` profile 装配交易进程；默认服务启动不承担下单风险。
@@ -81,8 +82,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
   订单、成交确认和仓位事实均终态后才释放；撤单竞态、迟到成交和重连顺序已有回归覆盖。
 
 当前结果证明离线入场链路、Redis/PostgreSQL 内部服务集成、Binance testnet 公共行情短时
-链路以及独立 REST 执行 harness 可用；尚不能证明完整策略进程的 User Stream、Campaign、
-部分成交和断线恢复已通过外部 testnet 验收，也不能证明正式账户可用。
+链路、独立 REST harness 及完整策略进程成交恢复可用；异常断流故障注入和正式退出规则仍未
+验收，也不能据此启动正式账户。
 
 ## 4. 功能范围与状态
 
@@ -110,8 +111,8 @@ V1 只实现上涨尖峰后的做空策略，运行模式仅为 `replay`、`test
 | 16h 预热和连续性检查 | 完成 | 外部质量长时间运行验证 | 预热不下单，窗口缺口阻止信号 |
 | replay runner 与报告 | 部分完成 | 部分成交、滑点、退出费用及期末口径 | 已输出订单、成交、持仓、汇总、策略审计，并实现 D-007 超时退出 |
 | 全局交易准入与首成交计时 | 部分完成 | Redis Store 接入运行时、恢复和终态 | 已验证全局互斥、首成交计时、Redis 原子租约及 D-009“盈利超过 900 秒时先平旧轮次再激活新信号” |
-| 入场幂等与失效撤单 | 部分完成 | 完整策略进程部分成交外部验收 | replay 已验证幂等和失效撤单；AKEUSDT testnet 已真实完成预挂撤单和限价成交；完整进程三档 NEW/CANCELED 与终态 WAL 重启已验收 |
-| User Stream 与启动对账 | 部分完成 | 带真实成交的 one-way testnet 外部竞态验证 | 已接好具体账户进程、WAL/风险门禁/账本回调、REST 成交回补、启动及重连严格对账和 5秒×12 次未知单轮询；真实 NEW/CANCELED 回报、空仓启动/人工重启已验收，成交后仓位流确认待外部验证 |
+| 入场幂等与失效撤单 | 完成 | 持续做交易所回归 | replay 与 AKEUSDT testnet 已验证预挂、幂等、部分成交、全部成交、撤单和终态 WAL 重启 |
+| User Stream 与启动对账 | 部分完成 | 异常断流和持续未知回报故障注入 | 已完成真实 NEW/PARTIALLY_FILLED/FILLED/CANCELED、TRADE、仓位确认、REST 回补、Campaign 恢复和空仓重启 |
 | 持仓保护与退出 | 部分完成 | 止损、止盈、盈利管理、退出费用和分批 | D-007 已实现；起涨点处的持有/减半方向已确认，计算阈值和剩余仓位退出待确认 |
 | 账户级风控 | 部分完成 | 保证金、日亏损、数据延迟、急停 | 已限制持仓价值、币种数、杠杆并阻塞未知订单 symbol；关键事实不一致会全局 halt 新开仓，但保留 reduce-only 退出 |
 | testnet/live 适配 | 部分完成 | 完整策略进程真实多轮验证、最新退出策略 | 已有正式进程与 `BinanceStrategyAccount`；REST harness 已在 one-way testnet 多轮写入；未冻结退出前 live 拒绝启动 |
@@ -187,9 +188,10 @@ PnL `-15,771.98 USDT` 不作为绩效基线。剩余：完成 Campaign 状态机
 校验并同步 WAL/RiskGuard，随后与成交和仓位事实写入 PostgreSQL。后台查单已冻结为 5 秒
 一次、最多 12 次；具体 testnet 进程、交易规则量化和 one-way 模式门禁已完成。撤单锁、部分
 成交、迟到回报、成交后仓位确认、重连顺序和全局 halt 已通过本地与 Compose 回归。剩余：在
-现有 one-way testnet 账户已补预挂撤单、成交、reduce-only 退出、紧急清仓、完整进程三档
-NEW/CANCELED、终态 WAL 恢复和人工重启；剩余完整进程部分成交、成交仓位确认、保护退出和
-异常断线恢复外部验证。
+现有 one-way testnet 账户已补预挂撤单、成交、reduce-only 退出、紧急清仓，以及完整进程
+`NEW/PARTIALLY_FILLED/FILLED/CANCELED`、TRADE、成交仓位确认、Campaign 恢复/释放和终态
+WAL 空仓重启。撤单异常后会按原 client ID 查询交易所，只有明确终态才解除门禁；剩余异常
+断线和持续未知回报外部故障注入，以及正式保护退出规则验收。
 
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
 未终态轮次；本地状态以交易所订单、成交和仓位事实为准。
@@ -262,8 +264,8 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前本地全量基线为 `268 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
-基线为 `279 passed, 1 warning`。
+当前本地全量基线为 `277 passed, 11 skipped, 1 warning`；Compose 真实 Redis/PostgreSQL
+基线为 `288 passed, 1 warning`。
 
 ## 8. 风险与停止条件
 
