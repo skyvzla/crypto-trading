@@ -118,6 +118,37 @@ async def test_risk_rejection_happens_before_wal_or_rest_submission(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_reduce_only_intent_is_the_live_exchange_contract(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    rest = Mock(
+        post_order=AsyncMock(return_value={"status": "NEW", "orderId": 42}),
+        query_order=AsyncMock(),
+    )
+    guard = RiskGuard(
+        "account-1", RiskConfig(max_position_value_usdt=Decimal("1"))
+    )
+    intent = _intent("cid-reduce")
+    intent.side = "BUY"
+    intent.reduce_only = True
+    executor = BinanceOrderExecutor(
+        rest, wal, account_id="account-1", risk_guard=guard
+    )
+
+    record = await executor.submit(intent)
+
+    assert record.payload["reduce_only"] is True
+    rest.post_order.assert_awaited_once_with(
+        symbol="BTCUSDT",
+        side="BUY",
+        order_type="LIMIT",
+        quantity=Decimal("0.1"),
+        price=Decimal("100"),
+        new_client_order_id="cid-reduce",
+        reduce_only=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_reused_client_id_with_different_intent_fails_closed(tmp_path):
     wal = OrderWAL(tmp_path / "orders.jsonl")
     rest = Mock(

@@ -42,6 +42,22 @@ def _intent(client_order_id="cid-1"):
     )
 
 
+def test_order_projection_restores_explicit_reduce_only_contract(tmp_path):
+    account, _, wal, _ = _account(tmp_path)
+    intent = _intent("exit-1")
+    intent.side = "BUY"
+    intent.reduce_only = True
+    record = wal.record_intent(intent, account_id="spike-test", recorded_at=1_000)
+    wal.record_exchange_status(
+        record, {"status": "NEW", "orderId": 42}, recorded_at=1_100
+    )
+
+    order = account.iter_orders()[0]
+
+    assert order.reduce_only is True
+    assert order.trigger_reason == "spike_tier1"
+
+
 @pytest.mark.asyncio
 async def test_sync_cancel_is_flushed_to_exchange_and_wal(tmp_path):
     account, rest, wal, _ = _account(tmp_path)

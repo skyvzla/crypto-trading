@@ -12,7 +12,7 @@ import unittest
 from decimal import Decimal
 from datetime import datetime
 
-from trading_platform.shared.events import Bar1s, Kline, OrderIntent, Fill
+from trading_platform.shared.events import Bar1s, Kline, OrderIntent, Fill, Position
 from trading_platform.shared.config import BacktestConfig
 from trading_platform.backtest.engine import BacktestEngine
 from trading_platform.backtest.executor import BacktestExecutor
@@ -88,6 +88,105 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(len(engine.orders), 1)
         self.assertEqual(len(engine.order_records), 1)
+
+    def test_reduce_only_rejects_empty_position(self):
+        engine = BacktestEngine(MockStrategy(), [], BacktestConfig())
+
+        with self.assertRaisesRegex(ValueError, "requires an open position"):
+            engine.executor.place_order(OrderIntent(
+                symbol='BTCUSDT',
+                side='BUY',
+                price=Decimal('100'),
+                quantity=Decimal('1'),
+                client_order_id='empty-reduce',
+                reduce_only=True,
+            ))
+
+        self.assertEqual(engine.orders, {})
+
+    def test_reduce_only_rejects_increasing_side_and_reserved_overflow(self):
+        engine = BacktestEngine(MockStrategy(), [], BacktestConfig())
+        engine.positions['BTCUSDT'] = Position(
+            symbol='BTCUSDT', side='SHORT', entry_price=Decimal('100'),
+            quantity=Decimal('1'), total_commission=Decimal('0'),
+            unrealized_pnl=Decimal('0'), realized_pnl=Decimal('0'), opened_at=0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "would increase"):
+            engine.executor.place_order(OrderIntent(
+                symbol='BTCUSDT', side='SELL', price=Decimal('101'),
+                quantity=Decimal('0.1'), client_order_id='wrong-side',
+                reduce_only=True,
+            ))
+
+        first = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='BUY', price=Decimal('99'),
+            quantity=Decimal('0.6'), client_order_id='reserved-1',
+            reduce_only=True,
+        ))
+        self.assertTrue(first.reduce_only)
+        with self.assertRaisesRegex(ValueError, "exceeds unreserved position"):
+            engine.executor.place_order(OrderIntent(
+                symbol='BTCUSDT', side='BUY', price=Decimal('98'),
+                quantity=Decimal('0.5'), client_order_id='reserved-2',
+                reduce_only=True,
+            ))
+
+    def test_reduce_only_market_order_partially_reduces_position(self):
+        class PartialExitStrategy(MockStrategy):
+            def on_bar1s(self, bar):
+                return [OrderIntent(
+                    symbol=bar.symbol, side='BUY', price=bar.close,
+                    quantity=Decimal('0.4'), client_order_id='partial-exit',
+                    order_type='MARKET', reduce_only=True,
+                )]
+
+        event = Bar1s(
+            symbol='BTCUSDT', timestamp=1_000, available_time=2_000,
+            open=Decimal('90'), high=Decimal('91'), low=Decimal('89'),
+            close=Decimal('90'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('90'),
+        )
+        engine = BacktestEngine(PartialExitStrategy(), [event], BacktestConfig())
+        engine.positions['BTCUSDT'] = Position(
+            symbol='BTCUSDT', side='SHORT', entry_price=Decimal('100'),
+            quantity=Decimal('1'), total_commission=Decimal('0'),
+            unrealized_pnl=Decimal('0'), realized_pnl=Decimal('0'), opened_at=0,
+        )
+
+        result = engine.run()
+
+        self.assertEqual(result.fills[0].quantity, Decimal('0.4'))
+        self.assertEqual(engine.positions['BTCUSDT'].quantity, Decimal('0.6'))
+        self.assertTrue(result.orders[0].reduce_only)
+
+    def test_reduce_only_fill_is_capped_if_position_shrinks_while_pending(self):
+        event = Bar1s(
+            symbol='BTCUSDT', timestamp=1_000, available_time=2_000,
+            open=Decimal('90'), high=Decimal('91'), low=Decimal('89'),
+            close=Decimal('90'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('90'),
+        )
+        engine = BacktestEngine(MockStrategy(), [event], BacktestConfig())
+        engine.positions['BTCUSDT'] = Position(
+            symbol='BTCUSDT', side='SHORT', entry_price=Decimal('100'),
+            quantity=Decimal('1'), total_commission=Decimal('0'),
+            unrealized_pnl=Decimal('0'), realized_pnl=Decimal('0'), opened_at=0,
+        )
+        order = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='BUY', price=Decimal('90'),
+            quantity=Decimal('0.8'), client_order_id='stale-reduce',
+            reduce_only=True,
+        ))
+        engine.positions['BTCUSDT'].quantity = Decimal('0.5')
+
+        fill = engine._execute_fill(order, event)
+
+        self.assertIsNotNone(fill)
+        self.assertEqual(fill.quantity, Decimal('0.5'))
+        self.assertEqual(order.filled_quantity, Decimal('0.5'))
+        self.assertEqual(order.status, 'EXPIRED')
+        self.assertNotIn('BTCUSDT', engine.positions)
 
     def test_market_order_intent_fills_on_current_bar(self):
         class ExitStrategy(MockStrategy):

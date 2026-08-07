@@ -344,6 +344,7 @@ class BinanceStrategyAccount:
             status=record.status or "SUBMIT_UNKNOWN",
             created_at=record.recorded_at,
             ttl_ms=payload.get("ttl_ms"),
+            reduce_only=bool(payload.get("reduce_only", False)),
             filled_quantity=self._filled_quantity(payload),
             strategy_id=payload.get("strategy_id"),
             trigger_reason=payload.get("trigger_reason"),

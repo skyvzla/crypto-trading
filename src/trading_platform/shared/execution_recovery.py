@@ -118,6 +118,7 @@ class OrderWAL:
                 "ttl_ms": intent.ttl_ms,
                 "strategy_id": intent.strategy_id,
                 "trigger_reason": intent.trigger_reason,
+                "reduce_only": intent.reduce_only,
             },
         )
         self.append(record)

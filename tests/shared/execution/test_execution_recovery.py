@@ -35,6 +35,7 @@ def test_wal_fsync_and_recover_latest(tmp_path):
     assert latest["cid-1"].record_type == "submit_unknown"
     assert latest["cid-1"].status == "SUBMIT_UNKNOWN"
     assert latest["cid-1"].payload["error"] == "timeout"
+    assert latest["cid-1"].payload["reduce_only"] is False
     assert len((tmp_path / "orders.jsonl").read_text().splitlines()) == 2
     assert unknown.client_order_id == "cid-1"
 

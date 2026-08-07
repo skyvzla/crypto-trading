@@ -47,7 +47,6 @@ class BinanceOrderExecutor:
         self,
         intent: OrderIntent,
         *,
-        reduce_only: bool = False,
         reference_price: Decimal | None = None,
         leverage: int = 1,
     ) -> OrderWALRecord:
@@ -73,7 +72,7 @@ class BinanceOrderExecutor:
             if existing.status == "SUBMIT_UNKNOWN":
                 self._block_unknown(existing)
             return existing
-        if not reduce_only and self.risk_guard is not None:
+        if not intent.reduce_only and self.risk_guard is not None:
             notional_price = (
                 intent.price if intent.order_type == "LIMIT" else reference_price
             )
@@ -100,7 +99,7 @@ class BinanceOrderExecutor:
                 quantity=intent.quantity,
                 price=intent.price if intent.order_type == "LIMIT" else None,
                 new_client_order_id=intent.client_order_id,
-                reduce_only=reduce_only,
+                reduce_only=intent.reduce_only,
             )
         except (httpx.TimeoutException, RuntimeError) as exc:
             return self._record_unknown(
@@ -292,4 +291,5 @@ class BinanceOrderExecutor:
             and record.order_type == intent.order_type
             and Decimal(record.quantity) == intent.quantity
             and Decimal(record.price) == intent.price
+            and bool(record.payload.get("reduce_only", False)) == intent.reduce_only
         )

@@ -388,6 +388,7 @@ class DynamicSpikeShortStrategy:
                     self.symbol, bar.timestamp, "r"
                 ),
                 order_type="MARKET",
+                reduce_only=True,
                 strategy_id="spike_short",
                 trigger_reason="campaign_rotation_exit",
             )
@@ -446,6 +447,7 @@ class DynamicSpikeShortStrategy:
                     self.symbol, self.first_fill_time, "t"
                 ),
                 order_type="MARKET",
+                reduce_only=True,
                 strategy_id="spike_short",
                 trigger_reason="campaign_timeout_exit",
             )
@@ -513,6 +515,7 @@ class DynamicSpikeShortStrategy:
                         quantity=quantity,
                         client_order_id=client_order_id,
                         ttl_ms=sig.expire_time - bar.timestamp,
+                        reduce_only=False,
                         strategy_id="spike_short",
                         trigger_reason=f"spike_tier{tier_idx}",
                     )

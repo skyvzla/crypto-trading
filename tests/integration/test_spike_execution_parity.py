@@ -121,8 +121,8 @@ class ExecutorStub:
     def __init__(self):
         self.submissions: list[Submission] = []
 
-    async def submit(self, intent, *, reduce_only, reference_price):
-        self.submissions.append(Submission(intent, reduce_only, reference_price))
+    async def submit(self, intent, *, reference_price):
+        self.submissions.append(Submission(intent, intent.reduce_only, reference_price))
         return type("OrderRecord", (), {"status": "NEW"})()
 
 
@@ -196,6 +196,7 @@ async def test_replay_and_live_emit_identical_three_tier_entry_contract():
         ]
         assert all(intent.side == "SELL" for intent in replay_intents)
         assert all(intent.order_type == "LIMIT" for intent in replay_intents)
+        assert all(not intent.reduce_only for intent in replay_intents)
         assert all(not submission.reduce_only for submission in executor.submissions)
         assert all(
             submission.reference_price == submission.intent.price
@@ -252,6 +253,7 @@ async def test_replay_and_live_do_not_prehang_exit_and_submit_it_reduce_only_mar
         assert replay_intents[0].trigger_reason == "campaign_timeout_exit"
         assert replay_intents[0].side == "BUY"
         assert replay_intents[0].order_type == "MARKET"
+        assert replay_intents[0].reduce_only is True
         assert replay_intents[0].ttl_ms is None
         assert submission.reduce_only is True
         assert submission.reference_price == replay_intents[0].price

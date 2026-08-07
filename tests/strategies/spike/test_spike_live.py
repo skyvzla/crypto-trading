@@ -43,6 +43,7 @@ def _entry(tier=1):
         quantity=Decimal("1"),
         client_order_id=f"spike_short_BTCUSDT_1000_tier{tier}",
         ttl_ms=None,
+        reduce_only=False,
         strategy_id="spike_short",
         trigger_reason=f"spike_tier{tier}",
     )
@@ -272,6 +273,7 @@ async def test_entry_acquires_campaign_then_submits_and_exit_is_reduce_only():
         quantity=Decimal("1"),
         client_order_id="exit-1",
         order_type="MARKET",
+        reduce_only=True,
         strategy_id="spike_short",
         trigger_reason="campaign_timeout_exit",
     )
@@ -280,11 +282,9 @@ async def test_entry_acquires_campaign_then_submits_and_exit_is_reduce_only():
 
     store.acquire.assert_awaited_once()
     assert executor.submit.await_args_list[0].kwargs == {
-        "reduce_only": False,
         "reference_price": Decimal("100"),
     }
     assert executor.submit.await_args_list[1].kwargs == {
-        "reduce_only": True,
         "reference_price": Decimal("99"),
     }
 
@@ -317,6 +317,7 @@ async def test_halted_risk_rejects_entry_but_still_submits_reduce_only_exit():
         quantity=Decimal("1"),
         client_order_id="exit-after-halt",
         order_type="MARKET",
+        reduce_only=True,
         strategy_id="spike_short",
         trigger_reason="campaign_timeout_exit",
     )
@@ -324,7 +325,7 @@ async def test_halted_risk_rejects_entry_but_still_submits_reduce_only_exit():
     await coordinator._execute([_entry(), exit_intent], event_time=1_001)
 
     executor.submit.assert_awaited_once_with(
-        exit_intent, reduce_only=True, reference_price=Decimal("99")
+        exit_intent, reference_price=Decimal("99")
     )
 
 
@@ -562,12 +563,14 @@ async def test_shutdown_cancels_every_open_entry_order():
         order_id="11",
         client_order_id="entry-1",
         trigger_reason="spike_tier1",
+        reduce_only=False,
         status="NEW",
     )
     closed_order = Mock(
         order_id="11",
         client_order_id="entry-1",
         trigger_reason="spike_tier1",
+        reduce_only=False,
         status="CANCELLED",
     )
     account = Mock(
@@ -600,6 +603,7 @@ async def test_restart_immediately_cancels_entry_whose_wal_ttl_elapsed():
         order_id="11",
         client_order_id="entry-expired",
         trigger_reason="spike_tier1",
+        reduce_only=False,
         status="NEW",
         created_at=1_000,
         ttl_ms=100,

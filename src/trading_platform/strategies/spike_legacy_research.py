@@ -123,6 +123,7 @@ class LegacyScriptExitSpikeShortStrategy(DynamicSpikeShortStrategy):
                     f"{self._campaign_id_for_timing or 'spike_short'}_{reason}"
                 ),
                 order_type="MARKET",
+                reduce_only=True,
                 strategy_id="spike_short",
                 trigger_reason=reason,
             )

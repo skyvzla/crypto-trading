@@ -57,6 +57,7 @@ class BacktestResult:
                 'status': order.status,
                 'created_at': order.created_at,
                 'ttl_ms': order.ttl_ms,
+                'reduce_only': order.reduce_only,
                 'filled_quantity': float(order.filled_quantity),
                 'fill_time': order.fill_time,
                 'cancel_time': order.cancel_time,

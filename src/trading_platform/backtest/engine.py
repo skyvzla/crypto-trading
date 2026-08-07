@@ -160,6 +160,8 @@ class BacktestEngine:
                     order = self.executor.place_order(intent)
                     if order.type == 'MARKET' and order.status == 'NEW':
                         fill = self._execute_fill(order, event)
+                        if fill is None:
+                            continue
                         self.fills.append(fill)
                         self.fill_records.append(fill)
                         if hasattr(self.strategy, 'on_fill'):
@@ -243,6 +245,8 @@ class BacktestEngine:
 
             if filled:
                 fill = self._execute_fill(order, event)
+                if fill is None:
+                    continue
                 self.fills.append(fill)
                 self.fill_records.append(fill)
 
@@ -251,7 +255,7 @@ class BacktestEngine:
                     self.strategy.on_fill(fill)
                     self._collect_strategy_audit_events()
 
-    def _execute_fill(self, order: Order, event: Bar1s) -> Fill:
+    def _execute_fill(self, order: Order, event: Bar1s) -> Fill | None:
         """
         执行成交，采用保守假设
 
@@ -264,7 +268,31 @@ class BacktestEngine:
         """
         # 保守假设：按挂单价成交（而非触发价）
         fill_price = order.price
-        fill_qty = order.quantity
+        fill_qty = order.quantity - order.filled_quantity
+        if order.reduce_only:
+            position = self.positions.get(order.symbol)
+            closing_side = (
+                "BUY" if position is not None and position.side == "SHORT" else "SELL"
+            )
+            if position is None or order.side != closing_side:
+                self._expire_order(order)
+                return None
+            fill_qty = min(fill_qty, position.quantity)
+            if fill_qty <= 0:
+                self._expire_order(order)
+                return None
+        else:
+            position = self.positions.get(order.symbol)
+            if position is not None:
+                is_closing = (
+                    (position.side == "SHORT" and order.side == "BUY")
+                    or (position.side == "LONG" and order.side == "SELL")
+                )
+                if is_closing and fill_qty > position.quantity:
+                    raise ValueError(
+                        "order would reverse position: "
+                        f"fill_qty={fill_qty}, position_qty={position.quantity}"
+                    )
 
         is_maker = order.type != 'MARKET'
         fee_rate = (
@@ -289,9 +317,13 @@ class BacktestEngine:
         )
 
         # 更新订单状态
-        order.status = 'FILLED'
-        order.filled_quantity = fill_qty
+        order.filled_quantity += fill_qty
+        order.status = (
+            'FILLED' if order.filled_quantity == order.quantity else 'EXPIRED'
+        )
         order.fill_time = self.virtual_time_ms
+        if order.status == 'EXPIRED':
+            order.cancel_time = self.virtual_time_ms
 
         # 更新持仓（支持多档累加）
         self._update_position(fill)
@@ -383,13 +415,6 @@ class BacktestEngine:
                     logger.debug(
                         f"Position fully closed: {symbol} "
                         f"total_pnl {pos.realized_pnl:.4f}"
-                    )
-
-                # V1 不支持反向开仓（平仓后立即反向）
-                if fill.quantity > close_qty:
-                    raise ValueError(
-                        f"V1 does not support reverse opening: "
-                        f"fill_qty={fill.quantity} > pos_qty={pos.quantity}"
                     )
 
             else:

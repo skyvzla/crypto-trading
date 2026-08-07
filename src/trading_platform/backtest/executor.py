@@ -58,6 +58,9 @@ class BacktestExecutor:
             ):
                 return existing
 
+        if order_intent.reduce_only:
+            self._validate_reduce_only(order_intent)
+
         # 生成订单ID
         self._order_counter += 1
         order_id = f"order_{self._order_counter}_{self.engine.virtual_time_ms}"
@@ -75,6 +78,7 @@ class BacktestExecutor:
             status='NEW',
             created_at=self.engine.virtual_time_ms,
             ttl_ms=order_intent.ttl_ms,
+            reduce_only=order_intent.reduce_only,
             strategy_id=order_intent.strategy_id,
             trigger_reason=order_intent.trigger_reason,
             filled_quantity=Decimal('0')
@@ -90,6 +94,31 @@ class BacktestExecutor:
         )
 
         return order
+
+    def _validate_reduce_only(self, intent: OrderIntent) -> None:
+        position = self.engine.get_position(intent.symbol)
+        if position is None:
+            raise ValueError(f"reduce-only order requires an open position: {intent.symbol}")
+        closing_side = "BUY" if position.side == "SHORT" else "SELL"
+        if intent.side != closing_side:
+            raise ValueError(
+                f"reduce-only side {intent.side} would increase {position.side} position"
+            )
+        reserved = sum(
+            (
+                order.quantity - order.filled_quantity
+                for order in self.engine.orders.values()
+                if order.symbol == intent.symbol
+                and order.reduce_only
+                and order.status in {"NEW", "PARTIALLY_FILLED"}
+            ),
+            start=Decimal("0"),
+        )
+        if intent.quantity > position.quantity - reserved:
+            raise ValueError(
+                "reduce-only quantity exceeds unreserved position: "
+                f"quantity={intent.quantity}, available={position.quantity - reserved}"
+            )
 
     def cancel_order(self, order_id: str) -> bool:
         """

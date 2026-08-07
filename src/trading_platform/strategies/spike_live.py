@@ -219,7 +219,7 @@ class SpikeExecutionCoordinator:
         entry_ids = {
             record.client_order_id
             for record in owned_records
-            if record.payload.get("trigger_reason") in ENTRY_REASONS
+            if not bool(record.payload.get("reduce_only", False))
             and parse_entry_client_order_id(
                 record.client_order_id, expected_symbol=symbol
             )
@@ -298,7 +298,7 @@ class SpikeExecutionCoordinator:
         now_ms = self._now_ms()
         for order in self.account.iter_orders():
             if (
-                order.trigger_reason not in ENTRY_REASONS
+                order.reduce_only
                 or order.status not in {"NEW", "PARTIALLY_FILLED"}
                 or order.ttl_ms is None
                 or order.ttl_ms <= 0
@@ -318,8 +318,8 @@ class SpikeExecutionCoordinator:
             await self._flush_cancellations()
 
     async def _execute(self, intents: list[OrderIntent], *, event_time: int) -> None:
-        entries = [intent for intent in intents if intent.trigger_reason in ENTRY_REASONS]
-        exits = [intent for intent in intents if intent.trigger_reason not in ENTRY_REASONS]
+        entries = [intent for intent in intents if not intent.reduce_only]
+        exits = [intent for intent in intents if intent.reduce_only]
         if entries and self.gate.enabled:
             campaign_id = self._campaign_id(entries[0])
             if not await self._acquire_campaign(campaign_id, entries[0].symbol, event_time):
@@ -335,14 +335,13 @@ class SpikeExecutionCoordinator:
                     )
                 else:
                     for intent in entries:
-                        await self._submit(intent, reduce_only=False)
+                        await self._submit(intent)
         for intent in exits:
-            await self._submit(intent, reduce_only=True)
+            await self._submit(intent)
 
-    async def _submit(self, intent: OrderIntent, *, reduce_only: bool) -> None:
+    async def _submit(self, intent: OrderIntent) -> None:
         record = await self.executor.submit(
             intent,
-            reduce_only=reduce_only,
             reference_price=intent.price,
         )
         if record.status == "SUBMIT_UNKNOWN":
@@ -421,7 +420,7 @@ class SpikeExecutionCoordinator:
         self._expiry_tasks.clear()
         for order in self.account.iter_orders():
             if (
-                order.trigger_reason in ENTRY_REASONS
+                not order.reduce_only
                 and order.status in {"NEW", "PARTIALLY_FILLED"}
             ):
                 self.account.cancel_order(order.order_id)
@@ -429,7 +428,7 @@ class SpikeExecutionCoordinator:
         remaining = [
             order.client_order_id
             for order in self.account.iter_orders()
-            if order.trigger_reason in ENTRY_REASONS
+            if not order.reduce_only
             and order.status in {"NEW", "PARTIALLY_FILLED"}
         ]
         if remaining:
