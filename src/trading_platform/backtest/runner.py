@@ -233,7 +233,7 @@ def load_strategy(
                     "Spike strategy requires a positive --total-notional"
                 )
 
-            from trading_platform.strategies.spike_short import (
+            from trading_platform.strategies.spike.short import (
                 DynamicSpikeBacktestStrategy,
             )
             return DynamicSpikeBacktestStrategy(

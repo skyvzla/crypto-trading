@@ -11,10 +11,10 @@ from trading_platform.backtest.loader import BacktestDataLoader
 from trading_platform.backtest.result import ResultAnalyzer
 from trading_platform.backtest.runner import load_symbol_rules
 from trading_platform.shared.config import BacktestConfig
-from trading_platform.strategies.spike_legacy_research import (
+from trading_platform.strategies.spike.legacy_research import (
     LegacyScriptExitSpikeBacktestStrategy,
 )
-from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
+from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
 
 
 def _timestamp_ms(value: str) -> int:
