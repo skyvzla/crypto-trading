@@ -64,7 +64,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
         with httpx.Client(timeout=args.timeout, follow_redirects=True) as client:
-            fetch = BinanceVisionHTTPFetcher(client, attempts=args.attempts)
+            fetch = BinanceVisionHTTPFetcher(
+                client,
+                attempts=args.attempts,
+                on_retry=reporter.retry,
+            )
             with ParquetCandleArchive(args.archive) as archive:
                 results = download_history(
                     archive,
@@ -117,7 +121,7 @@ class _ProgressReporter:
                     _format_bytes(progress.downloaded_bytes / seconds),
                 )
                 return
-            if progress.phase not in {"stored", "skipped"}:
+            if progress.phase not in {"stored", "skipped", "unavailable"}:
                 return
             self._completed += 1
             prefix = (
@@ -126,6 +130,8 @@ class _ProgressReporter:
             )
             if progress.phase == "skipped":
                 message = f"{prefix} skipped, already exists ({progress.rows} rows)"
+            elif progress.phase == "unavailable":
+                message = f"{prefix} unavailable (404), skipped"
             else:
                 size, speed = self._downloads.pop(progress.current, ("?", "?"))
                 message = (
@@ -133,6 +139,22 @@ class _ProgressReporter:
                     f"({size} at {speed}/s)"
                 )
             print(message, file=sys.stderr, flush=True)
+
+    def retry(
+        self,
+        url: str,
+        attempt: int,
+        attempts: int,
+        error: Exception,
+    ) -> None:
+        with self._lock:
+            filename = url.rsplit("/", 1)[-1]
+            print(
+                f"Retry {attempt}/{attempts} {filename}: "
+                f"{type(error).__name__}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
 
 
 def _print_result(
@@ -144,6 +166,7 @@ def _print_result(
 ) -> None:
     rows = sum(item.rows for item in results)
     skipped = sum(item.skipped for item in results)
+    unavailable = sum(item.unavailable for item in results)
     if as_json:
         print(
             json.dumps(
@@ -159,6 +182,7 @@ def _print_result(
                             "period": item.period,
                             "rows": item.rows,
                             "skipped": item.skipped,
+                            "unavailable": item.unavailable,
                         }
                         for item in results
                     ],
@@ -167,8 +191,11 @@ def _print_result(
             )
         )
         return
-    downloaded = len(results) - skipped
-    print(f"Complete: {downloaded} downloaded, {skipped} skipped, {rows} rows.")
+    downloaded = len(results) - skipped - unavailable
+    print(
+        f"Complete: {downloaded} downloaded, {skipped} existing, "
+        f"{unavailable} unavailable, {rows} rows."
+    )
     print(f"Archive: {archive_path}")
     print(f"Catalog: {catalog_path}")
 

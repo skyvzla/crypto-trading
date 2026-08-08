@@ -123,8 +123,6 @@ class ParquetCandleArchive:
 def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
     dataset = Path(root).resolve()
     files = list(dataset.glob("*/*/*/*/*/*.parquet"))
-    if not files:
-        raise ValueError(f"no candle Parquet partitions found under {dataset}")
     catalog = Path(catalog_path).resolve()
     catalog.parent.mkdir(parents=True, exist_ok=True)
     glob = _sql_literal(
@@ -133,8 +131,9 @@ def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
     connection = duckdb.connect(str(catalog))
     try:
         connection.execute("SET TimeZone = 'UTC'")
-        connection.execute(
-            f"""
+        if files:
+            connection.execute(
+                f"""
             CREATE OR REPLACE VIEW candles AS
             SELECT
                 symbol::VARCHAR AS symbol,
@@ -150,7 +149,24 @@ def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
                 {glob}, union_by_name = true
             )
             """
-        )
+            )
+        else:
+            connection.execute(
+                """
+                CREATE OR REPLACE VIEW candles AS
+                SELECT
+                    NULL::VARCHAR AS symbol,
+                    NULL::VARCHAR AS timeframe,
+                    NULL::TIMESTAMPTZ AS open_time,
+                    NULL::DOUBLE AS open,
+                    NULL::DOUBLE AS high,
+                    NULL::DOUBLE AS low,
+                    NULL::DOUBLE AS close,
+                    NULL::DOUBLE AS volume,
+                    NULL::TIMESTAMPTZ AS close_time
+                WHERE false
+                """
+            )
     finally:
         connection.close()
     return catalog

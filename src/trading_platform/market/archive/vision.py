@@ -24,6 +24,10 @@ NATIVE_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
+class ArchiveNotFoundError(Exception):
+    """Binance does not publish the requested archive partition."""
+
+
 @dataclass(frozen=True)
 class DownloadResult:
     symbol: str
@@ -31,6 +35,7 @@ class DownloadResult:
     period: str
     rows: int
     skipped: bool = False
+    unavailable: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,10 +60,12 @@ class BinanceVisionHTTPFetcher:
         *,
         attempts: int = 3,
         retry_base_seconds: float = 1.0,
+        on_retry: Callable[[str, int, int, Exception], None] | None = None,
     ) -> None:
         self._client = client
         self._attempts = max(1, attempts)
         self._retry_base_seconds = max(0.0, retry_base_seconds)
+        self._on_retry = on_retry
 
     def __call__(self, url: str) -> bytes:
         content = self._get(url).content
@@ -74,6 +81,7 @@ class BinanceVisionHTTPFetcher:
     def _get(self, url: str) -> httpx.Response:
         last_error: Exception | None = None
         for attempt in range(self._attempts):
+            not_found = False
             for candidate in _download_urls(url):
                 try:
                     response = self._client.get(
@@ -82,9 +90,26 @@ class BinanceVisionHTTPFetcher:
                     )
                     response.raise_for_status()
                     return response
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code == 404:
+                        not_found = True
+                    else:
+                        last_error = error
                 except httpx.HTTPError as error:
                     last_error = error
+            if not_found:
+                raise ArchiveNotFoundError(
+                    f"Binance archive not found: {url}"
+                )
             if attempt + 1 < self._attempts:
+                if self._on_retry is not None:
+                    assert last_error is not None
+                    self._on_retry(
+                        url,
+                        attempt + 2,
+                        self._attempts,
+                        last_error,
+                    )
                 time.sleep(self._retry_base_seconds * (2**attempt))
         assert last_error is not None
         raise last_error
@@ -272,7 +297,21 @@ def download_history(
                     )
         _notify(on_progress, "downloading", current, total, symbol, timeframe, label)
         started = time.monotonic()
-        content = fetch(url)
+        try:
+            content = fetch(url)
+        except ArchiveNotFoundError:
+            _notify(
+                on_progress,
+                "unavailable",
+                current,
+                total,
+                symbol,
+                timeframe,
+                label,
+            )
+            return DownloadResult(
+                symbol, timeframe, label, 0, unavailable=True
+            )
         elapsed = time.monotonic() - started
         _notify(
             on_progress,

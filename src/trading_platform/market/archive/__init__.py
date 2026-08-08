@@ -1,6 +1,7 @@
 from .models import Candle
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (
+    ArchiveNotFoundError,
     BinanceVisionHTTPFetcher,
     DownloadProgress,
     DownloadResult,
@@ -12,6 +13,7 @@ from .vision import (
 )
 
 __all__ = [
+    "ArchiveNotFoundError",
     "Candle",
     "BinanceVisionHTTPFetcher",
     "DownloadResult",

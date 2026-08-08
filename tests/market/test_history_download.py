@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from trading_platform.backtest.loader import BacktestDataLoader
+from trading_platform.market.archive import vision as archive_vision
 from trading_platform.market.archive import (
     BinanceVisionHTTPFetcher,
     Candle,
@@ -212,6 +213,12 @@ def test_http_fetcher_verifies_binance_checksum():
 
 def test_cli_progress_uses_monotonic_completion_count(capsys):
     reporter = _ProgressReporter(workers=4)
+    reporter.retry(
+        "https://example.com/BTWUSDT-aggTrades-2026-06-04.zip",
+        2,
+        3,
+        httpx.ConnectError("temporary outage"),
+    )
     reporter(
         DownloadProgress(
             phase="downloaded",
@@ -248,6 +255,7 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
     )
 
     output = capsys.readouterr().err
+    assert "Retry 2/3 BTWUSDT-aggTrades-2026-06-04.zip" in output
     assert "Processing 68 files with 4 workers." in output
     assert "[1/68] BANKUSDT 15m 2026-07 stored 2976 rows" in output
     assert "2.0 MiB at 4.0 MiB/s" in output
@@ -266,8 +274,36 @@ def test_cli_result_is_plain_text_by_default(tmp_path, capsys):
     )
 
     output = capsys.readouterr().out
-    assert output.startswith("Complete: 1 downloaded, 0 skipped, 44640 rows.")
+    assert output.startswith(
+        "Complete: 1 downloaded, 0 existing, 0 unavailable, 44640 rows."
+    )
     assert not output.lstrip().startswith("{")
+
+
+def test_catalog_supports_an_all_unavailable_download(tmp_path):
+    catalog = create_duckdb_catalog(
+        tmp_path / "empty-parquet", tmp_path / "history.duckdb"
+    )
+
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        rows = connection.execute("SELECT * FROM candles").fetchall()
+        columns = [item[0] for item in connection.description]
+    finally:
+        connection.close()
+
+    assert rows == []
+    assert columns == [
+        "symbol",
+        "timeframe",
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+    ]
 
 
 def test_cli_handles_keyboard_interrupt_without_traceback(
@@ -338,6 +374,75 @@ def test_http_fetcher_falls_back_to_public_endpoint_from_s3():
         )
 
     assert result == content
+
+
+def test_download_history_skips_pre_listing_404_and_continues(tmp_path):
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(
+            "BTWUSDT-aggTrades-2026-06-01.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "transact_time,is_buyer_maker\n"
+            "1,1.0,2.0,1,1,1780272000100,false\n",
+        )
+
+    def fetch(url: str) -> bytes:
+        if "2026-05-31" in url:
+            raise archive_vision.ArchiveNotFoundError(url)
+        return payload.getvalue()
+
+    progress: list[DownloadProgress] = []
+    with ParquetCandleArchive(tmp_path / "history") as archive:
+        results = download_history(
+            archive,
+            fetch=fetch,
+            symbols=["BTWUSDT"],
+            timeframes=["1s"],
+            start=datetime(2026, 5, 31, tzinfo=UTC),
+            end=datetime(2026, 6, 2, tzinfo=UTC),
+            on_progress=progress.append,
+        )
+
+    assert [(item.period, item.unavailable, item.rows) for item in results] == [
+        ("2026-05-31", True, 0),
+        ("2026-06-01", False, 1),
+    ]
+    assert [item.phase for item in progress if item.phase == "unavailable"] == [
+        "unavailable"
+    ]
+
+
+def test_http_fetcher_reports_retries_before_succeeding():
+    content = b"eventual archive"
+    checksum = hashlib.sha256(content).hexdigest()
+    requests = 0
+    retries: list[tuple[int, int]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        if request.url.path.endswith(".CHECKSUM"):
+            return httpx.Response(200, text=checksum)
+        requests += 1
+        if requests < 3:
+            raise httpx.ConnectError("temporary outage", request=request)
+        return httpx.Response(200, content=content)
+
+    def on_retry(
+        url: str, attempt: int, attempts: int, error: Exception
+    ) -> None:
+        retries.append((attempt, attempts))
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = BinanceVisionHTTPFetcher(
+            client,
+            attempts=3,
+            retry_base_seconds=0,
+            on_retry=on_retry,
+        )("https://example.com/archive.zip")
+
+    assert result == content
+    assert requests == 3
+    assert retries == [(2, 3), (3, 3)]
 
 
 def test_parquet_archive_allows_separate_archive_handles(tmp_path):
