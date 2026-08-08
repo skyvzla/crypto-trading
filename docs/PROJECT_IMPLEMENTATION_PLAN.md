@@ -250,8 +250,9 @@ WAL 空仓重启。撤单异常后会按原 client ID 查询交易所，只有�
 回补 PostgreSQL；User Stream 业务回调失败会进入进程级 fatal，关机必须排空或显式报超时。
 同一 account id 的执行进程由 PostgreSQL session lock 单实例保护；未归属 WAL 的订单回报
 和非托管 symbol 仓位不再写入策略账本，而是直接停止进程。真实 testnet 主动断流演练已观察到
-disconnect、恢复对账、reconnected 和 listenKey 轮换，最终空仓空单。
-剩余外部长时间运行、持续未知回报外部处置演练，以及正式保护退出规则验收。
+disconnect、恢复对账、reconnected 和 listenKey 轮换，最终空仓空单。3900.224 秒正式长稳
+已取得 676 个样本并通过，覆盖同一实例 runtime 恢复和多次真实 listenKey 重建。
+剩余持续未知回报外部处置演练，以及正式保护退出规则验收。
 
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
 未终态轮次；本地状态以交易所订单、成交和仓位事实为准。
@@ -290,11 +291,13 @@ Binance testnet 已完成预挂撤单、4 轮开平仓和最终空仓检查；�
 和 Campaign 释放。迁移 `0002` 后曾再次启动完整 Spike profile，迁移 runner 与 ledger 使用同一
 镜像、User Stream 真实连接且进程 healthy；subcategory version 6 保持 disabled。停止 Spike
 后独立 dry-run 再次确认 AKEUSDT/BTCUSDT 均为空仓空单。User Stream 主动断流恢复也已通过
-真实 testnet 演练，报告为 `reports/testnet_user_stream_reconnect_20260807.json`。新增迁移
+真实 testnet 演练，报告为 `reports/testnet_user_stream_reconnect_20260807.json`。正式
+3900.224 秒监督也已 `SOAK_OK`：676 个样本、最大心跳年龄 4.984 秒、一次 5.458 秒
+runtime 恢复，全程 0 挂单、0 仓位。新增迁移
 `0003` 的策略运行状态和 API/Web 已通过 Compose 真实 PostgreSQL 回归；默认数据库也已从
 `0002` 升至 `0003`，准入关闭的 Spike testnet 进程实际写入 `running`、
-`entry_enabled=false`，优雅停止后写入 `stopped`，全程空仓空单。仍缺外部长时间运行、
-持续未知回报处置、外部告警通道和恢复演练。
+`entry_enabled=false`，优雅停止后写入 `stopped`，全程空仓空单。仍缺持续未知回报处置、
+外部告警通道和正式退出规则验收。
 最新一轮 BTCUSDT 使用 `SELL LIMIT 0.001 @ 65000` 成交，随后 `BUY MARKET reduceOnly`
 全部成交；独立 dry-run 复核 AKEUSDT/BTCUSDT 均为 0 挂单、0 持仓。最新报告为
 `reports/testnet_20260807_post_migration_flat.json`。
