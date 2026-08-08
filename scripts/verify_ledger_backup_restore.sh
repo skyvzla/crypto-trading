@@ -45,6 +45,7 @@ SELECT jsonb_build_object(
   'subcategory_admission_audit', (SELECT COUNT(*) FROM subcategory_admission_audit),
   'strategy_audit_events', (SELECT COUNT(*) FROM strategy_audit_events),
   'strategy_runtime_status', (SELECT COUNT(*) FROM strategy_runtime_status),
+  'exchange_symbols', (SELECT COUNT(*) FROM exchange_symbols),
   'ledger_schema_migrations', (SELECT COUNT(*) FROM ledger_schema_migrations)
 )::text;
 "
