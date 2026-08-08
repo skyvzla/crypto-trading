@@ -46,6 +46,25 @@
 - 现有 candidate-v1 参数来源已失效，只能继续用于执行链路验证和逐轮数据观察；
   依 D-028 完成人工评审和后续证据门禁前，不得冻结为生产参数或进入 live。
 
+### 重要：Binance USD-M 永续合约下架信号（2026-08-08 实测）
+
+> **不得遗漏。** 策略只交易 Binance USD-M 永续合约；`/fapi/v1/exchangeInfo`
+> 的 `deliveryDate` 是合约下架/结算的重要防线，不能只检查 `status`。
+
+- 正常可交易的永续合约（当日 569 个，包括 `BTCUSDT`、`AKEUSDT`）均为
+  `status=TRADING`，`deliveryDate=2100-12-25T08:00:00Z` 的远期默认值。
+- 当年具有实际 `deliveryDate` 的 58 个永续合约全部为 `status=SETTLING`，即已退出
+  正常交易；Binance 仍会在 `exchangeInfo` 保留它们作为结算记录。
+- `HFTUSDT`、`VANRYUSDT`、`ACXUSDT`、`VICUSDT` 均在
+  `2026-08-07T09:00:00Z`（17:00 CST）进入该状态。该组是本规则的直接样本。
+- 当前快照中不存在 `status=TRADING` 且 `deliveryDate` 非远期默认值的永续合约。单次
+  快照不能证明 Binance 会在下架前多久更新此字段，因此不能把它当成唯一的预告来源。
+
+后续 live/testnet 准入必须同时校验 `contractType=PERPETUAL`、`status=TRADING` 和
+`deliveryDate` 距当前时间超过冻结窗口；发现近期 `deliveryDate` 时立即停止新开仓并撤销
+未成交入场单，已有仓位只允许保护性退出。公告采集用于更早冻结，`exchangeInfo` 的
+`status` 与 `deliveryDate` 用作不可绕过的硬校验。
+
 ## 已冻结脚本基线（2026-08-06 确认）
 
 以下参数直接来自 `scripts/backtest_dynamic_spike.py`，已确认为唯一事实源，不得擅自修改：
