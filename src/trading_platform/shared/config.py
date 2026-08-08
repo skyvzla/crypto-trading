@@ -93,6 +93,7 @@ class BacktestConfig(BaseSettings):
     trading_start_ms: int | None = None  # 此前事件只用于指标预热
     limit_fill_fraction_per_bar: float = Field(default=1.0, gt=0, le=1)
     bar1s_time_shift_ms: int = 0  # 历史源已证实存在偏移时才显式设置
+    prior_high_lookback_minutes: int = Field(default=240, gt=0)
 
 
 def load_config() -> dict:

@@ -135,6 +135,9 @@ class SpikeSignal:
     pullback_threshold: Decimal | None = None
     pullback_time: int | None = None
     pullback_low: Decimal | None = None
+    prior_high: Decimal | None = None
+    prior_high_time: int | None = None
+    # 保留 4h 字段，兼容已有报告；非 4h 回测时为空。
     prior_high_4h: Decimal | None = None
     prior_high_4h_time: int | None = None
 
@@ -179,6 +182,7 @@ class DynamicSpikeShortStrategy:
         account: Optional[StrategyAccount] = None,
         account_id: str = "backtest",
         exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007",
+        prior_high_lookback_minutes: int | None = None,
     ):
         """
         Args:
@@ -195,6 +199,13 @@ class DynamicSpikeShortStrategy:
         self.total_notional = Decimal(total_notional)
         self.account_id = account_id
         self.exit_policy = exit_policy
+        self.prior_high_lookback_minutes = (
+            self.PRIOR_HIGH_LOOKBACK_MINUTES
+            if prior_high_lookback_minutes is None
+            else int(prior_high_lookback_minutes)
+        )
+        if self.prior_high_lookback_minutes <= 0:
+            raise ValueError("prior_high_lookback_minutes must be positive")
         self._account = account
         self._trading_enabled = True
         self._execution_enabled = True
@@ -485,13 +496,19 @@ class DynamicSpikeShortStrategy:
                     details={
                         "spike_high": str(signal.spike_high),
                         "spike_high_time": signal.spike_high_time,
+                        "prior_high": (
+                            str(signal.prior_high)
+                            if signal.prior_high is not None
+                            else None
+                        ),
+                        "prior_high_time": signal.prior_high_time,
                         "prior_high_4h": (
                             str(signal.prior_high_4h)
                             if signal.prior_high_4h is not None
                             else None
                         ),
                         "prior_high_4h_time": signal.prior_high_4h_time,
-                        "prior_high_lookback_minutes": self.PRIOR_HIGH_LOOKBACK_MINUTES,
+                        "prior_high_lookback_minutes": self.prior_high_lookback_minutes,
                         "prior_high_guard_all_tiers_above": True,
                         "origin_price": str(signal.origin_price),
                         "origin_floor": (
@@ -1039,7 +1056,7 @@ class DynamicSpikeShortStrategy:
         prior_high_point = self._prior_high_point(minute_start)
         if prior_high_point is None:
             return None
-        prior_high_4h, prior_high_4h_time = prior_high_point
+        prior_high, prior_high_time = prior_high_point
 
         # 8. ATR（已完成 5m K 线，14 周期）
         atr = self._atr_5m()
@@ -1057,8 +1074,19 @@ class DynamicSpikeShortStrategy:
         lowest_tier = min(tier_prices)
         if lowest_tier < origin_floor or lowest_tier <= current.close:
             return None
-        if lowest_tier <= prior_high_4h:
+        if lowest_tier <= prior_high:
             return None
+
+        prior_high_4h = (
+            prior_high
+            if self.prior_high_lookback_minutes == self.PRIOR_HIGH_LOOKBACK_MINUTES
+            else None
+        )
+        prior_high_4h_time = (
+            prior_high_time
+            if prior_high_4h is not None
+            else None
+        )
 
         # 11. 失效价
         invalid_price = max(
@@ -1087,6 +1115,8 @@ class DynamicSpikeShortStrategy:
             rise_from_12h_low=current.close / low_12h - Decimal("1"),
             origin_floor=origin_floor,
             pullback_threshold=spike_high - atr * self.RETEST_ATR,
+            prior_high=prior_high,
+            prior_high_time=prior_high_time,
             prior_high_4h=prior_high_4h,
             prior_high_4h_time=prior_high_4h_time,
         )
@@ -1119,7 +1149,7 @@ class DynamicSpikeShortStrategy:
         self, minute_start: int
     ) -> tuple[Decimal, int] | None:
         completed = self._completed_1m_window(
-            minute_start, self.PRIOR_HIGH_LOOKBACK_MINUTES
+            minute_start, self.prior_high_lookback_minutes
         )
         if not completed:
             return None
@@ -1234,6 +1264,7 @@ class DynamicSpikeBacktestStrategy:
         total_notional: Decimal,
         account: Optional[StrategyAccount] = None,
         exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007",
+        prior_high_lookback_minutes: int | None = None,
     ):
         self.strategies = {
             symbol: DynamicSpikeShortStrategy(
@@ -1241,6 +1272,7 @@ class DynamicSpikeBacktestStrategy:
                 total_notional=total_notional,
                 account=account,
                 exit_policy=exit_policy,
+                prior_high_lookback_minutes=prior_high_lookback_minutes,
             )
             for symbol in symbols
         }

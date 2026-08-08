@@ -25,7 +25,8 @@ TRADE_COLUMNS = [
     'pullback_time', 'pullback_time_iso', 'pullback_low',
     'pullback_threshold', 'pullback_atr', 'signal_cooldown_seconds',
     'order_ttl_seconds', 'exit_policy', 'spike_high', 'spike_high_time',
-    'spike_high_time_iso', 'prior_high_4h', 'prior_high_4h_time',
+    'spike_high_time_iso', 'prior_high', 'prior_high_time',
+    'prior_high_time_iso', 'prior_high_4h', 'prior_high_4h_time',
     'prior_high_4h_time_iso', 'prior_high_lookback_minutes',
     'atr', 'origin_price', 'origin_floor',
     'trigger_price', 'rise_5s', 'volume_5s', 'median_volume_1s',
@@ -346,6 +347,12 @@ class ResultAnalyzer:
                 except (TypeError, ValueError):
                     spike_high_time = None
 
+            prior_high_time = metrics.get('prior_high_time')
+            if prior_high_time is not None:
+                try:
+                    prior_high_time = int(prior_high_time)
+                except (TypeError, ValueError):
+                    prior_high_time = None
             prior_high_4h_time = metrics.get('prior_high_4h_time')
             if prior_high_4h_time is not None:
                 try:
@@ -373,6 +380,9 @@ class ResultAnalyzer:
                 'spike_high': detail_number('spike_high'),
                 'spike_high_time': spike_high_time,
                 'spike_high_time_iso': self._timestamp_iso(spike_high_time),
+                'prior_high': detail_number('prior_high'),
+                'prior_high_time': prior_high_time,
+                'prior_high_time_iso': self._timestamp_iso(prior_high_time),
                 'prior_high_4h': detail_number('prior_high_4h'),
                 'prior_high_4h_time': prior_high_4h_time,
                 'prior_high_4h_time_iso': self._timestamp_iso(prior_high_4h_time),
@@ -700,6 +710,9 @@ class ResultAnalyzer:
                     self.result.config.limit_fill_fraction_per_bar
                 ),
                 'bar1s_time_shift_ms': self.result.config.bar1s_time_shift_ms,
+                'prior_high_lookback_minutes': (
+                    self.result.config.prior_high_lookback_minutes
+                ),
             }
         }
 

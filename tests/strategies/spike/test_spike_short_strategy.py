@@ -131,8 +131,42 @@ class TestDynamicSpikeShortStrategy:
         assert DynamicSpikeShortStrategy.VOLUME_MULTIPLE_5S == Decimal("3.0")
         assert DynamicSpikeShortStrategy.RISE_FROM_12H_LOW == Decimal("0.20")
         assert DynamicSpikeShortStrategy.PRIOR_HIGH_LOOKBACK_MINUTES == 240
+        custom = DynamicSpikeShortStrategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            prior_high_lookback_minutes=8 * 60,
+        )
+        assert custom.prior_high_lookback_minutes == 8 * 60
         assert len(DynamicSpikeShortStrategy.TIER_WEIGHTS) == 3
         assert sum(DynamicSpikeShortStrategy.TIER_WEIGHTS) == Decimal("1.0")
+
+    def test_prior_high_uses_configured_lookback_window(self):
+        minute = 60_000
+        minute_start = 10_000_000_000
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            prior_high_lookback_minutes=8 * 60,
+        )
+        strategy.klines_1m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=minute_start - (480 - index) * minute,
+                close_time=minute_start - (480 - index) * minute + minute - 1,
+                available_time=minute_start - (480 - index - 1) * minute,
+                open=Decimal("100"),
+                high=Decimal("200") if index == 100 else Decimal("150"),
+                low=Decimal("90"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            )
+            for index in range(480)
+        ]
+
+        prior_high, _ = strategy._prior_high_point(minute_start)
+
+        assert prior_high == Decimal("200")
 
     def test_orders_activate_after_one_second_with_full_ttl(self):
         strategy = DynamicSpikeShortStrategy(

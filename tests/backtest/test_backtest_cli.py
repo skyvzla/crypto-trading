@@ -116,7 +116,10 @@ def test_spike_cli_runs_on_sample_data(tmp_path, monkeypatch, entrypoint):
         monkeypatch.setattr(sys, "argv", argv)
         runner.main()
     else:
-        argv = ["run_spike_short", "--symbol", "BTCUSDT", *common]
+        argv = [
+            "run_spike_short", "--symbol", "BTCUSDT",
+            *common, "--prior-high-lookback-hours", "8",
+        ]
         monkeypatch.setattr(sys, "argv", argv)
         run_spike_short.main()
 
@@ -127,6 +130,9 @@ def test_spike_cli_runs_on_sample_data(tmp_path, monkeypatch, entrypoint):
     assert summary["orders"]["total"] == 0
     assert summary["pnl"]["total_profit"] == 0.0
     assert run_meta["total_events"] == 4
+    assert run_meta["config"]["prior_high_lookback_minutes"] == (
+        240 if entrypoint == "generic" else 480
+    )
     assert (output_dir / "audit_events.parquet").exists()
 
 

@@ -76,6 +76,12 @@ def parse_args() -> argparse.Namespace:
         help="显式修正历史 1s 数据时间偏移；默认 0，不自动推断",
     )
     parser.add_argument(
+        "--prior-high-lookback-hours",
+        type=int,
+        default=4,
+        help="前高过滤回看周期（小时），默认 4",
+    )
+    parser.add_argument(
         "--exchange-info",
         type=Path,
         default=None,
@@ -98,8 +104,13 @@ def main() -> None:
     if args.warmup_hours < 0:
         print("Error: --warmup-hours must not be negative", file=sys.stderr)
         raise SystemExit(2)
-    load_start_ms = start_ms - int(args.warmup_hours * 3_600_000)
+    if args.prior_high_lookback_hours <= 0:
+        print("Error: --prior-high-lookback-hours must be positive", file=sys.stderr)
+        raise SystemExit(2)
+    warmup_hours = max(args.warmup_hours, float(args.prior_high_lookback_hours))
+    load_start_ms = start_ms - int(warmup_hours * 3_600_000)
     bar1s_time_shift_ms = int(args.bar1s_time_shift_hours * Decimal("3600000"))
+    prior_high_lookback_minutes = args.prior_high_lookback_hours * 60
     data_dir = args.data_dir or "data/market"
     data_source = args.duckdb_path or data_dir
 
@@ -107,6 +118,8 @@ def main() -> None:
     print(f"Symbol: {args.symbol}")
     print(f"Period: {args.start} to {args.end}")
     print(f"Data source: {data_source}")
+    print(f"Prior high lookback: {args.prior_high_lookback_hours}h")
+    print(f"Warmup: {warmup_hours:g}h")
 
     loader = BacktestDataLoader(
         data_dir=data_dir,
@@ -137,6 +150,7 @@ def main() -> None:
         trading_start_ms=start_ms,
         limit_fill_fraction_per_bar=args.limit_fill_fraction,
         bar1s_time_shift_ms=bar1s_time_shift_ms,
+        prior_high_lookback_minutes=prior_high_lookback_minutes,
     )
     if args.exit_policy == "legacy-script":
         strategy = LegacyScriptExitSpikeBacktestStrategy(
@@ -151,6 +165,7 @@ def main() -> None:
                 if args.exit_policy == "candidate-v1"
                 else "execution-test-d007"
             ),
+            prior_high_lookback_minutes=prior_high_lookback_minutes,
         )
     result = BacktestEngine(
         events=events,
