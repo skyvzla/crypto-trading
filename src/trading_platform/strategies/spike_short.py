@@ -123,6 +123,19 @@ class SpikeSignal:
     # 已提交的 client_order_id，用于幂等
     placed_client_order_ids: set = field(default_factory=set)
 
+    # 回测审计字段；不参与下单决策，保留信号复核所需的原始指标。
+    spike_high_time: int | None = None
+    rise_5s: Decimal | None = None
+    volume_5s: Decimal | None = None
+    median_volume_1s: Decimal | None = None
+    volume_multiple_5s: Decimal | None = None
+    low_12h: Decimal | None = None
+    rise_from_12h_low: Decimal | None = None
+    origin_floor: Decimal | None = None
+    pullback_threshold: Decimal | None = None
+    pullback_time: int | None = None
+    pullback_low: Decimal | None = None
+
 
 class DynamicSpikeShortStrategy:
     """
@@ -282,6 +295,9 @@ class DynamicSpikeShortStrategy:
                     "fill_id": fill.fill_id,
                     "price": str(fill.price),
                     "quantity": str(fill.quantity),
+                    **self._entry_pattern_details(
+                        self._campaign_id_for_timing, fill.fill_time
+                    ),
                 },
             )
         elif (
@@ -433,6 +449,30 @@ class DynamicSpikeShortStrategy:
                         "trigger_price": str(signal.trigger_price),
                         "rise_threshold_5s": str(self.SPIKE_RISE_5S),
                         "volume_threshold_5s": str(self.VOLUME_MULTIPLE_5S),
+                        "rise_5s": (
+                            str(signal.rise_5s) if signal.rise_5s is not None else None
+                        ),
+                        "volume_5s": (
+                            str(signal.volume_5s) if signal.volume_5s is not None else None
+                        ),
+                        "median_volume_1s": (
+                            str(signal.median_volume_1s)
+                            if signal.median_volume_1s is not None
+                            else None
+                        ),
+                        "volume_multiple_5s": (
+                            str(signal.volume_multiple_5s)
+                            if signal.volume_multiple_5s is not None
+                            else None
+                        ),
+                        "low_12h": (
+                            str(signal.low_12h) if signal.low_12h is not None else None
+                        ),
+                        "rise_from_12h_low": (
+                            str(signal.rise_from_12h_low)
+                            if signal.rise_from_12h_low is not None
+                            else None
+                        ),
                     },
                 )
                 self._record_audit(
@@ -441,8 +481,23 @@ class DynamicSpikeShortStrategy:
                     campaign_id=campaign_id,
                     details={
                         "spike_high": str(signal.spike_high),
+                        "spike_high_time": signal.spike_high_time,
                         "origin_price": str(signal.origin_price),
+                        "origin_floor": (
+                            str(signal.origin_floor)
+                            if signal.origin_floor is not None
+                            else None
+                        ),
                         "atr": str(signal.atr),
+                        "pullback_threshold": (
+                            str(signal.pullback_threshold)
+                            if signal.pullback_threshold is not None
+                            else None
+                        ),
+                        "pullback_atr": str(self.RETEST_ATR),
+                        "signal_cooldown_seconds": self.SIGNAL_COOLDOWN,
+                        "order_ttl_seconds": self.ORDER_TTL,
+                        "exit_policy": self.exit_policy,
                         "tier_prices": [str(price) for price in signal.tier_prices],
                         "tier_weights": [str(weight) for weight in signal.tier_weights],
                         "invalid_price": str(signal.invalid_price),
@@ -791,6 +846,19 @@ class DynamicSpikeShortStrategy:
             if bar.timestamp < sig.active_time:
                 continue
 
+            # 记录首笔卖出前是否出现了足够深的回调，供交易归因使用。
+            pullback_threshold = sig.pullback_threshold
+            if pullback_threshold is None:
+                pullback_threshold = sig.spike_high - sig.atr * self.RETEST_ATR
+                sig.pullback_threshold = pullback_threshold
+            if sig.pullback_time is None and bar.low <= pullback_threshold:
+                sig.pullback_time = bar.timestamp
+                sig.pullback_low = bar.low
+            elif sig.pullback_time is not None and (
+                sig.pullback_low is None or bar.low < sig.pullback_low
+            ):
+                sig.pullback_low = bar.low
+
             # 4. 三档挂单（按 client_order_id 幂等）
             for tier_idx, (tier_price, tier_weight) in enumerate(
                 zip(sig.tier_prices, sig.tier_weights), start=1
@@ -813,6 +881,7 @@ class DynamicSpikeShortStrategy:
                         reduce_only=False,
                         strategy_id="spike_short",
                         trigger_reason=f"spike_tier{tier_idx}",
+                        campaign_id=self._campaign_id(sig),
                     )
                 )
                 sig.placed_client_order_ids.add(client_order_id)
@@ -949,9 +1018,10 @@ class DynamicSpikeShortStrategy:
             return None
 
         # 7. spike_high（已完成 1m K 线 + 已缓存 1s Bar，避免未完成 K 线泄漏）
-        spike_high = self._spike_high(minute_start)
-        if spike_high is None:
+        spike_high_point = self._spike_high_point(minute_start)
+        if spike_high_point is None:
             return None
+        spike_high, spike_high_time = spike_high_point
 
         # 8. ATR（已完成 5m K 线，14 周期）
         atr = self._atr_5m()
@@ -988,6 +1058,15 @@ class DynamicSpikeShortStrategy:
             invalid_price=invalid_price,
             active_time=active_time,
             expire_time=active_time + self.ORDER_TTL * MS_PER_SECOND,
+            spike_high_time=spike_high_time,
+            rise_5s=rise_5s,
+            volume_5s=volume_5s,
+            median_volume_1s=median_volume,
+            volume_multiple_5s=volume_5s / (median_volume * Decimal("5")),
+            low_12h=low_12h,
+            rise_from_12h_low=current.close / low_12h - Decimal("1"),
+            origin_floor=origin_floor,
+            pullback_threshold=spike_high - atr * self.RETEST_ATR,
         )
 
     # ------------------------------------------------------------------
@@ -1015,7 +1094,16 @@ class DynamicSpikeShortStrategy:
         return [by_open_time[open_time] for open_time in expected_times]
 
     def _spike_high(self, minute_start: int) -> Optional[Decimal]:
+        point = self._spike_high_point(minute_start)
+        return point[0] if point is not None else None
+
+    def _spike_high_point(
+        self, minute_start: int
+    ) -> tuple[Decimal, int] | None:
         """
+        Return ``(spike_high, timestamp)`` using only information available at
+        the current 1s bar.
+
         spike_high = max(
             已完成 1m K 线在最近 30 分钟内的最高价,
             已缓存 1s Bar 的最高价（覆盖当前未完成分钟）
@@ -1026,9 +1114,50 @@ class DynamicSpikeShortStrategy:
         )
         if not completed:
             return None
-        highs = [k.high for k in completed]
-        highs.extend(b.high for b in self.bars_1s if b.timestamp >= minute_start)
-        return max(highs) if highs else None
+        points = [(k.high, k.open_time) for k in completed]
+        points.extend(
+            (b.high, b.timestamp)
+            for b in self.bars_1s
+            if b.timestamp >= minute_start
+        )
+        return max(points, key=lambda point: (point[0], point[1])) if points else None
+
+    def _entry_pattern_details(
+        self, campaign_id: str | None, fill_time: int
+    ) -> dict:
+        signal = next(
+            (
+                signal
+                for signal in self.active_signals
+                if self._campaign_id(signal) == campaign_id
+            ),
+            None,
+        )
+        if signal is None:
+            return {"entry_pattern": "unknown", "pullback_before_fill": False}
+        pullback_before_fill = (
+            signal.pullback_time is not None
+            and signal.pullback_time < fill_time
+        )
+        return {
+            "entry_pattern": (
+                "short_term_high_pullback_rebreak"
+                if pullback_before_fill
+                else "direct_entry_without_pullback"
+            ),
+            "pullback_before_fill": pullback_before_fill,
+            "pullback_time": signal.pullback_time,
+            "pullback_low": (
+                str(signal.pullback_low)
+                if signal.pullback_low is not None
+                else None
+            ),
+            "pullback_threshold": (
+                str(signal.pullback_threshold)
+                if signal.pullback_threshold is not None
+                else None
+            ),
+        }
 
     def _atr_5m(self) -> Optional[Decimal]:
         """已完成 5m K 线的 14 周期 ATR"""

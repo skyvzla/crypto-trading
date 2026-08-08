@@ -6,6 +6,7 @@
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from decimal import Decimal
 from typing import Any
@@ -17,6 +18,22 @@ from trading_platform.shared.events import Order, Fill, Position, StrategyAuditE
 from trading_platform.shared.config import BacktestConfig
 
 logger = logging.getLogger(__name__)
+
+TRADE_COLUMNS = [
+    'trade_id', 'symbol', 'side', 'campaign_id', 'signal_time',
+    'signal_time_iso', 'entry_pattern', 'pullback_before_first_entry',
+    'pullback_time', 'pullback_time_iso', 'pullback_low',
+    'pullback_threshold', 'pullback_atr', 'signal_cooldown_seconds',
+    'order_ttl_seconds', 'exit_policy', 'spike_high', 'spike_high_time',
+    'spike_high_time_iso', 'atr', 'origin_price', 'origin_floor',
+    'trigger_price', 'rise_5s', 'volume_5s', 'median_volume_1s',
+    'volume_multiple_5s', 'low_12h', 'rise_from_12h_low', 'tier_prices',
+    'tier_weights', 'invalid_price', 'entry_action', 'entry_time',
+    'entry_time_iso', 'entry_price', 'entry_quantity', 'entry_notional',
+    'entry_fill_count', 'exit_action', 'exit_time', 'exit_time_iso',
+    'exit_price', 'exit_quantity', 'exit_fill_count', 'exit_reason',
+    'status', 'gross_pnl', 'commission', 'net_pnl', 'net_return', 'winner',
+]
 
 
 @dataclass
@@ -63,6 +80,7 @@ class BacktestResult:
                 'cancel_time': order.cancel_time,
                 'strategy_id': order.strategy_id,
                 'trigger_reason': order.trigger_reason,
+                'campaign_id': order.campaign_id,
             })
 
         # 转换 Fill
@@ -113,10 +131,25 @@ class BacktestResult:
             })
 
         return {
-            'orders': pd.DataFrame(orders_data),
-            'fills': pd.DataFrame(fills_data),
-            'positions': pd.DataFrame(positions_data),
-            'audit_events': pd.DataFrame(audit_data),
+            'orders': pd.DataFrame(orders_data, columns=[
+                'order_id', 'client_order_id', 'account_id', 'symbol', 'side',
+                'type', 'price', 'quantity', 'status', 'created_at', 'ttl_ms',
+                'reduce_only', 'filled_quantity', 'fill_time', 'cancel_time',
+                'strategy_id', 'trigger_reason', 'campaign_id',
+            ]),
+            'fills': pd.DataFrame(fills_data, columns=[
+                'fill_id', 'order_id', 'symbol', 'side', 'price', 'quantity',
+                'commission', 'commission_asset', 'fill_time', 'is_maker',
+            ]),
+            'positions': pd.DataFrame(positions_data, columns=[
+                'symbol', 'side', 'entry_price', 'quantity', 'total_commission',
+                'unrealized_pnl', 'realized_pnl', 'opened_at', 'closed_at',
+                'status',
+            ]),
+            'audit_events': pd.DataFrame(audit_data, columns=[
+                'event_time', 'event_type', 'symbol', 'strategy_id',
+                'campaign_id', 'details',
+            ]),
         }
 
 
@@ -139,6 +172,7 @@ class ResultAnalyzer:
         """
         self.result = result
         self.dfs = result.to_dataframes()
+        self.dfs['trades'] = self._build_trades()
 
     def analyze(self) -> dict[str, Any]:
         """
@@ -157,10 +191,265 @@ class ResultAnalyzer:
             },
             'orders': self._analyze_orders(),
             'positions': self._analyze_positions(),
+            'trades': self._analyze_trades(),
             'pnl': self._analyze_pnl(),
         }
 
         return summary
+
+    @staticmethod
+    def _timestamp_iso(value: Any) -> str | None:
+        if value is None or pd.isna(value):
+            return None
+        return datetime.fromtimestamp(
+            int(value) / 1000, tz=timezone.utc
+        ).isoformat()
+
+    @staticmethod
+    def _detail_number(details: dict, key: str) -> float | None:
+        value = details.get(key)
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _build_trades(self) -> pd.DataFrame:
+        """将订单、成交、持仓和策略审计合并为逐笔交易复核表。"""
+        orders = self.dfs['orders']
+        fills = self.dfs['fills']
+        positions = self.dfs['positions']
+        audits = self.dfs['audit_events']
+
+        plans: dict[str, dict] = {}
+        triggers: dict[str, dict] = {}
+        first_fills: dict[str, dict] = {}
+        for event in audits.itertuples(index=False):
+            if not isinstance(event.campaign_id, str):
+                continue
+            try:
+                details = json.loads(event.details or '{}')
+            except (TypeError, json.JSONDecodeError):
+                details = {}
+            if event.event_type == 'entry_plan_created':
+                plans[event.campaign_id] = details
+            elif event.event_type == 'signal_triggered':
+                triggers[event.campaign_id] = details
+            elif event.event_type == 'campaign_first_fill':
+                first_fills[event.campaign_id] = details
+
+        order_fields = [
+            'order_id', 'reduce_only', 'campaign_id', 'trigger_reason'
+        ]
+        fill_orders = fills.merge(
+            orders[order_fields], on='order_id', how='left'
+        )
+        rows: list[dict[str, Any]] = []
+
+        for position in positions.itertuples(index=False):
+            opened_at = int(position.opened_at)
+            is_closed = position.status == 'CLOSED' and not pd.isna(position.closed_at)
+            closed_at = int(position.closed_at) if is_closed else None
+            period = fill_orders[
+                (fill_orders['symbol'] == position.symbol)
+                & (fill_orders['fill_time'] >= opened_at)
+            ]
+            if closed_at is not None:
+                period = period[period['fill_time'] <= closed_at]
+
+            entries = period[
+                (period['side'] == ('SELL' if position.side == 'SHORT' else 'BUY'))
+                & (period['reduce_only'] == False)
+            ]
+            exits = period[
+                (period['side'] == ('BUY' if position.side == 'SHORT' else 'SELL'))
+                & (period['reduce_only'] == True)
+            ]
+
+            campaign_id = None
+            if not entries.empty:
+                campaign_values = entries['campaign_id'].dropna()
+                if not campaign_values.empty:
+                    campaign_id = str(campaign_values.iloc[0])
+
+            plan = plans.get(campaign_id or '', {})
+            trigger = triggers.get(campaign_id or '', {})
+            first_fill = first_fills.get(campaign_id or '', {})
+            metrics = dict(trigger)
+            metrics.update(plan)
+
+            signal_time = None
+            if campaign_id and ':' in campaign_id:
+                try:
+                    signal_time = int(campaign_id.rsplit(':', 1)[1])
+                except ValueError:
+                    signal_time = None
+
+            entry_time = (
+                int(entries['fill_time'].min())
+                if not entries.empty else opened_at
+            )
+            exit_time = (
+                int(exits['fill_time'].max())
+                if not exits.empty else closed_at
+            )
+            entry_quantity = float(entries['quantity'].sum())
+            exit_quantity = float(exits['quantity'].sum())
+            entry_notional = float(
+                (entries['price'] * entries['quantity']).sum()
+            )
+            if entry_notional <= 0:
+                entry_notional = float(position.entry_price * position.quantity)
+            exit_price = None
+            if exit_quantity > 0:
+                exit_price = float(
+                    (exits['price'] * exits['quantity']).sum() / exit_quantity
+                )
+
+            gross_pnl = float(
+                position.realized_pnl
+                if is_closed else position.unrealized_pnl
+            )
+            commission = float(position.total_commission)
+            net_pnl = gross_pnl - commission
+            exit_reasons = sorted(
+                {
+                    str(reason)
+                    for reason in exits['trigger_reason'].dropna()
+                    if str(reason)
+                }
+            )
+            entry_pattern = first_fill.get('entry_pattern', 'unknown')
+            pullback_before = first_fill.get('pullback_before_fill')
+            if pullback_before is not None:
+                pullback_before = bool(pullback_before)
+
+            def detail_number(key: str) -> float | None:
+                return self._detail_number(metrics, key)
+
+            def first_number(key: str) -> float | None:
+                return self._detail_number(first_fill, key)
+
+            pullback_time = first_fill.get('pullback_time')
+            if pullback_time is not None:
+                try:
+                    pullback_time = int(pullback_time)
+                except (TypeError, ValueError):
+                    pullback_time = None
+            spike_high_time = metrics.get('spike_high_time')
+            if spike_high_time is not None:
+                try:
+                    spike_high_time = int(spike_high_time)
+                except (TypeError, ValueError):
+                    spike_high_time = None
+
+            rows.append({
+                'trade_id': campaign_id or f'{position.symbol}:{opened_at}',
+                'symbol': position.symbol,
+                'side': position.side,
+                'campaign_id': campaign_id,
+                'signal_time': signal_time,
+                'signal_time_iso': self._timestamp_iso(signal_time),
+                'entry_pattern': entry_pattern,
+                'pullback_before_first_entry': pullback_before,
+                'pullback_time': pullback_time,
+                'pullback_time_iso': self._timestamp_iso(pullback_time),
+                'pullback_low': first_number('pullback_low'),
+                'pullback_threshold': detail_number('pullback_threshold'),
+                'pullback_atr': detail_number('pullback_atr'),
+                'signal_cooldown_seconds': detail_number('signal_cooldown_seconds'),
+                'order_ttl_seconds': detail_number('order_ttl_seconds'),
+                'exit_policy': metrics.get('exit_policy'),
+                'spike_high': detail_number('spike_high'),
+                'spike_high_time': spike_high_time,
+                'spike_high_time_iso': self._timestamp_iso(spike_high_time),
+                'atr': detail_number('atr'),
+                'origin_price': detail_number('origin_price'),
+                'origin_floor': detail_number('origin_floor'),
+                'trigger_price': detail_number('trigger_price'),
+                'rise_5s': detail_number('rise_5s'),
+                'volume_5s': detail_number('volume_5s'),
+                'median_volume_1s': detail_number('median_volume_1s'),
+                'volume_multiple_5s': detail_number('volume_multiple_5s'),
+                'low_12h': detail_number('low_12h'),
+                'rise_from_12h_low': detail_number('rise_from_12h_low'),
+                'tier_prices': json.dumps(
+                    metrics.get('tier_prices', []), ensure_ascii=True
+                ),
+                'tier_weights': json.dumps(
+                    metrics.get('tier_weights', []), ensure_ascii=True
+                ),
+                'invalid_price': detail_number('invalid_price'),
+                'entry_action': 'SELL' if position.side == 'SHORT' else 'BUY',
+                'entry_time': entry_time,
+                'entry_time_iso': self._timestamp_iso(entry_time),
+                'entry_price': float(position.entry_price),
+                'entry_quantity': entry_quantity,
+                'entry_notional': entry_notional,
+                'entry_fill_count': int(len(entries)),
+                'exit_action': 'BUY' if position.side == 'SHORT' else 'SELL',
+                'exit_time': exit_time,
+                'exit_time_iso': self._timestamp_iso(exit_time),
+                'exit_price': exit_price,
+                'exit_quantity': exit_quantity,
+                'exit_fill_count': int(len(exits)),
+                'exit_reason': ';'.join(exit_reasons) if exit_reasons else (
+                    'open' if not is_closed else None
+                ),
+                'status': position.status,
+                'gross_pnl': gross_pnl,
+                'commission': commission,
+                'net_pnl': net_pnl,
+                'net_return': net_pnl / entry_notional if entry_notional else None,
+                'winner': (net_pnl > 0) if is_closed else None,
+            })
+
+        return pd.DataFrame(rows, columns=TRADE_COLUMNS)
+
+    def _analyze_trades(self) -> dict[str, Any]:
+        trades = self.dfs['trades']
+        if trades.empty:
+            return {
+                'total': 0,
+                'open': 0,
+                'closed': 0,
+                'profitable': 0,
+                'loss': 0,
+                'win_rate': 0.0,
+                'short_term_high_pullback_rebreak': {
+                    'total': 0, 'closed': 0, 'profitable': 0,
+                    'loss': 0, 'win_rate': 0.0,
+                },
+            }
+
+        closed = trades[trades['status'] == 'CLOSED']
+
+        def stats(frame: pd.DataFrame) -> dict[str, Any]:
+            net = frame['net_pnl'].astype(float)
+            profitable = int((net > 0).sum())
+            loss = int((net < 0).sum())
+            return {
+                'total': int(len(frame)),
+                'closed': int((frame['status'] == 'CLOSED').sum()),
+                'profitable': profitable,
+                'loss': loss,
+                'win_rate': profitable / len(frame) if len(frame) else 0.0,
+                'net_pnl': float(net.sum()),
+            }
+
+        pattern = closed[
+            closed['entry_pattern'] == 'short_term_high_pullback_rebreak'
+        ]
+        return {
+            **stats(trades),
+            'open': int((trades['status'] != 'CLOSED').sum()),
+            'short_term_high_pullback_rebreak': stats(pattern),
+            'by_pattern': {
+                str(name): stats(group)
+                for name, group in closed.groupby('entry_pattern', dropna=False)
+            },
+        }
 
     def _analyze_orders(self) -> dict[str, Any]:
         """分析订单统计"""
@@ -374,6 +663,8 @@ class ResultAnalyzer:
         dfs['audit_events'].to_parquet(
             output_path / 'audit_events.parquet', index=False
         )
+        dfs['trades'].to_parquet(output_path / 'trades.parquet', index=False)
+        dfs['trades'].to_csv(output_path / 'trades.csv', index=False)
 
         # 保存汇总指标
         summary = self.analyze()

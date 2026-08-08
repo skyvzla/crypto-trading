@@ -95,6 +95,7 @@ class BacktestExecutor:
             reduce_only=order_intent.reduce_only,
             strategy_id=order_intent.strategy_id,
             trigger_reason=order_intent.trigger_reason,
+            campaign_id=order_intent.campaign_id,
             filled_quantity=Decimal('0')
         )
 
