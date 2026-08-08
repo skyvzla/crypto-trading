@@ -135,6 +135,8 @@ class SpikeSignal:
     pullback_threshold: Decimal | None = None
     pullback_time: int | None = None
     pullback_low: Decimal | None = None
+    prior_high_4h: Decimal | None = None
+    prior_high_4h_time: int | None = None
 
 
 class DynamicSpikeShortStrategy:
@@ -160,6 +162,7 @@ class DynamicSpikeShortStrategy:
     LOW_12H_MINUTES = 720  # 12 小时
     ORIGIN_MINUTES = 16 * 60  # 16 小时起涨点窗口
     SPIKE_HIGH_MINUTES = 30  # spike_high 回溯窗口
+    PRIOR_HIGH_LOOKBACK_MINUTES = 4 * 60  # 4 小时前高过滤窗口
     ATR_PERIOD = 14  # 5m ATR 周期
 
     SIGNAL_COOLDOWN = 180  # 信号冷却时间（秒）
@@ -482,6 +485,14 @@ class DynamicSpikeShortStrategy:
                     details={
                         "spike_high": str(signal.spike_high),
                         "spike_high_time": signal.spike_high_time,
+                        "prior_high_4h": (
+                            str(signal.prior_high_4h)
+                            if signal.prior_high_4h is not None
+                            else None
+                        ),
+                        "prior_high_4h_time": signal.prior_high_4h_time,
+                        "prior_high_lookback_minutes": self.PRIOR_HIGH_LOOKBACK_MINUTES,
+                        "prior_high_guard_all_tiers_above": True,
                         "origin_price": str(signal.origin_price),
                         "origin_floor": (
                             str(signal.origin_floor)
@@ -1023,6 +1034,13 @@ class DynamicSpikeShortStrategy:
             return None
         spike_high, spike_high_time = spike_high_point
 
+        # 4 小时前高过滤：三档入场价必须全部高于回调前的前高，
+        # 避免价格在前高附近或下方重新挂出空单。
+        prior_high_point = self._prior_high_point(minute_start)
+        if prior_high_point is None:
+            return None
+        prior_high_4h, prior_high_4h_time = prior_high_point
+
         # 8. ATR（已完成 5m K 线，14 周期）
         atr = self._atr_5m()
         if atr is None or atr <= 0:
@@ -1038,6 +1056,8 @@ class DynamicSpikeShortStrategy:
         origin_floor = origin_price * (Decimal("1") + self.ORIGIN_MIN_RISE)
         lowest_tier = min(tier_prices)
         if lowest_tier < origin_floor or lowest_tier <= current.close:
+            return None
+        if lowest_tier <= prior_high_4h:
             return None
 
         # 11. 失效价
@@ -1067,6 +1087,8 @@ class DynamicSpikeShortStrategy:
             rise_from_12h_low=current.close / low_12h - Decimal("1"),
             origin_floor=origin_floor,
             pullback_threshold=spike_high - atr * self.RETEST_ATR,
+            prior_high_4h=prior_high_4h,
+            prior_high_4h_time=prior_high_4h_time,
         )
 
     # ------------------------------------------------------------------
@@ -1092,6 +1114,19 @@ class DynamicSpikeShortStrategy:
         if any(open_time not in by_open_time for open_time in expected_times):
             return []
         return [by_open_time[open_time] for open_time in expected_times]
+
+    def _prior_high_point(
+        self, minute_start: int
+    ) -> tuple[Decimal, int] | None:
+        completed = self._completed_1m_window(
+            minute_start, self.PRIOR_HIGH_LOOKBACK_MINUTES
+        )
+        if not completed:
+            return None
+        return max(
+            ((k.high, k.open_time) for k in completed),
+            key=lambda point: (point[0], point[1]),
+        )
 
     def _spike_high(self, minute_start: int) -> Optional[Decimal]:
         point = self._spike_high_point(minute_start)

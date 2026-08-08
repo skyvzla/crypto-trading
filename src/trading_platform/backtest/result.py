@@ -25,7 +25,9 @@ TRADE_COLUMNS = [
     'pullback_time', 'pullback_time_iso', 'pullback_low',
     'pullback_threshold', 'pullback_atr', 'signal_cooldown_seconds',
     'order_ttl_seconds', 'exit_policy', 'spike_high', 'spike_high_time',
-    'spike_high_time_iso', 'atr', 'origin_price', 'origin_floor',
+    'spike_high_time_iso', 'prior_high_4h', 'prior_high_4h_time',
+    'prior_high_4h_time_iso', 'prior_high_lookback_minutes',
+    'atr', 'origin_price', 'origin_floor',
     'trigger_price', 'rise_5s', 'volume_5s', 'median_volume_1s',
     'volume_multiple_5s', 'low_12h', 'rise_from_12h_low', 'tier_prices',
     'tier_weights', 'invalid_price', 'entry_action', 'entry_time',
@@ -344,6 +346,13 @@ class ResultAnalyzer:
                 except (TypeError, ValueError):
                     spike_high_time = None
 
+            prior_high_4h_time = metrics.get('prior_high_4h_time')
+            if prior_high_4h_time is not None:
+                try:
+                    prior_high_4h_time = int(prior_high_4h_time)
+                except (TypeError, ValueError):
+                    prior_high_4h_time = None
+
             rows.append({
                 'trade_id': campaign_id or f'{position.symbol}:{opened_at}',
                 'symbol': position.symbol,
@@ -364,6 +373,12 @@ class ResultAnalyzer:
                 'spike_high': detail_number('spike_high'),
                 'spike_high_time': spike_high_time,
                 'spike_high_time_iso': self._timestamp_iso(spike_high_time),
+                'prior_high_4h': detail_number('prior_high_4h'),
+                'prior_high_4h_time': prior_high_4h_time,
+                'prior_high_4h_time_iso': self._timestamp_iso(prior_high_4h_time),
+                'prior_high_lookback_minutes': detail_number(
+                    'prior_high_lookback_minutes'
+                ),
                 'atr': detail_number('atr'),
                 'origin_price': detail_number('origin_price'),
                 'origin_floor': detail_number('origin_floor'),

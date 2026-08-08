@@ -130,6 +130,7 @@ class TestDynamicSpikeShortStrategy:
         assert DynamicSpikeShortStrategy.SPIKE_RISE_5S == Decimal("0.05")
         assert DynamicSpikeShortStrategy.VOLUME_MULTIPLE_5S == Decimal("3.0")
         assert DynamicSpikeShortStrategy.RISE_FROM_12H_LOW == Decimal("0.20")
+        assert DynamicSpikeShortStrategy.PRIOR_HIGH_LOOKBACK_MINUTES == 240
         assert len(DynamicSpikeShortStrategy.TIER_WEIGHTS) == 3
         assert sum(DynamicSpikeShortStrategy.TIER_WEIGHTS) == Decimal("1.0")
 
