@@ -8,7 +8,7 @@ import re
 import time
 import zipfile
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
@@ -20,12 +20,25 @@ from .models import Candle
 VISION_PUBLIC_ROOT = "https://data.binance.vision"
 VISION_S3_ROOT = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 VISION_ROOT = f"{VISION_S3_ROOT}/data/futures/um"
+EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 NATIVE_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 class ArchiveNotFoundError(Exception):
     """Binance does not publish the requested archive partition."""
+
+
+@dataclass(frozen=True)
+class SymbolAvailability:
+    onboard_time: datetime | None
+    delivery_time: datetime | None
+
+    def intersects(self, start: datetime, end: datetime) -> bool:
+        return (
+            (self.onboard_time is None or end > self.onboard_time)
+            and (self.delivery_time is None or start < self.delivery_time)
+        )
 
 
 @dataclass(frozen=True)
@@ -113,6 +126,76 @@ class BinanceVisionHTTPFetcher:
                 time.sleep(self._retry_base_seconds * (2**attempt))
         assert last_error is not None
         raise last_error
+
+
+class BinanceFuturesMetadataFetcher:
+    """Load exact symbol lifecycle bounds from USD-M exchangeInfo."""
+
+    def __init__(
+        self,
+        client: httpx.Client,
+        *,
+        attempts: int = 3,
+        retry_base_seconds: float = 1.0,
+        on_retry: Callable[[str, int, int, Exception], None] | None = None,
+    ) -> None:
+        self._client = client
+        self._attempts = max(1, attempts)
+        self._retry_base_seconds = max(0.0, retry_base_seconds)
+        self._on_retry = on_retry
+
+    def __call__(
+        self, symbols: Sequence[str]
+    ) -> dict[str, SymbolAvailability]:
+        last_error: Exception | None = None
+        for attempt in range(self._attempts):
+            try:
+                response = self._client.get(EXCHANGE_INFO_URL)
+                response.raise_for_status()
+                return parse_symbol_availability(response.json(), symbols)
+            except (httpx.HTTPError, ValueError) as error:
+                last_error = error
+            if attempt + 1 < self._attempts:
+                if self._on_retry is not None:
+                    self._on_retry(
+                        EXCHANGE_INFO_URL,
+                        attempt + 2,
+                        self._attempts,
+                        last_error,
+                    )
+                time.sleep(self._retry_base_seconds * (2**attempt))
+        assert last_error is not None
+        raise last_error
+
+
+def parse_symbol_availability(
+    payload: object,
+    symbols: Sequence[str],
+) -> dict[str, SymbolAvailability]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("symbols"), list):
+        raise ValueError("Binance exchangeInfo has incompatible symbol metadata")
+    requested = {item.strip().upper() for item in symbols if item.strip()}
+    availability: dict[str, SymbolAvailability] = {}
+    for item in payload["symbols"]:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol", "")).strip().upper()
+        if symbol not in requested:
+            continue
+        availability[symbol] = SymbolAvailability(
+            onboard_time=_optional_epoch_datetime(item.get("onboardDate")),
+            delivery_time=_optional_epoch_datetime(item.get("deliveryDate")),
+        )
+    return availability
+
+
+def _optional_epoch_datetime(value: object) -> datetime | None:
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        return _epoch_datetime(int(value))
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"invalid Binance lifecycle timestamp: {value!r}") from error
 
 
 def _download_urls(url: str) -> tuple[str, ...]:
@@ -228,6 +311,7 @@ def download_history(
     on_progress: Callable[[DownloadProgress], None] | None = None,
     max_workers: int = 1,
     overwrite: bool = False,
+    symbol_availability: Mapping[str, SymbolAvailability] | None = None,
 ) -> list[DownloadResult]:
     """Download a bounded UTC range; network reads are separate from one writer."""
 
@@ -257,6 +341,12 @@ def download_history(
             else:
                 periods = _months(start_utc, end_utc)
             for period in periods:
+                bounds = (symbol_availability or {}).get(symbol)
+                period_start, period_end = _period_bounds(period)
+                if bounds is not None and not bounds.intersects(
+                    max(period_start, start_utc), min(period_end, end_utc)
+                ):
+                    continue
                 jobs.append((symbol, timeframe, period))
 
     total = len(jobs)
@@ -420,3 +510,16 @@ def _months(start: datetime, end: datetime) -> tuple[tuple[int, int], ...]:
         else:
             month += 1
     return tuple(values)
+
+
+def _period_bounds(
+    period: date | tuple[int, int],
+) -> tuple[datetime, datetime]:
+    if isinstance(period, date):
+        start = datetime(period.year, period.month, period.day, tzinfo=UTC)
+        return start, start + timedelta(days=1)
+    year, month = period
+    start = datetime(year, month, 1, tzinfo=UTC)
+    if month == 12:
+        return start, datetime(year + 1, 1, 1, tzinfo=UTC)
+    return start, datetime(year, month + 1, 1, tzinfo=UTC)

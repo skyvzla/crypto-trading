@@ -23,6 +23,9 @@ CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行�
 整批任务。SSL、超时、连接错误及其他 HTTP 错误会按 `--attempts` 重试，默认 3 次；
 重试过程会输出当前次数，耗尽后才失败退出。
 如果所选范围全部早于币种上架日期，仍会生成结构完整但没有数据行的 DuckDB catalog。
+任务规划前会从 Binance USD-M `exchangeInfo` 读取 `onboardDate` 和 `deliveryDate`，裁掉
+上架前及下架后的日/月分区。exchangeInfo 请求失败时会按相同策略重试，耗尽后降级为
+不裁剪并继续下载，由 404 规则兜底。
 
 `1s` 使用 Binance Vision daily `aggTrades` 按交易时间聚合；其他周期使用原生 monthly
 Kline。请求范围只决定要下载哪些完整日/月分区，写入时不会把一个完整分区截断成部分数据。

@@ -12,6 +12,7 @@ import httpx
 
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (
+    BinanceFuturesMetadataFetcher,
     BinanceVisionHTTPFetcher,
     DownloadProgress,
     DownloadResult,
@@ -64,6 +65,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
         with httpx.Client(timeout=args.timeout, follow_redirects=True) as client:
+            try:
+                symbol_availability = BinanceFuturesMetadataFetcher(
+                    client,
+                    attempts=args.attempts,
+                    on_retry=reporter.retry,
+                )(args.symbols)
+            except Exception as error:
+                reporter.metadata_fallback(error)
+                symbol_availability = {}
             fetch = BinanceVisionHTTPFetcher(
                 client,
                 attempts=args.attempts,
@@ -80,6 +90,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     on_progress=reporter,
                     max_workers=args.workers,
                     overwrite=args.overwrite,
+                    symbol_availability=symbol_availability,
                 )
         catalog_path = args.catalog or args.archive / "history.duckdb"
         create_duckdb_catalog(args.archive, catalog_path)
@@ -152,6 +163,15 @@ class _ProgressReporter:
             print(
                 f"Retry {attempt}/{attempts} {filename}: "
                 f"{type(error).__name__}: {error}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def metadata_fallback(self, error: Exception) -> None:
+        with self._lock:
+            print(
+                "Warning: exchangeInfo unavailable after retries; "
+                f"continuing with 404 fallback: {type(error).__name__}: {error}",
                 file=sys.stderr,
                 flush=True,
             )

@@ -41,6 +41,228 @@ def test_archive_urls_default_to_binance_s3_origin():
     )
 
 
+def test_exchange_info_parses_onboard_and_delivery_dates_in_utc():
+    payload = {
+        "symbols": [
+            {
+                "symbol": "BTWUSDT",
+                "onboardDate": 1_780_272_000_000,
+                "deliveryDate": 1_784_073_600_000,
+            }
+        ]
+    }
+
+    bounds = archive_vision.parse_symbol_availability(payload, ["BTWUSDT"])
+
+    assert bounds["BTWUSDT"] == archive_vision.SymbolAvailability(
+        onboard_time=datetime(2026, 6, 1, tzinfo=UTC),
+        delivery_time=datetime(2026, 7, 15, tzinfo=UTC),
+    )
+
+
+def test_exchange_info_fetcher_requests_usdm_metadata():
+    requested: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "symbols": [
+                    {
+                        "symbol": "BTWUSDT",
+                        "onboardDate": 1_780_582_500_000,
+                        "deliveryDate": 4_133_404_800_000,
+                    }
+                ]
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        bounds = archive_vision.BinanceFuturesMetadataFetcher(
+            client,
+            attempts=1,
+        )(["btwusdt"])
+
+    assert [str(request.url) for request in requested] == [
+        "https://fapi.binance.com/fapi/v1/exchangeInfo"
+    ]
+    assert bounds["BTWUSDT"] == archive_vision.SymbolAvailability(
+        onboard_time=datetime(2026, 6, 4, 14, 15, tzinfo=UTC),
+        delivery_time=datetime(2100, 12, 25, 8, tzinfo=UTC),
+    )
+
+
+def test_symbol_availability_filters_pre_listing_and_post_delivery_periods():
+    bounds = archive_vision.SymbolAvailability(
+        onboard_time=datetime(2026, 6, 1, tzinfo=UTC),
+        delivery_time=datetime(2026, 7, 15, tzinfo=UTC),
+    )
+
+    assert bounds.intersects(
+        datetime(2026, 5, 1, tzinfo=UTC),
+        datetime(2026, 6, 1, tzinfo=UTC),
+    ) is False
+    assert bounds.intersects(
+        datetime(2026, 6, 1, tzinfo=UTC),
+        datetime(2026, 7, 1, tzinfo=UTC),
+    ) is True
+    assert bounds.intersects(
+        datetime(2026, 7, 1, tzinfo=UTC),
+        datetime(2026, 8, 1, tzinfo=UTC),
+    ) is True
+    assert bounds.intersects(
+        datetime(2026, 7, 15, tzinfo=UTC),
+        datetime(2026, 7, 16, tzinfo=UTC),
+    ) is False
+
+
+def test_download_history_does_not_request_outside_symbol_lifecycle(tmp_path):
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(
+            "BTWUSDT-aggTrades-2026-06-01.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "transact_time,is_buyer_maker\n"
+            "1,1.0,2.0,1,1,1780272000100,false\n",
+        )
+    requested: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        requested.append(url)
+        assert "2026-06-01" in url
+        return payload.getvalue()
+
+    with ParquetCandleArchive(tmp_path / "history") as archive:
+        results = download_history(
+            archive,
+            fetch=fetch,
+            symbols=["BTWUSDT"],
+            timeframes=["1s"],
+            start=datetime(2026, 5, 31, tzinfo=UTC),
+            end=datetime(2026, 6, 3, tzinfo=UTC),
+            symbol_availability={
+                "BTWUSDT": archive_vision.SymbolAvailability(
+                    onboard_time=datetime(2026, 6, 1, tzinfo=UTC),
+                    delivery_time=datetime(2026, 6, 2, tzinfo=UTC),
+                )
+            },
+        )
+
+    assert len(requested) == 1
+    assert [(item.period, item.rows) for item in results] == [
+        ("2026-06-01", 1)
+    ]
+
+
+def test_download_history_keeps_intersecting_listing_and_delivery_months():
+    requested: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        requested.append(url)
+        month = url.removesuffix(".zip").rsplit("-", 2)[-2:]
+        label = "-".join(month)
+        payload = BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr(
+                f"BTWUSDT-1m-{label}.csv",
+                "open_time,open,high,low,close,volume,close_time\n",
+            )
+        return payload.getvalue()
+
+    class Archive:
+        @staticmethod
+        def upsert(candles):
+            return len(candles)
+
+    results = download_history(
+        Archive(),
+        fetch=fetch,
+        symbols=["BTWUSDT"],
+        timeframes=["1m"],
+        start=datetime(2026, 5, 1, tzinfo=UTC),
+        end=datetime(2026, 9, 1, tzinfo=UTC),
+        symbol_availability={
+            "BTWUSDT": archive_vision.SymbolAvailability(
+                onboard_time=datetime(2026, 6, 15, tzinfo=UTC),
+                delivery_time=datetime(2026, 7, 15, tzinfo=UTC),
+            )
+        },
+    )
+
+    assert [item.period for item in results] == ["2026-06", "2026-07"]
+    assert [url.rsplit("/", 1)[-1] for url in requested] == [
+        "BTWUSDT-1m-2026-06.zip",
+        "BTWUSDT-1m-2026-07.zip",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("timeframe", "start", "end", "onboard_time", "delivery_time"),
+    [
+        (
+            "1s",
+            datetime(2026, 6, 4, tzinfo=UTC),
+            datetime(2026, 6, 4, 12, tzinfo=UTC),
+            datetime(2026, 6, 4, 14, 15, tzinfo=UTC),
+            datetime(2100, 12, 25, 8, tzinfo=UTC),
+        ),
+        (
+            "1m",
+            datetime(2026, 6, 1, tzinfo=UTC),
+            datetime(2026, 6, 2, tzinfo=UTC),
+            datetime(2026, 6, 4, 14, 15, tzinfo=UTC),
+            datetime(2100, 12, 25, 8, tzinfo=UTC),
+        ),
+        (
+            "1s",
+            datetime(2026, 7, 15, 16, tzinfo=UTC),
+            datetime(2026, 7, 15, 18, tzinfo=UTC),
+            datetime(2026, 6, 1, tzinfo=UTC),
+            datetime(2026, 7, 15, 14, tzinfo=UTC),
+        ),
+        (
+            "1m",
+            datetime(2026, 7, 20, tzinfo=UTC),
+            datetime(2026, 7, 21, tzinfo=UTC),
+            datetime(2026, 6, 1, tzinfo=UTC),
+            datetime(2026, 7, 15, 14, tzinfo=UTC),
+        ),
+    ],
+)
+def test_download_history_skips_partition_outside_requested_lifecycle_slice(
+    timeframe,
+    start,
+    end,
+    onboard_time,
+    delivery_time,
+):
+    def reject_fetch(url: str) -> bytes:
+        raise AssertionError(f"out-of-lifecycle partition was requested: {url}")
+
+    class Archive:
+        @staticmethod
+        def upsert(candles):
+            return len(candles)
+
+    results = download_history(
+        Archive(),
+        fetch=reject_fetch,
+        symbols=["BTWUSDT"],
+        timeframes=[timeframe],
+        start=start,
+        end=end,
+        symbol_availability={
+            "BTWUSDT": archive_vision.SymbolAvailability(
+                onboard_time=onboard_time,
+                delivery_time=delivery_time,
+            )
+        },
+    )
+
+    assert results == []
+
+
 def test_aggtrade_archive_aggregates_millisecond_and_microsecond_timestamps():
     payload = BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
@@ -313,6 +535,11 @@ def test_cli_handles_keyboard_interrupt_without_traceback(
         raise KeyboardInterrupt
 
     monkeypatch.setattr(archive_cli, "download_history", interrupt)
+    monkeypatch.setattr(
+        archive_cli,
+        "BinanceFuturesMetadataFetcher",
+        lambda *args, **kwargs: lambda symbols: {},
+    )
 
     exit_code = archive_cli.main(
         [

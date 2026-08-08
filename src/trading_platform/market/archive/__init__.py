@@ -2,6 +2,7 @@ from .models import Candle
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (
     ArchiveNotFoundError,
+    BinanceFuturesMetadataFetcher,
     BinanceVisionHTTPFetcher,
     DownloadProgress,
     DownloadResult,
@@ -14,6 +15,7 @@ from .vision import (
 
 __all__ = [
     "ArchiveNotFoundError",
+    "BinanceFuturesMetadataFetcher",
     "Candle",
     "BinanceVisionHTTPFetcher",
     "DownloadResult",
