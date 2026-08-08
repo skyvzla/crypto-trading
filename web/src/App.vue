@@ -1,0 +1,136 @@
+<script setup lang="ts">
+import { computed, h, onMounted } from 'vue'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
+import {
+  NConfigProvider,
+  NLayout,
+  NLayoutContent,
+  NLayoutHeader,
+  NLayoutSider,
+  NMenu,
+  NBadge,
+  NText,
+  zhCN,
+  dateZhCN,
+  type MenuOption
+} from 'naive-ui'
+import { darkTheme, themeOverrides } from '@/theme'
+import { useHealthStore } from '@/stores/health'
+
+const route = useRoute()
+const health = useHealthStore()
+
+const menuOptions: MenuOption[] = [
+  { key: 'overview', label: '运行总览', to: '/overview' },
+  { key: 'calendar', label: '收益日历', to: '/calendar' },
+  { key: 'positions', label: '持仓', to: '/positions' },
+  { key: 'trades', label: '成交与买卖点', to: '/trades' },
+  { key: 'stats', label: '胜率与盈亏比', to: '/stats' },
+  { key: 'symbols', label: '交易对统计', to: '/symbols' },
+  { key: 'universe', label: '可交易池', to: '/universe' },
+  { key: 'admissions', label: 'Subcategory 管理', to: '/admissions' }
+].map((item) => ({
+  key: item.key,
+  label: () => h(RouterLink, { to: item.to }, { default: () => item.label })
+}))
+
+const activeKey = computed(() => String(route.name ?? ''))
+const title = computed(() => String(route.meta.title ?? ''))
+const healthType = computed(() =>
+  health.status === 'healthy'
+    ? 'success'
+    : health.status === 'unhealthy'
+      ? 'error'
+      : 'warning'
+)
+const healthLabel = computed(
+  () =>
+    ({
+      healthy: '账本服务正常',
+      unhealthy: '账本服务异常',
+      unknown: '未探测'
+    })[health.status]
+)
+
+onMounted(health.check)
+</script>
+
+<template>
+  <NConfigProvider
+    :theme="darkTheme"
+    :theme-overrides="themeOverrides"
+    :locale="zhCN"
+    :date-locale="dateZhCN"
+  >
+    <NLayout has-sider position="absolute">
+      <NLayoutSider bordered :width="220" content-style="display:flex;flex-direction:column">
+        <div class="brand">
+          <span class="brand-mark">TL</span>
+          <span class="brand-name">Trade Ledger</span>
+        </div>
+        <NMenu :value="activeKey" :options="menuOptions" />
+        <div class="rail-status">
+          <NBadge dot :type="healthType" />
+          <NText depth="3">{{ healthLabel }}</NText>
+        </div>
+      </NLayoutSider>
+      <NLayout>
+        <NLayoutHeader bordered class="topbar">
+          <h1>{{ title }}</h1>
+        </NLayoutHeader>
+        <NLayoutContent class="workspace">
+          <RouterView />
+        </NLayoutContent>
+      </NLayout>
+    </NLayout>
+  </NConfigProvider>
+</template>
+
+<style scoped>
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 56px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: var(--primary);
+  color: #06101f;
+  font-weight: 700;
+  font-size: 13px;
+}
+.brand-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+.rail-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding: 16px 18px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  height: 56px;
+  padding: 0 24px;
+}
+.topbar h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+}
+.workspace {
+  padding: 20px 24px 32px;
+}
+</style>

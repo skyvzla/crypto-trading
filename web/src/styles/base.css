@@ -1,0 +1,26 @@
+/* 只放 Naive UI 覆盖不到的全局项；组件配色一律走 theme.ts。 */
+:root {
+  color-scheme: dark;
+  --primary: #3b82f6;
+  --line: #22304a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}

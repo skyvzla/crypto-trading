@@ -1,3 +1,18 @@
+# 账本 Web 面板构建阶段。产物只有静态文件，Node 不进运行镜像。
+FROM node:22-alpine AS web
+
+ARG NPM_REGISTRY=https://registry.npmjs.org
+WORKDIR /web
+
+# 先装依赖，锁文件不变时复用该层
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm config set registry "${NPM_REGISTRY}" && npm ci
+
+COPY web/ ./
+RUN npm run build
+
+
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -30,6 +45,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv.lock; \
     fi \
     && uv sync --frozen --extra dev
+
+# Web 面板产物来自 web 阶段，与 Python 依赖层相互独立
+COPY --from=web /web/dist ./web/dist
 
 # 数据和日志由 Compose 挂载，镜像内只提供默认目录
 RUN mkdir -p /app/data /app/logs

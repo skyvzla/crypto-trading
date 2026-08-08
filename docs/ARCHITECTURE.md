@@ -29,7 +29,9 @@
 
 负责 PostgreSQL 中的订单、成交、持仓、控制状态、配置和审计记录；通过 FastAPI 提供查询和控制接口；Web 提供交易池 subcategory 控制、账本查看、盈亏和运行状态。Campaign 的持久生命周期从 `strategy_audit_events` 按 `campaign_id` 查询还原，不建立与 Redis 运行态重复的 Campaign 状态表。订单意图在提交前显式携带 `campaign_id`，该身份经 WAL、User Stream 和启动回补进入订单/成交表，用于按 Campaign 聚合实际卖出、买回、手续费及净 PnL。
 
-Web 首版是否包含暂停、撤单、紧急平仓、权限和配置管理，以 `decisions.md` 的后续确认结果为准。
+Web 不实现身份认证、登录和角色权限（D-029），部署限定内网，访问控制由网络边界承担。
+
+Web 首版是否包含暂停、撤单、紧急平仓和配置管理，以 `decisions.md` 的后续确认结果为准。
 
 ## 边界
 

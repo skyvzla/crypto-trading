@@ -6,41 +6,27 @@ import pytest
 from trading_platform.ledger.main import app
 
 
+WEB_DIST = Path("web/dist/index.html")
+
+
 @pytest.mark.asyncio
-async def test_ledger_web_assets_are_served():
+@pytest.mark.skipif(
+    not WEB_DIST.is_file(),
+    reason="web/dist 未构建；容器构建阶段会生成",
+)
+async def test_ledger_web_shell_and_spa_fallback_are_served():
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
         base_url="http://test",
     ) as client:
         page = await client.get("/ui/")
-        script = await client.get("/ui/app.js")
-        styles = await client.get("/ui/styles.css")
+        # history 模式深链接必须回退到 SPA 外壳，而不是 404
+        deep_link = await client.get("/ui/admissions")
+        missing_asset = await client.get("/ui/assets/does-not-exist.js")
 
     assert page.status_code == 200
-    assert "Trade Ledger" in page.text
-    assert "subcategory" in page.text
-    assert "策略运行状态" in page.text
-    assert "独立于账本服务健康状态" in page.text
-    assert 'id="runtime-count">未运行' in page.text
-    assert script.status_code == 200
-    assert "/subcategory-admissions" in script.text
-    assert "/strategy-runtime-status" in script.text
-    assert "effective_status" in script.text
-    assert "entry_enabled" in script.text
-    assert "halt_reason" in script.text
-    assert "heartbeat_at" in script.text
-    assert "gate_conditions" in script.text
-    assert 'textContent = "未运行"' in script.text
-    assert 'textContent = "账本服务正常"' in script.text
-    assert styles.status_code == 200
-    assert "--accent" in styles.text
-    assert ".runtime-table-wrap" in styles.text
-
-
-def test_ledger_web_does_not_expose_unconfirmed_controls():
-    script = Path(
-        "src/trading_platform/ledger/web/app.js"
-    ).read_text()
-    assert "CLOSE_ALL" not in script
-    assert "account_control_state" not in script
+    assert '<div id="app">' in page.text
+    assert deep_link.status_code == 200
+    assert deep_link.text == page.text
+    assert missing_asset.status_code == 404

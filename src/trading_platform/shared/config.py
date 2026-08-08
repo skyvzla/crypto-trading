@@ -79,6 +79,7 @@ class LedgerConfig(BaseSettings):
 
     host: str = '0.0.0.0'
     port: int = 8001
+    web_dist: str = 'web/dist'
     db: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
 
@@ -113,6 +114,7 @@ def load_config() -> dict:
         "ledger": {
             "host": os.getenv("LEDGER_HOST", "0.0.0.0"),
             "port": int(os.getenv("LEDGER_PORT", "8001")),
+            "web_dist": os.getenv("LEDGER_WEB_DIST", "web/dist"),
         },
         "redis": {
             "host": os.getenv("REDIS_HOST", "localhost"),

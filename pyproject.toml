@@ -40,7 +40,6 @@ where = ["src"]
 include = ["trading_platform*"]
 
 [tool.setuptools.package-data]
-"trading_platform.ledger" = ["web/*.html", "web/*.css", "web/*.js"]
 "trading_platform.ledger.db" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]
