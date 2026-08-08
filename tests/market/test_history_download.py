@@ -21,6 +21,7 @@ from trading_platform.market.archive import (
     parse_aggtrade_archive,
     parse_kline_archive,
 )
+from trading_platform.market.archive import cli as archive_cli
 from trading_platform.market.archive.cli import _ProgressReporter, _print_result
 
 
@@ -267,6 +268,35 @@ def test_cli_result_is_plain_text_by_default(tmp_path, capsys):
     output = capsys.readouterr().out
     assert output.startswith("Complete: 1 downloaded, 0 skipped, 44640 rows.")
     assert not output.lstrip().startswith("{")
+
+
+def test_cli_handles_keyboard_interrupt_without_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(archive_cli, "download_history", interrupt)
+
+    exit_code = archive_cli.main(
+        [
+            str(tmp_path / "parquet"),
+            "--symbols",
+            "AKEUSDT",
+            "--timeframes",
+            "1s",
+            "--start",
+            "2026-07-01T00:00:00Z",
+            "--end",
+            "2026-07-02T00:00:00Z",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 130
+    assert captured.out == ""
+    assert captured.err == "Cancelled.\n"
+    assert "Traceback" not in captured.err
 
 
 def test_http_fetcher_falls_back_to_binance_s3_origin():

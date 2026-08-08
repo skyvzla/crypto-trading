@@ -79,6 +79,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         catalog_path = args.catalog or args.archive / "history.duckdb"
         create_duckdb_catalog(args.archive, catalog_path)
+    except KeyboardInterrupt:
+        print("Cancelled.", file=sys.stderr)
+        return 130
     except Exception as error:
         if args.json:
             print(json.dumps({"status": "failed", "error": str(error)}))
