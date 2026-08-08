@@ -4,7 +4,7 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, AsyncIterator, Optional, Sequence
 
@@ -133,6 +133,18 @@ class StrategyRuntimeStatus:
     started_at: datetime
     heartbeat_at: datetime
     stopped_at: Optional[datetime]
+
+
+@dataclass
+class ExchangeSymbol:
+    symbol: str
+    pair: str
+    contract_type: str
+    status: str
+    onboard_date: Optional[datetime]
+    delivery_date: Optional[datetime]
+    active: bool
+    synced_at: datetime
 
 
 @dataclass
@@ -968,6 +980,63 @@ class LedgerDB:
         assert admission is not None
         return admission
 
+    async def sync_exchange_symbols(self, exchange_info: object) -> int:
+        """Replace the active USD-M exchangeInfo snapshot transactionally."""
+
+        if not isinstance(exchange_info, dict) or not isinstance(
+            exchange_info.get("symbols"), list
+        ):
+            raise ValueError("Binance exchangeInfo has incompatible symbol metadata")
+        rows: list[tuple[object, ...]] = []
+        for item in exchange_info["symbols"]:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol", "")).strip().upper()
+            if not symbol:
+                continue
+            rows.append(
+                (
+                    symbol,
+                    str(item.get("pair", symbol)).strip().upper() or symbol,
+                    str(item.get("contractType", "")).strip().upper(),
+                    str(item.get("status", "")).strip().upper(),
+                    _optional_epoch_ms_datetime(item.get("onboardDate")),
+                    _optional_epoch_ms_datetime(item.get("deliveryDate")),
+                )
+            )
+        if not rows:
+            raise ValueError("Binance exchangeInfo contains no valid symbols")
+        async with self.transaction() as conn:
+            await conn.execute("UPDATE exchange_symbols SET active = FALSE")
+            for row in rows:
+                await conn.execute(
+                    """
+                    INSERT INTO exchange_symbols (
+                        symbol, pair, contract_type, status,
+                        onboard_date, delivery_date, active, synced_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, TRUE, NOW())
+                    ON CONFLICT (symbol) DO UPDATE SET
+                        pair = EXCLUDED.pair,
+                        contract_type = EXCLUDED.contract_type,
+                        status = EXCLUDED.status,
+                        onboard_date = EXCLUDED.onboard_date,
+                        delivery_date = EXCLUDED.delivery_date,
+                        active = TRUE,
+                        synced_at = NOW()
+                    """,
+                    row,
+                )
+        return len(rows)
+
+    async def get_exchange_symbol(self, symbol: str) -> Optional[ExchangeSymbol]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeSymbol))
+            await cursor.execute(
+                "SELECT * FROM exchange_symbols WHERE symbol = %s",
+                (symbol.strip().upper(),),
+            )
+            return await cursor.fetchone()
+
     async def list_subcategory_audit(
         self,
         subcategory: Optional[str] = None,
@@ -1008,3 +1077,12 @@ async def create_connection_pool(
     )
     await pool.open()
     return pool
+
+
+def _optional_epoch_ms_datetime(value: object) -> datetime | None:
+    if value in (None, "", 0, "0"):
+        return None
+    try:
+        return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
+    except (TypeError, ValueError, OverflowError):
+        return None

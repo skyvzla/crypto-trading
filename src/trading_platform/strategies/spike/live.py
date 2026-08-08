@@ -27,6 +27,7 @@ from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     parse_entry_client_order_id,
 )
+from trading_platform.strategies.universe import DEFAULT_DELISTING_FREEZE_DAYS
 
 
 STRATEGY_ID = "spike_short"
@@ -58,6 +59,7 @@ class SpikeLiveSettings(BaseSettings):
     subcategory: str = "spike"
     poll_interval_seconds: float = 5.0
     max_poll_attempts: int = 12
+    delisting_freeze_days: int = DEFAULT_DELISTING_FREEZE_DAYS
 
     @field_validator("symbols", mode="before")
     @classmethod
@@ -78,6 +80,8 @@ class SpikeLiveSettings(BaseSettings):
             raise ValueError("total_notional must be positive")
         if self.poll_interval_seconds != 5 or self.max_poll_attempts != 12:
             raise ValueError("SUBMIT_UNKNOWN recovery is frozen at 5s x 12")
+        if self.delisting_freeze_days < 0:
+            raise ValueError("delisting_freeze_days must be non-negative")
         if self.mode == "live":
             if self.live_confirmation != LIVE_CONFIRMATION:
                 raise ValueError("live mode requires the exact live confirmation phrase")
@@ -435,8 +439,61 @@ class SpikeExecutionCoordinator:
         if cancel_due:
             await self._flush_cancellations()
 
+    async def update_exchange_symbol_admission(
+        self,
+        allowed_symbols: set[str] | frozenset[str],
+        *,
+        symbol_rules: object | None = None,
+    ) -> frozenset[str]:
+        """Atomically block entries and cancel open entry orders by symbol."""
+
+        async with self._lock:
+            if symbol_rules is not None:
+                self.executor.symbol_rules = symbol_rules
+            managed = frozenset(self.strategy.strategies)
+            allowed = frozenset(
+                symbol.strip().upper()
+                for symbol in allowed_symbols
+                if symbol.strip().upper() in managed
+            )
+            blocked = managed - allowed
+            self.strategy.set_blocked_entry_symbols(blocked)
+            await self._cancel_blocked_entry_orders(blocked)
+            return blocked
+
+    async def reconcile_exchange_symbol_admission(self) -> None:
+        """Recheck orders that just changed from unknown to a cancellable state."""
+
+        async with self._lock:
+            await self._cancel_blocked_entry_orders(
+                self.strategy.blocked_entry_symbols
+            )
+
+    async def _cancel_blocked_entry_orders(
+        self, blocked: frozenset[str]
+    ) -> None:
+        cancellation_requested = False
+        for order in self.account.iter_orders():
+            if (
+                order.symbol in blocked
+                and not order.reduce_only
+                and order.status in {"NEW", "PARTIALLY_FILLED"}
+            ):
+                cancellation_requested = (
+                    self.account.cancel_order(order.order_id)
+                    or cancellation_requested
+                )
+        if cancellation_requested:
+            await self._flush_cancellations()
+
     async def _execute(self, intents: list[OrderIntent], *, event_time: int) -> bool:
-        entries = [intent for intent in intents if not intent.reduce_only]
+        symbol_allowed = getattr(self.strategy, "is_symbol_entry_enabled", None)
+        entries = [
+            intent
+            for intent in intents
+            if not intent.reduce_only
+            and (not callable(symbol_allowed) or symbol_allowed(intent.symbol))
+        ]
         exits = [intent for intent in intents if intent.reduce_only]
         if entries and self.gate.enabled:
             campaign_id = self._campaign_id(entries[0])
@@ -759,6 +816,7 @@ class SpikeRuntimeCallbacks:
             if fill is not None:
                 await self.coordinator.on_fill(fill)
             await self.coordinator.reconcile_entry_expirations()
+            await self.coordinator.reconcile_exchange_symbol_admission()
             symbol = str(order_data.get("s") or "")
             if symbol:
                 await self.coordinator.maybe_release_campaign(symbol)

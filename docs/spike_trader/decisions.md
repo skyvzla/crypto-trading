@@ -35,6 +35,7 @@
 | D-027 | 退出指标窗口和阈值不要求用户凭经验直接确认；先作为带版本的候选参数用于 replay/testnet，依据历史回测、walk-forward、真实成交偏差和运行样本迭代，证据达标后再冻结生产版本；候选参数不得自动进入 live |
 | D-028 | 当前策略冻结为 `candidate-v1` 观察基线；暂停参数搜索、收益寻优和新规则猜测。必须先向用户展示逐轮买卖点、成交、费用、PnL、价格路径和指标快照，共同确认具体问题后才可进行单变量实验；执行安全、恢复和账本一致性测试不受此限制 |
 | D-029 | Web 面板不实现身份认证、登录和角色权限；部署限定在内网访问，由网络边界承担访问控制。审计字段（`updated_by`、`reason`）保留但由调用方自行填写，不作为身份凭证 |
+| D-030 | Binance USD-M 交易对元数据每日同步到 PostgreSQL；退市冻结窗口默认 15 天并可由 `SPIKE_DELISTING_FREEZE_DAYS` 配置。非 `PERPETUAL`、非 `TRADING`、字段异常或 `deliveryDate` 距当前不超过窗口的交易对禁止新开仓并撤销未成交入场单；已有仓位仍允许保护性退出 |
 
 ## 数据事实与执行安全约束
 
@@ -61,7 +62,9 @@
   快照不能证明 Binance 会在下架前多久更新此字段，因此不能把它当成唯一的预告来源。
 
 后续 live/testnet 准入必须同时校验 `contractType=PERPETUAL`、`status=TRADING` 和
-`deliveryDate` 距当前时间超过冻结窗口；发现近期 `deliveryDate` 时立即停止新开仓并撤销
+`deliveryDate` 距当前时间超过退市冻结窗口。窗口默认 15 天，可通过
+`SPIKE_DELISTING_FREEZE_DAYS` 配置；交易所元数据每日同步到 PostgreSQL，并在每次
+5 分钟安全扫描时按当前 UTC 时间重算。发现近期 `deliveryDate` 时立即停止新开仓并撤销
 未成交入场单，已有仓位只允许保护性退出。公告采集用于更早冻结，`exchangeInfo` 的
 `status` 与 `deliveryDate` 用作不可绕过的硬校验。
 

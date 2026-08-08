@@ -153,6 +153,7 @@ class BinanceSymbolRuleBook:
         exchange_info: dict[str, Any],
         *,
         symbols: Iterable[str] | None = None,
+        require_trading: bool = True,
     ) -> "BinanceSymbolRuleBook":
         response_symbols = exchange_info.get("symbols")
         if not isinstance(response_symbols, list):
@@ -169,7 +170,7 @@ class BinanceSymbolRuleBook:
                 continue
             if value.get("contractType") != "PERPETUAL":
                 continue
-            if value.get("status") != "TRADING":
+            if require_trading and value.get("status") != "TRADING":
                 continue
             rule = BinanceSymbolRules.from_exchange_info(value)
             if rule.symbol in rules:

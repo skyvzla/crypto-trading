@@ -901,3 +901,43 @@ async def test_subcategory_admission_service_reads_db_and_cancels_on_close(ledge
     assert closed.enabled is False
     assert gate.set_entry_enabled.call_args_list[-2:] == [((True,),), ((False,),)]
     account.cancel_order.assert_called_once_with("entry-1")
+
+
+@pytest.mark.asyncio
+async def test_exchange_symbol_sync_updates_lifecycle_and_marks_missing_inactive(ledger):
+    first = {
+        "symbols": [
+            {
+                "symbol": "BTCUSDT",
+                "pair": "BTCUSDT",
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "onboardDate": 1_564_611_200_000,
+                "deliveryDate": 4_133_404_800_000,
+            },
+            {
+                "symbol": "HFTUSDT",
+                "pair": "HFTUSDT",
+                "contractType": "PERPETUAL",
+                "status": "SETTLING",
+                "onboardDate": 1_680_000_000_000,
+                "deliveryDate": 1_786_093_200_000,
+            },
+        ]
+    }
+
+    assert await ledger.sync_exchange_symbols(first) == 2
+    hft = await ledger.get_exchange_symbol("hftusdt")
+    assert hft is not None
+    assert hft.status == "SETTLING"
+    assert hft.delivery_date.isoformat() == "2026-08-07T09:00:00+00:00"
+    assert hft.active is True
+
+    with pytest.raises(ValueError, match="no valid symbols"):
+        await ledger.sync_exchange_symbols({"symbols": []})
+    assert (await ledger.get_exchange_symbol("HFTUSDT")).active is True
+
+    assert await ledger.sync_exchange_symbols({"symbols": [first["symbols"][0]]}) == 1
+    hft = await ledger.get_exchange_symbol("HFTUSDT")
+    assert hft is not None
+    assert hft.active is False

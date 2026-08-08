@@ -55,7 +55,13 @@ from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
 )
-from trading_platform.strategies.universe import UNIVERSE_SCAN_INTERVAL_SECONDS
+from trading_platform.strategies.universe import (
+    EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS,
+    UNIVERSE_SCAN_INTERVAL_SECONDS,
+    ExchangeSymbolSnapshot,
+    classify_exchange_symbols,
+    fetch_exchange_symbol_snapshot,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -109,6 +115,10 @@ class SpikeLiveProcess:
         self.runtime_callbacks: SpikeRuntimeCallbacks | None = None
         self.execution_lease: PostgresExecutionLease | None = None
         self.db: LedgerDB | None = None
+        self.exchange_rest: BinanceRestClient | None = None
+        self.exchange_symbol_snapshot: ExchangeSymbolSnapshot | None = None
+        self._exchange_info: dict[str, Any] | None = None
+        self._exchange_info_synced_monotonic: float | None = None
         self.instance_id = uuid4().hex
         self.started_at = datetime.now(timezone.utc)
         self._runtime_fatal_reason: str | None = None
@@ -134,6 +144,7 @@ class SpikeLiveProcess:
             await self.coordinator.restore_campaign_gate()
             await self.runtime.start()
             await self.coordinator.account.refresh_positions()
+            await self._refresh_exchange_symbol_admission()
             await self.coordinator.reconcile_entry_expirations()
             self.coordinator.validate_recovered_campaign()
             await self.coordinator.restore_campaign_timing()
@@ -284,6 +295,7 @@ class SpikeLiveProcess:
             self.binance.api_secret,
             base_url=self.binance.base_url,
         )
+        self.exchange_rest = rest
         self._stack.push_async_callback(rest.close)
         require_one_way_position_mode(await rest.get_position_mode())
         risk = RiskGuard(
@@ -298,21 +310,34 @@ class SpikeLiveProcess:
         if self.settings.total_notional > risk.config.max_position_value_usdt:
             raise ValueError("total_notional exceeds process risk limit")
         wal = OrderWAL(self.settings.wal_path)
-        symbol_rules = BinanceSymbolRuleBook.from_exchange_info(
-            await rest.get_exchange_info(), symbols=self.settings.symbols
+        fetched_exchange_info: dict[str, Any] | None = None
+
+        async def fetch_initial_exchange_info() -> dict[str, Any]:
+            nonlocal fetched_exchange_info
+            fetched_exchange_info = await rest.get_exchange_info()
+            return fetched_exchange_info
+
+        initial_symbol_snapshot = await fetch_exchange_symbol_snapshot(
+            fetch_initial_exchange_info,
+            self.settings.symbols,
+            freeze_days=self.settings.delisting_freeze_days,
+            on_retry=lambda attempt, total, error: logger.warning(
+                "initial exchangeInfo retry %s/%s: %s: %s",
+                attempt,
+                total,
+                type(error).__name__,
+                error,
+            ),
         )
-        for symbol in self.settings.symbols:
+        assert fetched_exchange_info is not None
+        exchange_info = fetched_exchange_info
+        self._exchange_info = exchange_info
+        symbol_rules = self._build_symbol_rule_book(exchange_info)
+        for symbol in initial_symbol_snapshot.allowed_symbols:
             require_viable_entry_notional(
                 self.settings.total_notional,
                 symbol_rules.get(symbol),
             )
-        executor = BinanceOrderExecutor(
-            rest,
-            wal,
-            account_id=self.settings.account_id,
-            risk_guard=risk,
-            symbol_rules=symbol_rules,
-        )
         account = BinanceStrategyAccount(
             rest,
             wal,
@@ -326,6 +351,14 @@ class SpikeLiveProcess:
             account=account,
             exit_policy=self.settings.exit_policy,
         )
+        executor = BinanceOrderExecutor(
+            rest,
+            wal,
+            account_id=self.settings.account_id,
+            risk_guard=risk,
+            symbol_rules=symbol_rules,
+            can_open_symbol=strategy.is_symbol_entry_enabled,
+        )
         strategy.set_trading_enabled(False)
         self.gate = CompositeEntryGate(strategy)
         for condition in (
@@ -334,6 +367,7 @@ class SpikeLiveProcess:
             "bar_stream",
             "subcategory",
             "campaign",
+            "exchange_symbols",
         ):
             self.gate.set_condition(condition, False)
         self.coordinator = SpikeExecutionCoordinator(
@@ -514,7 +548,7 @@ class SpikeLiveProcess:
         response = await self.http.put(
             f"/subscriptions/{self._consumer_id}",
             json={
-                "symbols": self.settings.symbols,
+                "symbols": list(self._market_symbols()),
                 "types": ["bar1s", "kline:1m", "kline:5m", "kline:15m"],
             },
         )
@@ -534,7 +568,7 @@ class SpikeLiveProcess:
         now_ms = int(time.time() * 1000)
         strategy = self.coordinator.strategy
         strategy.set_trading_enabled(False)
-        for symbol in self.settings.symbols:
+        for symbol in self._market_symbols():
             for interval, limit, minimum in (
                 ("1m", 1000, 960),
                 ("5m", 100, 15),
@@ -643,7 +677,7 @@ class SpikeLiveProcess:
         assert self.redis is not None
         assert self.coordinator is not None
         while True:
-            for symbol in self.settings.symbols:
+            for symbol in self._market_symbols():
                 for interval in ("1m", "5m", "15m"):
                     raw = await self.redis.hget(f"kline:{symbol}:{interval}", "latest")
                     if not raw:
@@ -662,6 +696,7 @@ class SpikeLiveProcess:
         assert self.gate is not None
         while True:
             await asyncio.sleep(UNIVERSE_SCAN_INTERVAL_SECONDS)
+            await self._refresh_exchange_symbol_admission()
             await self._register_market_subscriptions()
             await self._refresh_market_gate()
             await self.admission.on_universe_scan()
@@ -682,6 +717,83 @@ class SpikeLiveProcess:
                     else:
                         self._restore_execution_gate()
 
+    async def _refresh_exchange_symbol_admission(self) -> bool:
+        assert self.coordinator is not None
+        assert self.gate is not None
+        assert self.exchange_rest is not None
+        assert self.db is not None
+        now_monotonic = asyncio.get_running_loop().time()
+        refresh_due = self._exchange_info is None or (
+            self._exchange_info_synced_monotonic is not None
+            and now_monotonic - self._exchange_info_synced_monotonic
+            >= EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS
+        )
+        try:
+            updated_symbol_rules: BinanceSymbolRuleBook | None = None
+            if refresh_due:
+                fetched: dict[str, Any] | None = None
+
+                async def fetch_exchange_info() -> dict[str, Any]:
+                    nonlocal fetched
+                    fetched = await self.exchange_rest.get_exchange_info()
+                    return fetched
+
+                snapshot = await fetch_exchange_symbol_snapshot(
+                    fetch_exchange_info,
+                    self.settings.symbols,
+                    freeze_days=self.settings.delisting_freeze_days,
+                    on_retry=lambda attempt, total, error: logger.warning(
+                        "exchangeInfo retry %s/%s: %s: %s",
+                        attempt,
+                        total,
+                        type(error).__name__,
+                        error,
+                    ),
+                )
+                assert fetched is not None
+                exchange_info = fetched
+                await self.db.sync_exchange_symbols(exchange_info)
+                updated_symbol_rules = self._build_symbol_rule_book(exchange_info)
+                self._exchange_info = exchange_info
+                self._exchange_info_synced_monotonic = now_monotonic
+            else:
+                assert self._exchange_info is not None
+                snapshot = classify_exchange_symbols(
+                    self._exchange_info,
+                    self.settings.symbols,
+                    freeze_days=self.settings.delisting_freeze_days,
+                )
+                if self._exchange_info_synced_monotonic is None:
+                    await self.db.sync_exchange_symbols(self._exchange_info)
+                    self._exchange_info_synced_monotonic = now_monotonic
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await self.coordinator.update_exchange_symbol_admission(frozenset())
+            self.gate.set_condition("exchange_symbols", False)
+            logger.error(
+                "exchangeInfo sync failed closed: %s: %s",
+                type(error).__name__,
+                error,
+            )
+            return False
+
+        blocked = await self.coordinator.update_exchange_symbol_admission(
+            snapshot.allowed_symbols,
+            symbol_rules=updated_symbol_rules,
+        )
+        self.exchange_symbol_snapshot = snapshot
+        self.gate.set_condition("exchange_symbols", True)
+        if blocked:
+            logger.warning(
+                "exchange symbol entry blocked: %s",
+                ", ".join(
+                    f"{symbol}={snapshot.blocked_reasons[symbol]}"
+                    for symbol in sorted(blocked)
+                ),
+            )
+        return True
+
     async def _market_watchdog_loop(self) -> None:
         """缩短市场质量失效到关闭准入之间的时间。"""
         while True:
@@ -696,10 +808,48 @@ class SpikeLiveProcess:
         ready = all(
             current - self._last_bar_received_monotonic.get(symbol, float("-inf"))
             <= BAR_STREAM_STALE_SECONDS
-            for symbol in self.settings.symbols
+            for symbol in self._market_symbols()
         )
         self.gate.set_condition("bar_stream", ready)
         return ready
+
+    def _market_symbols(self) -> tuple[str, ...]:
+        allowed = (
+            frozenset()
+            if self.exchange_symbol_snapshot is None
+            else self.exchange_symbol_snapshot.allowed_symbols
+        )
+        try:
+            live_risk = (
+                frozenset()
+                if self.coordinator is None
+                else frozenset(
+                    self.coordinator.account.symbols_with_live_risk()
+                )
+            )
+        except Exception:
+            live_risk = frozenset(self.settings.symbols)
+        managed = frozenset(self.settings.symbols)
+        return tuple(sorted((allowed | live_risk) & managed))
+
+    def _build_symbol_rule_book(
+        self, exchange_info: dict[str, Any]
+    ) -> BinanceSymbolRuleBook:
+        managed = frozenset(self.settings.symbols)
+        rule_symbols = [
+            str(item.get("symbol"))
+            for item in exchange_info.get("symbols", [])
+            if isinstance(item, dict)
+            and item.get("contractType") == "PERPETUAL"
+            and item.get("symbol") in managed
+        ]
+        if not rule_symbols:
+            return BinanceSymbolRuleBook({})
+        return BinanceSymbolRuleBook.from_exchange_info(
+            exchange_info,
+            symbols=rule_symbols,
+            require_trading=False,
+        )
 
     @property
     def _consumer_id(self) -> str:

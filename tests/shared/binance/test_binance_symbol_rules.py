@@ -103,6 +103,18 @@ def test_rule_book_keeps_only_trading_perpetual_contracts():
         rules.get("DELIVERY")
 
 
+def test_rule_book_can_keep_settling_perpetual_rules_for_protective_exits():
+    settling = symbol_info(symbol="HFTUSDT", status="SETTLING")
+
+    rules = BinanceSymbolRuleBook.from_exchange_info(
+        {"symbols": [settling]},
+        symbols=["HFTUSDT"],
+        require_trading=False,
+    )
+
+    assert rules.get("HFTUSDT").symbol == "HFTUSDT"
+
+
 def test_malformed_or_incomplete_rules_fail_closed():
     incomplete = symbol_info()
     incomplete["filters"] = incomplete["filters"][:-1]

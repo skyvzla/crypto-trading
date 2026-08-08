@@ -8,6 +8,7 @@ from trading_platform.strategies.spike.exit_features import CandidateFeatureSnap
 from trading_platform.strategies.spike.live import SpikeLiveSettings
 from trading_platform.strategies.spike.main import SpikeLiveProcess
 from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
+from trading_platform.strategies.universe import ExchangeSymbolSnapshot
 
 
 FIRST_FILL_MS = 1_000
@@ -337,6 +338,11 @@ async def test_live_market_subscription_requests_15m_klines():
     )
     response = Mock()
     process.http = Mock(put=AsyncMock(return_value=response))
+    process.exchange_symbol_snapshot = ExchangeSymbolSnapshot(
+        allowed_symbols=frozenset({"AKEUSDT"}),
+        blocked_symbols=frozenset(),
+        blocked_reasons={},
+    )
 
     await process._register_market_subscriptions()
 

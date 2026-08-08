@@ -19,7 +19,7 @@ from trading_platform.shared.execution_recovery import (
 from trading_platform.shared.risk import RiskGuard
 
 from .rest_client import BinanceAPIException, BinanceRestClient
-from .symbol_rules import BinanceSymbolRuleBook
+from .symbol_rules import BinanceSymbolRuleBook, SymbolRuleViolation
 
 
 # Binance returned a structured business rejection, so these codes prove the
@@ -54,6 +54,7 @@ class BinanceOrderExecutor:
         now_ms: Callable[[], int] | None = None,
         risk_guard: RiskGuard | None = None,
         symbol_rules: BinanceSymbolRuleBook | None = None,
+        can_open_symbol: Callable[[str], bool] | None = None,
     ):
         self.rest_client = rest_client
         self.wal = wal
@@ -62,6 +63,7 @@ class BinanceOrderExecutor:
         self._resolver = SubmitUnknownResolver(wal, rest_client)
         self.risk_guard = risk_guard
         self.symbol_rules = symbol_rules
+        self.can_open_symbol = can_open_symbol
 
     async def submit(
         self,
@@ -73,6 +75,14 @@ class BinanceOrderExecutor:
         """提交一次订单；相同 ``client_order_id`` 永不自动重复提交。"""
         if not intent.campaign_id:
             raise ValueError("campaign_id is required before order submission")
+        if (
+            not intent.reduce_only
+            and self.can_open_symbol is not None
+            and not self.can_open_symbol(intent.symbol)
+        ):
+            raise SymbolRuleViolation(
+                f"new entries are blocked for {intent.symbol} by exchange metadata"
+            )
         if self.symbol_rules is not None:
             intent = self.symbol_rules.get(intent.symbol).normalize_intent(
                 intent,

@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(
 async def ledger():
     pool = await create_connection_pool(os.environ["LEDGER_TEST_DSN"], 1, 4)
     await apply_migrations(pool)
-    assert await verify_current(pool) == 3
+    assert await verify_current(pool) == 4
     yield LedgerDB(pool)
     await pool.close()
 

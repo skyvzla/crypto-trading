@@ -17,7 +17,7 @@ Dynamic Spike Short Strategy - 冻结基线实现
 当前已实现全局轮次互斥和第一笔成交计时；完整 Campaign 恢复及持仓退出仍待后续阶段。
 """
 from decimal import Decimal
-from typing import List, Literal, Optional
+from typing import Iterable, List, Literal, Optional
 from dataclasses import dataclass, field, replace
 
 from trading_platform.shared.events import (
@@ -1278,6 +1278,7 @@ class DynamicSpikeBacktestStrategy:
         }
         self._account: Optional[StrategyAccount] = account
         self._entry_enabled = True
+        self._blocked_entry_symbols: frozenset[str] = frozenset()
         self.active_symbol: Optional[str] = None
 
     def bind_account(self, account: StrategyAccount) -> None:
@@ -1295,6 +1296,18 @@ class DynamicSpikeBacktestStrategy:
         for strategy in self.strategies.values():
             strategy.set_entry_enabled(enabled)
 
+    def set_blocked_entry_symbols(self, symbols: Iterable[str]) -> None:
+        self._blocked_entry_symbols = frozenset(
+            symbol.strip().upper() for symbol in symbols if symbol.strip()
+        )
+
+    def is_symbol_entry_enabled(self, symbol: str) -> bool:
+        return symbol.strip().upper() not in self._blocked_entry_symbols
+
+    @property
+    def blocked_entry_symbols(self) -> frozenset[str]:
+        return self._blocked_entry_symbols
+
     def set_execution_enabled(self, enabled: bool) -> None:
         for strategy in self.strategies.values():
             strategy.set_execution_enabled(enabled)
@@ -1310,6 +1323,7 @@ class DynamicSpikeBacktestStrategy:
 
         strategy.set_entry_enabled(
             self._entry_enabled
+            and self.is_symbol_entry_enabled(bar.symbol)
             and (self.active_symbol is None or self.active_symbol == bar.symbol)
         )
         intents = strategy.on_bar1s(bar)

@@ -27,15 +27,26 @@ from trading_platform.strategies.spike.main import (
     SpikeLiveProcess,
     require_viable_entry_notional,
 )
+from trading_platform.strategies.universe import (
+    EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS,
+    ExchangeSymbolSnapshot,
+)
 
 
 class StrategyStub:
     def __init__(self):
         self.enabled = None
         self.strategies = {"BTCUSDT": object()}
+        self.blocked_entry_symbols = frozenset()
 
     def set_entry_enabled(self, enabled):
         self.enabled = enabled
+
+    def set_blocked_entry_symbols(self, symbols):
+        self.blocked_entry_symbols = frozenset(symbols)
+
+    def is_symbol_entry_enabled(self, symbol):
+        return symbol not in self.blocked_entry_symbols
 
     def drain_audit_events(self):
         return []
@@ -64,6 +75,76 @@ def _entry(tier=1):
         strategy_id="spike_short",
         trigger_reason=f"spike_tier{tier}",
     )
+
+
+@pytest.mark.asyncio
+async def test_exchange_symbol_admission_cancels_only_blocked_entry_orders():
+    strategy = StrategyStub()
+    strategy.strategies["HFTUSDT"] = object()
+    blocked_entry = Mock(
+        order_id="blocked-entry",
+        symbol="HFTUSDT",
+        reduce_only=False,
+        status="NEW",
+    )
+    blocked_exit = Mock(
+        order_id="blocked-exit",
+        symbol="HFTUSDT",
+        reduce_only=True,
+        status="NEW",
+    )
+    allowed_entry = Mock(
+        order_id="allowed-entry",
+        symbol="BTCUSDT",
+        reduce_only=False,
+        status="NEW",
+    )
+    account = Mock(
+        iter_orders=Mock(return_value=(blocked_entry, blocked_exit, allowed_entry)),
+        cancel_order=Mock(return_value=True),
+        flush_cancellations=AsyncMock(return_value=("blocked-entry",)),
+        has_pending_cancellations=False,
+        refresh_positions=AsyncMock(),
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+    )
+
+    blocked = await coordinator.update_exchange_symbol_admission({"BTCUSDT"})
+
+    assert blocked == frozenset({"HFTUSDT"})
+    assert strategy.blocked_entry_symbols == frozenset({"HFTUSDT"})
+    account.cancel_order.assert_called_once_with("blocked-entry")
+    account.flush_cancellations.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_blocked_exchange_symbol_cannot_reach_entry_submission():
+    strategy = StrategyStub()
+    strategy.set_blocked_entry_symbols({"BTCUSDT"})
+    gate = CompositeEntryGate(strategy)
+    for name in ("execution", "market", "subcategory", "campaign", "exchange_symbols"):
+        gate.set_condition(name, True)
+    executor = Mock(submit=AsyncMock())
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=executor,
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+    )
+
+    await coordinator._execute([_entry()], event_time=1_001)
+
+    executor.submit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -404,6 +485,7 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
     process._warm_strategy_history = AsyncMock(
         side_effect=lambda: events.append("warmup")
     )
+    process._refresh_exchange_symbol_admission = AsyncMock(return_value=True)
 
     async def market_gate(*, require_ready=False):
         events.append("market_gate")
@@ -434,6 +516,159 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
 
 
 @pytest.mark.asyncio
+async def test_exchange_symbol_refresh_persists_once_then_uses_daily_cache():
+    now_ms = 1_780_000_000_000
+    exchange_info = {
+        "symbols": [
+            {
+                "symbol": "AKEUSDT",
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "onboardDate": now_ms - 24 * 60 * 60 * 1000,
+                "deliveryDate": now_ms + 30 * 24 * 60 * 60 * 1000,
+            }
+        ]
+    }
+    settings = SpikeLiveSettings(
+        account_id="spike-test",
+        symbols=["AKEUSDT"],
+        total_notional="10",
+        delisting_freeze_days=15,
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process._exchange_info = exchange_info
+    process.exchange_rest = Mock(get_exchange_info=AsyncMock())
+    process.db = Mock(sync_exchange_symbols=AsyncMock(return_value=1))
+    process.coordinator = Mock(
+        update_exchange_symbol_admission=AsyncMock(return_value=frozenset())
+    )
+    process.gate = Mock(set_condition=Mock())
+
+    assert await process._refresh_exchange_symbol_admission() is True
+    assert await process._refresh_exchange_symbol_admission() is True
+
+    process.exchange_rest.get_exchange_info.assert_not_awaited()
+    process.db.sync_exchange_symbols.assert_awaited_once_with(exchange_info)
+    assert process.coordinator.update_exchange_symbol_admission.await_count == 2
+    process.gate.set_condition.assert_called_with("exchange_symbols", True)
+
+
+@pytest.mark.asyncio
+async def test_exchange_symbol_refresh_failure_closes_entries_without_raising():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="10"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process._exchange_info = {"invalid": []}
+    process._exchange_info_synced_monotonic = asyncio.get_running_loop().time()
+    process.exchange_rest = Mock(get_exchange_info=AsyncMock())
+    process.db = Mock(sync_exchange_symbols=AsyncMock())
+    process.coordinator = Mock(
+        update_exchange_symbol_admission=AsyncMock(
+            return_value=frozenset({"AKEUSDT"})
+        )
+    )
+    process.gate = Mock(set_condition=Mock())
+
+    assert await process._refresh_exchange_symbol_admission() is False
+
+    process.coordinator.update_exchange_symbol_admission.assert_awaited_once_with(
+        frozenset()
+    )
+    process.gate.set_condition.assert_called_once_with("exchange_symbols", False)
+
+
+@pytest.mark.asyncio
+async def test_daily_exchange_symbol_refresh_fetches_persists_and_replaces_rules():
+    exchange_info = {
+        "symbols": [
+            {
+                "symbol": "AKEUSDT",
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "onboardDate": 1_700_000_000_000,
+                "deliveryDate": 4_133_404_800_000,
+                "filters": [],
+            }
+        ]
+    }
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="10"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process._exchange_info = {"symbols": []}
+    process._exchange_info_synced_monotonic = (
+        asyncio.get_running_loop().time() - EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS - 1
+    )
+    process.exchange_rest = Mock(
+        get_exchange_info=AsyncMock(return_value=exchange_info)
+    )
+    process.db = Mock(sync_exchange_symbols=AsyncMock(return_value=1))
+    process.coordinator = Mock(
+        update_exchange_symbol_admission=AsyncMock(return_value=frozenset())
+    )
+    process.gate = Mock(set_condition=Mock())
+    replacement_rules = Mock()
+    process._build_symbol_rule_book = Mock(return_value=replacement_rules)
+
+    assert await process._refresh_exchange_symbol_admission() is True
+
+    process.exchange_rest.get_exchange_info.assert_awaited_once()
+    process.db.sync_exchange_symbols.assert_awaited_once_with(exchange_info)
+    process.coordinator.update_exchange_symbol_admission.assert_awaited_once_with(
+        frozenset({"AKEUSDT"}),
+        symbol_rules=replacement_rules,
+    )
+
+
+def test_blocked_symbol_without_live_risk_does_not_close_bar_stream_gate():
+    settings = SpikeLiveSettings(
+        account_id="spike-test",
+        symbols=["AKEUSDT", "BTCUSDT"],
+        total_notional="10",
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process.exchange_symbol_snapshot = ExchangeSymbolSnapshot(
+        allowed_symbols=frozenset({"BTCUSDT"}),
+        blocked_symbols=frozenset({"AKEUSDT"}),
+        blocked_reasons={"AKEUSDT": "delivery_within_freeze_window"},
+    )
+    process.coordinator = Mock(
+        account=Mock(symbols_with_live_risk=Mock(return_value=set()))
+    )
+    process.gate = Mock(set_condition=Mock())
+    process._last_bar_received_monotonic = {"BTCUSDT": 99.0}
+
+    assert process._market_symbols() == ("BTCUSDT",)
+    assert process._refresh_bar_stream_gate(now=100.0) is True
+    process.gate.set_condition.assert_called_once_with("bar_stream", True)
+
+
+@pytest.mark.asyncio
 async def test_local_bar_delivery_gate_requires_every_symbol_and_expires():
     settings = SpikeLiveSettings(
         account_id="spike-test",
@@ -449,6 +684,11 @@ async def test_local_bar_delivery_gate_requires_every_symbol_and_expires():
     )
     strategy = StrategyStub()
     process.gate = CompositeEntryGate(strategy)
+    process.exchange_symbol_snapshot = ExchangeSymbolSnapshot(
+        allowed_symbols=frozenset({"AKEUSDT", "BTCUSDT"}),
+        blocked_symbols=frozenset(),
+        blocked_reasons={},
+    )
 
     process._last_bar_received_monotonic = {"AKEUSDT": 100.0}
     assert process._refresh_bar_stream_gate(now=100.0) is False
@@ -471,6 +711,7 @@ async def test_runtime_callbacks_wait_for_startup_recovery_barrier():
     account = Mock(handle_execution_report=Mock(return_value=None))
     coordinator = Mock(
         reconcile_entry_expirations=AsyncMock(),
+        reconcile_exchange_symbol_admission=AsyncMock(),
         maybe_release_campaign=AsyncMock(),
     )
     callbacks = SpikeRuntimeCallbacks(
@@ -487,6 +728,7 @@ async def test_runtime_callbacks_wait_for_startup_recovery_barrier():
     callbacks.finish_startup_recovery()
     await task
     delegate.handle_execution_report.assert_awaited_once()
+    coordinator.reconcile_exchange_symbol_admission.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ from trading_platform.shared.binance import (
     BinanceSymbolRuleBook,
     BinanceSymbolRules,
 )
+from trading_platform.shared.binance.symbol_rules import SymbolRuleViolation
 from trading_platform.shared.events import OrderIntent
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
@@ -169,6 +170,34 @@ async def test_reduce_only_intent_is_the_live_exchange_contract(tmp_path):
         new_client_order_id="cid-reduce",
         reduce_only=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_exchange_metadata_gate_blocks_entry_before_wal_but_allows_exit(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    rest = Mock(
+        post_order=AsyncMock(return_value={"status": "NEW", "orderId": 42}),
+        query_order=AsyncMock(),
+    )
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        can_open_symbol=lambda symbol: False,
+    )
+
+    with pytest.raises(SymbolRuleViolation, match="exchange metadata"):
+        await executor.submit(_intent("cid-delisting-entry"))
+
+    assert wal.recover_latest() == {}
+    rest.post_order.assert_not_awaited()
+
+    exit_intent = _intent("cid-delisting-exit")
+    exit_intent.side = "BUY"
+    exit_intent.reduce_only = True
+    await executor.submit(exit_intent)
+
+    rest.post_order.assert_awaited_once()
 
 
 @pytest.mark.asyncio
