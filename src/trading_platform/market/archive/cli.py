@@ -30,11 +30,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--end", required=True, help="ISO 8601 exclusive UTC time")
     parser.add_argument("--attempts", type=int, default=3)
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=4,
+        help="concurrent download/parse workers (default: 4)",
+    )
     args = parser.parse_args(argv)
     if args.attempts < 1:
         parser.error("--attempts must be positive")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
+    if args.workers < 1:
+        parser.error("--workers must be positive")
     try:
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
@@ -49,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     start=start,
                     end=end,
                     on_progress=_print_progress,
+                    max_workers=args.workers,
                 )
         catalog_path = args.catalog or args.archive / "history.duckdb"
         create_duckdb_catalog(args.archive, catalog_path)

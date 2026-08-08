@@ -13,6 +13,9 @@ uv run market-history data/market/history-parquet \
   --end 2026-08-01T00:00:00Z
 ```
 
+CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行，或按网络和 CPU
+调整。不同分区可以并行写入，同一分区仍由独立锁保护。
+
 `1s` 使用 Binance Vision daily `aggTrades` 按交易时间聚合；其他周期使用原生 monthly
 Kline。请求范围只决定要下载哪些完整日/月分区，写入时不会把一个完整分区截断成部分数据。
 目录固定为 `SYMBOL/TIMEFRAME/YYYY/MM/DD/candles.parquet`；月度分区最后一层使用

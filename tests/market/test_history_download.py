@@ -115,13 +115,16 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
             start=datetime(2026, 7, 1, tzinfo=UTC),
             end=datetime(2026, 7, 2, tzinfo=UTC),
             on_progress=progress.append,
+            max_workers=2,
         )
 
     assert {(item.timeframe, item.rows) for item in results} == {
         ("1s", 1),
         ("1m", 2),
     }
-    assert [(item.current, item.total, item.phase) for item in progress] == [
+    assert sorted(
+        (item.current, item.total, item.phase) for item in progress
+    ) == sorted([
         (1, 2, "downloading"),
         (1, 2, "downloaded"),
         (1, 2, "processing"),
@@ -130,7 +133,7 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
         (2, 2, "downloaded"),
         (2, 2, "processing"),
         (2, 2, "stored"),
-    ]
+    ])
     assert (archive_root / "AKEUSDT/1s/2026/07/01/candles.parquet").is_file()
     assert (archive_root / "AKEUSDT/1m/2026/07/00/candles.parquet").is_file()
     assert all(
@@ -254,8 +257,7 @@ def test_http_fetcher_falls_back_to_public_endpoint_from_s3():
     assert result == content
 
 
-def test_parquet_archive_rejects_a_second_writer(tmp_path):
+def test_parquet_archive_allows_separate_archive_handles(tmp_path):
     root = tmp_path / "history"
-    with ParquetCandleArchive(root):
-        with pytest.raises(RuntimeError, match="writer is already active"):
-            ParquetCandleArchive(root)
+    with ParquetCandleArchive(root), ParquetCandleArchive(root):
+        pass

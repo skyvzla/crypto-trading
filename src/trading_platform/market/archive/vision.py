@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import re
@@ -199,6 +200,7 @@ def download_history(
     start: datetime,
     end: datetime,
     on_progress: Callable[[DownloadProgress], None] | None = None,
+    max_workers: int = 1,
 ) -> list[DownloadResult]:
     """Download a bounded UTC range; network reads are separate from one writer."""
 
@@ -217,6 +219,8 @@ def download_history(
         raise ValueError("at least one symbol is required")
     if not normalized_timeframes or unsupported:
         raise ValueError(f"unsupported timeframes: {sorted(unsupported)}")
+    if max_workers < 1:
+        raise ValueError("max_workers must be positive")
 
     jobs: list[tuple[str, str, date | tuple[int, int]]] = []
     for symbol in normalized_symbols:
@@ -228,9 +232,9 @@ def download_history(
             for period in periods:
                 jobs.append((symbol, timeframe, period))
 
-    results: list[DownloadResult] = []
     total = len(jobs)
-    for current, (symbol, timeframe, period) in enumerate(jobs, start=1):
+    def process(job: tuple[int, tuple[str, str, date | tuple[int, int]]]) -> DownloadResult:
+        current, (symbol, timeframe, period) = job
         if isinstance(period, date):
             label = period.isoformat()
             url = aggtrade_archive_url(symbol, label)
@@ -270,8 +274,13 @@ def download_history(
             label,
             rows=rows,
         )
-        results.append(DownloadResult(symbol, timeframe, label, rows))
-    return results
+        return DownloadResult(symbol, timeframe, label, rows)
+
+    indexed_jobs = tuple(enumerate(jobs, start=1))
+    if max_workers == 1:
+        return [process(job) for job in indexed_jobs]
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        return list(executor.map(process, indexed_jobs))
 
 
 def _notify(

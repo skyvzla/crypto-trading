@@ -19,17 +19,6 @@ class ParquetCandleArchive:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self._lock_file = (self.root / ".writer.lock").open("a+")
-        self._closed = False
-        try:
-            fcntl.flock(
-                self._lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
-            )
-        except BlockingIOError as error:
-            self._lock_file.close()
-            raise RuntimeError(
-                f"archive writer is already active for {self.root}"
-            ) from error
 
     def __enter__(self) -> "ParquetCandleArchive":
         return self
@@ -38,11 +27,7 @@ class ParquetCandleArchive:
         self.close()
 
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
-        self._lock_file.close()
+        return None
 
     def upsert(self, candles: Iterable[Candle]) -> int:
         rows = list(candles)
@@ -91,11 +76,21 @@ class ParquetCandleArchive:
                 ),
             }
         )
+        lock_file = (partition / ".write.lock").open("a+")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            lock_file.close()
+            raise RuntimeError(
+                f"partition writer is already active for {partition}"
+            ) from error
         try:
             pq.write_table(table, temporary, compression="zstd")
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
         return len(rows)
 
 
