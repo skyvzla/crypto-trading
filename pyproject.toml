@@ -12,6 +12,7 @@ dependencies = [
     "psycopg[binary,pool]>=3.2,<4.0",
     "pyarrow>=20.0",
     "pydantic-settings>=2.10",
+    "pytz>=2024.1",
     "redis>=5.2,<6.0",
     "uvicorn>=0.30",
     "websocket-client>=1.8",
