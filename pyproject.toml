@@ -28,6 +28,7 @@ dev = [
 [project.scripts]
 spike-live = "trading_platform.strategies.spike.main:main"
 ledger-migrate = "trading_platform.ledger.db.migrations:main"
+market-history = "trading_platform.market.archive.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
