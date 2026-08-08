@@ -4,7 +4,7 @@ from trading_platform.backtest.engine import BacktestEngine
 from trading_platform.backtest.result import ResultAnalyzer
 from trading_platform.shared.config import BacktestConfig
 from trading_platform.shared.events import Bar1s, Kline
-from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
+from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
 
 
 MINUTE = 60_000

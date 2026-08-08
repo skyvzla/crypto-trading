@@ -2,7 +2,7 @@ from decimal import Decimal
 from unittest.mock import Mock
 
 from trading_platform.shared.events import Bar1s, Fill
-from trading_platform.strategies.spike_legacy_research import (
+from trading_platform.strategies.spike.legacy_research import (
     LegacyScriptExitSpikeShortStrategy,
 )
 

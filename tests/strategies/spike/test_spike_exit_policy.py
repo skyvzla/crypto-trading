@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from trading_platform.strategies.spike_exit_policy import (
+from trading_platform.strategies.spike.exit_policy import (
     CandidateV1Config,
     ExitAction,
     ExitObservation,

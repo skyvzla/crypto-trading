@@ -8,12 +8,12 @@ from trading_platform.ledger.db.models import Trade
 from trading_platform.shared.events import Bar1s, Position
 from trading_platform.shared.execution_recovery import OrderWAL, OrderWALRecord
 from trading_platform.shared.risk import RiskConfig, RiskGuard
-from trading_platform.strategies.spike_live import (
+from trading_platform.strategies.spike.live import (
     CompositeEntryGate,
     SpikeExecutionCoordinator,
 )
 from trading_platform.strategies.campaign_store import CampaignLease
-from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
+from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
 
 
 CAMPAIGN_ID = "spike_short:AKEUSDT:1000"

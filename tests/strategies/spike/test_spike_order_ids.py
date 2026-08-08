@@ -1,6 +1,6 @@
 import pytest
 
-from trading_platform.strategies.spike_short import (
+from trading_platform.strategies.spike.short import (
     build_entry_client_order_id,
     build_exit_client_order_id,
     parse_entry_client_order_id,

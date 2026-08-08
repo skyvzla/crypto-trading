@@ -488,11 +488,12 @@ V2 扩展：策略轮询配置表→检测变更→热更新参数并重新注�
 │   │   │   ├── breakout.py        # 策略实现示例
 │   │   │   ├── risk.py            # 账户 A 统一风控
 │   │   │   └── main.py
-│   │   └── tick/                  # 1s 事件策略群（账户 B）
-│   │       ├── base.py            # 1s 事件策略基类（Pub/Sub 驱动）
-│   │       ├── spike_short.py     # 逼空插针策略
-│   │       ├── risk.py            # 账户 B 统一风控
-│   │       └── main.py
+│   │   ├── tick/                  # 1s 事件策略群（账户 B）
+│   │   │   ├── base.py            # 1s 事件策略基类（Pub/Sub 驱动）
+│   │   │   ├── risk.py            # 账户 B 统一风控
+│   │   │   └── main.py
+│   │   └── spike/                 # Spike 策略子系统
+│   │       └── short.py           # 逼空插针策略
 │   │
 │   ├── ledger/                    # 账本层后端（独立进程）
 │   │   ├── db/

@@ -9,7 +9,7 @@ from trading_platform.research.spike_exit_calibration import (
     momentum_indicators as research_momentum,
 )
 from trading_platform.shared.events import Kline
-from trading_platform.strategies.spike_exit_features import (
+from trading_platform.strategies.spike.exit_features import (
     CandidateFeatureConfig,
     candidate_feature_snapshot,
     channel_breakout_candidates,

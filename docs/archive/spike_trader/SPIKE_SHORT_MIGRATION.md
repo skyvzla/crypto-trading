@@ -5,7 +5,7 @@
 已将 `scripts/backtest_dynamic_spike.py` 迁移到新平台的回测引擎。
 
 **原脚本**: `scripts/backtest_dynamic_spike.py`  
-**新策略**: `trading_platform/strategies/spike_short.py`  
+**新策略**: `trading_platform/strategies/spike/short.py`
 **回测脚本**: `trading_platform/backtest/run_spike_short.py`
 
 ---
@@ -317,7 +317,8 @@ VOLUME_MULTIPLE_5S = 3.0            # 成交量倍数
 ```
 trading_platform/
 ├── strategies/
-│   └── spike_short.py                    # 逼空做空策略实现
+│   └── spike/
+│       └── short.py                      # 逼空做空策略实现
 ├── backtest/
 │   └── run_spike_short.py               # 回测运行脚本
 └── tests/

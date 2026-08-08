@@ -4,10 +4,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from trading_platform.shared.events import Bar1s, Kline, Position
-from trading_platform.strategies.spike_exit_features import CandidateFeatureSnapshot
-from trading_platform.strategies.spike_live import SpikeLiveSettings
-from trading_platform.strategies.spike_main import SpikeLiveProcess
-from trading_platform.strategies.spike_short import DynamicSpikeShortStrategy
+from trading_platform.strategies.spike.exit_features import CandidateFeatureSnapshot
+from trading_platform.strategies.spike.live import SpikeLiveSettings
+from trading_platform.strategies.spike.main import SpikeLiveProcess
+from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
 
 
 FIRST_FILL_MS = 1_000
@@ -294,7 +294,7 @@ def test_candidate_strategy_caches_15m_and_only_recomputes_during_campaign(monke
         return None
 
     monkeypatch.setattr(
-        "trading_platform.strategies.spike_short.candidate_feature_snapshot",
+        "trading_platform.strategies.spike.short.candidate_feature_snapshot",
         capture,
     )
     account = PositionAccount()

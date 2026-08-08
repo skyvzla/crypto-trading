@@ -14,7 +14,7 @@ from trading_platform.shared.execution_recovery import (
     SubmitUnknownPollingService,
 )
 from trading_platform.shared.risk import RiskConfig, RiskGuard
-from trading_platform.strategies.spike_live import (
+from trading_platform.strategies.spike.live import (
     LIVE_CONFIRMATION,
     CompositeEntryGate,
     SpikeExecutionCoordinator,
@@ -23,7 +23,7 @@ from trading_platform.strategies.spike_live import (
     require_one_way_position_mode,
 )
 from trading_platform.strategies.campaign_store import CampaignLease
-from trading_platform.strategies.spike_main import (
+from trading_platform.strategies.spike.main import (
     SpikeLiveProcess,
     require_viable_entry_notional,
 )
@@ -765,7 +765,7 @@ async def test_runtime_heartbeat_failure_halts_process_fail_closed(monkeypatch):
         side_effect=ConnectionError("postgres unavailable")
     )
     monkeypatch.setattr(
-        "trading_platform.strategies.spike_main.asyncio.sleep", AsyncMock()
+        "trading_platform.strategies.spike.main.asyncio.sleep", AsyncMock()
     )
 
     with pytest.raises(RuntimeError, match="runtime status heartbeat failed"):

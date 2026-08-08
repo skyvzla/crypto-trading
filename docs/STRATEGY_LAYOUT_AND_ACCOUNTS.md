@@ -11,7 +11,7 @@ Spike 是一个独立策略子系统，统一放在 `strategies/spike/`：
 - `main.py`：测试网/实盘进程入口
 - `legacy_research.py`：仅回测研究用的旧退出规则
 
-根目录下的 `spike_*.py` 目前只是兼容旧导入路径，新代码应使用 `strategies.spike.*`。
+Spike 不保留根目录兼容模块，所有代码统一使用 `strategies.spike.*` 导入路径。
 
 ## 账户
 

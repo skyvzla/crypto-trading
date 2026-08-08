@@ -4,7 +4,7 @@
 import pytest
 from decimal import Decimal
 from trading_platform.shared.events import Bar1s, Kline, Order, Position
-from trading_platform.strategies.spike_short import (
+from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
     SpikeSignal,

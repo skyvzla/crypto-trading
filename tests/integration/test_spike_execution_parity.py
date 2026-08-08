@@ -6,11 +6,11 @@ import pytest
 from trading_platform.shared.events import Bar1s, Kline, OrderIntent, Position
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.campaign_store import CampaignLease
-from trading_platform.strategies.spike_live import (
+from trading_platform.strategies.spike.live import (
     CompositeEntryGate,
     SpikeExecutionCoordinator,
 )
-from trading_platform.strategies.spike_short import DynamicSpikeBacktestStrategy
+from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
 
 
 MINUTE = 60_000

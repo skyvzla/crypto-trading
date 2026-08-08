@@ -39,7 +39,7 @@
 
 ### 3.2 新平台中的迁移版本
 
-`trading_platform/strategies/spike_short.py` 是另一份迁移实现。目前不能替代上述实验脚本，也不能沿用其回测结论，原因包括：
+`trading_platform/strategies/spike/short.py` 是另一份迁移实现。目前不能替代上述实验脚本，也不能沿用其回测结论，原因包括：
 
 - 策略包装器接口与当前回测引擎不兼容。
 - 实盘 tick 入口仍运行示例策略，没有加载插针策略。
