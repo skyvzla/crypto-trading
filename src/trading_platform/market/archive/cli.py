@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
@@ -9,7 +10,7 @@ from typing import Sequence
 import httpx
 
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
-from .vision import BinanceVisionHTTPFetcher, download_history
+from .vision import BinanceVisionHTTPFetcher, DownloadProgress, download_history
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -47,6 +48,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     timeframes=args.timeframes,
                     start=start,
                     end=end,
+                    on_progress=_print_progress,
                 )
         catalog_path = args.catalog or args.archive / "history.duckdb"
         create_duckdb_catalog(args.archive, catalog_path)
@@ -74,6 +76,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     )
     return 0
+
+
+def _print_progress(progress: DownloadProgress) -> None:
+    prefix = (
+        f"[{progress.current}/{progress.total}] {progress.symbol} "
+        f"{progress.timeframe} {progress.period}"
+    )
+    if progress.phase == "downloaded":
+        seconds = max(progress.elapsed_seconds, 1e-9)
+        size = _format_bytes(progress.downloaded_bytes)
+        speed = _format_bytes(progress.downloaded_bytes / seconds)
+        message = f"{prefix} downloaded {size} ({speed}/s)"
+    elif progress.phase == "stored":
+        message = f"{prefix} stored {progress.rows} rows"
+    else:
+        message = f"{prefix} {progress.phase}"
+    print(message, file=sys.stderr, flush=True)
+
+
+def _format_bytes(value: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    raise AssertionError("unreachable")
 
 
 def _parse_datetime(value: str) -> datetime:

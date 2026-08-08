@@ -11,6 +11,7 @@ from trading_platform.backtest.loader import BacktestDataLoader
 from trading_platform.market.archive import (
     BinanceVisionHTTPFetcher,
     Candle,
+    DownloadProgress,
     ParquetCandleArchive,
     aggtrade_archive_url,
     create_duckdb_catalog,
@@ -19,6 +20,7 @@ from trading_platform.market.archive import (
     parse_aggtrade_archive,
     parse_kline_archive,
 )
+from trading_platform.market.archive.cli import _print_progress
 
 
 def test_archive_urls_default_to_binance_s3_origin():
@@ -103,6 +105,7 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
         raise AssertionError(url)
 
     archive_root = tmp_path / "history"
+    progress: list[DownloadProgress] = []
     with ParquetCandleArchive(archive_root) as archive:
         results = download_history(
             archive,
@@ -111,12 +114,30 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
             timeframes=["1s", "1m"],
             start=datetime(2026, 7, 1, tzinfo=UTC),
             end=datetime(2026, 7, 2, tzinfo=UTC),
+            on_progress=progress.append,
         )
 
     assert {(item.timeframe, item.rows) for item in results} == {
         ("1s", 1),
         ("1m", 2),
     }
+    assert [(item.current, item.total, item.phase) for item in progress] == [
+        (1, 2, "downloading"),
+        (1, 2, "downloaded"),
+        (1, 2, "processing"),
+        (1, 2, "stored"),
+        (2, 2, "downloading"),
+        (2, 2, "downloaded"),
+        (2, 2, "processing"),
+        (2, 2, "stored"),
+    ]
+    assert (archive_root / "AKEUSDT/1s/2026/07/01/candles.parquet").is_file()
+    assert (archive_root / "AKEUSDT/1m/2026/07/00/candles.parquet").is_file()
+    assert all(
+        "=" not in part
+        for path in archive_root.rglob("*.parquet")
+        for part in path.parts
+    )
     catalog = create_duckdb_catalog(archive_root, tmp_path / "history.duckdb")
     connection = duckdb.connect(str(catalog), read_only=True)
     try:
@@ -163,6 +184,33 @@ def test_http_fetcher_verifies_binance_checksum():
         result = fetch("https://data.binance.vision/archive.zip")
 
     assert result == content
+
+
+def test_cli_progress_reports_file_count_speed_and_processing(capsys):
+    base = {
+        "current": 2,
+        "total": 5,
+        "symbol": "AKEUSDT",
+        "timeframe": "1s",
+        "period": "2026-07-01",
+    }
+
+    _print_progress(
+        DownloadProgress(
+            phase="downloaded",
+            downloaded_bytes=2 * 1024 * 1024,
+            elapsed_seconds=0.5,
+            **base,
+        )
+    )
+    _print_progress(DownloadProgress(phase="processing", **base))
+    _print_progress(DownloadProgress(phase="stored", rows=60, **base))
+
+    output = capsys.readouterr().err
+    assert "[2/5] AKEUSDT 1s 2026-07-01" in output
+    assert "downloaded 2.0 MiB (4.0 MiB/s)" in output
+    assert "processing" in output
+    assert "stored 60 rows" in output
 
 
 def test_http_fetcher_falls_back_to_binance_s3_origin():

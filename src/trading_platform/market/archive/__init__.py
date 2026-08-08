@@ -2,6 +2,7 @@ from .models import Candle
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (
     BinanceVisionHTTPFetcher,
+    DownloadProgress,
     DownloadResult,
     aggtrade_archive_url,
     download_history,
@@ -14,6 +15,7 @@ __all__ = [
     "Candle",
     "BinanceVisionHTTPFetcher",
     "DownloadResult",
+    "DownloadProgress",
     "aggtrade_archive_url",
     "download_history",
     "kline_archive_url",

@@ -31,6 +31,19 @@ class DownloadResult:
     rows: int
 
 
+@dataclass(frozen=True)
+class DownloadProgress:
+    phase: str
+    current: int
+    total: int
+    symbol: str
+    timeframe: str
+    period: str
+    downloaded_bytes: int = 0
+    elapsed_seconds: float = 0.0
+    rows: int = 0
+
+
 class BinanceVisionHTTPFetcher:
     """Bounded downloader that verifies every Binance Vision SHA-256 file."""
 
@@ -185,6 +198,7 @@ def download_history(
     timeframes: Sequence[str],
     start: datetime,
     end: datetime,
+    on_progress: Callable[[DownloadProgress], None] | None = None,
 ) -> list[DownloadResult]:
     """Download a bounded UTC range; network reads are separate from one writer."""
 
@@ -204,7 +218,7 @@ def download_history(
     if not normalized_timeframes or unsupported:
         raise ValueError(f"unsupported timeframes: {sorted(unsupported)}")
 
-    results: list[DownloadResult] = []
+    jobs: list[tuple[str, str, date | tuple[int, int]]] = []
     for symbol in normalized_symbols:
         for timeframe in normalized_timeframes:
             if timeframe == "1s":
@@ -212,22 +226,80 @@ def download_history(
             else:
                 periods = _months(start_utc, end_utc)
             for period in periods:
-                if isinstance(period, date):
-                    label = period.isoformat()
-                    url = aggtrade_archive_url(symbol, label)
-                    candles = parse_aggtrade_archive(fetch(url), symbol, label)
-                else:
-                    label = f"{period[0]:04d}-{period[1]:02d}"
-                    url = kline_archive_url(symbol, timeframe, label)
-                    candles = parse_kline_archive(
-                        fetch(url), symbol, timeframe, label
-                    )
-                # Vision files are immutable day/month partitions. Store the
-                # complete source partition so later partial requests cannot
-                # overwrite it with an incomplete subset.
-                rows = archive.upsert(candles)
-                results.append(DownloadResult(symbol, timeframe, label, rows))
+                jobs.append((symbol, timeframe, period))
+
+    results: list[DownloadResult] = []
+    total = len(jobs)
+    for current, (symbol, timeframe, period) in enumerate(jobs, start=1):
+        if isinstance(period, date):
+            label = period.isoformat()
+            url = aggtrade_archive_url(symbol, label)
+        else:
+            label = f"{period[0]:04d}-{period[1]:02d}"
+            url = kline_archive_url(symbol, timeframe, label)
+        _notify(on_progress, "downloading", current, total, symbol, timeframe, label)
+        started = time.monotonic()
+        content = fetch(url)
+        elapsed = time.monotonic() - started
+        _notify(
+            on_progress,
+            "downloaded",
+            current,
+            total,
+            symbol,
+            timeframe,
+            label,
+            downloaded_bytes=len(content),
+            elapsed_seconds=elapsed,
+        )
+        _notify(on_progress, "processing", current, total, symbol, timeframe, label)
+        if isinstance(period, date):
+            candles = parse_aggtrade_archive(content, symbol, label)
+        else:
+            candles = parse_kline_archive(content, symbol, timeframe, label)
+        # Vision files are immutable day/month partitions. Store the complete
+        # source partition so partial requests cannot overwrite it.
+        rows = archive.upsert(candles)
+        _notify(
+            on_progress,
+            "stored",
+            current,
+            total,
+            symbol,
+            timeframe,
+            label,
+            rows=rows,
+        )
+        results.append(DownloadResult(symbol, timeframe, label, rows))
     return results
+
+
+def _notify(
+    callback: Callable[[DownloadProgress], None] | None,
+    phase: str,
+    current: int,
+    total: int,
+    symbol: str,
+    timeframe: str,
+    period: str,
+    downloaded_bytes: int = 0,
+    elapsed_seconds: float = 0.0,
+    rows: int = 0,
+) -> None:
+    if callback is not None:
+        callback(
+            DownloadProgress(
+                phase=phase,
+                current=current,
+                total=total,
+                symbol=symbol,
+                timeframe=timeframe,
+                period=period,
+                downloaded_bytes=downloaded_bytes,
+                elapsed_seconds=elapsed_seconds,
+                rows=rows,
+            )
+        )
 
 
 def aggtrade_archive_url(symbol: str, day: str) -> str:

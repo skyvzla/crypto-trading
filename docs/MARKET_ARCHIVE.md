@@ -2,6 +2,7 @@
 
 `market-history` 是一次性维护命令，不属于常驻行情进程，也不属于回测执行路径。
 下载得到的 Binance Vision 文件按不可变分区写入 Parquet，DuckDB 只生成查询 catalog。
+CLI 会显示总文件数、当前文件、平均下载速度、解析状态和写入行数。
 
 ```bash
 uv run market-history data/market/history-parquet \
@@ -14,6 +15,8 @@ uv run market-history data/market/history-parquet \
 
 `1s` 使用 Binance Vision daily `aggTrades` 按交易时间聚合；其他周期使用原生 monthly
 Kline。请求范围只决定要下载哪些完整日/月分区，写入时不会把一个完整分区截断成部分数据。
+目录固定为 `SYMBOL/TIMEFRAME/YYYY/MM/DD/candles.parquet`；月度分区最后一层使用
+`00` 表示整月。
 
 所有时间输入必须带时区，epoch 毫秒/微秒会先转换为 UTC。Parquet 时间列固定为
 `timestamp[ms, tz=UTC]`；每次写分区先写临时文件，再原子替换目标文件。下载文件同时校验

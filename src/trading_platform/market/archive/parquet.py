@@ -63,17 +63,19 @@ class ParquetCandleArchive:
         symbol, timeframe, year, month, day = keys.pop()
         partition = (
             self.root
-            / f"symbol={symbol}"
-            / f"timeframe={timeframe}"
-            / f"year={year:04d}"
-            / f"month={month:02d}"
+            / symbol
+            / timeframe
+            / f"{year:04d}"
+            / f"{month:02d}"
         )
-        partition /= f"day={day:02d}"
+        partition /= f"{day:02d}"
         partition.mkdir(parents=True, exist_ok=True)
         target = partition / "candles.parquet"
         temporary = partition / f".candles-{uuid4().hex}.tmp.parquet"
         table = pa.table(
             {
+                "symbol": pa.array([symbol] * len(rows), type=pa.string()),
+                "timeframe": pa.array([timeframe] * len(rows), type=pa.string()),
                 "open_time": pa.array(
                     [item.open_time_utc for item in rows],
                     type=pa.timestamp("ms", tz="UTC"),
@@ -99,12 +101,14 @@ class ParquetCandleArchive:
 
 def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
     dataset = Path(root).resolve()
-    files = list(dataset.glob("symbol=*/timeframe=*/year=*/month=*/**/*.parquet"))
+    files = list(dataset.glob("*/*/*/*/*/*.parquet"))
     if not files:
         raise ValueError(f"no candle Parquet partitions found under {dataset}")
     catalog = Path(catalog_path).resolve()
     catalog.parent.mkdir(parents=True, exist_ok=True)
-    glob = _sql_literal(str(dataset / "symbol=*" / "timeframe=*" / "**" / "*.parquet"))
+    glob = _sql_literal(
+        str(dataset / "*" / "*" / "*" / "*" / "*" / "*.parquet")
+    )
     connection = duckdb.connect(str(catalog))
     try:
         connection.execute("SET TimeZone = 'UTC'")
@@ -122,7 +126,7 @@ def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
                 volume::DOUBLE AS volume,
                 close_time::TIMESTAMPTZ AS close_time
             FROM read_parquet(
-                {glob}, hive_partitioning = true, union_by_name = true
+                {glob}, union_by_name = true
             )
             """
         )
