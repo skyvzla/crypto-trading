@@ -156,6 +156,10 @@ candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈�
 aggTrade 与 1m Kline 出现确定缺口。Market 保持 503、Spike 关闭 market/bar 门禁且账户为空，
 证明 fail-closed 生效；也证明在确定 REST 回补/对账规则前，单纯重连不能完成自动恢复。
 
+确定性回补实施后重新完成 3900.224 秒正式长稳：676 个样本、最大心跳年龄 4.984 秒，
+同一 Spike 实例、容器 RestartCount=0；一次 runtime degraded 在 5.458 秒内恢复，另有多次
+真实 User Stream listenKey 重建。最终 `SOAK_OK`，全程和停止后均为 0 挂单、0 非零仓位。
+
 **已修复**（2026-08-06）：新代码中的 `range(1,4)` bug 已改为 `range(3)`，与实验脚本对齐。
 
 三档价格公式（已冻结，来自实验脚本）：

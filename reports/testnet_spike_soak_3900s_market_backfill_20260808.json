@@ -1,0 +1,112 @@
+{
+  "account_id": "spike_testnet",
+  "actual_duration_seconds": 3900.224,
+  "duration_seconds": 3900.0,
+  "endpoint": "https://demo-fapi.binance.com",
+  "expect_entry_enabled": "false",
+  "finished_at": "2026-08-08T00:42:08.401567+00:00",
+  "first_sample": {
+    "entry_enabled": false,
+    "gates": {
+      "bar_stream": true,
+      "campaign": true,
+      "execution": true,
+      "market": true,
+      "subcategory": false
+    },
+    "heartbeat_age_seconds": 1.254,
+    "heartbeat_at": "2026-08-07T23:37:21.941704+00:00",
+    "instance_id": "cd66c4addcd147eab454a286b218de03",
+    "nonzero_position_count": 0,
+    "nonzero_position_symbols": [],
+    "observed_at": "2026-08-07T23:37:23.195268+00:00",
+    "open_order_count": 0,
+    "open_order_symbols": []
+  },
+  "instance_id": "cd66c4addcd147eab454a286b218de03",
+  "last_sample": {
+    "entry_enabled": false,
+    "gates": {
+      "bar_stream": true,
+      "campaign": true,
+      "execution": true,
+      "market": true,
+      "subcategory": false
+    },
+    "heartbeat_age_seconds": 1.612,
+    "heartbeat_at": "2026-08-08T00:42:06.565020+00:00",
+    "instance_id": "cd66c4addcd147eab454a286b218de03",
+    "nonzero_position_count": 0,
+    "nonzero_position_symbols": [],
+    "observed_at": "2026-08-08T00:42:08.177296+00:00",
+    "open_order_count": 0,
+    "open_order_symbols": []
+  },
+  "max_heartbeat_age_seconds": 4.984,
+  "max_nonzero_position_count": 0,
+  "max_open_order_count": 0,
+  "require_flat": true,
+  "result": "SOAK_OK",
+  "runtime_recoveries": [
+    {
+      "duration_seconds": 5.458,
+      "recovered_at": "2026-08-08T00:04:09.911846+00:00",
+      "started_at": "2026-08-08T00:04:04.901811+00:00"
+    }
+  ],
+  "runtime_recovery_seconds": 15.0,
+  "sample_count": 676,
+  "sample_seconds": 5.0,
+  "started_at": "2026-08-07T23:37:08.138252+00:00",
+  "strategy_id": "spike_short",
+  "transient_errors": [
+    {
+      "observed_at": "2026-08-07T23:37:08.176043+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-07T23:39:18.645324+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-07T23:43:02.782125+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-07T23:48:15.661299+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-07T23:52:33.073927+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-07T23:55:11.579271+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-08T00:23:09.577483+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-08T00:23:30.045708+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-08T00:33:52.075283+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-08T00:34:45.500980+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-08T00:35:22.362484+00:00",
+      "type": "ConnectTimeout"
+    },
+    {
+      "observed_at": "2026-08-08T00:37:27.544304+00:00",
+      "type": "ConnectTimeout"
+    }
+  ]
+}

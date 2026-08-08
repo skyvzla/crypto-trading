@@ -1,0 +1,23 @@
+{
+  "finished_at": "2026-08-08T00:42:45.058919+00:00",
+  "mode": "dry-run",
+  "orders": [],
+  "positions": [
+    {
+      "open_orders_before": [],
+      "position_before": null,
+      "symbol": "AKEUSDT"
+    },
+    {
+      "open_orders_before": [],
+      "position_before": null,
+      "symbol": "BTCUSDT"
+    }
+  ],
+  "result": "DRY_RUN_OK",
+  "started_at": "2026-08-08T00:42:43.506678+00:00",
+  "symbols": [
+    "AKEUSDT",
+    "BTCUSDT"
+  ]
+}

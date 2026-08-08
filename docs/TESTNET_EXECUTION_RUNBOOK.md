@@ -299,6 +299,12 @@ docker compose --profile spike run --rm --no-deps \
   1 重连到 2；服务分别调用 aggTrades `fromId=35836108` 和 1m Kline 时间范围回补，整批校验
   后 `/quality` 恢复 200，两个流均 healthy、0 quality issues。`spike` 全程停止、0 下单，探针
   订阅已移除。证据：`reports/testnet_market_backfill_recovery_20260808.json`。
+- 2026-08-08 正式长稳通过：实际运行 3900.224 秒、676 个样本，最大心跳年龄 4.984 秒；
+  固定实例 `cd66c4addcd147eab454a286b218de03`，RestartCount=0，一次 runtime 恢复耗时
+  5.458 秒（上限 15 秒）。全程 0 挂单、0 仓位，优雅停止后 runtime=`stopped`、Market
+  0 活跃流，AKEUSDT/BTCUSDT 最终 dry-run 均为空。证据：
+  `reports/testnet_spike_soak_3900s_market_backfill_20260808.json`、
+  `reports/testnet_post_soak_flat_20260808.json`。
 
 当前 `spike` subcategory 为 disabled。正式 soak 后 Market 再次出现确定 gap，Spike 已优雅
 停止，不通过重启清除质量事实；最终 dry-run 确认 AKEUSDT/BTCUSDT 均为 0 挂单、0 非零仓位，
