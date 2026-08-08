@@ -12,6 +12,7 @@ from trading_platform.market.archive import (
     BinanceVisionHTTPFetcher,
     Candle,
     DownloadProgress,
+    DownloadResult,
     ParquetCandleArchive,
     aggtrade_archive_url,
     create_duckdb_catalog,
@@ -20,7 +21,7 @@ from trading_platform.market.archive import (
     parse_aggtrade_archive,
     parse_kline_archive,
 )
-from trading_platform.market.archive.cli import _print_progress
+from trading_platform.market.archive.cli import _ProgressReporter, _print_result
 
 
 def test_archive_urls_default_to_binance_s3_origin():
@@ -141,6 +142,25 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
         for path in archive_root.rglob("*.parquet")
         for part in path.parts
     )
+    skipped_progress: list[DownloadProgress] = []
+
+    def reject_fetch(url: str) -> bytes:
+        raise AssertionError(f"existing partition was downloaded again: {url}")
+
+    with ParquetCandleArchive(archive_root) as archive:
+        repeated = download_history(
+            archive,
+            fetch=reject_fetch,
+            symbols=["AKEUSDT"],
+            timeframes=["1s", "1m"],
+            start=datetime(2026, 7, 1, tzinfo=UTC),
+            end=datetime(2026, 7, 2, tzinfo=UTC),
+            on_progress=skipped_progress.append,
+            max_workers=2,
+        )
+
+    assert [item.skipped for item in repeated] == [True, True]
+    assert [item.phase for item in skipped_progress] == ["skipped", "skipped"]
     catalog = create_duckdb_catalog(archive_root, tmp_path / "history.duckdb")
     connection = duckdb.connect(str(catalog), read_only=True)
     try:
@@ -189,31 +209,64 @@ def test_http_fetcher_verifies_binance_checksum():
     assert result == content
 
 
-def test_cli_progress_reports_file_count_speed_and_processing(capsys):
-    base = {
-        "current": 2,
-        "total": 5,
-        "symbol": "AKEUSDT",
-        "timeframe": "1s",
-        "period": "2026-07-01",
-    }
-
-    _print_progress(
+def test_cli_progress_uses_monotonic_completion_count(capsys):
+    reporter = _ProgressReporter(workers=4)
+    reporter(
         DownloadProgress(
             phase="downloaded",
             downloaded_bytes=2 * 1024 * 1024,
             elapsed_seconds=0.5,
-            **base,
+            current=68,
+            total=68,
+            symbol="BANKUSDT",
+            timeframe="15m",
+            period="2026-07",
         )
     )
-    _print_progress(DownloadProgress(phase="processing", **base))
-    _print_progress(DownloadProgress(phase="stored", rows=60, **base))
+    reporter(
+        DownloadProgress(
+            phase="stored",
+            current=68,
+            total=68,
+            symbol="BANKUSDT",
+            timeframe="15m",
+            period="2026-07",
+            rows=2976,
+        )
+    )
+    reporter(
+        DownloadProgress(
+            phase="skipped",
+            current=64,
+            total=68,
+            symbol="BANKUSDT",
+            timeframe="1s",
+            period="2026-07-30",
+            rows=86249,
+        )
+    )
 
     output = capsys.readouterr().err
-    assert "[2/5] AKEUSDT 1s 2026-07-01" in output
-    assert "downloaded 2.0 MiB (4.0 MiB/s)" in output
-    assert "processing" in output
-    assert "stored 60 rows" in output
+    assert "Processing 68 files with 4 workers." in output
+    assert "[1/68] BANKUSDT 15m 2026-07 stored 2976 rows" in output
+    assert "2.0 MiB at 4.0 MiB/s" in output
+    assert "[2/68] BANKUSDT 1s 2026-07-30 skipped" in output
+    assert "[68/68]" not in output
+
+
+def test_cli_result_is_plain_text_by_default(tmp_path, capsys):
+    results = [DownloadResult("AKEUSDT", "1m", "2026-07", 44640)]
+
+    _print_result(
+        results,
+        tmp_path / "parquet",
+        tmp_path / "history.duckdb",
+        as_json=False,
+    )
+
+    output = capsys.readouterr().out
+    assert output.startswith("Complete: 1 downloaded, 0 skipped, 44640 rows.")
+    assert not output.lstrip().startswith("{")
 
 
 def test_http_fetcher_falls_back_to_binance_s3_origin():

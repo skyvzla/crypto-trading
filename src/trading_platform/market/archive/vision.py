@@ -30,6 +30,7 @@ class DownloadResult:
     timeframe: str
     period: str
     rows: int
+    skipped: bool = False
 
 
 @dataclass(frozen=True)
@@ -201,6 +202,7 @@ def download_history(
     end: datetime,
     on_progress: Callable[[DownloadProgress], None] | None = None,
     max_workers: int = 1,
+    overwrite: bool = False,
 ) -> list[DownloadResult]:
     """Download a bounded UTC range; network reads are separate from one writer."""
 
@@ -233,7 +235,10 @@ def download_history(
                 jobs.append((symbol, timeframe, period))
 
     total = len(jobs)
-    def process(job: tuple[int, tuple[str, str, date | tuple[int, int]]]) -> DownloadResult:
+
+    def process(
+        job: tuple[int, tuple[str, str, date | tuple[int, int]]],
+    ) -> DownloadResult:
         current, (symbol, timeframe, period) = job
         if isinstance(period, date):
             label = period.isoformat()
@@ -241,6 +246,30 @@ def download_history(
         else:
             label = f"{period[0]:04d}-{period[1]:02d}"
             url = kline_archive_url(symbol, timeframe, label)
+        if not overwrite:
+            partition_rows = getattr(archive, "partition_rows", None)
+            if partition_rows is not None:
+                if isinstance(period, date):
+                    year, month, day = period.year, period.month, period.day
+                else:
+                    year, month, day = period[0], period[1], 0
+                existing_rows = partition_rows(
+                    symbol, timeframe, year, month, day
+                )
+                if existing_rows is not None:
+                    _notify(
+                        on_progress,
+                        "skipped",
+                        current,
+                        total,
+                        symbol,
+                        timeframe,
+                        label,
+                        rows=existing_rows,
+                    )
+                    return DownloadResult(
+                        symbol, timeframe, label, existing_rows, skipped=True
+                    )
         _notify(on_progress, "downloading", current, total, symbol, timeframe, label)
         started = time.monotonic()
         content = fetch(url)

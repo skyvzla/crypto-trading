@@ -29,6 +29,20 @@ class ParquetCandleArchive:
     def close(self) -> None:
         return None
 
+    def partition_rows(
+        self,
+        symbol: str,
+        timeframe: str,
+        year: int,
+        month: int,
+        day: int,
+    ) -> int | None:
+        target = self._partition_dir(symbol, timeframe, year, month, day)
+        target /= "candles.parquet"
+        if not target.is_file():
+            return None
+        return pq.ParquetFile(target).metadata.num_rows
+
     def upsert(self, candles: Iterable[Candle]) -> int:
         rows = list(candles)
         if not rows:
@@ -44,16 +58,11 @@ class ParquetCandleArchive:
             for candle in rows
         }
         if len(keys) != 1:
-            raise ValueError("one Parquet write must contain exactly one archive partition")
+            raise ValueError(
+                "one Parquet write must contain exactly one archive partition"
+            )
         symbol, timeframe, year, month, day = keys.pop()
-        partition = (
-            self.root
-            / symbol
-            / timeframe
-            / f"{year:04d}"
-            / f"{month:02d}"
-        )
-        partition /= f"{day:02d}"
+        partition = self._partition_dir(symbol, timeframe, year, month, day)
         partition.mkdir(parents=True, exist_ok=True)
         target = partition / "candles.parquet"
         temporary = partition / f".candles-{uuid4().hex}.tmp.parquet"
@@ -92,6 +101,23 @@ class ParquetCandleArchive:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             lock_file.close()
         return len(rows)
+
+    def _partition_dir(
+        self,
+        symbol: str,
+        timeframe: str,
+        year: int,
+        month: int,
+        day: int,
+    ) -> Path:
+        return (
+            self.root
+            / symbol.strip().upper()
+            / timeframe.strip().lower()
+            / f"{year:04d}"
+            / f"{month:02d}"
+            / f"{day:02d}"
+        )
 
 
 def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:

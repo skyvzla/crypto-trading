@@ -16,6 +16,9 @@ uv run market-history data/market/history-parquet \
 CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行，或按网络和 CPU
 调整。不同分区可以并行写入，同一分区仍由独立锁保护。
 
+已存在且可读取的 Parquet 分区默认跳过，不会重复下载；使用 `--overwrite` 可强制重建。
+默认输出简洁文本，只有显式传入 `--json` 时才输出完整 JSON 结果。
+
 `1s` 使用 Binance Vision daily `aggTrades` 按交易时间聚合；其他周期使用原生 monthly
 Kline。请求范围只决定要下载哪些完整日/月分区，写入时不会把一个完整分区截断成部分数据。
 目录固定为 `SYMBOL/TIMEFRAME/YYYY/MM/DD/candles.parquet`；月度分区最后一层使用
