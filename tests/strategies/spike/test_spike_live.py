@@ -544,6 +544,7 @@ async def test_exchange_symbol_refresh_persists_once_then_uses_daily_cache():
     )
     process._exchange_info = exchange_info
     process.exchange_rest = Mock(get_exchange_info=AsyncMock())
+    process.execution_rest = Mock(get_exchange_info=AsyncMock())
     process.db = Mock(sync_exchange_symbols=AsyncMock(return_value=1))
     process.coordinator = Mock(
         update_exchange_symbol_admission=AsyncMock(return_value=frozenset())
@@ -574,6 +575,7 @@ async def test_exchange_symbol_refresh_failure_closes_entries_without_raising():
     process._exchange_info = {"invalid": []}
     process._exchange_info_synced_monotonic = asyncio.get_running_loop().time()
     process.exchange_rest = Mock(get_exchange_info=AsyncMock())
+    process.execution_rest = Mock(get_exchange_info=AsyncMock())
     process.db = Mock(sync_exchange_symbols=AsyncMock())
     process.coordinator = Mock(
         update_exchange_symbol_admission=AsyncMock(
@@ -621,6 +623,9 @@ async def test_daily_exchange_symbol_refresh_fetches_persists_and_replaces_rules
     process.exchange_rest = Mock(
         get_exchange_info=AsyncMock(return_value=exchange_info)
     )
+    process.execution_rest = Mock(
+        get_exchange_info=AsyncMock(return_value=exchange_info)
+    )
     process.db = Mock(sync_exchange_symbols=AsyncMock(return_value=1))
     process.coordinator = Mock(
         update_exchange_symbol_admission=AsyncMock(return_value=frozenset())
@@ -632,6 +637,7 @@ async def test_daily_exchange_symbol_refresh_fetches_persists_and_replaces_rules
     assert await process._refresh_exchange_symbol_admission() is True
 
     process.exchange_rest.get_exchange_info.assert_awaited_once()
+    process.execution_rest.get_exchange_info.assert_awaited_once()
     process.db.sync_exchange_symbols.assert_awaited_once_with(exchange_info)
     process.coordinator.update_exchange_symbol_admission.assert_awaited_once_with(
         frozenset({"AKEUSDT"}),

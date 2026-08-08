@@ -56,10 +56,12 @@ from trading_platform.strategies.spike.short import (
     DynamicSpikeShortStrategy,
 )
 from trading_platform.strategies.universe import (
+    BINANCE_USDM_METADATA_BASE_URL,
     EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS,
     UNIVERSE_SCAN_INTERVAL_SECONDS,
     ExchangeSymbolSnapshot,
     classify_exchange_symbols,
+    fetch_exchange_info_with_retry,
     fetch_exchange_symbol_snapshot,
 )
 
@@ -116,6 +118,7 @@ class SpikeLiveProcess:
         self.execution_lease: PostgresExecutionLease | None = None
         self.db: LedgerDB | None = None
         self.exchange_rest: BinanceRestClient | None = None
+        self.execution_rest: BinanceRestClient | None = None
         self.exchange_symbol_snapshot: ExchangeSymbolSnapshot | None = None
         self._exchange_info: dict[str, Any] | None = None
         self._exchange_info_synced_monotonic: float | None = None
@@ -295,8 +298,14 @@ class SpikeLiveProcess:
             self.binance.api_secret,
             base_url=self.binance.base_url,
         )
-        self.exchange_rest = rest
+        self.execution_rest = rest
         self._stack.push_async_callback(rest.close)
+        self.exchange_rest = BinanceRestClient(
+            "",
+            "",
+            base_url=BINANCE_USDM_METADATA_BASE_URL,
+        )
+        self._stack.push_async_callback(self.exchange_rest.close)
         require_one_way_position_mode(await rest.get_position_mode())
         risk = RiskGuard(
             self.settings.account_id,
@@ -310,17 +319,8 @@ class SpikeLiveProcess:
         if self.settings.total_notional > risk.config.max_position_value_usdt:
             raise ValueError("total_notional exceeds process risk limit")
         wal = OrderWAL(self.settings.wal_path)
-        fetched_exchange_info: dict[str, Any] | None = None
-
-        async def fetch_initial_exchange_info() -> dict[str, Any]:
-            nonlocal fetched_exchange_info
-            fetched_exchange_info = await rest.get_exchange_info()
-            return fetched_exchange_info
-
-        initial_symbol_snapshot = await fetch_exchange_symbol_snapshot(
-            fetch_initial_exchange_info,
-            self.settings.symbols,
-            freeze_days=self.settings.delisting_freeze_days,
+        metadata_exchange_info = await fetch_exchange_info_with_retry(
+            self.exchange_rest.get_exchange_info,
             on_retry=lambda attempt, total, error: logger.warning(
                 "initial exchangeInfo retry %s/%s: %s: %s",
                 attempt,
@@ -329,10 +329,23 @@ class SpikeLiveProcess:
                 error,
             ),
         )
-        assert fetched_exchange_info is not None
-        exchange_info = fetched_exchange_info
-        self._exchange_info = exchange_info
-        symbol_rules = self._build_symbol_rule_book(exchange_info)
+        initial_symbol_snapshot = classify_exchange_symbols(
+            metadata_exchange_info,
+            self.settings.symbols,
+            freeze_days=self.settings.delisting_freeze_days,
+        )
+        self._exchange_info = metadata_exchange_info
+        execution_exchange_info = await fetch_exchange_info_with_retry(
+            rest.get_exchange_info,
+            on_retry=lambda attempt, total, error: logger.warning(
+                "initial execution exchangeInfo retry %s/%s: %s: %s",
+                attempt,
+                total,
+                type(error).__name__,
+                error,
+            ),
+        )
+        symbol_rules = self._build_symbol_rule_book(execution_exchange_info)
         for symbol in initial_symbol_snapshot.allowed_symbols:
             require_viable_entry_notional(
                 self.settings.total_notional,
@@ -721,6 +734,7 @@ class SpikeLiveProcess:
         assert self.coordinator is not None
         assert self.gate is not None
         assert self.exchange_rest is not None
+        assert self.execution_rest is not None
         assert self.db is not None
         now_monotonic = asyncio.get_running_loop().time()
         refresh_due = self._exchange_info is None or (
@@ -753,7 +767,19 @@ class SpikeLiveProcess:
                 assert fetched is not None
                 exchange_info = fetched
                 await self.db.sync_exchange_symbols(exchange_info)
-                updated_symbol_rules = self._build_symbol_rule_book(exchange_info)
+                execution_exchange_info = await fetch_exchange_info_with_retry(
+                    self.execution_rest.get_exchange_info,
+                    on_retry=lambda attempt, total, error: logger.warning(
+                        "execution exchangeInfo retry %s/%s: %s: %s",
+                        attempt,
+                        total,
+                        type(error).__name__,
+                        error,
+                    ),
+                )
+                updated_symbol_rules = self._build_symbol_rule_book(
+                    execution_exchange_info
+                )
                 self._exchange_info = exchange_info
                 self._exchange_info_synced_monotonic = now_monotonic
             else:

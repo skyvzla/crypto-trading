@@ -13,6 +13,7 @@ UNIVERSE_SCAN_INTERVAL_SECONDS = 5 * 60
 EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_DELISTING_FREEZE_DAYS = 15
 MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
+BINANCE_USDM_METADATA_BASE_URL = "https://fapi.binance.com"
 
 
 @dataclass(frozen=True)
@@ -95,16 +96,43 @@ async def fetch_exchange_symbol_snapshot(
 ) -> ExchangeSymbolSnapshot:
     """Fetch exchangeInfo with bounded retries, then classify managed symbols."""
 
+    exchange_info = await fetch_exchange_info_with_retry(
+        fetch,
+        attempts=attempts,
+        retry_base_seconds=retry_base_seconds,
+        sleep=sleep,
+        on_retry=on_retry,
+    )
+    return classify_exchange_symbols(
+        exchange_info,
+        managed_symbols,
+        now_ms=now_ms,
+        freeze_days=freeze_days,
+    )
+
+
+async def fetch_exchange_info_with_retry(
+    fetch: Callable[[], Awaitable[dict[str, Any]]],
+    *,
+    attempts: int = 3,
+    retry_base_seconds: float = 1.0,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    on_retry: Callable[[int, int, Exception], None] | None = None,
+) -> dict[str, Any]:
+    """Fetch a structurally valid exchangeInfo payload with bounded retries."""
+
     total_attempts = max(1, attempts)
     last_error: Exception | None = None
     for attempt in range(total_attempts):
         try:
-            return classify_exchange_symbols(
-                await fetch(),
-                managed_symbols,
-                now_ms=now_ms,
-                freeze_days=freeze_days,
-            )
+            exchange_info = await fetch()
+            if not isinstance(exchange_info, dict) or not isinstance(
+                exchange_info.get("symbols"), list
+            ):
+                raise ValueError(
+                    "Binance exchangeInfo has incompatible symbol metadata"
+                )
+            return exchange_info
         except asyncio.CancelledError:
             raise
         except Exception as error:
