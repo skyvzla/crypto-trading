@@ -4,6 +4,7 @@
 虚拟时钟驱动的事件循环，确定性回测。
 """
 import logging
+from collections.abc import Iterable, Sized
 from decimal import Decimal
 from typing import Protocol, Union
 
@@ -69,7 +70,7 @@ class BacktestEngine:
     def __init__(
         self,
         strategy: Strategy,
-        events: list[Event],
+        events: Iterable[Event],
         config: BacktestConfig,
         account_id: str = 'backtest',
         symbol_rules: BinanceSymbolRuleBook | None = None,
@@ -83,11 +84,18 @@ class BacktestEngine:
         """
         self.strategy = strategy
         self.events = events
+        self._event_count_hint = len(events) if isinstance(events, Sized) else None
+        self._events_processed = 0
+        self._first_event_time: int | None = None
         self.config = config
         self.account_id = account_id
 
         # 虚拟时钟（使用 available_time，避免未来信息）
-        self.virtual_time_ms = events[0].available_time if events else 0
+        self.virtual_time_ms = (
+            events[0].available_time
+            if isinstance(events, list) and events
+            else 0
+        )
 
         # 订单管理
         self.orders: dict[str, Order] = {}
@@ -128,9 +136,17 @@ class BacktestEngine:
         Returns:
             回测结果
         """
-        logger.info(f"Backtest starting: {len(self.events)} events")
+        event_label = (
+            str(self._event_count_hint)
+            if self._event_count_hint is not None
+            else "streaming"
+        )
+        logger.info(f"Backtest starting: {event_label} events")
 
         for i, event in enumerate(self.events):
+            if self._first_event_time is None:
+                self._first_event_time = event.available_time
+            self._events_processed = i + 1
             # 1. 更新虚拟时钟（使用 available_time，避免未来信息）
             self.virtual_time_ms = event.available_time
 
@@ -172,7 +188,10 @@ class BacktestEngine:
 
             # 5. 进度打印（可选）
             if i % 10000 == 0 and i > 0:
-                logger.info(f"Progress: {i}/{len(self.events)}")
+                if self._event_count_hint is None:
+                    logger.info(f"Progress: {i} events")
+                else:
+                    logger.info(f"Progress: {i}/{self._event_count_hint}")
 
         # 6. 生成结果报告
         logger.info("Backtest completed")
@@ -473,13 +492,13 @@ class BacktestEngine:
             virtual_time_start=(
                 self.config.trading_start_ms
                 if self.config.trading_start_ms is not None
-                else (self.events[0].available_time if self.events else 0)
+                else (self._first_event_time or 0)
             ),
             virtual_time_end=self.virtual_time_ms,
             orders=self.order_records,
             fills=self.fill_records,
             positions=self.position_records,
             config=self.config,
-            events_processed=len(self.events),
+            events_processed=self._events_processed,
             audit_events=self.audit_records,
         )

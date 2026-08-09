@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Dynamic Spike Short 策略专用回测入口。"""
 import argparse
+from itertools import chain
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -14,7 +15,56 @@ from trading_platform.shared.config import BacktestConfig
 from trading_platform.strategies.spike.legacy_research import (
     LegacyScriptExitSpikeBacktestStrategy,
 )
-from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
+from trading_platform.strategies.spike.short import (
+    DynamicSpikeBacktestStrategy,
+    DynamicSpikeShortStrategy,
+)
+
+
+class NoPriorHighDynamicSpikeShortStrategy(DynamicSpikeShortStrategy):
+    """回测实验用适配器：保留信号逻辑，但不施加前高价格约束。"""
+
+    def __init__(self, *args, **kwargs):
+        # 父类要求 lookback 为正；实际比较在 _prior_high_point 中被禁用。
+        kwargs["prior_high_lookback_minutes"] = 1
+        super().__init__(*args, **kwargs)
+        self.prior_high_lookback_minutes = 0
+
+    def _prior_high_point(self, minute_start: int):
+        # 返回正价格下永远不会拦截入场的哨兵值，避免改动生产策略。
+        return Decimal("0"), minute_start
+
+    def _detect_signal(self, bar):
+        signal = super()._detect_signal(bar)
+        if signal is not None:
+            signal.prior_high = None
+            signal.prior_high_time = None
+        return signal
+
+
+class NoPriorHighDynamicSpikeBacktestStrategy(DynamicSpikeBacktestStrategy):
+    """多币种适配器的无前高过滤实验版本。"""
+
+    def __init__(
+        self,
+        symbols,
+        total_notional,
+        account=None,
+        exit_policy="execution-test-d007",
+    ):
+        self.strategies = {
+            symbol: NoPriorHighDynamicSpikeShortStrategy(
+                symbol,
+                total_notional=total_notional,
+                account=account,
+                exit_policy=exit_policy,
+            )
+            for symbol in symbols
+        }
+        self._account = account
+        self._entry_enabled = True
+        self._blocked_entry_symbols = frozenset()
+        self.active_symbol = None
 
 
 def _timestamp_ms(value: str) -> int:
@@ -79,13 +129,36 @@ def parse_args() -> argparse.Namespace:
         "--prior-high-lookback-hours",
         type=int,
         default=4,
-        help="前高过滤回看周期（小时），默认 4",
+        help="前高过滤回看周期（小时），0 表示禁用过滤，默认 4",
     )
     parser.add_argument(
         "--exchange-info",
         type=Path,
         default=None,
         help="可选 Binance exchangeInfo JSON 快照，用于 tick/step 量化",
+    )
+    parser.add_argument(
+        "--chunk-hours",
+        type=float,
+        default=24.0 * 90,
+        help="DuckDB 流式回测的时间窗口（小时）",
+    )
+    parser.add_argument(
+        "--fetch-batch-size",
+        type=int,
+        default=10_000,
+        help="每次从 DuckDB 取出的事件行数",
+    )
+    parser.add_argument(
+        "--duckdb-memory-limit",
+        default=None,
+        help="单个 DuckDB worker 的内存上限，例如 4GB",
+    )
+    parser.add_argument(
+        "--duckdb-threads",
+        type=int,
+        default=1,
+        help="单个 DuckDB worker 使用的线程数",
     )
     return parser.parse_args()
 
@@ -104,8 +177,8 @@ def main() -> None:
     if args.warmup_hours < 0:
         print("Error: --warmup-hours must not be negative", file=sys.stderr)
         raise SystemExit(2)
-    if args.prior_high_lookback_hours <= 0:
-        print("Error: --prior-high-lookback-hours must be positive", file=sys.stderr)
+    if args.prior_high_lookback_hours < 0:
+        print("Error: --prior-high-lookback-hours must not be negative", file=sys.stderr)
         raise SystemExit(2)
     warmup_hours = max(args.warmup_hours, float(args.prior_high_lookback_hours))
     load_start_ms = start_ms - int(warmup_hours * 3_600_000)
@@ -118,7 +191,11 @@ def main() -> None:
     print(f"Symbol: {args.symbol}")
     print(f"Period: {args.start} to {args.end}")
     print(f"Data source: {data_source}")
-    print(f"Prior high lookback: {args.prior_high_lookback_hours}h")
+    prior_high_label = (
+        "disabled" if args.prior_high_lookback_hours == 0
+        else f"{args.prior_high_lookback_hours}h"
+    )
+    print(f"Prior high lookback: {prior_high_label}")
     print(f"Warmup: {warmup_hours:g}h")
 
     loader = BacktestDataLoader(
@@ -135,13 +212,18 @@ def main() -> None:
         duckdb_path=args.duckdb_path,
         bar1s_time_shift_ms=bar1s_time_shift_ms,
     )
-    events = loader.load_all()
-    if not events:
+    event_iter = loader.iter_all(
+        chunk_hours=args.chunk_hours,
+        fetch_batch_size=args.fetch_batch_size,
+        duckdb_memory_limit=args.duckdb_memory_limit,
+        duckdb_threads=args.duckdb_threads,
+    )
+    try:
+        first_event = next(event_iter)
+    except StopIteration:
         print("Error: no market data found in the requested range", file=sys.stderr)
         raise SystemExit(1)
-    if not any(event.available_time >= start_ms for event in events):
-        print("Error: no events in the trading period", file=sys.stderr)
-        raise SystemExit(1)
+    events = chain((first_event,), event_iter)
 
     output_path = Path(args.output)
     config = BacktestConfig(
@@ -150,11 +232,27 @@ def main() -> None:
         trading_start_ms=start_ms,
         limit_fill_fraction_per_bar=args.limit_fill_fraction,
         bar1s_time_shift_ms=bar1s_time_shift_ms,
-        prior_high_lookback_minutes=prior_high_lookback_minutes,
+        # BacktestConfig 保留历史上的正数校验；无过滤实验先用合法值构造，
+        # 再把实际回测口径写入报告元数据，不影响共享配置模型。
+        prior_high_lookback_minutes=(
+            prior_high_lookback_minutes or 1
+        ),
     )
+    if args.prior_high_lookback_hours == 0:
+        config.prior_high_lookback_minutes = 0
     if args.exit_policy == "legacy-script":
         strategy = LegacyScriptExitSpikeBacktestStrategy(
             symbols=[args.symbol], total_notional=args.total_notional
+        )
+    elif args.prior_high_lookback_hours == 0:
+        strategy = NoPriorHighDynamicSpikeBacktestStrategy(
+            symbols=[args.symbol],
+            total_notional=args.total_notional,
+            exit_policy=(
+                "candidate-v1"
+                if args.exit_policy == "candidate-v1"
+                else "execution-test-d007"
+            ),
         )
     else:
         strategy = DynamicSpikeBacktestStrategy(

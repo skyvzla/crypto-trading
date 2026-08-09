@@ -53,4 +53,4 @@ def test_spike_loader_rejects_missing_required_dataset(tmp_path):
     )
 
     with pytest.raises(ValueError, match="required aggTrade"):
-        loader.load_all()
+        list(loader.iter_all())

@@ -56,7 +56,7 @@ def test_duckdb_loader_reads_candles_without_mutating_archive(tmp_path):
         required_kline_intervals=["1m", "5m"],
     )
 
-    events = loader.load_all()
+    events = list(loader.iter_all())
 
     assert len(events) == 3
     bar = next(event for event in events if isinstance(event, Bar1s))
@@ -76,6 +76,46 @@ def test_duckdb_loader_reads_candles_without_mutating_archive(tmp_path):
         check.close()
 
 
+def test_duckdb_stream_matches_materialized_event_order(tmp_path):
+    archive = tmp_path / "history.duckdb"
+    _write_candle_archive(archive)
+    kwargs = {
+        "data_dir": "unused",
+        "duckdb_path": str(archive),
+        "symbols": ["AKEUSDT"],
+        "start_ms": 0,
+        "end_ms": 400_000,
+        "require_aggtrades": True,
+        "required_kline_intervals": ["1m", "5m"],
+    }
+
+    materialized = list(BacktestDataLoader(**kwargs).iter_all())
+    streamed = list(
+        BacktestDataLoader(**kwargs).iter_all(
+            chunk_hours=0.0003,
+            fetch_batch_size=1,
+        )
+    )
+
+    assert streamed == materialized
+
+
+def test_duckdb_stream_rejects_missing_required_dataset_before_yield(tmp_path):
+    archive = tmp_path / "history.duckdb"
+    _write_candle_archive(archive)
+    loader = BacktestDataLoader(
+        data_dir="unused",
+        duckdb_path=str(archive),
+        symbols=["AKEUSDT"],
+        start_ms=0,
+        end_ms=400_000,
+        required_kline_intervals=["15m"],
+    )
+
+    with pytest.raises(ValueError, match="Missing required 15m"):
+        list(loader.iter_all())
+
+
 def test_duckdb_loader_applies_explicit_one_second_time_shift(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
@@ -88,7 +128,7 @@ def test_duckdb_loader_applies_explicit_one_second_time_shift(tmp_path):
         bar1s_time_shift_ms=8_000,
     )
 
-    events = loader.load_all()
+    events = list(loader.iter_all())
     bar = next(event for event in events if isinstance(event, Bar1s))
 
     assert bar.timestamp == 9_000
@@ -110,7 +150,7 @@ def test_duckdb_loader_rejects_incompatible_archive(tmp_path):
     )
 
     with pytest.raises(ValueError, match="candles missing columns"):
-        loader.load_all()
+        list(loader.iter_all())
 
 
 def test_duckdb_loader_rejects_invalid_one_second_duration(tmp_path):
@@ -135,4 +175,4 @@ def test_duckdb_loader_rejects_invalid_one_second_duration(tmp_path):
     )
 
     with pytest.raises(ValueError, match="invalid 1s candle duration"):
-        loader.load_all()
+        list(loader.iter_all())

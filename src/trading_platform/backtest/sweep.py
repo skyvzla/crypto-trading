@@ -1,0 +1,883 @@
+#!/usr/bin/env python3
+"""可复现的 Dynamic Spike Short 参数实验编排器。"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import itertools
+import json
+import logging
+import math
+import os
+import shlex
+import subprocess
+import sys
+import tomllib
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from datetime import timedelta
+from pathlib import Path
+from typing import Any
+
+import duckdb
+import pandas as pd
+import psycopg
+
+from trading_platform.shared.symbol_universe_query import (
+    EFFECTIVE_SYMBOL_UNIVERSE_SQL,
+)
+
+logger = logging.getLogger(__name__)
+
+PARAMETER_FLAGS = {
+    "total_notional": "--total-notional",
+    "exit_policy": "--exit-policy",
+    "prior_high_lookback_hours": "--prior-high-lookback-hours",
+    "limit_fill_fraction": "--limit-fill-fraction",
+    "warmup_hours": "--warmup-hours",
+    "bar1s_time_shift_hours": "--bar1s-time-shift-hours",
+}
+SUPPORTED_MATRIX_KEYS = set(PARAMETER_FLAGS)
+EXECUTION_FLAGS = {
+    "chunk_hours": "--chunk-hours",
+    "fetch_batch_size": "--fetch-batch-size",
+    "duckdb_memory_limit": "--duckdb-memory-limit",
+    "duckdb_threads": "--duckdb-threads",
+}
+ESTIMATED_PYTHON_EVENT_BYTES = 1_024
+ESTIMATED_DUCKDB_ROW_BYTES = 160
+WORKER_FIXED_OVERHEAD_BYTES = 512 * 1024**2
+
+
+@dataclass(frozen=True)
+class RunSpec:
+    run_id: str
+    symbol: str
+    params: dict[str, Any]
+
+
+def _timestamp_ms(value: str) -> int:
+    from datetime import datetime, timezone
+
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp() * 1000)
+
+
+def _dsn_from_environment() -> str:
+    return (
+        f"postgresql://{os.getenv('DB_USER', 'postgres')}:{os.getenv('DB_PASSWORD', 'postgres')}"
+        f"@{os.getenv('DB_HOST', 'localhost')}:{os.getenv('DB_PORT', '5432')}"
+        f"/{os.getenv('DB_DATABASE', 'trading_platform')}"
+    )
+
+
+def _allowed_symbols(dsn: str, *, freeze_days: int, strategy_id: str) -> set[str]:
+    with psycopg.connect(dsn) as connection:
+        # 交易对筛选只允许读取主库；即使后续误加 SQL，也不能写入。
+        connection.execute("SET TRANSACTION READ ONLY")
+        with connection.cursor() as cursor:
+            cursor.execute(
+                EFFECTIVE_SYMBOL_UNIVERSE_SQL,
+                (timedelta(days=freeze_days), strategy_id, strategy_id),
+            )
+            return {str(row[0]).strip().upper() for row in cursor.fetchall()}
+
+
+def _archive_coverage(
+    duckdb_path: str, *, start_ms: int, end_ms: int
+) -> dict[str, dict[str, tuple[int, int, int]]]:
+    connection = duckdb.connect(duckdb_path, read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT symbol, timeframe, min(epoch_ms(open_time)), "
+            "max(epoch_ms(close_time)), count(*) FROM main.candles "
+            "WHERE timeframe IN ('1s', '1m', '5m', '15m') "
+            "AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ? "
+            "GROUP BY symbol, timeframe ORDER BY symbol, timeframe",
+            [start_ms, end_ms],
+        ).fetchall()
+        coverage: dict[str, dict[str, tuple[int, int, int]]] = {}
+        for symbol, timeframe, first_ms, last_ms, count in rows:
+            coverage.setdefault(str(symbol).strip().upper(), {})[
+                str(timeframe)
+            ] = (int(first_ms), int(last_ms), int(count))
+        return coverage
+    finally:
+        connection.close()
+
+
+def _estimate_monthly_memory(
+    duckdb_path: str,
+    *,
+    symbols: list[str],
+    start_ms: int,
+    end_ms: int,
+    chunk_hours: float,
+    fetch_batch_size: int,
+) -> pd.DataFrame:
+    """按币种月份估算全量物化和流式窗口的内存量级。"""
+    placeholders = ", ".join("?" for _ in symbols)
+    connection = duckdb.connect(duckdb_path, read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT symbol, date_trunc('month', timezone('UTC', open_time)) AS month, "
+            "count(*) FILTER (WHERE timeframe = '1s') AS rows_1s, "
+            "count(*) AS event_rows FROM main.candles "
+            f"WHERE symbol IN ({placeholders}) "
+            "AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ? "
+            "AND timeframe IN ('1s', '1m', '5m', '15m') "
+            "GROUP BY symbol, month ORDER BY symbol, month",
+            [*symbols, start_ms, end_ms],
+        ).fetchall()
+    finally:
+        connection.close()
+    records = []
+    for symbol, month, rows_1s, event_rows in rows:
+        event_rows = int(event_rows)
+        chunk_fraction = max(float(chunk_hours) / (24 * 30), 1 / (24 * 30))
+        chunk_rows = max(1, math.ceil(event_rows * chunk_fraction))
+        materialized = event_rows * ESTIMATED_PYTHON_EVENT_BYTES
+        stream_peak = (
+            chunk_rows * ESTIMATED_DUCKDB_ROW_BYTES
+            + fetch_batch_size * ESTIMATED_PYTHON_EVENT_BYTES
+            + WORKER_FIXED_OVERHEAD_BYTES
+        )
+        records.append({
+            "symbol": str(symbol), "month": str(month),
+            "rows_1s": int(rows_1s), "event_rows": event_rows,
+            "estimated_materialized_gb": materialized / 1024**3,
+            "estimated_stream_peak_gb": stream_peak / 1024**3,
+            "chunk_hours": float(chunk_hours),
+            "estimate_note": "1KiB/Python event; 160B/DuckDB row; +512MiB worker",
+        })
+    return pd.DataFrame(records)
+
+
+def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    universe = config.get("universe", {})
+    requested = {
+        str(symbol).strip().upper()
+        for symbol in universe.get("symbols", [])
+        if str(symbol).strip()
+    }
+    excluded = {
+        str(symbol).strip().upper()
+        for symbol in universe.get("exclude_symbols", ["ZECUSDT"])
+    }
+    mode = universe.get("mode", "database")
+    if mode not in {"database", "explicit", "all-archived"}:
+        raise ValueError("universe.mode must be database, explicit, or all-archived")
+
+    start_ms = _timestamp_ms(config["start"])
+    end_ms = _timestamp_ms(config["end"])
+    coverage = _archive_coverage(
+        config["duckdb_path"], start_ms=start_ms, end_ms=end_ms
+    )
+    archived = {
+        symbol for symbol, timeframes in coverage.items() if "1s" in timeframes
+    }
+    allowed = _allowed_symbols(
+        config.get("database_dsn") or _dsn_from_environment(),
+        freeze_days=int(universe.get("freeze_days", 15)),
+        strategy_id=str(universe.get("strategy_id", "spike_short")),
+    )
+    candidates = requested if mode == "explicit" else (archived if mode == "all-archived" else allowed)
+    selected = sorted((candidates & allowed & archived) - excluded)
+
+    rows = []
+    tolerance_ms = int(float(universe.get("coverage_tolerance_hours", 24)) * 3_600_000)
+    for symbol in sorted(candidates | allowed | archived | excluded):
+        timeframes = coverage.get(symbol, {})
+        reasons = []
+        if symbol not in allowed:
+            reasons.append("database_disabled_or_not_tradeable")
+        if symbol not in archived:
+            reasons.append("missing_1s_archive")
+        if symbol in excluded:
+            reasons.append("explicitly_excluded")
+        one_second = timeframes.get("1s")
+        missing_required = [
+            timeframe for timeframe in ("1m", "5m", "15m")
+            if timeframe not in timeframes
+        ]
+        data_incomplete = (
+            one_second is None
+            or bool(missing_required)
+            or one_second[0] > start_ms + tolerance_ms
+            or one_second[1] < end_ms - tolerance_ms
+        )
+        rows.append({
+            "symbol": symbol,
+            "database_allowed": symbol in allowed,
+            "has_1s_archive": symbol in archived,
+            "selected": symbol in selected,
+            "exclude_reason": ";".join(reasons),
+            "has_1m": "1m" in timeframes,
+            "has_5m": "5m" in timeframes,
+            "has_15m": "15m" in timeframes,
+            "first_1s_ms": None if one_second is None else one_second[0],
+            "last_1s_ms": None if one_second is None else one_second[1],
+            "data_incomplete": data_incomplete,
+        })
+    if not selected:
+        raise RuntimeError("no symbols remain after database/archive universe filtering")
+    return selected, rows
+
+
+def _memory_bytes(value: str) -> int:
+    text = str(value).strip().upper()
+    units = {"B": 1, "KB": 1024, "MB": 1024**2, "GB": 1024**3}
+    for unit in ("GB", "MB", "KB", "B"):
+        multiplier = units[unit]
+        if text.endswith(unit):
+            return int(float(text[:-len(unit)]) * multiplier)
+    raise ValueError(f"unsupported memory size: {value}")
+
+
+def _available_memory_bytes() -> int | None:
+    try:
+        with open("/proc/meminfo", encoding="ascii") as stream:
+            for line in stream:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
+
+
+def _worker_memory_plan(
+    requested: int | None,
+    minimum_memory_limit: str,
+    budget_percent: int,
+    *,
+    available_memory_bytes: int | None = None,
+) -> tuple[int, str]:
+    if requested is not None and requested <= 0:
+        raise ValueError("execution.workers must be positive")
+    if not 1 <= budget_percent <= 95:
+        raise ValueError("execution.memory_budget_percent must be 1..95")
+    minimum_per_worker = _memory_bytes(minimum_memory_limit)
+    if minimum_per_worker < 4 * 1024**3:
+        raise ValueError("execution.duckdb_memory_limit must be at least 4GB per worker")
+    available = available_memory_bytes
+    if available is None:
+        available = _available_memory_bytes()
+    if available is None:
+        return requested or 1, minimum_memory_limit
+    budget = available * budget_percent // 100
+    minimum_process = minimum_per_worker + WORKER_FIXED_OVERHEAD_BYTES
+    max_workers = budget // minimum_process
+    if max_workers < 1:
+        raise RuntimeError(
+            "available memory cannot provide the minimum 4GB DuckDB limit "
+            "plus worker overhead"
+        )
+    if requested is not None and requested > max_workers:
+        required_gib = requested * minimum_process / 1024**3
+        budget_gib = budget / 1024**3
+        raise RuntimeError(
+            f"--workers {requested} requires at least {required_gib:.1f} GiB "
+            f"within the worker budget, but only {budget_gib:.1f} GiB is "
+            f"available; maximum safe workers: {max_workers}"
+        )
+    workers = max_workers if requested is None else requested
+    duckdb_bytes = max(
+        minimum_per_worker,
+        budget // workers - WORKER_FIXED_OVERHEAD_BYTES,
+    )
+    return workers, f"{duckdb_bytes // 1024**2}MB"
+
+
+def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
+    fixed = dict(config.get("fixed", {}))
+    matrix = dict(config.get("matrix", {}))
+    unknown = set(matrix) - SUPPORTED_MATRIX_KEYS
+    if unknown:
+        raise ValueError(f"unsupported matrix parameter(s): {', '.join(sorted(unknown))}")
+    if "total_notional" not in fixed and "total_notional" not in matrix:
+        raise ValueError("fixed or matrix must define total_notional")
+    keys = sorted(matrix)
+    values = []
+    for key in keys:
+        value = matrix[key]
+        expanded = value if isinstance(value, list) else [value]
+        if not expanded:
+            raise ValueError(f"matrix parameter {key} must not be empty")
+        values.append(expanded)
+    specs = []
+    for symbol, combination in itertools.product(symbols, itertools.product(*values) if values else [()]):
+        params = {**fixed, **dict(zip(keys, combination))}
+        identity = json.dumps({
+            "symbol": symbol,
+            "params": params,
+            "start": config.get("start"),
+            "end": config.get("end"),
+            "duckdb_path": config.get("duckdb_path"),
+        }, sort_keys=True, default=str)
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
+        specs.append(RunSpec(f"{digest}_{symbol}", symbol, params))
+    return specs
+
+
+def _run_one(spec: RunSpec, config: dict[str, Any], output_root: Path) -> dict[str, Any]:
+    run_dir = output_root / "runs" / spec.run_id
+    summary_path = run_dir / "summary.json"
+    if config.get("execution", {}).get("resume", True) and summary_path.exists():
+        summary = json.loads(summary_path.read_text())
+        return _summary_row(spec, summary, "resumed")
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    params = {**spec.params, **config.get("execution", {})}
+    command = [sys.executable, "-m", "trading_platform.backtest.run_spike_short",
+               "--symbol", spec.symbol, "--start", config["start"], "--end", config["end"],
+               "--duckdb-path", config["duckdb_path"], "--output", str(run_dir)]
+    for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
+        if key in params:
+            command.extend([flag, str(params[key])])
+    completed = subprocess.run(command, capture_output=True, text=True)
+    (run_dir / "command.txt").write_text(shlex.join(command) + "\n")
+    (run_dir / "stdout.log").write_text(completed.stdout)
+    (run_dir / "stderr.log").write_text(completed.stderr)
+    if completed.returncode != 0 or not summary_path.exists():
+        return {
+            "run_id": spec.run_id, "symbol": spec.symbol, "status": "failed",
+            "returncode": completed.returncode,
+            "parameters": json.dumps(spec.params, sort_keys=True, default=str),
+            "trades": 0, "wins": 0, "win_rate": 0.0, "net_pnl": 0.0,
+            "total_profit": 0.0, "total_loss": 0.0, "commission": 0.0,
+            "max_drawdown": 0.0, "profit_factor": 0.0,
+        }
+    return _summary_row(spec, json.loads(summary_path.read_text()), "ok")
+
+
+def _summary_row(spec: RunSpec, summary: dict[str, Any], status: str) -> dict[str, Any]:
+    positions = summary.get("positions", {})
+    pnl = summary.get("pnl", {})
+    return {
+        "run_id": spec.run_id, "symbol": spec.symbol, "status": status,
+        "parameters": json.dumps(spec.params, sort_keys=True, default=str),
+        "trades": positions.get("total", 0), "wins": positions.get("profitable", 0),
+        "win_rate": positions.get("win_rate", 0),
+        "net_pnl": pnl.get("net_pnl", 0), "total_profit": pnl.get("total_profit", 0),
+        "total_loss": pnl.get("total_loss", 0),
+        "commission": pnl.get("total_commission", 0),
+        "max_drawdown": pnl.get("max_drawdown", 0),
+        "profit_factor": pnl.get("profit_factor", 0),
+    }
+
+
+def _annotate_collisions(trades: pd.DataFrame, *, tolerance_ms: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if trades.empty:
+        return trades, pd.DataFrame()
+    trades = trades.copy()
+    for column in ("signal_time", "entry_time", "exit_time"):
+        trades[column] = pd.to_numeric(trades.get(column), errors="coerce")
+    trades["collision_group_id"] = ""
+    trades["collision_size"] = 1
+    trades["collision_independent_pnl"] = trades["net_pnl"]
+    trades["collision_conservative_pnl"] = trades["net_pnl"]
+    trades["collision_status"] = "独立"
+    records = []
+    for params, group in trades.groupby("parameters", dropna=False):
+        ordered = group.sort_values(["signal_time", "entry_time", "symbol"])
+        active: list[tuple[int, int, int]] = []
+        groups: list[list[int]] = []
+        for index, row in ordered.iterrows():
+            start = int(row["signal_time"] if pd.notna(row["signal_time"]) else row["entry_time"])
+            end = int(row["exit_time"] if pd.notna(row["exit_time"]) else start)
+            overlaps = [item for item in active if item[1] + tolerance_ms >= start]
+            if overlaps:
+                collision = [item[2] for item in overlaps] + [index]
+                merged = next((item for item in groups if any(i in item for i in collision)), None)
+                if merged is None:
+                    groups.append(collision)
+                else:
+                    merged.extend(i for i in collision if i not in merged)
+            active = [item for item in active if item[1] + tolerance_ms >= start]
+            active.append((start, end, index))
+        for number, indexes in enumerate(groups, 1):
+            subset = trades.loc[indexes]
+            if subset["symbol"].nunique() < 2:
+                continue
+            group_id = f"collision_{hashlib.sha1(str((params, indexes)).encode()).hexdigest()[:10]}"
+            conservative = float(subset["net_pnl"].min())
+            independent = float(subset["net_pnl"].sum())
+            trades.loc[indexes, "collision_group_id"] = group_id
+            trades.loc[indexes, "collision_size"] = len(subset)
+            trades.loc[indexes, "collision_independent_pnl"] = independent
+            trades.loc[indexes, "collision_conservative_pnl"] = conservative
+            trades.loc[indexes, "collision_status"] = "多币种竞争"
+            records.append({
+                "collision_group_id": group_id, "parameters": params,
+                "symbols": ",".join(sorted(subset["symbol"].astype(str))),
+                "trade_count": len(subset), "independent_pnl": independent,
+                "conservative_pnl": conservative,
+            })
+    return trades, pd.DataFrame(records)
+
+
+def _find_simultaneous_signals(
+    signals: pd.DataFrame, *, tolerance_ms: int
+) -> pd.DataFrame:
+    if signals.empty:
+        return pd.DataFrame()
+    records = []
+    for params, group in signals.groupby("parameters", dropna=False):
+        ordered = group.sort_values(["event_time", "symbol"])
+        current: list[int] = []
+        group_end = -1
+        for index, row in ordered.iterrows():
+            event_time = int(row["event_time"])
+            if current and event_time > group_end + tolerance_ms:
+                subset = ordered.loc[current]
+                if subset["symbol"].nunique() > 1:
+                    records.append({
+                        "parameters": params,
+                        "start_time": int(subset["event_time"].min()),
+                        "end_time": int(subset["event_time"].max()),
+                        "signal_count": len(subset),
+                        "symbols": ",".join(sorted(subset["symbol"].astype(str).unique())),
+                    })
+                current = []
+            current.append(index)
+            group_end = max(group_end, event_time)
+        if current:
+            subset = ordered.loc[current]
+            if subset["symbol"].nunique() > 1:
+                records.append({
+                    "parameters": params,
+                    "start_time": int(subset["event_time"].min()),
+                    "end_time": int(subset["event_time"].max()),
+                    "signal_count": len(subset),
+                    "symbols": ",".join(sorted(subset["symbol"].astype(str).unique())),
+                })
+    return pd.DataFrame(records)
+
+
+def _write_trade_breakdowns(
+    trades: pd.DataFrame, output_root: Path, *, pnl_split_usdt: float
+) -> None:
+    """统一输出持仓时间和盈亏金额分档，避免每次实验手工统计。"""
+    if trades.empty:
+        pd.DataFrame(columns=["bucket", "trades", "wins", "win_rate", "net_pnl"]).to_csv(
+            output_root / "holding_bucket_summary.csv", index=False
+        )
+        pd.DataFrame(columns=["bucket", "trades", "net_pnl"]).to_csv(
+            output_root / "pnl_bucket_summary.csv", index=False
+        )
+        return
+    frame = trades.copy()
+    holding_seconds = (
+        pd.to_numeric(frame["exit_time"], errors="coerce")
+        - pd.to_numeric(frame["entry_time"], errors="coerce")
+    ) / 1000
+    frame["holding_seconds"] = holding_seconds
+    frame["holding_bucket"] = pd.cut(
+        holding_seconds,
+        bins=[-1, 60, 300, 900, 3600, 14400, float("inf")],
+        labels=["<1m", "1-5m", "5-15m", "15-60m", "1-4h", ">4h"],
+    ).astype("string")
+    frame["net_pnl"] = pd.to_numeric(frame["net_pnl"], errors="coerce").fillna(0)
+    threshold = float(pnl_split_usdt)
+    frame["pnl_bucket"] = f"亏损绝对值<{threshold:g}U"
+    frame.loc[frame["net_pnl"] >= 0, "pnl_bucket"] = f"盈利0-{threshold:g}U"
+    frame.loc[frame["net_pnl"] > threshold, "pnl_bucket"] = f"盈利>{threshold:g}U"
+    frame.loc[frame["net_pnl"] <= -threshold, "pnl_bucket"] = f"亏损绝对值>={threshold:g}U"
+
+    def grouped(column: str) -> pd.DataFrame:
+        result = frame.groupby(["parameters", column], dropna=False).agg(
+            trades=("net_pnl", "size"),
+            wins=("net_pnl", lambda values: int((values > 0).sum())),
+            net_pnl=("net_pnl", "sum"),
+        ).reset_index().rename(columns={column: "bucket"})
+        result["win_rate"] = result["wins"] / result["trades"]
+        return result[["parameters", "bucket", "trades", "wins", "win_rate", "net_pnl"]]
+
+    grouped("holding_bucket").to_csv(output_root / "holding_bucket_summary.csv", index=False)
+    grouped("pnl_bucket").to_csv(output_root / "pnl_bucket_summary.csv", index=False)
+
+
+def _attach_breakout_context(
+    trades: pd.DataFrame,
+    *,
+    duckdb_path: str,
+    windows_hours: list[int],
+) -> pd.DataFrame:
+    """从入场前完整1m K线提取上涨周期与3d/7d箱体指标。"""
+    if trades.empty:
+        return trades
+    frame = trades.copy()
+    entry_times = pd.to_numeric(frame["entry_time"], errors="coerce")
+    entry_prices = pd.to_numeric(frame["entry_price"], errors="coerce")
+    connection = duckdb.connect(duckdb_path, read_only=True)
+    cache: dict[tuple[str, int], list[tuple[int, int, float, float]]] = {}
+    calculation_windows = sorted({4, *windows_hours})
+    max_hours = max([168, *calculation_windows])
+    try:
+        for index, row in frame.iterrows():
+            if pd.isna(entry_times.loc[index]) or pd.isna(entry_prices.loc[index]):
+                continue
+            entry_time = int(entry_times.loc[index])
+            entry_price = float(entry_prices.loc[index])
+            symbol = str(row["symbol"])
+            key = (symbol, entry_time)
+            candles = cache.get(key)
+            if candles is None:
+                candles = [
+                    (int(open_time), int(close_time), float(low), float(high))
+                    for open_time, close_time, low, high in connection.execute(
+                        "SELECT epoch_ms(open_time), epoch_ms(close_time), low, high "
+                        "FROM main.candles WHERE symbol = ? AND timeframe = '1m' "
+                        "AND epoch_ms(close_time) >= ? AND epoch_ms(close_time) < ? "
+                        "ORDER BY close_time",
+                        [symbol, entry_time - max_hours * 3_600_000, entry_time],
+                    ).fetchall()
+                ]
+                cache[key] = candles
+            for hours in calculation_windows:
+                values = [item for item in candles if item[1] >= entry_time - hours * 3_600_000]
+                valid = len(values) >= math.floor(hours * 60 * 0.95)
+                frame.at[index, f"low_{hours}h_valid"] = valid
+                if not values:
+                    continue
+                low_candle = min(values, key=lambda item: (item[2], item[0]))
+                frame.at[index, f"low_{hours}h"] = low_candle[2]
+                frame.at[index, f"low_{hours}h_time"] = low_candle[0]
+                frame.at[index, f"low_{hours}h_age_hours"] = (
+                    entry_time - low_candle[0]
+                ) / 3_600_000
+                frame.at[index, f"rise_from_{hours}h_low"] = (
+                    entry_price / low_candle[2] - 1 if low_candle[2] > 0 else math.nan
+                )
+
+            low_4h = frame.at[index, "low_4h"] if "low_4h" in frame else math.nan
+            for days in (3, 7):
+                values = [item for item in candles if item[1] >= entry_time - days * 86_400_000]
+                valid = len(values) >= math.floor(days * 24 * 60 * 0.95)
+                frame.at[index, f"box_{days}d_valid"] = valid
+                if not values:
+                    continue
+                box_low = min(item[2] for item in values)
+                box_high = max(item[3] for item in values)
+                frame.at[index, f"box_{days}d_low"] = box_low
+                frame.at[index, f"box_{days}d_high"] = box_high
+                if pd.notna(low_4h) and box_low > 0:
+                    frame.at[index, f"low_4h_to_{days}d_low"] = low_4h / box_low - 1
+                    span = box_high - box_low
+                    frame.at[index, f"low_4h_{days}d_position"] = (
+                        (low_4h - box_low) / span if span > 0 else 0.0
+                    )
+    finally:
+        connection.close()
+    return frame
+
+
+def _write_breakout_summaries(
+    trades: pd.DataFrame,
+    output_root: Path,
+    *,
+    windows_hours: list[int],
+    proximity_percentages: list[float],
+) -> None:
+    if trades.empty:
+        pd.DataFrame().to_csv(output_root / "breakout_window_summary.csv", index=False)
+        pd.DataFrame().to_csv(output_root / "box_position_summary.csv", index=False)
+        pd.DataFrame().to_csv(output_root / "box_proximity_summary.csv", index=False)
+        return
+    window_rows = []
+    for params, group in trades.groupby("parameters", dropna=False):
+        for hours in windows_hours:
+            valid = group[group.get(f"low_{hours}h_valid", False) == True]  # noqa: E712
+            window_rows.append({
+                "parameters": params, "window_hours": hours,
+                "valid_trades": len(valid),
+                "wins": int((valid["net_pnl"] > 0).sum()) if not valid.empty else 0,
+                "win_rate": float((valid["net_pnl"] > 0).mean()) if not valid.empty else math.nan,
+                "net_pnl": float(valid["net_pnl"].sum()) if not valid.empty else 0.0,
+                "median_low_age_hours": float(valid[f"low_{hours}h_age_hours"].median()) if not valid.empty else math.nan,
+                "median_rise_from_low": float(valid[f"rise_from_{hours}h_low"].median()) if not valid.empty else math.nan,
+            })
+    pd.DataFrame(window_rows).to_csv(output_root / "breakout_window_summary.csv", index=False)
+
+    position_rows = []
+    proximity_rows = []
+    for params, group in trades.groupby("parameters", dropna=False):
+        for days in (3, 7):
+            position_column = f"low_4h_{days}d_position"
+            distance_column = f"low_4h_to_{days}d_low"
+            valid = group[group.get(f"box_{days}d_valid", False) == True].copy()  # noqa: E712
+            if position_column in valid:
+                valid["box_position"] = pd.cut(
+                    valid[position_column],
+                    bins=[-math.inf, 0.2, 0.5, 0.8, math.inf],
+                    labels=["bottom_20", "20_50", "50_80", "top_20"],
+                ).astype("string")
+                for bucket, subset in valid.groupby("box_position", dropna=False):
+                    position_rows.append({
+                        "parameters": params, "box_days": days, "position": bucket,
+                        "trades": len(subset), "wins": int((subset["net_pnl"] > 0).sum()),
+                        "win_rate": float((subset["net_pnl"] > 0).mean()),
+                        "net_pnl": float(subset["net_pnl"].sum()),
+                    })
+            if distance_column in valid:
+                for threshold in proximity_percentages:
+                    subset = valid[valid[distance_column] <= threshold / 100]
+                    proximity_rows.append({
+                        "parameters": params, "box_days": days,
+                        "threshold_percent": threshold, "trades": len(subset),
+                        "wins": int((subset["net_pnl"] > 0).sum()),
+                        "win_rate": float((subset["net_pnl"] > 0).mean()) if not subset.empty else math.nan,
+                        "net_pnl": float(subset["net_pnl"].sum()),
+                    })
+    pd.DataFrame(position_rows).to_csv(output_root / "box_position_summary.csv", index=False)
+    pd.DataFrame(proximity_rows).to_csv(output_root / "box_proximity_summary.csv", index=False)
+
+
+def _parameter_summary(
+    comparison: pd.DataFrame,
+    collisions: pd.DataFrame,
+    signal_collisions: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    successful = comparison[comparison["status"].isin(["ok", "resumed"])].copy()
+    if successful.empty:
+        return pd.DataFrame()
+    summary = successful.groupby("parameters", dropna=False).agg(
+        runs=("run_id", "size"),
+        symbols=("symbol", "nunique"),
+        trades=("trades", "sum"),
+        wins=("wins", "sum"),
+        net_pnl=("net_pnl", "sum"),
+        total_profit=("total_profit", "sum"),
+        total_loss=("total_loss", "sum"),
+        commission=("commission", "sum"),
+    ).reset_index()
+    summary["win_rate"] = summary["wins"] / summary["trades"].replace(0, math.nan)
+    summary["profit_factor"] = summary["total_profit"] / summary["total_loss"].replace(0, math.nan)
+    summary["collision_groups"] = 0
+    summary["collision_trades"] = 0
+    summary["simultaneous_signal_groups"] = 0
+    summary["conservative_net_pnl"] = summary["net_pnl"]
+    if not collisions.empty:
+        collision_totals = collisions.groupby("parameters").agg(
+            collision_groups=("collision_group_id", "nunique"),
+            collision_trades=("trade_count", "sum"),
+            collision_independent_pnl=("independent_pnl", "sum"),
+            collision_conservative_pnl=("conservative_pnl", "sum"),
+        ).reset_index()
+        summary = summary.drop(columns=["collision_groups", "collision_trades"]).merge(
+            collision_totals, on="parameters", how="left"
+        )
+        summary[["collision_groups", "collision_trades"]] = summary[
+            ["collision_groups", "collision_trades"]
+        ].fillna(0).astype(int)
+        summary["conservative_net_pnl"] = (
+            summary["net_pnl"]
+            - summary["collision_independent_pnl"].fillna(0)
+            + summary["collision_conservative_pnl"].fillna(0)
+        )
+    if signal_collisions is not None and not signal_collisions.empty:
+        counts = signal_collisions.groupby("parameters").size().rename(
+            "simultaneous_signal_groups"
+        ).reset_index()
+        summary = summary.drop(columns=["simultaneous_signal_groups"]).merge(
+            counts, on="parameters", how="left"
+        )
+        summary["simultaneous_signal_groups"] = summary[
+            "simultaneous_signal_groups"
+        ].fillna(0).astype(int)
+    return summary.sort_values("net_pnl", ascending=False)
+
+
+def _write_report(
+    output_root: Path,
+    summary: pd.DataFrame,
+    *,
+    run_count: int,
+    workers: int,
+    duckdb_memory_limit: str,
+) -> None:
+    lines = [
+        "# Spike 参数对比回测",
+        "",
+        f"- 回测任务：{run_count}",
+        f"- 实际 worker：{workers}",
+        f"- 每 worker DuckDB 内存上限：{duckdb_memory_limit}",
+        "- 行情：DuckDB/Parquet 只读流式窗口",
+        "- 交易对：PostgreSQL 主库只读有效集合与历史归档集合的交集",
+        "- conservative_net_pnl：每个多币种冲突组仅保留最低盈亏后的保守结果",
+        "",
+    ]
+    if not summary.empty:
+        display_columns = [
+            "parameters", "symbols", "trades", "win_rate", "net_pnl",
+            "collision_groups", "conservative_net_pnl",
+        ]
+        lines.extend(["## 参数汇总", "", "| " + " | ".join(display_columns) + " |"])
+        lines.append("|" + "|".join(["---"] * len(display_columns)) + "|")
+        for _, row in summary.iterrows():
+            lines.append("| " + " | ".join(str(row[column]) for column in display_columns) + " |")
+        lines.append("")
+    lines.extend([
+        "## 复核文件", "",
+        "- `parameter_summary.csv`：参数组合总体结果。",
+        "- `comparison.csv`：参数组合按币种的执行结果。",
+        "- `all_trades.csv`：逐笔买卖点、盈亏及冲突标记。",
+        "- `collisions.csv`：多币种同时或重叠交易组。",
+        "- `signal_collisions.csv`：同一秒附近触发的多币种信号组。",
+        "- `holding_bucket_summary.csv`：持仓周期分档。",
+        "- `pnl_bucket_summary.csv`：输赢金额分档。",
+        "- `universe.csv`：交易对纳入和排除原因。",
+        "- `memory_estimate.csv`：按币种月份估算的全量与流式内存。",
+    ])
+    (output_root / "report.md").write_text("\n".join(lines) + "\n")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Dynamic Spike 参数矩阵流式回测")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="强制 worker 数；内存不足时报错，不传时按可用内存自动计算",
+    )
+    args = parser.parse_args(argv)
+    config = tomllib.loads(args.config.read_text())
+    config["duckdb_path"] = str(config.get("duckdb_path", "data/market/history.duckdb"))
+    output_root = Path(config.get("output", f"reports/{config.get('name', 'spike_sweep')}"))
+    symbols, universe_rows = resolve_universe(config)
+    specs = expand_specs(config, symbols)
+    output_root.mkdir(parents=True, exist_ok=True)
+    with (output_root / "universe.csv").open("w", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=universe_rows[0].keys())
+        writer.writeheader(); writer.writerows(universe_rows)
+    (output_root / "universe_snapshot.json").write_text(
+        json.dumps({
+            "source": "primary_postgresql_read_only",
+            "duckdb_path": config["duckdb_path"],
+            "start": config["start"],
+            "end": config["end"],
+            "selected_symbols": symbols,
+        }, indent=2, ensure_ascii=False)
+    )
+    execution = config.setdefault("execution", {})
+    if "workers" in execution:
+        raise ValueError("worker 数请通过 --workers 传递，不要放在配置文件中")
+    minimum_memory_limit = str(execution.get("duckdb_memory_limit", "4GB"))
+    workers, actual_memory_limit = _worker_memory_plan(
+        args.workers,
+        minimum_memory_limit,
+        int(execution.get("memory_budget_percent", 80)),
+    )
+    execution["minimum_duckdb_memory_limit"] = minimum_memory_limit
+    execution["duckdb_memory_limit"] = actual_memory_limit
+    memory_estimate = _estimate_monthly_memory(
+        config["duckdb_path"],
+        symbols=symbols,
+        start_ms=_timestamp_ms(config["start"]),
+        end_ms=_timestamp_ms(config["end"]),
+        chunk_hours=float(execution.get("chunk_hours", 24 * 90)),
+        fetch_batch_size=int(execution.get("fetch_batch_size", 10_000)),
+    )
+    memory_estimate.to_csv(output_root / "memory_estimate.csv", index=False)
+    memory_limit_bytes = _memory_bytes(actual_memory_limit)
+    if (
+        not memory_estimate.empty
+        and memory_estimate["estimated_stream_peak_gb"].max() * 1024**3
+        > memory_limit_bytes
+    ):
+        raise RuntimeError(
+            "estimated stream peak exceeds execution.duckdb_memory_limit; "
+            "reduce chunk_hours or raise the per-worker limit"
+        )
+    rows = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_run_one, spec, config, output_root): spec for spec in specs}
+        for future in as_completed(futures):
+            spec = futures[future]
+            try:
+                rows.append(future.result())
+            except Exception as error:
+                rows.append({
+                    "run_id": spec.run_id, "symbol": spec.symbol,
+                    "status": "failed", "returncode": -1,
+                    "parameters": json.dumps(spec.params, sort_keys=True, default=str),
+                    "error": str(error), "trades": 0, "wins": 0,
+                    "win_rate": 0.0, "net_pnl": 0.0, "total_profit": 0.0,
+                    "total_loss": 0.0, "commission": 0.0,
+                    "max_drawdown": 0.0, "profit_factor": 0.0,
+                })
+    comparison = pd.DataFrame(rows).sort_values(["status", "net_pnl"], ascending=[True, False])
+    comparison.to_csv(output_root / "comparison.csv", index=False)
+    all_trades = []
+    all_signals = []
+    for spec in specs:
+        path = output_root / "runs" / spec.run_id / "trades.csv"
+        if path.exists():
+            frame = pd.read_csv(path)
+            frame["run_id"] = spec.run_id
+            frame["parameters"] = json.dumps(spec.params, sort_keys=True, default=str)
+            all_trades.append(frame)
+        audit_path = output_root / "runs" / spec.run_id / "audit_events.parquet"
+        if audit_path.exists():
+            audit = pd.read_parquet(audit_path)
+            audit = audit[audit["event_type"] == "signal_triggered"].copy()
+            if not audit.empty:
+                audit["run_id"] = spec.run_id
+                audit["parameters"] = json.dumps(
+                    spec.params, sort_keys=True, default=str
+                )
+                all_signals.append(audit)
+    trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
+    analysis = config.get("analysis", {})
+    windows_hours = [int(value) for value in analysis.get("breakout_windows_hours", [4, 6, 8, 12, 24])]
+    trades = _attach_breakout_context(
+        trades, duckdb_path=config["duckdb_path"], windows_hours=windows_hours
+    )
+    trades, collisions = _annotate_collisions(
+        trades, tolerance_ms=int(config.get("analysis", {}).get("collision_tolerance_seconds", 1) * 1000)
+    )
+    trades.to_csv(output_root / "all_trades.csv", index=False)
+    collisions.to_csv(output_root / "collisions.csv", index=False)
+    signals = pd.concat(all_signals, ignore_index=True) if all_signals else pd.DataFrame()
+    signals.to_csv(output_root / "all_signals.csv", index=False)
+    signal_collisions = _find_simultaneous_signals(
+        signals,
+        tolerance_ms=int(analysis.get("collision_tolerance_seconds", 1) * 1000),
+    )
+    signal_collisions.to_csv(output_root / "signal_collisions.csv", index=False)
+    _write_trade_breakdowns(
+        trades, output_root,
+        pnl_split_usdt=float(config.get("analysis", {}).get("pnl_split_usdt", 10)),
+    )
+    _write_breakout_summaries(
+        trades, output_root, windows_hours=windows_hours,
+        proximity_percentages=[float(value) for value in analysis.get("box_proximity_percentages", [1, 3, 5, 10])],
+    )
+    parameter_summary = _parameter_summary(
+        comparison, collisions, signal_collisions
+    )
+    parameter_summary.to_csv(output_root / "parameter_summary.csv", index=False)
+    _write_report(
+        output_root,
+        parameter_summary,
+        run_count=len(specs),
+        workers=workers,
+        duckdb_memory_limit=actual_memory_limit,
+    )
+    public_config = {key: value for key, value in config.items() if key != "database_dsn"}
+    (output_root / "experiment.json").write_text(json.dumps({
+        "config": public_config, "symbols": symbols,
+        "runs": len(specs), "workers": workers,
+        "duckdb_memory_limit_per_worker": actual_memory_limit,
+    }, indent=2, default=str))
+    print(f"实验完成: {len(specs)} runs, workers={workers}, output={output_root}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

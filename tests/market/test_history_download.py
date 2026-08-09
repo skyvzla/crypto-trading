@@ -591,6 +591,10 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
         for path in archive_root.rglob("*.parquet")
         for part in path.parts
     )
+    temporary = archive_root / "AKEUSDT/1s/2026/07/01/.candles-stale.tmp.parquet"
+    temporary.write_bytes(
+        (archive_root / "AKEUSDT/1s/2026/07/01/candles.parquet").read_bytes()
+    )
     skipped_progress: list[DownloadProgress] = []
 
     def reject_fetch(url: str) -> bytes:
@@ -636,7 +640,8 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
         require_aggtrades=True,
         required_kline_intervals=["1m"],
         duckdb_path=str(catalog),
-    ).load_all()
+    ).iter_all()
+    events = list(events)
     assert [event.timestamp for event in events if hasattr(event, "timestamp")] == [
         1_782_864_000_000
     ]

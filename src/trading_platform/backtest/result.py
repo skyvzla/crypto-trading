@@ -31,7 +31,14 @@ TRADE_COLUMNS = [
     'atr', 'origin_price', 'origin_floor',
     'trigger_price', 'rise_5s', 'volume_5s', 'median_volume_1s',
     'volume_multiple_5s', 'low_12h', 'rise_from_12h_low', 'tier_prices',
-    'tier_weights', 'invalid_price', 'entry_action', 'entry_time',
+    'tier_weights',
+    'tier1_price', 'tier2_price', 'tier3_price',
+    'tier1_weight', 'tier2_weight', 'tier3_weight',
+    'tier1_order_status', 'tier2_order_status', 'tier3_order_status',
+    'tier1_fill_count', 'tier2_fill_count', 'tier3_fill_count',
+    'tier1_fill_quantity', 'tier2_fill_quantity', 'tier3_fill_quantity',
+    'tier1_avg_fill_price', 'tier2_avg_fill_price', 'tier3_avg_fill_price',
+    'invalid_price', 'entry_action', 'entry_time',
     'entry_time_iso', 'entry_price', 'entry_quantity', 'entry_notional',
     'entry_fill_count', 'exit_action', 'exit_time', 'exit_time_iso',
     'exit_price', 'exit_quantity', 'exit_fill_count', 'exit_reason',
@@ -218,6 +225,64 @@ class ResultAnalyzer:
         except (TypeError, ValueError):
             return None
 
+    @staticmethod
+    def _tier_details(
+        plan: dict,
+        campaign_orders: pd.DataFrame,
+        entries: pd.DataFrame,
+    ) -> dict[str, Any]:
+        """展开三档计划和实际入场成交，便于直接复核分档执行。"""
+        prices = plan.get('tier_prices')
+        weights = plan.get('tier_weights')
+        details: dict[str, Any] = {}
+
+        for tier in range(1, 4):
+            index = tier - 1
+            tier_name = f'tier{tier}'
+            planned_price = None
+            if isinstance(prices, list) and index < len(prices):
+                try:
+                    planned_price = float(prices[index])
+                except (TypeError, ValueError):
+                    planned_price = None
+            planned_weight = None
+            if isinstance(weights, list) and index < len(weights):
+                try:
+                    planned_weight = float(weights[index])
+                except (TypeError, ValueError):
+                    planned_weight = None
+
+            tier_orders = campaign_orders[
+                campaign_orders['trigger_reason'] == f'spike_tier{tier}'
+            ]
+            order_statuses = sorted(
+                {
+                    str(status)
+                    for status in tier_orders['status'].dropna()
+                    if str(status)
+                }
+            )
+            tier_entries = entries[
+                entries['trigger_reason'] == f'spike_tier{tier}'
+            ]
+            fill_quantity = float(tier_entries['quantity'].sum())
+            fill_notional = float(
+                (tier_entries['price'] * tier_entries['quantity']).sum()
+            )
+
+            details[f'{tier_name}_price'] = planned_price
+            details[f'{tier_name}_weight'] = planned_weight
+            details[f'{tier_name}_order_status'] = (
+                ';'.join(order_statuses) if order_statuses else 'NOT_PLACED'
+            )
+            details[f'{tier_name}_fill_count'] = int(len(tier_entries))
+            details[f'{tier_name}_fill_quantity'] = fill_quantity
+            details[f'{tier_name}_avg_fill_price'] = (
+                fill_notional / fill_quantity if fill_quantity > 0 else None
+            )
+
+        return details
+
     def _build_trades(self) -> pd.DataFrame:
         """将订单、成交、持仓和策略审计合并为逐笔交易复核表。"""
         orders = self.dfs['orders']
@@ -276,6 +341,12 @@ class ResultAnalyzer:
                 if not campaign_values.empty:
                     campaign_id = str(campaign_values.iloc[0])
 
+            campaign_orders = (
+                orders[orders['campaign_id'] == campaign_id]
+                if campaign_id
+                else orders.iloc[0:0]
+            )
+
             plan = plans.get(campaign_id or '', {})
             trigger = triggers.get(campaign_id or '', {})
             first_fill = first_fills.get(campaign_id or '', {})
@@ -327,6 +398,10 @@ class ResultAnalyzer:
             pullback_before = first_fill.get('pullback_before_fill')
             if pullback_before is not None:
                 pullback_before = bool(pullback_before)
+
+            tier_details = self._tier_details(
+                plan, campaign_orders, entries
+            )
 
             def detail_number(key: str) -> float | None:
                 return self._detail_number(metrics, key)
@@ -405,6 +480,7 @@ class ResultAnalyzer:
                 'tier_weights': json.dumps(
                     metrics.get('tier_weights', []), ensure_ascii=True
                 ),
+                **tier_details,
                 'invalid_price': detail_number('invalid_price'),
                 'entry_action': 'SELL' if position.side == 'SHORT' else 'BUY',
                 'entry_time': entry_time,

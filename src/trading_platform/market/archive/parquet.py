@@ -161,11 +161,11 @@ class ParquetCandleArchive:
 
 def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
     dataset = Path(root).resolve()
-    files = list(dataset.glob("*/*/*/*/*/*.parquet"))
+    files = list(dataset.glob("*/*/*/*/*/candles.parquet"))
     catalog = Path(catalog_path).resolve()
     catalog.parent.mkdir(parents=True, exist_ok=True)
     glob = _sql_literal(
-        str(dataset / "*" / "*" / "*" / "*" / "*" / "*.parquet")
+        str(dataset / "*" / "*" / "*" / "*" / "*" / "candles.parquet")
     )
     connection = duckdb.connect(str(catalog))
     try:

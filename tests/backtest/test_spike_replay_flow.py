@@ -108,6 +108,15 @@ def test_spike_replay_runs_from_warmup_through_three_fills():
     assert summary["positions"]["open"] == 1
     assert summary["pnl"]["total_commission"] > 0
 
+    trade = ResultAnalyzer(result).dfs["trades"].iloc[0]
+    for tier in (1, 2, 3):
+        assert trade[f"tier{tier}_price"] is not None
+        assert trade[f"tier{tier}_weight"] is not None
+        assert trade[f"tier{tier}_order_status"] == "FILLED"
+        assert trade[f"tier{tier}_fill_count"] == 1
+        assert trade[f"tier{tier}_fill_quantity"] > 0
+        assert trade[f"tier{tier}_avg_fill_price"] == trade[f"tier{tier}_price"]
+
 
 def _warmup_klines(minute_start: int, *, extra_minutes: int = 0) -> list[Kline]:
     """构造无缺口的 1m/5m 指标输入，供固定生命周期案例复用。"""

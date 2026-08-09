@@ -15,7 +15,9 @@ import httpx
 import psycopg
 
 from trading_platform.shared.config import DatabaseConfig
-from trading_platform.ledger.db.models import EFFECTIVE_SYMBOL_UNIVERSE_SQL
+from trading_platform.shared.symbol_universe_query import (
+    EFFECTIVE_SYMBOL_UNIVERSE_SQL,
+)
 
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (

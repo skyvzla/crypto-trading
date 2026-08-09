@@ -1,0 +1,35 @@
+name = "spike-july-parameter-sweep"
+start = "2026-07-01T00:00:00+00:00"
+end = "2026-08-01T00:00:00+00:00"
+duckdb_path = "data/market/history.duckdb"
+output = "reports/spike-july-parameter-sweep"
+
+[universe]
+mode = "database"
+strategy_id = "spike_short"
+freeze_days = 15
+coverage_tolerance_hours = 24
+exclude_symbols = ["ZECUSDT"]
+
+[execution]
+chunk_hours = 2160
+fetch_batch_size = 10000
+# 每个 worker 的最低 DuckDB 内存上限；程序会按可用内存自动提高。
+duckdb_memory_limit = "4GB"
+duckdb_threads = 1
+memory_budget_percent = 80
+resume = true
+
+[fixed]
+total_notional = 1000
+exit_policy = "candidate-v1"
+warmup_hours = 16
+
+[matrix]
+prior_high_lookback_hours = [0, 4, 6, 8, 12, 24]
+
+[analysis]
+collision_tolerance_seconds = 1
+pnl_split_usdt = 10
+breakout_windows_hours = [4, 6, 8, 12, 24]
+box_proximity_percentages = [1, 3, 5, 10]

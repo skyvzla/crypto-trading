@@ -10,6 +10,7 @@
         --output reports/backtest_20260806
 """
 import argparse
+from itertools import chain
 import json
 import logging
 import sys
@@ -159,6 +160,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help='可选 Binance exchangeInfo JSON 快照；提供后 replay 按真实 tick/step 量化',
     )
+    parser.add_argument('--chunk-hours', type=float, default=24.0 * 90)
+    parser.add_argument('--fetch-batch-size', type=int, default=10_000)
+    parser.add_argument('--duckdb-memory-limit', default=None)
+    parser.add_argument('--duckdb-threads', type=int, default=1)
 
     parser.add_argument(
         '--log-level',
@@ -306,19 +311,21 @@ def main():
     )
 
     try:
-        events = loader.load_all()
+        event_iter = loader.iter_all(
+            chunk_hours=args.chunk_hours,
+            fetch_batch_size=args.fetch_batch_size,
+            duckdb_memory_limit=args.duckdb_memory_limit,
+            duckdb_threads=args.duckdb_threads,
+        )
+        first_event = next(event_iter, None)
+        if first_event is None:
+            raise ValueError("no market data found in the requested range")
+        events = chain((first_event,), event_iter)
     except Exception as e:
         logger.error(f"数据加载失败: {e}")
         sys.exit(1)
 
-    if not events:
-        logger.error("未找到任何数据，请检查数据目录和时间范围")
-        sys.exit(1)
-    if not any(event.available_time >= start_ms for event in events):
-        logger.error("只有预热数据，交易时间范围内没有事件")
-        sys.exit(1)
-
-    logger.info(f"数据加载完成: {len(events)} 个事件")
+    logger.info("数据加载完成：使用流式事件迭代器")
 
     # 2. 加载策略
     logger.info("Step 2/4: 加载策略")
@@ -361,6 +368,10 @@ def main():
         result = engine.run()
     except Exception as e:
         logger.error(f"回测运行失败: {e}", exc_info=True)
+        sys.exit(1)
+
+    if result.virtual_time_end < start_ms:
+        logger.error("只有预热数据，交易时间范围内没有事件")
         sys.exit(1)
 
     logger.info("回测运行完成")

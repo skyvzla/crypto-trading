@@ -4,6 +4,7 @@
 从 Parquet 或只读 DuckDB 历史归档加载事件流。
 """
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from decimal import Decimal
 from typing import Union
@@ -70,19 +71,185 @@ class BacktestDataLoader:
         if self.duckdb_path is not None and not self.duckdb_path.is_file():
             raise FileNotFoundError(f"DuckDB archive not found: {self.duckdb_path}")
 
-    def load_all(self) -> list[Event]:
-        """加载所选数据源；DuckDB 始终以只读模式打开。"""
-        if self.duckdb_path is None:
-            return self._load_all_from_source()
+    def iter_all(
+        self,
+        *,
+        chunk_hours: float = 24.0 * 90,
+        fetch_batch_size: int = 10_000,
+        duckdb_memory_limit: str | None = None,
+        duckdb_threads: int = 1,
+    ) -> Iterator[Event]:
+        """按固定时间窗口流式读取 DuckDB 事件。
 
+        该接口保持策略状态连续，但不会把 DuckDB 完整回测区间物化为
+        Python 对象列表。目录型 Parquet 的 aggTrade 聚合路径仍会在
+        内部物化源文件，因此大规模实验必须使用 DuckDB catalog。
+        """
+        if self.duckdb_path is None:
+            # 目录型 Parquet 仍通过既有聚合器提供事件，但对外只暴露
+            # 迭代器接口；实验程序默认使用 DuckDB 固定窗口读取。
+            yield from self._load_all_from_source()
+            return
+        if chunk_hours <= 0:
+            raise ValueError("chunk_hours must be positive")
+        if fetch_batch_size <= 0:
+            raise ValueError("fetch_batch_size must be positive")
+        if duckdb_threads <= 0:
+            raise ValueError("duckdb_threads must be positive")
+
+        chunk_ms = max(1, int(chunk_hours * 3_600_000))
         connection = duckdb.connect(str(self.duckdb_path), read_only=True)
         self._duckdb_connection = connection
         try:
+            connection.execute("SET enable_progress_bar = false")
+            connection.execute(f"SET threads = {int(duckdb_threads)}")
+            if duckdb_memory_limit:
+                connection.execute("SET memory_limit = ?", [duckdb_memory_limit])
             self._validate_duckdb_source()
-            return self._load_all_from_source()
+            self._validate_stream_datasets()
+
+            sequence_by_stream: dict[tuple[str, str], int] = {}
+            # 1s Bar 在 open_time 后 1000ms 可用，因此流式范围需要覆盖
+            # end 之后的一个边界；原始时间过滤仍确保事件集合不变。
+            stream_end_ms = self.end_ms + 1_001
+            chunk_start_ms = self.start_ms
+            while chunk_start_ms < stream_end_ms:
+                chunk_end_ms = min(chunk_start_ms + chunk_ms, stream_end_ms)
+                cursor = self._execute_stream_query(
+                    chunk_start_ms=chunk_start_ms,
+                    chunk_end_ms=chunk_end_ms,
+                )
+                while rows := cursor.fetchmany(fetch_batch_size):
+                    for row in rows:
+                        symbol = str(row[0])
+                        timeframe = str(row[1])
+                        stream_key = (symbol, timeframe)
+                        sequence = sequence_by_stream.get(stream_key, 0)
+                        sequence_by_stream[stream_key] = sequence + 1
+                        yield self._stream_row_to_event(row, sequence)
+                chunk_start_ms = chunk_end_ms
         finally:
             self._duckdb_connection = None
             connection.close()
+
+    def _validate_stream_datasets(self) -> None:
+        """在开始 yield 前完整校验必需数据集，避免半程失败。"""
+        connection = self._require_duckdb_connection()
+        placeholders = ", ".join("?" for _ in self.symbols)
+        rows = connection.execute(
+            "SELECT symbol, timeframe, count(*) "
+            "FROM main.candles "
+            f"WHERE symbol IN ({placeholders}) "
+            "AND timeframe IN ('1s', '1m', '5m', '15m') "
+            "AND ((timeframe = '1s' AND epoch_ms(open_time) >= ? "
+            "AND epoch_ms(open_time) < ?) "
+            "OR (timeframe <> '1s' AND epoch_ms(close_time) >= ? "
+            "AND epoch_ms(close_time) < ?)) "
+            "GROUP BY symbol, timeframe",
+            [
+                *self.symbols,
+                self.start_ms - self.bar1s_time_shift_ms,
+                self.end_ms - self.bar1s_time_shift_ms,
+                self.start_ms,
+                self.end_ms,
+            ],
+        ).fetchall()
+        available = {(str(symbol), str(timeframe)) for symbol, timeframe, _ in rows}
+        for symbol in self.symbols:
+            if self.require_aggtrades and (symbol, "1s") not in available:
+                raise ValueError(f"Missing required 1s market data for {symbol}")
+            for interval in self.required_kline_intervals:
+                if (symbol, interval) not in available:
+                    raise ValueError(
+                        f"Missing required {interval} Kline data for {symbol}"
+                    )
+
+    def _execute_stream_query(
+        self, *, chunk_start_ms: int, chunk_end_ms: int
+    ) -> duckdb.DuckDBPyConnection:
+        connection = self._require_duckdb_connection()
+        placeholders = ", ".join("?" for _ in self.symbols)
+        available_time_sql = (
+            "CASE WHEN timeframe = '1s' "
+            "THEN epoch_ms(open_time) + 1000 + ? "
+            "ELSE epoch_ms(close_time) + 1 END"
+        )
+        query = (
+            "SELECT symbol, timeframe, epoch_ms(open_time), epoch_ms(close_time), "
+            "open, high, low, close, volume, "
+            f"{available_time_sql} AS available_time "
+            "FROM main.candles "
+            f"WHERE symbol IN ({placeholders}) "
+            "AND timeframe IN ('1s', '1m', '5m', '15m') "
+            "AND ((timeframe = '1s' AND epoch_ms(open_time) >= ? "
+            "AND epoch_ms(open_time) < ?) "
+            "OR (timeframe <> '1s' AND epoch_ms(close_time) >= ? "
+            "AND epoch_ms(close_time) < ?)) "
+            f"AND {available_time_sql} >= ? "
+            f"AND {available_time_sql} < ? "
+            "ORDER BY available_time, "
+            "CASE WHEN timeframe = '1s' THEN 1 ELSE 2 END, "
+            "symbol, open_time, close_time"
+        )
+        shift = self.bar1s_time_shift_ms
+        return connection.execute(
+            query,
+            [
+                shift,
+                *self.symbols,
+                self.start_ms - shift,
+                self.end_ms - shift,
+                self.start_ms,
+                self.end_ms,
+                shift,
+                chunk_start_ms,
+                shift,
+                chunk_end_ms,
+            ],
+        )
+
+    def _stream_row_to_event(self, row: tuple, sequence: int) -> Event:
+        symbol, timeframe = str(row[0]), str(row[1])
+        open_time, close_time = int(row[2]), int(row[3])
+        open_, high, low, close, volume = row[4:9]
+        available_time = int(row[9])
+        if timeframe == "1s":
+            shifted_open = open_time + self.bar1s_time_shift_ms
+            shifted_close = close_time + self.bar1s_time_shift_ms
+            if shifted_close - shifted_open not in {999, 1_000}:
+                raise ValueError(
+                    f"invalid 1s candle duration for {symbol}: "
+                    f"{shifted_open}..{shifted_close}"
+                )
+            close_decimal = Decimal(str(close))
+            return Bar1s(
+                symbol=symbol,
+                timestamp=shifted_open,
+                available_time=available_time,
+                type_priority=1,
+                sequence=sequence,
+                open=Decimal(str(open_)),
+                high=Decimal(str(high)),
+                low=Decimal(str(low)),
+                close=close_decimal,
+                volume=Decimal(str(volume)),
+                trade_count=0,
+                vwap=close_decimal,
+            )
+        return Kline(
+            symbol=symbol,
+            interval=timeframe,
+            open_time=open_time,
+            close_time=close_time,
+            available_time=available_time,
+            type_priority=2,
+            sequence=sequence,
+            open=Decimal(str(open_)),
+            high=Decimal(str(high)),
+            low=Decimal(str(low)),
+            close=Decimal(str(close)),
+            volume=Decimal(str(volume)),
+        )
 
     def _load_all_from_source(self) -> list[Event]:
         """
