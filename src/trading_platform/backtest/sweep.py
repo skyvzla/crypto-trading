@@ -890,7 +890,10 @@ def main(argv: list[str] | None = None) -> int:
     succeeded_count = 0
     failed_count = 0
     started_at = time.monotonic()
-    print(f"开始回测：任务={len(specs)}，worker={workers}，输出={output_root}")
+    print(
+        f"开始回测：任务={len(specs)}，worker={workers}，输出={output_root}",
+        flush=True,
+    )
     try:
         futures = {
             pool.submit(_run_one, spec, config, output_root, processes): spec
@@ -921,17 +924,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"进度 {completed_count}/{len(specs)} "
                 f"({completed_count / len(specs):.1%})，"
                 f"成功={succeeded_count}，失败={failed_count}，"
-                f"当前={spec.symbol}，状态={row['status']}，耗时={elapsed:.0f}s"
+                f"当前={spec.symbol}，状态={row['status']}，耗时={elapsed:.0f}s",
+                flush=True,
             )
     except KeyboardInterrupt:
-        print("收到 Ctrl+C，正在终止活动回测子进程...")
+        print("收到 Ctrl+C，正在终止活动回测子进程...", flush=True)
         processes.terminate_all()
         for future in futures:
             future.cancel()
         pool.shutdown(wait=True, cancel_futures=True)
         print(
             f"回测已停止：已完成={completed_count}/{len(specs)}；"
-            "已完成任务可在下次运行时通过 resume 复用。"
+            "已完成任务可在下次运行时通过 resume 复用。",
+            flush=True,
         )
         return 130
     else:
@@ -1000,7 +1005,10 @@ def main(argv: list[str] | None = None) -> int:
         "runs": len(specs), "workers": workers,
         "duckdb_memory_limit_per_worker": actual_memory_limit,
     }, indent=2, default=str))
-    print(f"实验完成: {len(specs)} runs, workers={workers}, output={output_root}")
+    print(
+        f"实验完成: {len(specs)} runs, workers={workers}, output={output_root}",
+        flush=True,
+    )
     return 0
 
 
