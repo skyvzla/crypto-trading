@@ -36,6 +36,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
+current_version="$(docker compose exec -T postgres sh -ceu '
+  psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+    -c "SELECT COALESCE(MAX(version), 0) FROM ledger_schema_migrations"
+')"
+extra_count_sql=""
+if (( current_version >= 5 )); then
+  extra_count_sql="
+  'exchange_categories', (SELECT COUNT(*) FROM exchange_categories),
+  'exchange_symbol_categories', (SELECT COUNT(*) FROM exchange_symbol_categories),
+  'exchange_symbol_sync_state', (SELECT COUNT(*) FROM exchange_symbol_sync_state),
+  'symbol_global_admission', (SELECT COUNT(*) FROM symbol_global_admission),
+  'symbol_global_admission_audit', (SELECT COUNT(*) FROM symbol_global_admission_audit),
+  'strategy_category_admission', (SELECT COUNT(*) FROM strategy_category_admission),
+  'strategy_category_admission_audit', (SELECT COUNT(*) FROM strategy_category_admission_audit),"
+fi
+
 count_sql="
 SELECT jsonb_build_object(
   'orders', (SELECT COUNT(*) FROM orders),
@@ -46,6 +62,7 @@ SELECT jsonb_build_object(
   'strategy_audit_events', (SELECT COUNT(*) FROM strategy_audit_events),
   'strategy_runtime_status', (SELECT COUNT(*) FROM strategy_runtime_status),
   'exchange_symbols', (SELECT COUNT(*) FROM exchange_symbols),
+  $extra_count_sql
   'ledger_schema_migrations', (SELECT COUNT(*) FROM ledger_schema_migrations)
 )::text;
 "

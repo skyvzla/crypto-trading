@@ -47,10 +47,13 @@ runner 使用事务级 PostgreSQL advisory lock 串行化并发实例；全部�
 `0004_exchange_symbols.sql` 保存 Binance USD-M 交易对生命周期元数据，供每日同步与退市
 入场门禁使用。
 
+`0005_exchange_symbol_universe.sql` 扩展交易对基础字段，保存 Binance 两级分类及关联，
+并增加带审计的交易对全局开关和按策略可选分类开关。
+
 ## 备份恢复演练
 
 以下命令对当前 Compose PostgreSQL 创建权限为 `0600` 的 custom-format 归档，恢复到随机命名
-的临时数据库，逐项核对 9 张业务/迁移表的行数和全部迁移文件校验和，随后删除且只删除该
+的临时数据库，逐项核对 16 张业务/迁移表的行数和全部迁移文件校验和，随后删除且只删除该
 临时验证库。目标文件已存在时命令拒绝覆盖：
 
 ```bash

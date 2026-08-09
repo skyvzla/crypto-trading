@@ -529,7 +529,11 @@ def test_load_allowed_symbols_uses_exchange_lifecycle_gate(monkeypatch):
     assert "status = 'TRADING'" in query
     assert "onboard_date <= NOW()" in query
     assert "delivery_date > NOW() + %s" in query
-    assert cursor.execute.call_args.args[1][0].days == 15
+    assert cursor.execute.call_args.args[1] == (
+        archive_cli.timedelta(days=15),
+        None,
+        None,
+    )
 
 
 def test_disk_space_guard_stops_at_configured_reserve(tmp_path, monkeypatch):
@@ -585,7 +589,9 @@ def test_cli_without_symbols_loads_all_tradable_symbols(
     )
 
     assert exit_code == 0
-    loaded.assert_called_once_with("postgresql://archive", freeze_days=15)
+    loaded.assert_called_once_with(
+        "postgresql://archive", freeze_days=15, strategy_id=None
+    )
     assert captured["symbols"] == ["AKEUSDT", "BTCUSDT"]
     assert "Loaded 2 tradable symbols from PostgreSQL." in capsys.readouterr().err
 

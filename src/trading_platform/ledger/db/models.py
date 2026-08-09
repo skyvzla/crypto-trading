@@ -4,7 +4,7 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, AsyncIterator, Optional, Sequence
 
@@ -13,6 +13,45 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 from trading_platform.shared.events import StrategyAuditEvent
+
+
+EFFECTIVE_SYMBOL_UNIVERSE_SQL = """
+    SELECT symbol.symbol
+    FROM exchange_symbols AS symbol
+    WHERE EXISTS (
+          SELECT 1 FROM exchange_symbol_sync_state AS sync_state
+          WHERE sync_state.singleton = TRUE
+            AND sync_state.status = 'SUCCESS'
+            AND sync_state.last_success_at >= NOW() - INTERVAL '36 hours'
+      )
+      AND symbol.active = TRUE
+      AND symbol.contract_type = 'PERPETUAL'
+      AND symbol.status = 'TRADING'
+      AND symbol.onboard_date IS NOT NULL
+      AND symbol.onboard_date <= NOW()
+      AND symbol.delivery_date IS NOT NULL
+      AND symbol.delivery_date > NOW() + %s
+      AND NOT EXISTS (
+          SELECT 1
+          FROM symbol_global_admission AS global_control
+          WHERE global_control.symbol = symbol.symbol
+            AND global_control.enabled = FALSE
+      )
+      AND (
+          CAST(%s AS VARCHAR) IS NULL
+          OR NOT EXISTS (
+              SELECT 1
+              FROM exchange_symbol_categories AS assignment
+              JOIN strategy_category_admission AS category_control
+                ON category_control.category_key = assignment.category_key
+              WHERE assignment.symbol = symbol.symbol
+                AND assignment.active = TRUE
+                AND category_control.strategy_id = %s
+                AND category_control.enabled = FALSE
+          )
+      )
+    ORDER BY symbol.symbol
+"""
 
 
 @dataclass
@@ -143,8 +182,77 @@ class ExchangeSymbol:
     status: str
     onboard_date: Optional[datetime]
     delivery_date: Optional[datetime]
+    base_asset: Optional[str]
+    quote_asset: Optional[str]
+    margin_asset: Optional[str]
+    underlying_type: Optional[str]
+    raw_metadata: dict[str, Any]
     active: bool
     synced_at: datetime
+
+
+@dataclass
+class ExchangeSymbolOverview(ExchangeSymbol):
+    global_enabled: bool = True
+    global_admission_version: int = 0
+
+
+@dataclass
+class ExchangeCategory:
+    category_key: str
+    source: str
+    category_type: str
+    code: str
+    name: str
+    parent_key: Optional[str]
+    active: bool
+    synced_at: datetime
+
+
+@dataclass
+class SymbolGlobalAdmission:
+    symbol: str
+    enabled: bool
+    version: int
+    updated_at: datetime
+    updated_by: str
+    reason: Optional[str] = None
+
+
+@dataclass
+class StrategyCategoryAdmission:
+    strategy_id: str
+    category_key: str
+    enabled: bool
+    version: int
+    updated_at: datetime
+    updated_by: str
+    reason: Optional[str] = None
+
+
+@dataclass
+class SymbolGlobalAdmissionAudit:
+    id: int
+    symbol: str
+    previous_enabled: Optional[bool]
+    enabled: bool
+    version: int
+    changed_at: datetime
+    changed_by: str
+    reason: Optional[str] = None
+
+
+@dataclass
+class StrategyCategoryAdmissionAudit:
+    id: int
+    strategy_id: str
+    category_key: str
+    previous_enabled: Optional[bool]
+    enabled: bool
+    version: int
+    changed_at: datetime
+    changed_by: str
+    reason: Optional[str] = None
 
 
 @dataclass
@@ -981,52 +1089,214 @@ class LedgerDB:
         return admission
 
     async def sync_exchange_symbols(self, exchange_info: object) -> int:
-        """Replace the active USD-M exchangeInfo snapshot transactionally."""
+        """Replace USD-M symbol facts and Binance category assignments atomically."""
 
         if not isinstance(exchange_info, dict) or not isinstance(
             exchange_info.get("symbols"), list
         ):
             raise ValueError("Binance exchangeInfo has incompatible symbol metadata")
         rows: list[tuple[object, ...]] = []
+        categories: dict[str, tuple[object, ...]] = {}
+        assignments: set[tuple[str, str]] = set()
+        seen_symbols: set[str] = set()
         for item in exchange_info["symbols"]:
             if not isinstance(item, dict):
-                continue
+                raise ValueError("Binance exchangeInfo contains an invalid symbol row")
             symbol = str(item.get("symbol", "")).strip().upper()
             if not symbol:
-                continue
+                raise ValueError("Binance exchangeInfo contains a symbol without a name")
+            if len(symbol) > 32:
+                raise ValueError("Binance exchangeInfo contains an oversized symbol")
+            if symbol in seen_symbols:
+                raise ValueError("Binance exchangeInfo contains duplicate symbols")
+            seen_symbols.add(symbol)
+            contract_type = str(item.get("contractType", "")).strip().upper()
+            status = str(item.get("status", "")).strip().upper()
+            onboard_date = _optional_epoch_ms_datetime(item.get("onboardDate"))
+            delivery_date = _optional_epoch_ms_datetime(item.get("deliveryDate"))
+            if not contract_type or not status or onboard_date is None or delivery_date is None:
+                raise ValueError(
+                    f"Binance exchangeInfo symbol {symbol} has incomplete lifecycle metadata"
+                )
+            underlying_type = _normalized_exchange_category_code(
+                item.get("underlyingType")
+            )
             rows.append(
                 (
                     symbol,
                     str(item.get("pair", symbol)).strip().upper() or symbol,
-                    str(item.get("contractType", "")).strip().upper(),
-                    str(item.get("status", "")).strip().upper(),
-                    _optional_epoch_ms_datetime(item.get("onboardDate")),
-                    _optional_epoch_ms_datetime(item.get("deliveryDate")),
+                    contract_type,
+                    status,
+                    onboard_date,
+                    delivery_date,
+                    _optional_upper_string(item.get("baseAsset")),
+                    _optional_upper_string(item.get("quoteAsset")),
+                    _optional_upper_string(item.get("marginAsset")),
+                    underlying_type,
+                    Jsonb(item),
                 )
             )
+            if underlying_type is None:
+                continue
+            parent_key = _exchange_category_key("CATEGORY", underlying_type)
+            categories[parent_key] = (
+                parent_key,
+                "BINANCE",
+                "CATEGORY",
+                underlying_type,
+                underlying_type,
+                None,
+            )
+            assignments.add((symbol, parent_key))
+            subtypes = item.get("underlyingSubType", [])
+            if not isinstance(subtypes, list):
+                continue
+            for raw_subtype in subtypes:
+                subtype = _normalized_exchange_category_code(raw_subtype)
+                if subtype is None:
+                    continue
+                child_key = _exchange_category_key(
+                    "SUBCATEGORY", subtype, parent_code=underlying_type
+                )
+                categories[child_key] = (
+                    child_key,
+                    "BINANCE",
+                    "SUBCATEGORY",
+                    subtype,
+                    subtype,
+                    parent_key,
+                )
+                assignments.add((symbol, child_key))
         if not rows:
             raise ValueError("Binance exchangeInfo contains no valid symbols")
         async with self.transaction() as conn:
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                ("exchange-symbol-sync",),
+            )
+            previous_count = await (
+                await conn.execute(
+                    "SELECT synced_symbols FROM exchange_symbol_sync_state "
+                    "WHERE singleton = TRUE FOR UPDATE"
+                )
+            ).fetchone()
+            if (
+                previous_count is not None
+                and previous_count[0] >= 20
+                and len(rows) * 2 < previous_count[0]
+            ):
+                raise ValueError(
+                    "Binance exchangeInfo symbol count dropped by more than 50%"
+                )
             await conn.execute("UPDATE exchange_symbols SET active = FALSE")
+            await conn.execute(
+                """
+                UPDATE exchange_symbol_categories
+                SET active = FALSE
+                WHERE category_key IN (
+                    SELECT category_key FROM exchange_categories
+                    WHERE source = 'BINANCE'
+                )
+                """
+            )
+            await conn.execute(
+                "UPDATE exchange_categories SET active = FALSE "
+                "WHERE source = 'BINANCE'"
+            )
             for row in rows:
                 await conn.execute(
                     """
                     INSERT INTO exchange_symbols (
                         symbol, pair, contract_type, status,
-                        onboard_date, delivery_date, active, synced_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, TRUE, NOW())
+                        onboard_date, delivery_date, base_asset, quote_asset,
+                        margin_asset, underlying_type, raw_metadata,
+                        active, synced_at
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, TRUE, NOW()
+                    )
                     ON CONFLICT (symbol) DO UPDATE SET
                         pair = EXCLUDED.pair,
                         contract_type = EXCLUDED.contract_type,
                         status = EXCLUDED.status,
                         onboard_date = EXCLUDED.onboard_date,
                         delivery_date = EXCLUDED.delivery_date,
+                        base_asset = EXCLUDED.base_asset,
+                        quote_asset = EXCLUDED.quote_asset,
+                        margin_asset = EXCLUDED.margin_asset,
+                        underlying_type = EXCLUDED.underlying_type,
+                        raw_metadata = EXCLUDED.raw_metadata,
                         active = TRUE,
                         synced_at = NOW()
                     """,
                     row,
                 )
+            category_rows = sorted(
+                categories.values(), key=lambda row: row[2] == "SUBCATEGORY"
+            )
+            for row in category_rows:
+                await conn.execute(
+                    """
+                    INSERT INTO exchange_categories (
+                        category_key, source, category_type, code,
+                        name, parent_key, active, synced_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, TRUE, NOW())
+                    ON CONFLICT (category_key) DO UPDATE SET
+                        source = EXCLUDED.source,
+                        category_type = EXCLUDED.category_type,
+                        code = EXCLUDED.code,
+                        name = EXCLUDED.name,
+                        parent_key = EXCLUDED.parent_key,
+                        active = TRUE,
+                        synced_at = NOW()
+                    """,
+                    row,
+                )
+            for assignment in sorted(assignments):
+                await conn.execute(
+                    """
+                    INSERT INTO exchange_symbol_categories (
+                        symbol, category_key, active, synced_at
+                    ) VALUES (%s, %s, TRUE, NOW())
+                    ON CONFLICT (symbol, category_key) DO UPDATE SET
+                        active = TRUE,
+                        synced_at = NOW()
+                    """,
+                    assignment,
+                )
+            await conn.execute(
+                """
+                INSERT INTO exchange_symbol_sync_state (
+                    singleton, status, last_attempt_at, last_success_at,
+                    synced_symbols, last_error
+                ) VALUES (TRUE, 'SUCCESS', NOW(), NOW(), %s, NULL)
+                ON CONFLICT (singleton) DO UPDATE SET
+                    status = 'SUCCESS',
+                    last_attempt_at = NOW(),
+                    last_success_at = NOW(),
+                    synced_symbols = EXCLUDED.synced_symbols,
+                    last_error = NULL
+                """,
+                (len(rows),),
+            )
         return len(rows)
+
+    async def mark_exchange_symbol_sync_failed(self, error: Exception) -> None:
+        message = f"{type(error).__name__}: {error}"[:2000]
+        async with self.pool.connection() as conn:
+            await conn.execute(
+                """
+                INSERT INTO exchange_symbol_sync_state (
+                    singleton, status, last_attempt_at, last_success_at,
+                    synced_symbols, last_error
+                ) VALUES (TRUE, 'FAILED', NOW(), NULL, 0, %s)
+                ON CONFLICT (singleton) DO UPDATE SET
+                    status = 'FAILED',
+                    last_attempt_at = NOW(),
+                    last_error = EXCLUDED.last_error
+                """,
+                (message,),
+            )
 
     async def get_exchange_symbol(self, symbol: str) -> Optional[ExchangeSymbol]:
         async with self.pool.connection() as conn:
@@ -1036,6 +1306,338 @@ class LedgerDB:
                 (symbol.strip().upper(),),
             )
             return await cursor.fetchone()
+
+    async def list_exchange_symbols(
+        self, limit: int = 100, offset: int = 0
+    ) -> tuple[list[ExchangeSymbolOverview], int]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeSymbolOverview))
+            await cursor.execute(
+                """
+                SELECT symbol.*,
+                       COALESCE(control.enabled, TRUE) AS global_enabled,
+                       COALESCE(control.version, 0) AS global_admission_version
+                FROM exchange_symbols AS symbol
+                LEFT JOIN symbol_global_admission AS control
+                  ON control.symbol = symbol.symbol
+                ORDER BY symbol.symbol LIMIT %s OFFSET %s
+                """,
+                (limit, offset),
+            )
+            items = await cursor.fetchall()
+            total = await (
+                await conn.execute("SELECT COUNT(*) FROM exchange_symbols")
+            ).fetchone()
+        return items, int(total[0])
+
+    async def list_exchange_categories(
+        self, *, active_only: bool = True
+    ) -> list[ExchangeCategory]:
+        where = " WHERE active = TRUE" if active_only else ""
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeCategory))
+            await cursor.execute(
+                "SELECT * FROM exchange_categories"
+                f"{where} ORDER BY category_type, parent_key NULLS FIRST, code"
+            )
+            return await cursor.fetchall()
+
+    async def get_exchange_category(
+        self, category_key: str
+    ) -> Optional[ExchangeCategory]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeCategory))
+            await cursor.execute(
+                "SELECT * FROM exchange_categories WHERE category_key = %s",
+                (category_key.strip(),),
+            )
+            return await cursor.fetchone()
+
+    async def list_exchange_symbol_categories(
+        self, symbol: str
+    ) -> list[ExchangeCategory]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeCategory))
+            await cursor.execute(
+                """
+                SELECT category.*
+                FROM exchange_categories AS category
+                JOIN exchange_symbol_categories AS assignment
+                  ON assignment.category_key = category.category_key
+                WHERE assignment.symbol = %s
+                  AND assignment.active = TRUE
+                  AND category.active = TRUE
+                ORDER BY category.category_type, category.code
+                """,
+                (symbol.strip().upper(),),
+            )
+            return await cursor.fetchall()
+
+    async def list_tradeable_exchange_symbols(
+        self,
+        *,
+        freeze_days: int = 15,
+        strategy_id: Optional[str] = None,
+    ) -> list[str]:
+        """Return the effective universe; absent strategy category rules allow."""
+
+        if freeze_days < 0:
+            raise ValueError("freeze_days must be non-negative")
+        normalized_strategy = strategy_id.strip() if strategy_id else None
+        async with self.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    EFFECTIVE_SYMBOL_UNIVERSE_SQL,
+                    (
+                        timedelta(days=freeze_days),
+                        normalized_strategy,
+                        normalized_strategy,
+                    ),
+                )
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    async def get_symbol_global_admission(
+        self, symbol: str
+    ) -> Optional[SymbolGlobalAdmission]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(SymbolGlobalAdmission))
+            await cursor.execute(
+                "SELECT * FROM symbol_global_admission WHERE symbol = %s",
+                (symbol.strip().upper(),),
+            )
+            return await cursor.fetchone()
+
+    async def set_symbol_global_admission(
+        self,
+        symbol: str,
+        enabled: bool,
+        expected_version: int,
+        updated_by: str,
+        reason: Optional[str] = None,
+    ) -> SymbolGlobalAdmission:
+        normalized = symbol.strip().upper()
+        async with self.transaction() as conn:
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"symbol-global:{normalized}",),
+            )
+            current = await (
+                await conn.execute(
+                    "SELECT enabled, version FROM symbol_global_admission "
+                    "WHERE symbol = %s FOR UPDATE",
+                    (normalized,),
+                )
+            ).fetchone()
+            if current is None:
+                if expected_version != 0:
+                    raise VersionConflictError
+                previous_enabled, version = None, 1
+                await conn.execute(
+                    "INSERT INTO symbol_global_admission "
+                    "(symbol, enabled, version, updated_by, reason) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (normalized, enabled, version, updated_by, reason),
+                )
+            else:
+                previous_enabled, current_version = current
+                if current_version != expected_version:
+                    raise VersionConflictError
+                version = current_version + 1
+                await conn.execute(
+                    "UPDATE symbol_global_admission SET enabled = %s, version = %s, "
+                    "updated_at = NOW(), updated_by = %s, reason = %s "
+                    "WHERE symbol = %s",
+                    (enabled, version, updated_by, reason, normalized),
+                )
+            await conn.execute(
+                "INSERT INTO symbol_global_admission_audit "
+                "(symbol, previous_enabled, enabled, version, changed_by, reason) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    normalized,
+                    previous_enabled,
+                    enabled,
+                    version,
+                    updated_by,
+                    reason,
+                ),
+            )
+            cursor = conn.cursor(row_factory=class_row(SymbolGlobalAdmission))
+            await cursor.execute(
+                "SELECT * FROM symbol_global_admission WHERE symbol = %s",
+                (normalized,),
+            )
+            admission = await cursor.fetchone()
+        assert admission is not None
+        return admission
+
+    async def list_symbol_global_admission_audit(
+        self,
+        symbol: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[SymbolGlobalAdmissionAudit], int]:
+        normalized = symbol.strip().upper() if symbol else None
+        where = " WHERE symbol = %s" if normalized else ""
+        page_params = (
+            (normalized, limit, offset) if normalized else (limit, offset)
+        )
+        count_params = (normalized,) if normalized else ()
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(SymbolGlobalAdmissionAudit))
+            await cursor.execute(
+                "SELECT * FROM symbol_global_admission_audit"
+                f"{where} ORDER BY changed_at DESC, id DESC LIMIT %s OFFSET %s",
+                page_params,
+            )
+            items = await cursor.fetchall()
+            total = await (
+                await conn.execute(
+                    "SELECT COUNT(*) FROM symbol_global_admission_audit" + where,
+                    count_params,
+                )
+            ).fetchone()
+        return items, int(total[0])
+
+    async def get_strategy_category_admission(
+        self, strategy_id: str, category_key: str
+    ) -> Optional[StrategyCategoryAdmission]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(StrategyCategoryAdmission))
+            await cursor.execute(
+                "SELECT * FROM strategy_category_admission "
+                "WHERE strategy_id = %s AND category_key = %s",
+                (strategy_id.strip(), category_key.strip()),
+            )
+            return await cursor.fetchone()
+
+    async def list_strategy_category_admissions(
+        self, strategy_id: str
+    ) -> list[StrategyCategoryAdmission]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(StrategyCategoryAdmission))
+            await cursor.execute(
+                "SELECT * FROM strategy_category_admission "
+                "WHERE strategy_id = %s ORDER BY category_key",
+                (strategy_id.strip(),),
+            )
+            return await cursor.fetchall()
+
+    async def set_strategy_category_admission(
+        self,
+        strategy_id: str,
+        category_key: str,
+        enabled: bool,
+        expected_version: int,
+        updated_by: str,
+        reason: Optional[str] = None,
+    ) -> StrategyCategoryAdmission:
+        normalized_strategy = strategy_id.strip()
+        normalized_category = category_key.strip()
+        lock_key = f"strategy-category:{normalized_strategy}:{normalized_category}"
+        async with self.transaction() as conn:
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (lock_key,),
+            )
+            current = await (
+                await conn.execute(
+                    "SELECT enabled, version FROM strategy_category_admission "
+                    "WHERE strategy_id = %s AND category_key = %s FOR UPDATE",
+                    (normalized_strategy, normalized_category),
+                )
+            ).fetchone()
+            if current is None:
+                if expected_version != 0:
+                    raise VersionConflictError
+                previous_enabled, version = None, 1
+                await conn.execute(
+                    "INSERT INTO strategy_category_admission "
+                    "(strategy_id, category_key, enabled, version, updated_by, reason) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (
+                        normalized_strategy,
+                        normalized_category,
+                        enabled,
+                        version,
+                        updated_by,
+                        reason,
+                    ),
+                )
+            else:
+                previous_enabled, current_version = current
+                if current_version != expected_version:
+                    raise VersionConflictError
+                version = current_version + 1
+                await conn.execute(
+                    "UPDATE strategy_category_admission "
+                    "SET enabled = %s, version = %s, updated_at = NOW(), "
+                    "updated_by = %s, reason = %s "
+                    "WHERE strategy_id = %s AND category_key = %s",
+                    (
+                        enabled,
+                        version,
+                        updated_by,
+                        reason,
+                        normalized_strategy,
+                        normalized_category,
+                    ),
+                )
+            await conn.execute(
+                "INSERT INTO strategy_category_admission_audit "
+                "(strategy_id, category_key, previous_enabled, enabled, "
+                "version, changed_by, reason) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (
+                    normalized_strategy,
+                    normalized_category,
+                    previous_enabled,
+                    enabled,
+                    version,
+                    updated_by,
+                    reason,
+                ),
+            )
+            cursor = conn.cursor(row_factory=class_row(StrategyCategoryAdmission))
+            await cursor.execute(
+                "SELECT * FROM strategy_category_admission "
+                "WHERE strategy_id = %s AND category_key = %s",
+                (normalized_strategy, normalized_category),
+            )
+            admission = await cursor.fetchone()
+        assert admission is not None
+        return admission
+
+    async def list_strategy_category_admission_audit(
+        self,
+        strategy_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[StrategyCategoryAdmissionAudit], int]:
+        normalized = strategy_id.strip() if strategy_id else None
+        where = " WHERE strategy_id = %s" if normalized else ""
+        page_params = (
+            (normalized, limit, offset) if normalized else (limit, offset)
+        )
+        count_params = (normalized,) if normalized else ()
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(
+                row_factory=class_row(StrategyCategoryAdmissionAudit)
+            )
+            await cursor.execute(
+                "SELECT * FROM strategy_category_admission_audit"
+                f"{where} ORDER BY changed_at DESC, id DESC LIMIT %s OFFSET %s",
+                page_params,
+            )
+            items = await cursor.fetchall()
+            total = await (
+                await conn.execute(
+                    "SELECT COUNT(*) FROM strategy_category_admission_audit" + where,
+                    count_params,
+                )
+            ).fetchone()
+        return items, int(total[0])
 
     async def list_subcategory_audit(
         self,
@@ -1086,3 +1688,27 @@ def _optional_epoch_ms_datetime(value: object) -> datetime | None:
         return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _optional_upper_string(value: object) -> str | None:
+    normalized = str(value).strip().upper() if value is not None else ""
+    return normalized or None
+
+
+def _normalized_exchange_category_code(value: object) -> str | None:
+    normalized = " ".join(str(value).strip().upper().split()) if value else ""
+    if not normalized:
+        return None
+    if len(normalized) > 96:
+        raise ValueError("Binance exchange category code is too long")
+    return normalized
+
+
+def _exchange_category_key(
+    category_type: str, code: str, *, parent_code: str | None = None
+) -> str:
+    if category_type == "CATEGORY":
+        return f"BINANCE:CATEGORY:{code}"
+    if category_type == "SUBCATEGORY" and parent_code:
+        return f"BINANCE:SUBCATEGORY:{parent_code}:{code}"
+    raise ValueError("invalid exchange category identity")

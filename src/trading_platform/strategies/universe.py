@@ -8,12 +8,13 @@ from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from trading_platform.ledger.exchange_symbols import fetch_exchange_info_with_retry
+
 
 UNIVERSE_SCAN_INTERVAL_SECONDS = 5 * 60
 EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
 DEFAULT_DELISTING_FREEZE_DAYS = 15
 MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
-BINANCE_USDM_METADATA_BASE_URL = "https://fapi.binance.com"
 
 
 @dataclass(frozen=True)
@@ -109,41 +110,6 @@ async def fetch_exchange_symbol_snapshot(
         now_ms=now_ms,
         freeze_days=freeze_days,
     )
-
-
-async def fetch_exchange_info_with_retry(
-    fetch: Callable[[], Awaitable[dict[str, Any]]],
-    *,
-    attempts: int = 3,
-    retry_base_seconds: float = 1.0,
-    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    on_retry: Callable[[int, int, Exception], None] | None = None,
-) -> dict[str, Any]:
-    """Fetch a structurally valid exchangeInfo payload with bounded retries."""
-
-    total_attempts = max(1, attempts)
-    last_error: Exception | None = None
-    for attempt in range(total_attempts):
-        try:
-            exchange_info = await fetch()
-            if not isinstance(exchange_info, dict) or not isinstance(
-                exchange_info.get("symbols"), list
-            ):
-                raise ValueError(
-                    "Binance exchangeInfo has incompatible symbol metadata"
-                )
-            return exchange_info
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            last_error = error
-        if attempt + 1 < total_attempts:
-            if on_retry is not None:
-                assert last_error is not None
-                on_retry(attempt + 2, total_attempts, last_error)
-            await sleep(max(0.0, retry_base_seconds) * (2**attempt))
-    assert last_error is not None
-    raise last_error
 
 
 class UniverseScanLoop:

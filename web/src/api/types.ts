@@ -19,3 +19,41 @@ export interface LedgerFilters {
   strategy_id?: string
   symbol?: string
 }
+
+export interface ExchangeSymbol {
+  symbol: string
+  pair: string
+  contract_type: string
+  status: string
+  onboard_date: string | null
+  delivery_date: string | null
+  base_asset: string | null
+  quote_asset: string | null
+  margin_asset: string | null
+  underlying_type: string | null
+  active: boolean
+  synced_at: string
+  global_enabled: boolean
+  global_admission_version: number
+}
+
+export interface ExchangeCategory {
+  category_key: string
+  source: string
+  category_type: 'CATEGORY' | 'SUBCATEGORY'
+  code: string
+  name: string
+  parent_key: string | null
+  active: boolean
+  synced_at: string
+}
+
+export interface StrategyCategoryAdmission {
+  strategy_id: string
+  category_key: string
+  enabled: boolean
+  version: number
+  updated_at: string
+  updated_by: string
+  reason: string | null
+}

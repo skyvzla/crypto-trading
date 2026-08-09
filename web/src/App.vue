@@ -8,6 +8,7 @@ import {
   NLayoutHeader,
   NLayoutSider,
   NMenu,
+  NMessageProvider,
   NBadge,
   NText,
   zhCN,
@@ -27,7 +28,7 @@ const menuOptions: MenuOption[] = [
   { key: 'trades', label: '成交与买卖点', to: '/trades' },
   { key: 'stats', label: '胜率与盈亏比', to: '/stats' },
   { key: 'symbols', label: '交易对统计', to: '/symbols' },
-  { key: 'universe', label: '可交易池', to: '/universe' },
+  { key: 'universe', label: '交易对管理', to: '/universe' },
   { key: 'admissions', label: 'Subcategory 管理', to: '/admissions' }
 ].map((item) => ({
   key: item.key,
@@ -62,6 +63,7 @@ onMounted(health.check)
     :locale="zhCN"
     :date-locale="dateZhCN"
   >
+    <NMessageProvider>
     <NLayout has-sider position="absolute">
       <NLayoutSider bordered :width="220" content-style="display:flex;flex-direction:column">
         <div class="brand">
@@ -83,6 +85,7 @@ onMounted(health.check)
         </NLayoutContent>
       </NLayout>
     </NLayout>
+    </NMessageProvider>
   </NConfigProvider>
 </template>
 

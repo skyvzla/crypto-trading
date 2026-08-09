@@ -106,6 +106,26 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  symbol-sync:
+    image: trading_platform-ledger
+    build: *app_build
+    command: ["python", "-m", "trading_platform.ledger.exchange_symbols", "--watch"]
+    init: true
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_DATABASE: ${DB_DATABASE:-trading_platform}
+      SPIKE_DELISTING_FREEZE_DAYS: ${SPIKE_DELISTING_FREEZE_DAYS:-15}
+      EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS: ${EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS:-86400}
+    networks:
+      - trading_net
+    depends_on:
+      ledger-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   spike:
     profiles: ["spike"]
     build: *app_build

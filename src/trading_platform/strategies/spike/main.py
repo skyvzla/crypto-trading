@@ -7,6 +7,7 @@ import logging
 import signal
 import time
 from contextlib import AsyncExitStack
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -55,20 +56,31 @@ from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
 )
+from trading_platform.ledger.exchange_symbols import fetch_exchange_info_with_retry
 from trading_platform.strategies.universe import (
-    BINANCE_USDM_METADATA_BASE_URL,
-    EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS,
     UNIVERSE_SCAN_INTERVAL_SECONDS,
     ExchangeSymbolSnapshot,
-    classify_exchange_symbols,
-    fetch_exchange_info_with_retry,
-    fetch_exchange_symbol_snapshot,
 )
 
 
 logger = logging.getLogger(__name__)
 BAR_STREAM_STALE_SECONDS = 10.0
 RUNTIME_HEARTBEAT_SECONDS = 5.0
+EXCHANGE_RULE_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
+
+
+def _snapshot_from_database(
+    managed_symbols: Sequence[str], allowed_symbols: Sequence[str]
+) -> ExchangeSymbolSnapshot:
+    managed = {symbol.strip().upper() for symbol in managed_symbols}
+    database_allowed = {symbol.strip().upper() for symbol in allowed_symbols}
+    allowed = managed & database_allowed
+    blocked = managed - allowed
+    return ExchangeSymbolSnapshot(
+        allowed_symbols=frozenset(allowed),
+        blocked_symbols=frozenset(blocked),
+        blocked_reasons={symbol: "database_admission" for symbol in blocked},
+    )
 
 
 def require_viable_entry_notional(
@@ -117,11 +129,9 @@ class SpikeLiveProcess:
         self.runtime_callbacks: SpikeRuntimeCallbacks | None = None
         self.execution_lease: PostgresExecutionLease | None = None
         self.db: LedgerDB | None = None
-        self.exchange_rest: BinanceRestClient | None = None
         self.execution_rest: BinanceRestClient | None = None
         self.exchange_symbol_snapshot: ExchangeSymbolSnapshot | None = None
-        self._exchange_info: dict[str, Any] | None = None
-        self._exchange_info_synced_monotonic: float | None = None
+        self._exchange_rules_synced_monotonic: float | None = None
         self.instance_id = uuid4().hex
         self.started_at = datetime.now(timezone.utc)
         self._runtime_fatal_reason: str | None = None
@@ -300,12 +310,6 @@ class SpikeLiveProcess:
         )
         self.execution_rest = rest
         self._stack.push_async_callback(rest.close)
-        self.exchange_rest = BinanceRestClient(
-            "",
-            "",
-            base_url=BINANCE_USDM_METADATA_BASE_URL,
-        )
-        self._stack.push_async_callback(self.exchange_rest.close)
         require_one_way_position_mode(await rest.get_position_mode())
         risk = RiskGuard(
             self.settings.account_id,
@@ -319,22 +323,13 @@ class SpikeLiveProcess:
         if self.settings.total_notional > risk.config.max_position_value_usdt:
             raise ValueError("total_notional exceeds process risk limit")
         wal = OrderWAL(self.settings.wal_path)
-        metadata_exchange_info = await fetch_exchange_info_with_retry(
-            self.exchange_rest.get_exchange_info,
-            on_retry=lambda attempt, total, error: logger.warning(
-                "initial exchangeInfo retry %s/%s: %s: %s",
-                attempt,
-                total,
-                type(error).__name__,
-                error,
+        initial_symbol_snapshot = _snapshot_from_database(
+            self.settings.symbols,
+            await db.list_tradeable_exchange_symbols(
+                freeze_days=self.settings.delisting_freeze_days,
+                strategy_id=STRATEGY_ID,
             ),
         )
-        initial_symbol_snapshot = classify_exchange_symbols(
-            metadata_exchange_info,
-            self.settings.symbols,
-            freeze_days=self.settings.delisting_freeze_days,
-        )
-        self._exchange_info = metadata_exchange_info
         execution_exchange_info = await fetch_exchange_info_with_retry(
             rest.get_exchange_info,
             on_retry=lambda attempt, total, error: logger.warning(
@@ -346,6 +341,7 @@ class SpikeLiveProcess:
             ),
         )
         symbol_rules = self._build_symbol_rule_book(execution_exchange_info)
+        self._exchange_rules_synced_monotonic = asyncio.get_running_loop().time()
         for symbol in initial_symbol_snapshot.allowed_symbols:
             require_viable_entry_notional(
                 self.settings.total_notional,
@@ -733,40 +729,16 @@ class SpikeLiveProcess:
     async def _refresh_exchange_symbol_admission(self) -> bool:
         assert self.coordinator is not None
         assert self.gate is not None
-        assert self.exchange_rest is not None
         assert self.execution_rest is not None
         assert self.db is not None
         now_monotonic = asyncio.get_running_loop().time()
-        refresh_due = self._exchange_info is None or (
-            self._exchange_info_synced_monotonic is not None
-            and now_monotonic - self._exchange_info_synced_monotonic
-            >= EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS
+        rules_refresh_due = self._exchange_rules_synced_monotonic is None or (
+            now_monotonic - self._exchange_rules_synced_monotonic
+            >= EXCHANGE_RULE_REFRESH_INTERVAL_SECONDS
         )
         try:
             updated_symbol_rules: BinanceSymbolRuleBook | None = None
-            if refresh_due:
-                fetched: dict[str, Any] | None = None
-
-                async def fetch_exchange_info() -> dict[str, Any]:
-                    nonlocal fetched
-                    fetched = await self.exchange_rest.get_exchange_info()
-                    return fetched
-
-                snapshot = await fetch_exchange_symbol_snapshot(
-                    fetch_exchange_info,
-                    self.settings.symbols,
-                    freeze_days=self.settings.delisting_freeze_days,
-                    on_retry=lambda attempt, total, error: logger.warning(
-                        "exchangeInfo retry %s/%s: %s: %s",
-                        attempt,
-                        total,
-                        type(error).__name__,
-                        error,
-                    ),
-                )
-                assert fetched is not None
-                exchange_info = fetched
-                await self.db.sync_exchange_symbols(exchange_info)
+            if rules_refresh_due:
                 execution_exchange_info = await fetch_exchange_info_with_retry(
                     self.execution_rest.get_exchange_info,
                     on_retry=lambda attempt, total, error: logger.warning(
@@ -780,25 +752,21 @@ class SpikeLiveProcess:
                 updated_symbol_rules = self._build_symbol_rule_book(
                     execution_exchange_info
                 )
-                self._exchange_info = exchange_info
-                self._exchange_info_synced_monotonic = now_monotonic
-            else:
-                assert self._exchange_info is not None
-                snapshot = classify_exchange_symbols(
-                    self._exchange_info,
-                    self.settings.symbols,
+                self._exchange_rules_synced_monotonic = now_monotonic
+            snapshot = _snapshot_from_database(
+                self.settings.symbols,
+                await self.db.list_tradeable_exchange_symbols(
                     freeze_days=self.settings.delisting_freeze_days,
-                )
-                if self._exchange_info_synced_monotonic is None:
-                    await self.db.sync_exchange_symbols(self._exchange_info)
-                    self._exchange_info_synced_monotonic = now_monotonic
+                    strategy_id=STRATEGY_ID,
+                ),
+            )
         except asyncio.CancelledError:
             raise
         except Exception as error:
             await self.coordinator.update_exchange_symbol_admission(frozenset())
             self.gate.set_condition("exchange_symbols", False)
             logger.error(
-                "exchangeInfo sync failed closed: %s: %s",
+                "exchange symbol admission refresh failed closed: %s: %s",
                 type(error).__name__,
                 error,
             )

@@ -24,13 +24,12 @@ from trading_platform.strategies.spike.live import (
 )
 from trading_platform.strategies.campaign_store import CampaignLease
 from trading_platform.strategies.spike.main import (
+    EXCHANGE_RULE_REFRESH_INTERVAL_SECONDS,
     SpikeLiveProcess,
+    _snapshot_from_database,
     require_viable_entry_notional,
 )
-from trading_platform.strategies.universe import (
-    EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS,
-    ExchangeSymbolSnapshot,
-)
+from trading_platform.strategies.universe import ExchangeSymbolSnapshot
 
 
 class StrategyStub:
@@ -61,6 +60,16 @@ class AuditedStrategyStub(StrategyStub):
         events = self.audit_events
         self.audit_events = []
         return events
+
+
+def test_database_admission_builds_managed_symbol_snapshot():
+    restricted = _snapshot_from_database(
+        ["AKEUSDT", "BTCUSDT", "OLDUSDT"], ["BTCUSDT"]
+    )
+
+    assert restricted.allowed_symbols == frozenset({"BTCUSDT"})
+    assert restricted.blocked_symbols == frozenset({"AKEUSDT", "OLDUSDT"})
+    assert restricted.blocked_reasons["AKEUSDT"] == "database_admission"
 
 
 def _entry(tier=1):
@@ -516,19 +525,7 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
 
 
 @pytest.mark.asyncio
-async def test_exchange_symbol_refresh_persists_once_then_uses_daily_cache():
-    now_ms = 1_780_000_000_000
-    exchange_info = {
-        "symbols": [
-            {
-                "symbol": "AKEUSDT",
-                "contractType": "PERPETUAL",
-                "status": "TRADING",
-                "onboardDate": now_ms - 24 * 60 * 60 * 1000,
-                "deliveryDate": now_ms + 30 * 24 * 60 * 60 * 1000,
-            }
-        ]
-    }
+async def test_exchange_symbol_refresh_reads_database_without_metadata_request():
     settings = SpikeLiveSettings(
         account_id="spike-test",
         symbols=["AKEUSDT"],
@@ -542,10 +539,11 @@ async def test_exchange_symbol_refresh_persists_once_then_uses_daily_cache():
         redis_config=Mock(),
         strategy_config=Mock(account_id="spike-test"),
     )
-    process._exchange_info = exchange_info
-    process.exchange_rest = Mock(get_exchange_info=AsyncMock())
+    process._exchange_rules_synced_monotonic = asyncio.get_running_loop().time()
     process.execution_rest = Mock(get_exchange_info=AsyncMock())
-    process.db = Mock(sync_exchange_symbols=AsyncMock(return_value=1))
+    process.db = Mock(
+        list_tradeable_exchange_symbols=AsyncMock(return_value=["AKEUSDT"]),
+    )
     process.coordinator = Mock(
         update_exchange_symbol_admission=AsyncMock(return_value=frozenset())
     )
@@ -554,8 +552,8 @@ async def test_exchange_symbol_refresh_persists_once_then_uses_daily_cache():
     assert await process._refresh_exchange_symbol_admission() is True
     assert await process._refresh_exchange_symbol_admission() is True
 
-    process.exchange_rest.get_exchange_info.assert_not_awaited()
-    process.db.sync_exchange_symbols.assert_awaited_once_with(exchange_info)
+    process.execution_rest.get_exchange_info.assert_not_awaited()
+    assert process.db.list_tradeable_exchange_symbols.await_count == 2
     assert process.coordinator.update_exchange_symbol_admission.await_count == 2
     process.gate.set_condition.assert_called_with("exchange_symbols", True)
 
@@ -572,11 +570,11 @@ async def test_exchange_symbol_refresh_failure_closes_entries_without_raising():
         redis_config=Mock(),
         strategy_config=Mock(account_id="spike-test"),
     )
-    process._exchange_info = {"invalid": []}
-    process._exchange_info_synced_monotonic = asyncio.get_running_loop().time()
-    process.exchange_rest = Mock(get_exchange_info=AsyncMock())
+    process._exchange_rules_synced_monotonic = asyncio.get_running_loop().time()
     process.execution_rest = Mock(get_exchange_info=AsyncMock())
-    process.db = Mock(sync_exchange_symbols=AsyncMock())
+    process.db = Mock(
+        list_tradeable_exchange_symbols=AsyncMock(side_effect=RuntimeError("db down"))
+    )
     process.coordinator = Mock(
         update_exchange_symbol_admission=AsyncMock(
             return_value=frozenset({"AKEUSDT"})
@@ -593,7 +591,7 @@ async def test_exchange_symbol_refresh_failure_closes_entries_without_raising():
 
 
 @pytest.mark.asyncio
-async def test_daily_exchange_symbol_refresh_fetches_persists_and_replaces_rules():
+async def test_daily_execution_rule_refresh_replaces_rules_without_metadata_sync():
     exchange_info = {
         "symbols": [
             {
@@ -616,17 +614,17 @@ async def test_daily_exchange_symbol_refresh_fetches_persists_and_replaces_rules
         redis_config=Mock(),
         strategy_config=Mock(account_id="spike-test"),
     )
-    process._exchange_info = {"symbols": []}
-    process._exchange_info_synced_monotonic = (
-        asyncio.get_running_loop().time() - EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS - 1
-    )
-    process.exchange_rest = Mock(
-        get_exchange_info=AsyncMock(return_value=exchange_info)
+    process._exchange_rules_synced_monotonic = (
+        asyncio.get_running_loop().time()
+        - EXCHANGE_RULE_REFRESH_INTERVAL_SECONDS
+        - 1
     )
     process.execution_rest = Mock(
         get_exchange_info=AsyncMock(return_value=exchange_info)
     )
-    process.db = Mock(sync_exchange_symbols=AsyncMock(return_value=1))
+    process.db = Mock(
+        list_tradeable_exchange_symbols=AsyncMock(return_value=["AKEUSDT"]),
+    )
     process.coordinator = Mock(
         update_exchange_symbol_admission=AsyncMock(return_value=frozenset())
     )
@@ -636,9 +634,7 @@ async def test_daily_exchange_symbol_refresh_fetches_persists_and_replaces_rules
 
     assert await process._refresh_exchange_symbol_admission() is True
 
-    process.exchange_rest.get_exchange_info.assert_awaited_once()
     process.execution_rest.get_exchange_info.assert_awaited_once()
-    process.db.sync_exchange_symbols.assert_awaited_once_with(exchange_info)
     process.coordinator.update_exchange_symbol_admission.assert_awaited_once_with(
         frozenset({"AKEUSDT"}),
         symbol_rules=replacement_rules,

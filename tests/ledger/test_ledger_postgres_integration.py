@@ -904,16 +904,27 @@ async def test_subcategory_admission_service_reads_db_and_cancels_on_close(ledge
 
 
 @pytest.mark.asyncio
-async def test_exchange_symbol_sync_updates_lifecycle_and_marks_missing_inactive(ledger):
+async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
+    ledger, client
+):
+    suffix = uuid4().hex[:8].upper()
+    symbol = f"T{suffix}USDT"
+    strategy_id = f"spike-{suffix.lower()}"
+    subtype = f"TEST_{suffix}"
     first = {
         "symbols": [
             {
-                "symbol": "BTCUSDT",
-                "pair": "BTCUSDT",
+                "symbol": symbol,
+                "pair": symbol,
                 "contractType": "PERPETUAL",
                 "status": "TRADING",
                 "onboardDate": 1_564_611_200_000,
                 "deliveryDate": 4_133_404_800_000,
+                "baseAsset": "BTC",
+                "quoteAsset": "USDT",
+                "marginAsset": "USDT",
+                "underlyingType": "COIN",
+                "underlyingSubType": [subtype, "LAYER_1"],
             },
             {
                 "symbol": "HFTUSDT",
@@ -927,6 +938,102 @@ async def test_exchange_symbol_sync_updates_lifecycle_and_marks_missing_inactive
     }
 
     assert await ledger.sync_exchange_symbols(first) == 2
+    btc = await ledger.get_exchange_symbol(symbol.lower())
+    assert btc is not None
+    assert btc.base_asset == "BTC"
+    assert btc.quote_asset == "USDT"
+    assert btc.raw_metadata["underlyingSubType"] == [subtype, "LAYER_1"]
+    categories = await ledger.list_exchange_symbol_categories(symbol)
+    assert {(item.category_type, item.code) for item in categories} == {
+        ("CATEGORY", "COIN"),
+        ("SUBCATEGORY", subtype),
+        ("SUBCATEGORY", "LAYER_1"),
+    }
+    category_by_code = {item.code: item for item in categories}
+    assert category_by_code[subtype].parent_key == category_by_code["COIN"].category_key
+
+    assert await ledger.list_tradeable_exchange_symbols(strategy_id=strategy_id) == [
+        symbol
+    ]
+    global_control = await ledger.set_symbol_global_admission(
+        symbol, False, 0, "test", "manual block"
+    )
+    assert global_control.version == 1
+    assert await ledger.list_tradeable_exchange_symbols() == []
+    await ledger.set_symbol_global_admission(symbol, True, 1, "test")
+
+    strategy_control = await ledger.set_strategy_category_admission(
+        strategy_id,
+        category_by_code[subtype].category_key,
+        False,
+        0,
+        "test",
+    )
+    assert strategy_control.version == 1
+    assert await ledger.list_tradeable_exchange_symbols() == [symbol]
+    assert await ledger.list_tradeable_exchange_symbols(
+        strategy_id="unconfigured-strategy"
+    ) == [symbol]
+    assert await ledger.list_tradeable_exchange_symbols(
+        strategy_id=strategy_id
+    ) == []
+    await ledger.set_strategy_category_admission(
+        strategy_id,
+        category_by_code[subtype].category_key,
+        True,
+        1,
+        "test",
+    )
+    assert await ledger.list_tradeable_exchange_symbols(
+        strategy_id=strategy_id
+    ) == [symbol]
+
+    parent_control = await ledger.set_strategy_category_admission(
+        strategy_id,
+        category_by_code["COIN"].category_key,
+        False,
+        0,
+        "test",
+    )
+    assert parent_control.version == 1
+    assert await ledger.list_tradeable_exchange_symbols(
+        strategy_id=strategy_id
+    ) == []
+    await ledger.set_strategy_category_admission(
+        strategy_id,
+        category_by_code["COIN"].category_key,
+        True,
+        1,
+        "test",
+    )
+
+    symbols_response = await client.get(
+        "/api/v1/exchange-symbols", params={"limit": 1000}
+    )
+    assert symbols_response.status_code == 200
+    assert any(
+        item["symbol"] == symbol for item in symbols_response.json()["items"]
+    )
+    categories_response = await client.get("/api/v1/exchange-categories")
+    assert categories_response.status_code == 200
+    assert any(item["code"] == subtype for item in categories_response.json())
+    strategy_response = await client.get(
+        f"/api/v1/strategy-category-admissions/{strategy_id}"
+    )
+    assert strategy_response.status_code == 200
+    assert strategy_response.json()[0]["enabled"] is True
+    global_audit = await client.get(
+        "/api/v1/symbol-global-admission-audit", params={"symbol": symbol}
+    )
+    assert global_audit.status_code == 200
+    assert global_audit.json()["total"] == 2
+    category_audit = await client.get(
+        "/api/v1/strategy-category-admission-audit",
+        params={"strategy_id": strategy_id},
+    )
+    assert category_audit.status_code == 200
+    assert category_audit.json()["total"] == 4
+
     hft = await ledger.get_exchange_symbol("hftusdt")
     assert hft is not None
     assert hft.status == "SETTLING"
@@ -937,7 +1044,40 @@ async def test_exchange_symbol_sync_updates_lifecycle_and_marks_missing_inactive
         await ledger.sync_exchange_symbols({"symbols": []})
     assert (await ledger.get_exchange_symbol("HFTUSDT")).active is True
 
+    with pytest.raises(ValueError, match="incomplete lifecycle metadata"):
+        await ledger.sync_exchange_symbols({"symbols": [{"symbol": "BROKENUSDT"}]})
+    assert (await ledger.get_exchange_symbol("HFTUSDT")).active is True
+
+    await ledger.mark_exchange_symbol_sync_failed(RuntimeError("network down"))
+    assert await ledger.list_tradeable_exchange_symbols() == []
+    assert await ledger.sync_exchange_symbols(first) == 2
+
+    async with ledger.pool.connection() as conn:
+        await conn.execute(
+            "UPDATE exchange_symbol_sync_state "
+            "SET last_success_at = NOW() - INTERVAL '37 hours'"
+        )
+    assert await ledger.list_tradeable_exchange_symbols() == []
+    assert await ledger.sync_exchange_symbols(first) == 2
+
     assert await ledger.sync_exchange_symbols({"symbols": [first["symbols"][0]]}) == 1
     hft = await ledger.get_exchange_symbol("HFTUSDT")
     assert hft is not None
     assert hft.active is False
+
+    bulk = {
+        "symbols": [
+            {
+                "symbol": f"BULK{index:02d}{suffix}USDT",
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "onboardDate": 1_564_611_200_000,
+                "deliveryDate": 4_133_404_800_000,
+            }
+            for index in range(20)
+        ]
+    }
+    assert await ledger.sync_exchange_symbols(bulk) == 20
+    with pytest.raises(ValueError, match="symbol count dropped"):
+        await ledger.sync_exchange_symbols(first)
+    assert (await ledger.get_exchange_symbol(bulk["symbols"][0]["symbol"])).active

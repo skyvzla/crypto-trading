@@ -9,9 +9,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trading_platform.ledger.db.models import (
     CampaignPnLFactsError,
+    ExchangeCategory,
+    ExchangeSymbol,
     LedgerDB,
+    StrategyCategoryAdmission,
     StrategyAuditRecord,
     SubcategoryAdmission,
+    SymbolGlobalAdmission,
     VersionConflictError,
 )
 
@@ -110,6 +114,87 @@ class AuditResponse(BaseModel):
 
     id: int
     subcategory: str
+    previous_enabled: Optional[bool]
+    enabled: bool
+    version: int
+    changed_at: datetime
+    changed_by: str
+    reason: Optional[str] = None
+
+
+class ExchangeSymbolResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    symbol: str
+    pair: str
+    contract_type: str
+    status: str
+    onboard_date: Optional[datetime]
+    delivery_date: Optional[datetime]
+    base_asset: Optional[str]
+    quote_asset: Optional[str]
+    margin_asset: Optional[str]
+    underlying_type: Optional[str]
+    active: bool
+    synced_at: datetime
+    global_enabled: bool
+    global_admission_version: int
+
+
+class ExchangeCategoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    category_key: str
+    source: str
+    category_type: str
+    code: str
+    name: str
+    parent_key: Optional[str]
+    active: bool
+    synced_at: datetime
+
+
+class SymbolGlobalAdmissionResponse(BaseModel):
+    symbol: str
+    enabled: bool
+    version: int
+    explicit: bool
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class StrategyCategoryAdmissionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    strategy_id: str
+    category_key: str
+    enabled: bool
+    version: int
+    updated_at: datetime
+    updated_by: str
+    reason: Optional[str] = None
+
+
+class SymbolGlobalAdmissionAuditResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    symbol: str
+    previous_enabled: Optional[bool]
+    enabled: bool
+    version: int
+    changed_at: datetime
+    changed_by: str
+    reason: Optional[str] = None
+
+
+class StrategyCategoryAdmissionAuditResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    strategy_id: str
+    category_key: str
     previous_enabled: Optional[bool]
     enabled: bool
     version: int
@@ -328,6 +413,180 @@ async def get_campaign_pnl(
     if item is None:
         raise HTTPException(status_code=404, detail="Campaign trades not found")
     return CampaignPnLResponse.model_validate(item)
+
+
+@router.get("/exchange-symbols", response_model=Page)
+async def list_exchange_symbols(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    items, total = await db.list_exchange_symbols(limit, offset)
+    return Page(
+        items=[ExchangeSymbolResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/exchange-symbols/{symbol}/categories",
+    response_model=list[ExchangeCategoryResponse],
+)
+async def list_exchange_symbol_categories(
+    symbol: str = Path(min_length=1, max_length=32),
+    db: LedgerDB = Depends(get_db),
+) -> list[ExchangeCategoryResponse]:
+    if await db.get_exchange_symbol(symbol) is None:
+        raise HTTPException(status_code=404, detail="exchange symbol not found")
+    items = await db.list_exchange_symbol_categories(symbol)
+    return [ExchangeCategoryResponse.model_validate(item) for item in items]
+
+
+@router.get(
+    "/exchange-symbols/{symbol}/admission",
+    response_model=SymbolGlobalAdmissionResponse,
+)
+async def get_symbol_global_admission(
+    symbol: str = Path(min_length=1, max_length=32),
+    db: LedgerDB = Depends(get_db),
+) -> SymbolGlobalAdmissionResponse:
+    exchange_symbol = await db.get_exchange_symbol(symbol)
+    if exchange_symbol is None:
+        raise HTTPException(status_code=404, detail="exchange symbol not found")
+    item = await db.get_symbol_global_admission(symbol)
+    if item is None:
+        return SymbolGlobalAdmissionResponse(
+            symbol=exchange_symbol.symbol,
+            enabled=True,
+            version=0,
+            explicit=False,
+        )
+    return SymbolGlobalAdmissionResponse(**item.__dict__, explicit=True)
+
+
+@router.put(
+    "/exchange-symbols/{symbol}/admission",
+    response_model=SymbolGlobalAdmissionResponse,
+)
+async def set_symbol_global_admission(
+    request: AdmissionRequest,
+    symbol: str = Path(min_length=1, max_length=32),
+    db: LedgerDB = Depends(get_db),
+) -> SymbolGlobalAdmissionResponse:
+    if await db.get_exchange_symbol(symbol) is None:
+        raise HTTPException(status_code=404, detail="exchange symbol not found")
+    try:
+        item: SymbolGlobalAdmission = await db.set_symbol_global_admission(
+            symbol,
+            request.enabled,
+            request.expected_version,
+            request.updated_by,
+            request.reason,
+        )
+    except VersionConflictError as exc:
+        raise HTTPException(
+            status_code=409, detail="symbol admission version conflict"
+        ) from exc
+    return SymbolGlobalAdmissionResponse(**item.__dict__, explicit=True)
+
+
+@router.get(
+    "/exchange-categories",
+    response_model=list[ExchangeCategoryResponse],
+)
+async def list_exchange_categories(
+    active_only: bool = True,
+    db: LedgerDB = Depends(get_db),
+) -> list[ExchangeCategoryResponse]:
+    items = await db.list_exchange_categories(active_only=active_only)
+    return [ExchangeCategoryResponse.model_validate(item) for item in items]
+
+
+@router.get("/symbol-global-admission-audit", response_model=Page)
+async def list_symbol_global_admission_audit(
+    symbol: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    items, total = await db.list_symbol_global_admission_audit(
+        symbol, limit, offset
+    )
+    return Page(
+        items=[
+            SymbolGlobalAdmissionAuditResponse.model_validate(item)
+            for item in items
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
+    "/strategy-category-admissions/{strategy_id}",
+    response_model=list[StrategyCategoryAdmissionResponse],
+)
+async def list_strategy_category_admissions(
+    strategy_id: str = Path(min_length=1, max_length=64),
+    db: LedgerDB = Depends(get_db),
+) -> list[StrategyCategoryAdmissionResponse]:
+    items = await db.list_strategy_category_admissions(strategy_id)
+    return [StrategyCategoryAdmissionResponse.model_validate(item) for item in items]
+
+
+@router.put(
+    "/strategy-category-admissions/{strategy_id}/{category_key}",
+    response_model=StrategyCategoryAdmissionResponse,
+)
+async def set_strategy_category_admission(
+    request: AdmissionRequest,
+    strategy_id: str = Path(min_length=1, max_length=64),
+    category_key: str = Path(min_length=1, max_length=192),
+    db: LedgerDB = Depends(get_db),
+) -> StrategyCategoryAdmissionResponse:
+    category = await db.get_exchange_category(category_key)
+    if category is None:
+        raise HTTPException(status_code=404, detail="exchange category not found")
+    try:
+        item: StrategyCategoryAdmission = (
+            await db.set_strategy_category_admission(
+                strategy_id,
+                category_key,
+                request.enabled,
+                request.expected_version,
+                request.updated_by,
+                request.reason,
+            )
+        )
+    except VersionConflictError as exc:
+        raise HTTPException(
+            status_code=409, detail="strategy category admission version conflict"
+        ) from exc
+    return StrategyCategoryAdmissionResponse.model_validate(item)
+
+
+@router.get("/strategy-category-admission-audit", response_model=Page)
+async def list_strategy_category_admission_audit(
+    strategy_id: Optional[str] = None,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    items, total = await db.list_strategy_category_admission_audit(
+        strategy_id, limit, offset
+    )
+    return Page(
+        items=[
+            StrategyCategoryAdmissionAuditResponse.model_validate(item)
+            for item in items
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/subcategory-admissions", response_model=Page)

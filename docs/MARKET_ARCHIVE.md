@@ -8,6 +8,8 @@ CLI 会显示总文件数、当前文件、平均下载速度、解析状态和�
 USD-M 永续币种；也可以显式传 `--all-symbols` 表达相同意图。筛选条件与交易门禁一致：
 必须为 active、`PERPETUAL`、`TRADING`、已经上架，且下架时间超出冻结窗口。数据库连接
 默认读取 `DB_*` 配置，也可用 `--dsn` 指定。
+传入 `--strategy-id` 时还会应用该策略显式关闭的 Category/Subcategory；不传时只应用
+交易所生命周期和交易对全局开关。
 
 ```bash
 uv run market-history data/market/history-parquet \

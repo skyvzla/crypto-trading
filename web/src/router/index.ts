@@ -2,6 +2,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 
 // 骨架阶段所有视图都指向同一个占位组件；接口定稿后逐个替换 component。
 const Placeholder = () => import('@/views/PlaceholderView.vue')
+const Universe = () => import('@/views/UniverseView.vue')
 
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/overview' },
@@ -44,8 +45,8 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/universe',
     name: 'universe',
-    component: Placeholder,
-    meta: { title: '可交易池', ready: false, needsApi: '可交易池查询端点' }
+    component: Universe,
+    meta: { title: '交易对管理', ready: true }
   },
   {
     path: '/admissions',

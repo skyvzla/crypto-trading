@@ -14,6 +14,7 @@ import httpx
 import psycopg
 
 from trading_platform.shared.config import DatabaseConfig
+from trading_platform.ledger.db.models import EFFECTIVE_SYMBOL_UNIVERSE_SQL
 
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (
@@ -56,6 +57,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=os.getenv("SPIKE_DELISTING_FREEZE_DAYS", "15"),
         help="exclude symbols delivering within this many days (default: 15)",
+    )
+    parser.add_argument(
+        "--strategy-id",
+        help="also apply optional category switches configured for this strategy",
     )
     parser.add_argument(
         "--min-free-gb",
@@ -102,6 +107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         symbols = args.symbols or _load_allowed_symbols(
             args.dsn or DatabaseConfig().dsn,
             freeze_days=args.delisting_freeze_days,
+            strategy_id=args.strategy_id,
         )
         if args.symbols is None:
             print(
@@ -179,23 +185,19 @@ class _DiskSpaceGuard:
             )
 
 
-def _load_allowed_symbols(dsn: str, *, freeze_days: int) -> list[str]:
+def _load_allowed_symbols(
+    dsn: str, *, freeze_days: int, strategy_id: str | None = None
+) -> list[str]:
+    normalized_strategy = strategy_id.strip() if strategy_id else None
     with psycopg.connect(dsn) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                """
-                SELECT symbol
-                FROM exchange_symbols
-                WHERE active = TRUE
-                  AND contract_type = 'PERPETUAL'
-                  AND status = 'TRADING'
-                  AND onboard_date IS NOT NULL
-                  AND onboard_date <= NOW()
-                  AND delivery_date IS NOT NULL
-                  AND delivery_date > NOW() + %s
-                ORDER BY symbol
-                """,
-                (timedelta(days=freeze_days),),
+                EFFECTIVE_SYMBOL_UNIVERSE_SQL,
+                (
+                    timedelta(days=freeze_days),
+                    normalized_strategy,
+                    normalized_strategy,
+                ),
             )
             symbols = [str(row[0]).strip().upper() for row in cursor.fetchall()]
     if not symbols:
