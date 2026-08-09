@@ -1,35 +1,71 @@
+# 实验名称，仅用于报告目录和元数据标识。
 name = "spike-july-parameter-sweep"
+# 回测区间，使用 UTC；结束时间不包含在回测内。
 start = "2026-07-01T00:00:00+00:00"
 end = "2026-08-01T00:00:00+00:00"
+# 只读 DuckDB catalog。回测不会联网补数据或写入历史归档。
 duckdb_path = "data/market/history.duckdb"
+# 本次实验所有汇总报表的输出目录；单参数单币种结果位于 runs/ 子目录。
 output = "reports/spike-july-parameter-sweep"
 
 [universe]
+# database：主库有效交易对与归档1秒数据的交集。
+# explicit：仅测试下方 symbols 中列出的交易对，但仍会校验主库未禁用。
+# all-archived：测试所有有1秒归档的主库有效交易对。
 mode = "database"
+# mode = "explicit" 时取消下一行注释，例如：
+# symbols = ["AKEUSDT", "1000PEPEUSDT"]
+# 主库中用于检查分类禁用规则的策略标识。
 strategy_id = "spike_short"
+# 距交割日少于该天数的交易对不纳入回测。
 freeze_days = 15
+# 允许数据首尾相对回测区间缺失的小时数；超过后在 universe.csv 标记为不完整。
 coverage_tolerance_hours = 24
+# 无论数据库或归档状态如何都排除的交易对。
 exclude_symbols = ["ZECUSDT"]
 
 [execution]
+# DuckDB 单次流式查询的时间窗口。2160小时=90天，策略状态会跨窗口连续保留。
 chunk_hours = 2160
+# 每次由 DuckDB 交给 Python 引擎的事件行数；增大可略降调用开销，但会增加短时内存。
 fetch_batch_size = 10000
-# 每个 worker 的最低 DuckDB 内存上限；程序会按可用内存自动提高。
+# 每个 worker 的最低 DuckDB 内存上限；程序会按可用内存和实际 worker 数自动提高。
 duckdb_memory_limit = "4GB"
+# 每个 worker 内 DuckDB 使用的线程数。并发由命令行 --workers 控制；不在此配置。
 duckdb_threads = 1
+# 可用内存中允许实验调度器使用的比例，剩余内存留给系统、Python 和其他服务。
 memory_budget_percent = 80
+# true 时，已有 summary.json 的任务直接复用；失败或中断的任务会在下次重跑。
 resume = true
 
 [fixed]
+# 每笔策略 Campaign 的总名义金额（USDT）；三档挂单按策略当前权重分配。
 total_notional = 1000
+# 退出策略：candidate-v1 为当前候选退出规则；修改会产生独立的真实回测结果。
 exit_policy = "candidate-v1"
+# 回测开始前额外读取的预热小时数，确保指标和前高计算不缺历史；不产生交易。
 warmup_hours = 16
 
 [matrix]
+# 以下字段会真正展开为参数组合。每个交易对都会对每个组合独立回测。
+# 0 表示不使用短期前高过滤；4/6/8/12/24 表示入场前对应小时内的前高限制。
+# 用于比较“短期回调后回到前高附近继续上涨”场景的过滤效果。
 prior_high_lookback_hours = [0, 4, 6, 8, 12, 24]
+# 如需比较单根1秒K线的限价成交比例，可取消下一行注释；数值范围是 0..1。
+# limit_fill_fraction = [0.5, 1.0]
+# 如需比较退出规则，可将 fixed.exit_policy 移除并取消下一行注释。
+# exit_policy = ["candidate-v1", "execution-test-d007", "legacy-script"]
+# 如需比较不同总名义金额，可将 fixed.total_notional 移除并取消下一行注释。
+# total_notional = [300, 1000]
 
 [analysis]
+# 以下字段只影响汇总报表分组，不会改变任何交易信号、挂单或退出结果。
+# 两笔不同交易对的信号时间或持仓时间相差不超过该秒数时，标记为竞争组。
 collision_tolerance_seconds = 1
+# 盈亏分档阈值（USDT）：输出盈利0-10U、盈利>10U、亏损绝对值<10U、亏损绝对值>=10U。
 pnl_split_usdt = 10
+# 对每笔交易提取入场前这些窗口内的最低点、最低点距入场时长、涨幅及对应胜率。
+# 这是“近期低点到入场经过多久”的统计，不是连续上涨周期的策略过滤。
 breakout_windows_hours = [4, 6, 8, 12, 24]
+# 统计4小时低点距离3天/7天箱体低点不超过这些百分比时的交易数、胜率和净收益。
 box_proximity_percentages = [1, 3, 5, 10]
