@@ -2,6 +2,8 @@ import hashlib
 import zipfile
 from datetime import UTC, datetime
 from io import BytesIO
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import duckdb
 import httpx
@@ -23,7 +25,12 @@ from trading_platform.market.archive import (
     parse_kline_archive,
 )
 from trading_platform.market.archive import cli as archive_cli
-from trading_platform.market.archive.cli import _ProgressReporter, _print_result
+from trading_platform.market.archive.cli import (
+    _DiskSpaceGuard,
+    _ProgressReporter,
+    _load_allowed_symbols,
+    _print_result,
+)
 
 
 def test_archive_urls_default_to_binance_s3_origin():
@@ -502,6 +509,87 @@ def test_cli_result_is_plain_text_by_default(tmp_path, capsys):
     assert not output.lstrip().startswith("{")
 
 
+def test_load_allowed_symbols_uses_exchange_lifecycle_gate(monkeypatch):
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.fetchall.return_value = [("AKEUSDT",), ("BTCUSDT",)]
+    connection = MagicMock()
+    connection.__enter__.return_value = connection
+    connection.cursor.return_value = cursor
+    connect = MagicMock(return_value=connection)
+    monkeypatch.setattr(archive_cli.psycopg, "connect", connect)
+
+    symbols = _load_allowed_symbols("postgresql://archive", freeze_days=15)
+
+    assert symbols == ["AKEUSDT", "BTCUSDT"]
+    connect.assert_called_once_with("postgresql://archive")
+    query = cursor.execute.call_args.args[0]
+    assert "active = TRUE" in query
+    assert "contract_type = 'PERPETUAL'" in query
+    assert "status = 'TRADING'" in query
+    assert "onboard_date <= NOW()" in query
+    assert "delivery_date > NOW() + %s" in query
+    assert cursor.execute.call_args.args[1][0].days == 15
+
+
+def test_disk_space_guard_stops_at_configured_reserve(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        archive_cli.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=10 * 1024**3),
+    )
+
+    guard = _DiskSpaceGuard(tmp_path / "not-created-yet", min_free_gb=10)
+
+    with pytest.raises(RuntimeError, match="insufficient disk space"):
+        guard()
+
+
+def test_cli_without_symbols_loads_all_tradable_symbols(
+    tmp_path, monkeypatch, capsys
+):
+    loaded = MagicMock(return_value=["AKEUSDT", "BTCUSDT"])
+    captured: dict[str, object] = {}
+
+    def fake_download(_archive, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(archive_cli, "_load_allowed_symbols", loaded)
+    monkeypatch.setattr(
+        archive_cli,
+        "BinanceFuturesMetadataFetcher",
+        lambda *args, **kwargs: lambda symbols: {},
+    )
+    monkeypatch.setattr(archive_cli, "download_history", fake_download)
+    monkeypatch.setattr(
+        archive_cli,
+        "create_duckdb_catalog",
+        lambda _archive, catalog: catalog,
+    )
+
+    exit_code = archive_cli.main(
+        [
+            str(tmp_path / "parquet"),
+            "--dsn",
+            "postgresql://archive",
+            "--timeframes",
+            "1m",
+            "--start",
+            "2026-07-01T00:00:00Z",
+            "--end",
+            "2026-08-01T00:00:00Z",
+            "--min-free-gb",
+            "0",
+        ]
+    )
+
+    assert exit_code == 0
+    loaded.assert_called_once_with("postgresql://archive", freeze_days=15)
+    assert captured["symbols"] == ["AKEUSDT", "BTCUSDT"]
+    assert "Loaded 2 tradable symbols from PostgreSQL." in capsys.readouterr().err
+
+
 def test_catalog_supports_an_all_unavailable_download(tmp_path):
     catalog = create_duckdb_catalog(
         tmp_path / "empty-parquet", tmp_path / "history.duckdb"
@@ -637,6 +725,43 @@ def test_download_history_skips_pre_listing_404_and_continues(tmp_path):
     assert [item.phase for item in progress if item.phase == "unavailable"] == [
         "unavailable"
     ]
+
+
+def test_download_history_rechecks_disk_space_before_each_download_and_write(
+    tmp_path,
+):
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as source:
+        source.writestr(
+            "AKEUSDT-aggTrades-2026-07-01.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "transact_time,is_buyer_maker\n"
+            "1,1.0,2.0,1,1,1782864000100,false\n",
+        )
+    fetch = MagicMock(return_value=payload.getvalue())
+    checks = 0
+
+    def storage_check() -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 3:
+            raise RuntimeError("insufficient disk space")
+
+    with ParquetCandleArchive(tmp_path / "history") as archive:
+        with pytest.raises(RuntimeError, match="insufficient disk space"):
+            download_history(
+                archive,
+                fetch=fetch,
+                symbols=["AKEUSDT"],
+                timeframes=["1s"],
+                start=datetime(2026, 7, 1, tzinfo=UTC),
+                end=datetime(2026, 7, 3, tzinfo=UTC),
+                storage_check=storage_check,
+            )
+
+    assert fetch.call_count == 1
+    assert checks == 3
+    assert (tmp_path / "history/AKEUSDT/1s/2026/07/01/candles.parquet").is_file()
 
 
 def test_http_fetcher_reports_retries_before_succeeding():

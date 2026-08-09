@@ -4,6 +4,11 @@
 下载得到的 Binance Vision 文件按不可变分区写入 Parquet，DuckDB 只生成查询 catalog。
 CLI 会显示总文件数、当前文件、平均下载速度、解析状态和写入行数。
 
+不传 `--symbols` 时，CLI 默认从 PostgreSQL `exchange_symbols` 读取当前允许交易的
+USD-M 永续币种；也可以显式传 `--all-symbols` 表达相同意图。筛选条件与交易门禁一致：
+必须为 active、`PERPETUAL`、`TRADING`、已经上架，且下架时间超出冻结窗口。数据库连接
+默认读取 `DB_*` 配置，也可用 `--dsn` 指定。
+
 ```bash
 uv run market-history data/market/history-parquet \
   --catalog data/market/history.duckdb \
@@ -13,8 +18,22 @@ uv run market-history data/market/history-parquet \
   --end 2026-08-01T00:00:00Z
 ```
 
+下载全部可交易币种：
+
+```bash
+uv run market-history data/market/history-parquet \
+  --all-symbols \
+  --timeframes 1s 1m 5m 15m \
+  --start 2026-05-01T00:00:00Z \
+  --end 2026-08-01T00:00:00Z
+```
+
 CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行，或按网络和 CPU
 调整。不同分区可以并行写入，同一分区仍由独立锁保护。
+
+磁盘保护默认保留 10 GiB 可用空间，并在启动、每个网络下载前以及每次 Parquet 写入前
+检查。可通过 `MARKET_HISTORY_MIN_FREE_GB` 配置，或用 `--min-free-gb` 覆盖；达到阈值
+时任务会停止且已完整写入的分区保留。传 `--min-free-gb 0` 可关闭保护。
 
 已存在且可读取的 Parquet 分区默认跳过，不会重复下载；使用 `--overwrite` 可强制重建。
 默认输出简洁文本，只有显式传入 `--json` 时才输出完整 JSON 结果。

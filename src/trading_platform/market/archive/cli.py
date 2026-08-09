@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import sys
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Sequence
 
 import httpx
+import psycopg
+
+from trading_platform.shared.config import DatabaseConfig
 
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (
@@ -31,7 +36,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="DuckDB query catalog path (default: <archive>/history.duckdb)",
     )
-    parser.add_argument("--symbols", nargs="+", required=True)
+    symbol_source = parser.add_mutually_exclusive_group()
+    symbol_source.add_argument(
+        "--symbols",
+        nargs="+",
+        help="symbols to download; omit to load all tradable symbols from PostgreSQL",
+    )
+    symbol_source.add_argument(
+        "--all-symbols",
+        action="store_true",
+        help="load all currently tradable symbols from PostgreSQL",
+    )
+    parser.add_argument(
+        "--dsn",
+        help="PostgreSQL DSN for automatic symbol selection (default: DB_* settings)",
+    )
+    parser.add_argument(
+        "--delisting-freeze-days",
+        type=int,
+        default=os.getenv("SPIKE_DELISTING_FREEZE_DAYS", "15"),
+        help="exclude symbols delivering within this many days (default: 15)",
+    )
+    parser.add_argument(
+        "--min-free-gb",
+        type=float,
+        default=os.getenv("MARKET_HISTORY_MIN_FREE_GB", "10"),
+        help="stop when archive filesystem free space reaches this value; 0 disables",
+    )
     parser.add_argument("--timeframes", nargs="+", required=True)
     parser.add_argument("--start", required=True, help="ISO 8601 inclusive UTC time")
     parser.add_argument("--end", required=True, help="ISO 8601 exclusive UTC time")
@@ -60,17 +91,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--timeout must be positive")
     if args.workers < 1:
         parser.error("--workers must be positive")
+    if args.delisting_freeze_days < 0:
+        parser.error("--delisting-freeze-days must be non-negative")
+    if args.min_free_gb < 0:
+        parser.error("--min-free-gb must be non-negative")
     reporter = _ProgressReporter(args.workers)
     try:
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
+        symbols = args.symbols or _load_allowed_symbols(
+            args.dsn or DatabaseConfig().dsn,
+            freeze_days=args.delisting_freeze_days,
+        )
+        if args.symbols is None:
+            print(
+                f"Loaded {len(symbols)} tradable symbols from PostgreSQL.",
+                file=sys.stderr,
+                flush=True,
+            )
+        storage_guard = _DiskSpaceGuard(args.archive, args.min_free_gb)
+        storage_guard()
         with httpx.Client(timeout=args.timeout, follow_redirects=True) as client:
             try:
                 symbol_availability = BinanceFuturesMetadataFetcher(
                     client,
                     attempts=args.attempts,
                     on_retry=reporter.retry,
-                )(args.symbols)
+                )(symbols)
             except Exception as error:
                 reporter.metadata_fallback(error)
                 symbol_availability = {}
@@ -83,7 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 results = download_history(
                     archive,
                     fetch=fetch,
-                    symbols=args.symbols,
+                    symbols=symbols,
                     timeframes=args.timeframes,
                     start=start,
                     end=end,
@@ -91,6 +138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_workers=args.workers,
                     overwrite=args.overwrite,
                     symbol_availability=symbol_availability,
+                    storage_check=storage_guard,
                 )
         catalog_path = args.catalog or args.archive / "history.duckdb"
         create_duckdb_catalog(args.archive, catalog_path)
@@ -105,6 +153,54 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     _print_result(results, args.archive, catalog_path, as_json=args.json)
     return 0
+
+
+class _DiskSpaceGuard:
+    def __init__(self, path: Path, min_free_gb: float) -> None:
+        self.path = path.resolve()
+        self.min_free_bytes = int(min_free_gb * 1024**3)
+        self._stopped = threading.Event()
+
+    def __call__(self) -> None:
+        if self.min_free_bytes == 0:
+            return
+        if self._stopped.is_set():
+            raise RuntimeError("download stopped by the disk space guard")
+        target = self.path
+        while not target.exists():
+            target = target.parent
+        free_bytes = shutil.disk_usage(target).free
+        if free_bytes <= self.min_free_bytes:
+            self._stopped.set()
+            raise RuntimeError(
+                "insufficient disk space: "
+                f"{_format_bytes(free_bytes)} free on {target}, "
+                f"requires more than {_format_bytes(self.min_free_bytes)}"
+            )
+
+
+def _load_allowed_symbols(dsn: str, *, freeze_days: int) -> list[str]:
+    with psycopg.connect(dsn) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT symbol
+                FROM exchange_symbols
+                WHERE active = TRUE
+                  AND contract_type = 'PERPETUAL'
+                  AND status = 'TRADING'
+                  AND onboard_date IS NOT NULL
+                  AND onboard_date <= NOW()
+                  AND delivery_date IS NOT NULL
+                  AND delivery_date > NOW() + %s
+                ORDER BY symbol
+                """,
+                (timedelta(days=freeze_days),),
+            )
+            symbols = [str(row[0]).strip().upper() for row in cursor.fetchall()]
+    if not symbols:
+        raise RuntimeError("PostgreSQL contains no currently tradable symbols")
+    return symbols
 
 
 class _ProgressReporter:

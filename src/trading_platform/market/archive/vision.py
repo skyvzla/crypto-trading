@@ -312,6 +312,7 @@ def download_history(
     max_workers: int = 1,
     overwrite: bool = False,
     symbol_availability: Mapping[str, SymbolAvailability] | None = None,
+    storage_check: Callable[[], None] | None = None,
 ) -> list[DownloadResult]:
     """Download a bounded UTC range; network reads are separate from one writer."""
 
@@ -385,6 +386,8 @@ def download_history(
                     return DownloadResult(
                         symbol, timeframe, label, existing_rows, skipped=True
                     )
+        if storage_check is not None:
+            storage_check()
         _notify(on_progress, "downloading", current, total, symbol, timeframe, label)
         started = time.monotonic()
         try:
@@ -421,6 +424,8 @@ def download_history(
             candles = parse_kline_archive(content, symbol, timeframe, label)
         # Vision files are immutable day/month partitions. Store the complete
         # source partition so partial requests cannot overwrite it.
+        if storage_check is not None:
+            storage_check()
         rows = archive.upsert(candles)
         _notify(
             on_progress,
