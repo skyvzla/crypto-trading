@@ -7,16 +7,99 @@ import duckdb
 import pandas as pd
 import pytest
 
+import trading_platform.backtest.sweep as sweep
 from trading_platform.backtest.sweep import (
     _annotate_collisions,
+    _archive_coverage,
     _attach_breakout_context,
     ChildProcessRegistry,
+    _configure_duckdb_connection,
     _estimate_monthly_memory,
     _find_simultaneous_signals,
     _parameter_summary,
     _worker_memory_plan,
     expand_specs,
 )
+
+
+def test_configure_duckdb_connection_limits_threads():
+    connection = duckdb.connect(":memory:")
+    try:
+        _configure_duckdb_connection(connection, threads=2)
+
+        assert int(connection.execute(
+            "SELECT current_setting('threads')"
+        ).fetchone()[0]) == 2
+    finally:
+        connection.close()
+
+
+def test_archive_coverage_filters_symbols(tmp_path: Path):
+    archive = tmp_path / "history.duckdb"
+    connection = duckdb.connect(str(archive))
+    connection.execute(
+        "CREATE TABLE candles (symbol VARCHAR, timeframe VARCHAR, "
+        "open_time TIMESTAMPTZ, close_time TIMESTAMPTZ)"
+    )
+    connection.executemany(
+        "INSERT INTO candles VALUES (?, '1s', to_timestamp(0), to_timestamp(1))",
+        [("AKEUSDT",), ("BANKUSDT",)],
+    )
+    connection.close()
+
+    coverage = _archive_coverage(
+        str(archive), start_ms=0, end_ms=2_000,
+        symbols={"AKEUSDT"}, duckdb_threads=1,
+    )
+
+    assert set(coverage) == {"AKEUSDT"}
+
+
+def test_explicit_universe_only_scans_requested_symbols(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(sweep, "_allowed_symbols", lambda *args, **kwargs: {
+        "AKEUSDT", "BANKUSDT", "BTCUSDT"
+    })
+
+    def fake_coverage(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "AKEUSDT": {
+                "1s": (0, 9_999_999, 1),
+                "1m": (0, 9_999_999, 1),
+                "5m": (0, 9_999_999, 1),
+                "15m": (0, 9_999_999, 1),
+            }
+        }
+
+    monkeypatch.setattr(sweep, "_archive_coverage", fake_coverage)
+    config = {
+        "start": "1970-01-01T00:00:00+00:00",
+        "end": "1970-01-01T00:00:01+00:00",
+        "duckdb_path": "history.duckdb",
+        "database_dsn": "unused",
+        "execution": {"duckdb_threads": 2},
+        "universe": {"mode": "explicit", "symbols": ["AKEUSDT"]},
+    }
+
+    symbols, _ = sweep.resolve_universe(config)
+
+    assert symbols == ["AKEUSDT"]
+    assert captured["symbols"] == {"AKEUSDT"}
+    assert captured["duckdb_threads"] == 2
+
+
+def test_main_handles_duckdb_query_interrupt_without_traceback(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        sweep, "_main", lambda argv=None: (_ for _ in ()).throw(
+            RuntimeError("Query interrupted")
+        )
+    )
+
+    assert sweep.main([]) == 130
+    assert "回测已停止" in capsys.readouterr().out
 
 
 def test_expand_specs_is_deterministic_and_period_sensitive():
@@ -158,7 +241,7 @@ def test_breakout_context_uses_only_completed_minutes(tmp_path: Path):
     }])
 
     enriched = _attach_breakout_context(
-        trades, duckdb_path=str(archive), windows_hours=[4, 6]
+        trades, duckdb_path=str(archive), windows_hours=[4, 6], duckdb_threads=1
     )
 
     assert bool(enriched.iloc[0]["low_4h_valid"])
@@ -169,6 +252,7 @@ def test_breakout_context_uses_only_completed_minutes(tmp_path: Path):
     estimate = _estimate_monthly_memory(
         str(archive), symbols=["AKEUSDT"], start_ms=0,
         end_ms=entry_time, chunk_hours=720, fetch_batch_size=10_000,
+        duckdb_threads=1,
     )
     assert estimate.iloc[0]["event_rows"] == 480
     assert estimate.iloc[0]["estimated_stream_peak_gb"] > 0

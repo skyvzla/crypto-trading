@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 import duckdb
 import pandas as pd
@@ -157,19 +157,77 @@ def _allowed_symbols(dsn: str, *, freeze_days: int, strategy_id: str) -> set[str
         ) from error
 
 
+def _configure_duckdb_connection(
+    connection: duckdb.DuckDBPyConnection, *, threads: int
+) -> None:
+    if threads <= 0:
+        raise ValueError("execution.duckdb_threads must be positive")
+    connection.execute(f"SET threads = {int(threads)}")
+    connection.execute("SET enable_progress_bar = false")
+
+
+def _execute_duckdb_interruptibly(
+    connection: duckdb.DuckDBPyConnection,
+    query: str,
+    parameters: list[Any],
+) -> list[tuple[Any, ...]]:
+    """让主线程可在 DuckDB 原生查询期间及时处理 Ctrl+C。"""
+    completed = threading.Event()
+    rows: list[tuple[Any, ...]] = []
+    errors: list[BaseException] = []
+
+    def execute() -> None:
+        try:
+            rows.extend(connection.execute(query, parameters).fetchall())
+        except BaseException as error:
+            errors.append(error)
+        finally:
+            completed.set()
+
+    query_thread = threading.Thread(target=execute, daemon=True)
+    query_thread.start()
+    try:
+        while not completed.wait(0.1):
+            pass
+    except KeyboardInterrupt:
+        connection.interrupt()
+        completed.wait(2)
+        raise
+    if errors:
+        raise errors[0]
+    return rows
+
+
 def _archive_coverage(
-    duckdb_path: str, *, start_ms: int, end_ms: int
+    duckdb_path: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    symbols: Collection[str] | None,
+    duckdb_threads: int,
 ) -> dict[str, dict[str, tuple[int, int, int]]]:
+    selected_symbols = sorted(set(symbols)) if symbols is not None else None
+    if selected_symbols == []:
+        return {}
+    symbol_filter = ""
+    parameters: list[Any] = [start_ms, end_ms]
+    if selected_symbols is not None:
+        placeholders = ", ".join("?" for _ in selected_symbols)
+        symbol_filter = f"AND symbol IN ({placeholders}) "
+        parameters.extend(selected_symbols)
     connection = duckdb.connect(duckdb_path, read_only=True)
     try:
-        rows = connection.execute(
+        _configure_duckdb_connection(connection, threads=duckdb_threads)
+        rows = _execute_duckdb_interruptibly(
+            connection,
             "SELECT symbol, timeframe, min(epoch_ms(open_time)), "
             "max(epoch_ms(close_time)), count(*) FROM main.candles "
             "WHERE timeframe IN ('1s', '1m', '5m', '15m') "
             "AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ? "
+            f"{symbol_filter}"
             "GROUP BY symbol, timeframe ORDER BY symbol, timeframe",
-            [start_ms, end_ms],
-        ).fetchall()
+            parameters,
+        )
         coverage: dict[str, dict[str, tuple[int, int, int]]] = {}
         for symbol, timeframe, first_ms, last_ms, count in rows:
             coverage.setdefault(str(symbol).strip().upper(), {})[
@@ -188,12 +246,15 @@ def _estimate_monthly_memory(
     end_ms: int,
     chunk_hours: float,
     fetch_batch_size: int,
+    duckdb_threads: int,
 ) -> pd.DataFrame:
     """按币种月份估算全量物化和流式窗口的内存量级。"""
     placeholders = ", ".join("?" for _ in symbols)
     connection = duckdb.connect(duckdb_path, read_only=True)
     try:
-        rows = connection.execute(
+        _configure_duckdb_connection(connection, threads=duckdb_threads)
+        rows = _execute_duckdb_interruptibly(
+            connection,
             "SELECT symbol, date_trunc('month', timezone('UTC', open_time)) AS month, "
             "count(*) FILTER (WHERE timeframe = '1s') AS rows_1s, "
             "count(*) AS event_rows FROM main.candles "
@@ -202,7 +263,7 @@ def _estimate_monthly_memory(
             "AND timeframe IN ('1s', '1m', '5m', '15m') "
             "GROUP BY symbol, month ORDER BY symbol, month",
             [*symbols, start_ms, end_ms],
-        ).fetchall()
+        )
     finally:
         connection.close()
     records = []
@@ -244,23 +305,34 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
 
     start_ms = _timestamp_ms(config["start"])
     end_ms = _timestamp_ms(config["end"])
-    coverage = _archive_coverage(
-        config["duckdb_path"], start_ms=start_ms, end_ms=end_ms
-    )
-    archived = {
-        symbol for symbol, timeframes in coverage.items() if "1s" in timeframes
-    }
+    duckdb_threads = int(config.get("execution", {}).get("duckdb_threads", 1))
     allowed = _allowed_symbols(
         config.get("database_dsn") or _dsn_from_environment(),
         freeze_days=int(universe.get("freeze_days", 15)),
         strategy_id=str(universe.get("strategy_id", "spike_short")),
     )
+    archive_scan_symbols = (
+        requested if mode == "explicit" else (allowed if mode == "database" else None)
+    )
+    coverage = _archive_coverage(
+        config["duckdb_path"],
+        start_ms=start_ms,
+        end_ms=end_ms,
+        symbols=archive_scan_symbols,
+        duckdb_threads=duckdb_threads,
+    )
+    archived = {
+        symbol for symbol, timeframes in coverage.items() if "1s" in timeframes
+    }
     candidates = requested if mode == "explicit" else (archived if mode == "all-archived" else allowed)
     selected = sorted((candidates & allowed & archived) - excluded)
 
     rows = []
     tolerance_ms = int(float(universe.get("coverage_tolerance_hours", 24)) * 3_600_000)
-    for symbol in sorted(candidates | allowed | archived | excluded):
+    report_symbols = candidates | excluded
+    if mode == "all-archived":
+        report_symbols |= allowed
+    for symbol in sorted(report_symbols):
         timeframes = coverage.get(symbol, {})
         reasons = []
         if symbol not in allowed:
@@ -594,6 +666,7 @@ def _attach_breakout_context(
     *,
     duckdb_path: str,
     windows_hours: list[int],
+    duckdb_threads: int,
 ) -> pd.DataFrame:
     """从入场前完整1m K线提取上涨周期与3d/7d箱体指标。"""
     if trades.empty:
@@ -606,6 +679,7 @@ def _attach_breakout_context(
     calculation_windows = sorted({4, *windows_hours})
     max_hours = max([168, *calculation_windows])
     try:
+        _configure_duckdb_connection(connection, threads=duckdb_threads)
         for index, row in frame.iterrows():
             if pd.isna(entry_times.loc[index]) or pd.isna(entry_prices.loc[index]):
                 continue
@@ -824,7 +898,7 @@ def _write_report(
     (output_root / "report.md").write_text("\n".join(lines) + "\n")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dynamic Spike 参数矩阵流式回测")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
@@ -836,7 +910,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = tomllib.loads(args.config.read_text())
     config["duckdb_path"] = str(config.get("duckdb_path", "data/market/history.duckdb"))
+    execution = config.setdefault("execution", {})
+    if "workers" in execution:
+        raise ValueError("worker 数请通过 --workers 传递，不要放在配置文件中")
+    duckdb_threads = int(execution.get("duckdb_threads", 1))
+    if duckdb_threads <= 0:
+        raise ValueError("execution.duckdb_threads must be positive")
     output_root = Path(config.get("output", f"reports/{config.get('name', 'spike_sweep')}"))
+    print("正在筛选交易对并检查历史归档覆盖...", flush=True)
     symbols, universe_rows = resolve_universe(config)
     specs = expand_specs(config, symbols)
     output_root.mkdir(parents=True, exist_ok=True)
@@ -852,9 +933,6 @@ def main(argv: list[str] | None = None) -> int:
             "selected_symbols": symbols,
         }, indent=2, ensure_ascii=False)
     )
-    execution = config.setdefault("execution", {})
-    if "workers" in execution:
-        raise ValueError("worker 数请通过 --workers 传递，不要放在配置文件中")
     minimum_memory_limit = str(execution.get("duckdb_memory_limit", "4GB"))
     workers, actual_memory_limit = _worker_memory_plan(
         args.workers,
@@ -863,6 +941,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     execution["minimum_duckdb_memory_limit"] = minimum_memory_limit
     execution["duckdb_memory_limit"] = actual_memory_limit
+    print("正在估算所选交易对的流式回测内存...", flush=True)
     memory_estimate = _estimate_monthly_memory(
         config["duckdb_path"],
         symbols=symbols,
@@ -870,6 +949,7 @@ def main(argv: list[str] | None = None) -> int:
         end_ms=_timestamp_ms(config["end"]),
         chunk_hours=float(execution.get("chunk_hours", 24 * 90)),
         fetch_batch_size=int(execution.get("fetch_batch_size", 10_000)),
+        duckdb_threads=duckdb_threads,
     )
     memory_estimate.to_csv(output_root / "memory_estimate.csv", index=False)
     memory_limit_bytes = _memory_bytes(actual_memory_limit)
@@ -966,7 +1046,10 @@ def main(argv: list[str] | None = None) -> int:
     analysis = config.get("analysis", {})
     windows_hours = [int(value) for value in analysis.get("breakout_windows_hours", [4, 6, 8, 12, 24])]
     trades = _attach_breakout_context(
-        trades, duckdb_path=config["duckdb_path"], windows_hours=windows_hours
+        trades,
+        duckdb_path=config["duckdb_path"],
+        windows_hours=windows_hours,
+        duckdb_threads=duckdb_threads,
     )
     trades, collisions = _annotate_collisions(
         trades, tolerance_ms=int(config.get("analysis", {}).get("collision_tolerance_seconds", 1) * 1000)
@@ -1010,6 +1093,19 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        print("回测已停止。", flush=True)
+        return 130
+    except RuntimeError as error:
+        if "Query interrupted" not in str(error):
+            raise
+        print("回测已停止。", flush=True)
+        return 130
 
 
 if __name__ == "__main__":
