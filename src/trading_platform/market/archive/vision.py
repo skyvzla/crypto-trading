@@ -12,6 +12,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from threading import Condition, Lock
 from typing import BinaryIO
 
 import httpx
@@ -179,6 +180,54 @@ class BinanceVisionHTTPFetcher:
                 time.sleep(self._retry_base_seconds * (2**attempt))
         assert last_error is not None
         raise last_error
+
+
+class BinanceVisionWorkerPoolFetcher:
+    """Assign each archive request to the next proxy in round-robin order."""
+
+    def __init__(self, fetchers: Sequence[Callable[[str], bytes]]) -> None:
+        if not fetchers:
+            raise ValueError("at least one proxy fetcher is required")
+        self._fetchers = tuple(fetchers)
+        self._condition = Condition(Lock())
+        self._busy = [False] * len(self._fetchers)
+        self._next = 0
+
+    def __call__(self, url: str) -> bytes:
+        index, fetcher = self._acquire()
+        try:
+            return fetcher(url)
+        finally:
+            self._release(index)
+
+    @contextmanager
+    def open_archive(self, url: str) -> Iterator[bytes | BinaryIO]:
+        index, fetcher = self._acquire()
+        released = False
+        try:
+            with _open_fetched_archive(fetcher, url) as source:
+                self._release(index)
+                released = True
+                yield source
+        finally:
+            if not released:
+                self._release(index)
+
+    def _acquire(self) -> tuple[int, Callable[[str], bytes]]:
+        with self._condition:
+            while True:
+                for offset in range(len(self._fetchers)):
+                    index = (self._next + offset) % len(self._fetchers)
+                    if not self._busy[index]:
+                        self._busy[index] = True
+                        self._next = (index + 1) % len(self._fetchers)
+                        return index, self._fetchers[index]
+                self._condition.wait()
+
+    def _release(self, index: int) -> None:
+        with self._condition:
+            self._busy[index] = False
+            self._condition.notify()
 
 
 class BinanceFuturesMetadataFetcher:

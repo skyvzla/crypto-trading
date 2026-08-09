@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import os
 import shutil
@@ -20,6 +21,7 @@ from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (
     BinanceFuturesMetadataFetcher,
     BinanceVisionHTTPFetcher,
+    BinanceVisionWorkerPoolFetcher,
     DownloadProgress,
     DownloadResult,
     download_history,
@@ -76,8 +78,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="concurrent download/parse workers (default: 4)",
+        default=None,
+        help="concurrent workers (default: proxy count, otherwise 4)",
+    )
+    parser.add_argument(
+        "--proxy",
+        dest="proxies",
+        action="append",
+        help=(
+            "HTTP(S) proxy URL; repeat for multiple busy-aware round-robin proxies "
+            "(or set MARKET_HISTORY_PROXIES as a comma-separated list)"
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -90,17 +101,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="print the final result as JSON",
     )
     args = parser.parse_args(argv)
+    proxies = args.proxies
+    if proxies is None:
+        proxies = _parse_proxy_environment(
+            os.getenv("MARKET_HISTORY_PROXIES", "")
+        )
+    else:
+        proxies = [proxy.strip() for proxy in proxies if proxy.strip()]
+    _validate_proxies(parser, proxies)
+    workers = args.workers
+    if workers is None:
+        workers = len(proxies) if proxies else 4
     if args.attempts < 1:
         parser.error("--attempts must be positive")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
-    if args.workers < 1:
+    if workers < 1:
         parser.error("--workers must be positive")
     if args.delisting_freeze_days < 0:
         parser.error("--delisting-freeze-days must be non-negative")
     if args.min_free_gb < 0:
         parser.error("--min-free-gb must be non-negative")
-    reporter = _ProgressReporter(args.workers)
+    reporter = _ProgressReporter(workers)
     try:
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
@@ -124,22 +146,57 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
             flush=True,
         )
+        if proxies:
+            print(
+                f"Using {len(proxies)} busy-aware round-robin proxies.",
+                file=sys.stderr,
+                flush=True,
+            )
         storage_guard = _DiskSpaceGuard(args.archive, args.min_free_gb)
         storage_guard()
-        with httpx.Client(timeout=args.timeout, follow_redirects=True) as client:
+        with ExitStack() as stack:
+            if proxies:
+                clients = [
+                    stack.enter_context(
+                        httpx.Client(
+                            timeout=args.timeout,
+                            follow_redirects=True,
+                            proxy=proxy,
+                            trust_env=False,
+                        )
+                    )
+                    for proxy in proxies
+                ]
+            else:
+                clients = [
+                    stack.enter_context(
+                        httpx.Client(
+                            timeout=args.timeout,
+                            follow_redirects=True,
+                        )
+                    )
+                ]
             try:
                 symbol_availability = BinanceFuturesMetadataFetcher(
-                    client,
+                    clients[0],
                     attempts=args.attempts,
                     on_retry=reporter.retry,
                 )(symbols)
             except Exception as error:
                 reporter.metadata_fallback(error)
                 symbol_availability = {}
-            fetch = BinanceVisionHTTPFetcher(
-                client,
-                attempts=args.attempts,
-                on_retry=reporter.retry,
+            worker_fetchers = [
+                BinanceVisionHTTPFetcher(
+                    client,
+                    attempts=args.attempts,
+                    on_retry=reporter.retry,
+                )
+                for client in clients
+            ]
+            fetch = (
+                BinanceVisionWorkerPoolFetcher(worker_fetchers)
+                if proxies
+                else worker_fetchers[0]
             )
             with ParquetCandleArchive(args.archive) as archive:
                 results = download_history(
@@ -150,7 +207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     start=start,
                     end=end,
                     on_progress=reporter,
-                    max_workers=args.workers,
+                    max_workers=workers,
                     overwrite=args.overwrite,
                     symbol_availability=symbol_availability,
                     storage_check=storage_guard,
@@ -168,6 +225,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     _print_result(results, args.archive, catalog_path, as_json=args.json)
     return 0
+
+
+def _parse_proxy_environment(value: str) -> list[str]:
+    return [
+        item.strip()
+        for item in value.replace("\n", ",").split(",")
+        if item.strip()
+    ]
+
+
+def _validate_proxies(parser: argparse.ArgumentParser, proxies: Sequence[str]) -> None:
+    for proxy in proxies:
+        try:
+            parsed = httpx.URL(proxy)
+        except httpx.InvalidURL:
+            parser.error("invalid proxy URL")
+        if parsed.scheme not in {"http", "https"} or not parsed.host:
+            parser.error("proxy must be an HTTP(S) URL")
 
 
 class _DiskSpaceGuard:

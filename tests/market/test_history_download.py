@@ -1,7 +1,9 @@
 import hashlib
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from io import BytesIO
+from threading import Event, Lock
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -13,6 +15,7 @@ from trading_platform.backtest.loader import BacktestDataLoader
 from trading_platform.market.archive import vision as archive_vision
 from trading_platform.market.archive import (
     BinanceVisionHTTPFetcher,
+    BinanceVisionWorkerPoolFetcher,
     Candle,
     DownloadProgress,
     DownloadResult,
@@ -611,6 +614,59 @@ def test_http_fetcher_exposes_verified_seekable_stream():
             assert source.read(8) == b"verified"
 
 
+def test_worker_pool_round_robins_requests_across_fetchers():
+    calls: list[str] = []
+
+    class Fetcher:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __call__(self, url: str) -> bytes:
+            calls.append(self.name)
+            return self.name.encode()
+
+    pool = BinanceVisionWorkerPoolFetcher([Fetcher("a"), Fetcher("b")])
+
+    assert [pool("first"), pool("second"), pool("third")] == [
+        b"a",
+        b"b",
+        b"a",
+    ]
+    assert calls == ["a", "b", "a"]
+
+
+def test_worker_pool_does_not_assign_a_busy_proxy_twice():
+    started = {"a": Event(), "b": Event()}
+    release = Event()
+    calls: list[str] = []
+    calls_lock = Lock()
+
+    class Fetcher:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __call__(self, _url: str) -> bytes:
+            with calls_lock:
+                calls.append(self.name)
+            started[self.name].set()
+            release.wait(timeout=2)
+            return self.name.encode()
+
+    pool = BinanceVisionWorkerPoolFetcher([Fetcher("a"), Fetcher("b")])
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first = executor.submit(pool, "first")
+        second = executor.submit(pool, "second")
+        assert started["a"].wait(timeout=1)
+        assert started["b"].wait(timeout=1)
+        third = executor.submit(pool, "third")
+        assert third.done() is False
+        release.set()
+        assert {first.result(), second.result(), third.result()} == {b"a", b"b"}
+
+    assert calls[:2] == ["a", "b"]
+    assert calls[2] == "a"
+
+
 def test_cli_progress_uses_monotonic_completion_count(capsys):
     reporter = _ProgressReporter(workers=4)
     reporter.retry(
@@ -767,6 +823,70 @@ def test_cli_without_symbols_loads_all_tradable_symbols(
     stderr = capsys.readouterr().err
     assert "Loaded 2 tradable symbols from PostgreSQL." in stderr
     assert "Downloading data for 2 trading pairs." in stderr
+
+
+def test_cli_uses_round_robin_proxy_pool(
+    tmp_path, monkeypatch, capsys
+):
+    client_options: list[dict[str, object]] = []
+    captured: dict[str, object] = {}
+
+    class Client:
+        def __init__(self, **kwargs) -> None:
+            client_options.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            return None
+
+    def fake_download(_archive, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(archive_cli.httpx, "Client", Client)
+    monkeypatch.setattr(
+        archive_cli,
+        "BinanceFuturesMetadataFetcher",
+        lambda *args, **kwargs: lambda symbols: {},
+    )
+    monkeypatch.setattr(archive_cli, "download_history", fake_download)
+    monkeypatch.setattr(
+        archive_cli,
+        "create_duckdb_catalog",
+        lambda _archive, catalog: catalog,
+    )
+
+    exit_code = archive_cli.main(
+        [
+            str(tmp_path / "parquet"),
+            "--symbols",
+            "AKEUSDT",
+            "--timeframes",
+            "1s",
+            "--start",
+            "2026-07-01T00:00:00Z",
+            "--end",
+            "2026-08-01T00:00:00Z",
+            "--min-free-gb",
+            "0",
+            "--proxy",
+            "http://proxy-a:8080",
+            "--proxy",
+            "http://proxy-b:8080",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["max_workers"] == 2
+    assert isinstance(captured["fetch"], BinanceVisionWorkerPoolFetcher)
+    assert [options["proxy"] for options in client_options] == [
+        "http://proxy-a:8080",
+        "http://proxy-b:8080",
+    ]
+    assert all(options["trust_env"] is False for options in client_options)
+    assert "Using 2 busy-aware round-robin proxies." in capsys.readouterr().err
 
 
 def test_catalog_supports_an_all_unavailable_download(tmp_path):

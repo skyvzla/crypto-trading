@@ -33,6 +33,24 @@ uv run market-history data/market/history-parquet \
 CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行，或按网络和 CPU
 调整。不同分区可以并行写入，同一分区仍由独立锁保护。
 
+如果单个代理有带宽上限，可以重复传入 `--proxy` 配置代理池；每个网络下载请求按轮询顺序
+选择一个空闲代理，同一代理在下载和校验完成前不会被再次分配。代理释放后才进入下一轮，
+因此 `--workers` 可以大于代理数，超出的 worker 会等待空闲代理。代理 URL 只接受 HTTP(S)，
+也可以用逗号或换行分隔的 `MARKET_HISTORY_PROXIES` 配置：
+
+```bash
+uv run market-history data/market/history-parquet \
+  --symbols BTCUSDT ETHUSDT \
+  --timeframes 1s 1m \
+  --start 2025-01-01T00:00:00Z \
+  --end 2026-01-01T00:00:00Z \
+  --workers 8 \
+  --proxy http://user:pass@proxy-a:8080 \
+  --proxy http://user:pass@proxy-b:8080
+```
+
+不传 `--proxy` 时继续使用 `httpx` 的 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量行为。
+
 磁盘保护默认保留 10 GiB 可用空间，并在启动、每个网络下载前以及每次 Parquet 写入前
 检查。可通过 `MARKET_HISTORY_MIN_FREE_GB` 配置，或用 `--min-free-gb` 覆盖；达到阈值
 时任务会停止且已完整写入的分区保留。传 `--min-free-gb 0` 可关闭保护。
