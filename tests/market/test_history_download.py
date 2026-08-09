@@ -593,7 +593,9 @@ def test_cli_without_symbols_loads_all_tradable_symbols(
         "postgresql://archive", freeze_days=15, strategy_id=None
     )
     assert captured["symbols"] == ["AKEUSDT", "BTCUSDT"]
-    assert "Loaded 2 tradable symbols from PostgreSQL." in capsys.readouterr().err
+    stderr = capsys.readouterr().err
+    assert "Loaded 2 tradable symbols from PostgreSQL." in stderr
+    assert "Downloading data for 2 trading pairs." in stderr
 
 
 def test_catalog_supports_an_all_unavailable_download(tmp_path):
@@ -652,7 +654,10 @@ def test_cli_handles_keyboard_interrupt_without_traceback(
     captured = capsys.readouterr()
     assert exit_code == 130
     assert captured.out == ""
-    assert captured.err == "Cancelled.\n"
+    assert captured.err == (
+        "Downloading data for 1 trading pair.\n"
+        "Cancelled.\n"
+    )
     assert "Traceback" not in captured.err
 
 

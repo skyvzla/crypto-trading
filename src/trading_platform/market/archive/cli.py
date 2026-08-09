@@ -115,6 +115,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
                 flush=True,
             )
+        symbol_count = len(
+            {symbol.strip().upper() for symbol in symbols if symbol.strip()}
+        )
+        symbol_label = "trading pair" if symbol_count == 1 else "trading pairs"
+        print(
+            f"Downloading data for {symbol_count} {symbol_label}.",
+            file=sys.stderr,
+            flush=True,
+        )
         storage_guard = _DiskSpaceGuard(args.archive, args.min_free_gb)
         storage_guard()
         with httpx.Client(timeout=args.timeout, follow_redirects=True) as client:
