@@ -24,6 +24,11 @@ Compose 的 `symbol-sync` 服务启动后立即同步一次，之后默认每 86
 `underlyingType` 和 `underlyingSubType` 两级分类。同步只更新 Binance 事实与分类关联，
 不会覆盖人工维护的全局交易对开关或策略分类开关。
 
+首次同步还会写入缺省准入规则：当前市值最大的基准资产（BTC、ETH、BNB、XRP、SOL
+等 32 个 Binance USD-M 永续）默认全局禁用，避免策略进入主流币；已有人工开关绝不
+会被覆盖。旧 `subcategory_admission` 中的禁用记录只在能唯一匹配 Binance 当前分类时
+迁移到 `spike_short` 的分类开关，歧义分类和测试残留不会迁移。
+
 Spike 不请求或写入这份元数据；每次安全扫描只读取 PostgreSQL 的有效交易池。执行连接
 仍会独立读取 `exchangeInfo` 中的 tick/step/min-notional 规则，并按 24 小时刷新。
 

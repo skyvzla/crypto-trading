@@ -9,7 +9,10 @@ from trading_platform.ledger import exchange_symbols
 async def test_data_layer_sync_retries_and_persists_complete_snapshot():
     payload = {"symbols": [{"symbol": "BTCUSDT"}]}
     fetch = AsyncMock(side_effect=[RuntimeError("temporary"), payload])
-    db = Mock(sync_exchange_symbols=AsyncMock(return_value=1))
+    db = Mock(
+        sync_exchange_symbols=AsyncMock(return_value=1),
+        seed_exchange_symbol_admissions=AsyncMock(return_value=(3, 2)),
+    )
     sleep = AsyncMock()
     retries = []
 
@@ -28,6 +31,13 @@ async def test_data_layer_sync_retries_and_persists_complete_snapshot():
     assert returned is payload
     assert fetch.await_count == 2
     db.sync_exchange_symbols.assert_awaited_once_with(payload)
+    db.seed_exchange_symbol_admissions.assert_awaited_once_with(
+        default_disabled_symbols=exchange_symbols.DEFAULT_MAINSTREAM_DISABLED_SYMBOLS,
+        legacy_strategy_id="spike_short",
+        updated_by="system-default",
+        default_reason="default mainstream asset exclusion",
+        legacy_reason="migrated legacy disabled subcategory",
+    )
     assert retries == [(2, 2, "temporary")]
 
 
@@ -39,6 +49,7 @@ async def test_manual_sync_always_uses_production_metadata_endpoint(monkeypatch)
     pool = Mock(close=AsyncMock())
     db = Mock(
         sync_exchange_symbols=AsyncMock(return_value=1),
+        seed_exchange_symbol_admissions=AsyncMock(return_value=(0, 0)),
         list_tradeable_exchange_symbols=AsyncMock(return_value=["BTCUSDT"]),
     )
     monkeypatch.setattr(exchange_symbols, "BinanceRestClient", rest_factory)

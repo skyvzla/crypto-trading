@@ -955,21 +955,68 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     assert await ledger.list_tradeable_exchange_symbols(strategy_id=strategy_id) == [
         symbol
     ]
-    global_control = await ledger.set_symbol_global_admission(
-        symbol, False, 0, "test", "manual block"
+    seeded_globals, seeded_categories = await ledger.seed_exchange_symbol_admissions(
+        default_disabled_symbols=[symbol, "MISSINGUSDT"],
+        legacy_strategy_id=strategy_id,
+        updated_by="integration-test",
+        default_reason="default block",
+        legacy_reason="legacy block",
     )
-    assert global_control.version == 1
+    assert (seeded_globals, seeded_categories) == (1, 0)
     assert await ledger.list_tradeable_exchange_symbols() == []
-    await ledger.set_symbol_global_admission(symbol, True, 1, "test")
+    await ledger.set_symbol_global_admission(
+        symbol, True, 1, "integration-test", "operator override"
+    )
+    seeded_globals, seeded_categories = await ledger.seed_exchange_symbol_admissions(
+        default_disabled_symbols=[symbol],
+        legacy_strategy_id=strategy_id,
+        updated_by="integration-test",
+        default_reason="default block",
+        legacy_reason="legacy block",
+    )
+    assert (seeded_globals, seeded_categories) == (0, 0)
+    assert await ledger.list_tradeable_exchange_symbols() == [symbol]
+
+    legacy = await ledger.set_subcategory_admission(
+        subtype, False, 0, "integration-test", "legacy block"
+    )
+    assert legacy.version == 1
+    seeded_globals, seeded_categories = await ledger.seed_exchange_symbol_admissions(
+        default_disabled_symbols=[],
+        legacy_strategy_id=strategy_id,
+        updated_by="integration-test",
+        default_reason="default block",
+        legacy_reason="legacy block",
+    )
+    assert (seeded_globals, seeded_categories) == (0, 1)
+    assert await ledger.list_tradeable_exchange_symbols(strategy_id=strategy_id) == []
+    migrated = await ledger.get_strategy_category_admission(
+        strategy_id, category_by_code[subtype].category_key
+    )
+    assert migrated is not None
+    assert migrated.enabled is False
+    await ledger.set_strategy_category_admission(
+        strategy_id,
+        category_by_code[subtype].category_key,
+        True,
+        migrated.version,
+        "integration-test",
+    )
+    global_control = await ledger.set_symbol_global_admission(
+        symbol, False, 2, "test", "manual block"
+    )
+    assert global_control.version == 3
+    assert await ledger.list_tradeable_exchange_symbols() == []
+    await ledger.set_symbol_global_admission(symbol, True, 3, "test")
 
     strategy_control = await ledger.set_strategy_category_admission(
         strategy_id,
         category_by_code[subtype].category_key,
         False,
-        0,
+        2,
         "test",
     )
-    assert strategy_control.version == 1
+    assert strategy_control.version == 3
     assert await ledger.list_tradeable_exchange_symbols() == [symbol]
     assert await ledger.list_tradeable_exchange_symbols(
         strategy_id="unconfigured-strategy"
@@ -981,7 +1028,7 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         strategy_id,
         category_by_code[subtype].category_key,
         True,
-        1,
+        3,
         "test",
     )
     assert await ledger.list_tradeable_exchange_symbols(
@@ -1026,13 +1073,13 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         "/api/v1/symbol-global-admission-audit", params={"symbol": symbol}
     )
     assert global_audit.status_code == 200
-    assert global_audit.json()["total"] == 2
+    assert global_audit.json()["total"] == 4
     category_audit = await client.get(
         "/api/v1/strategy-category-admission-audit",
         params={"strategy_id": strategy_id},
     )
     assert category_audit.status_code == 200
-    assert category_audit.json()["total"] == 4
+    assert category_audit.json()["total"] == 6
 
     hft = await ledger.get_exchange_symbol("hftusdt")
     assert hft is not None

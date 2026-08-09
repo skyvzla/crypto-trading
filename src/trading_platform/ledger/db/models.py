@@ -1298,6 +1298,119 @@ class LedgerDB:
                 (message,),
             )
 
+    async def seed_exchange_symbol_admissions(
+        self,
+        *,
+        default_disabled_symbols: Sequence[str],
+        legacy_strategy_id: str,
+        updated_by: str,
+        default_reason: str,
+        legacy_reason: str,
+    ) -> tuple[int, int]:
+        """Seed absent global defaults and migrate unambiguous legacy blocks once.
+
+        Existing controls always win: this method never overwrites an operator's
+        global or strategy-category decision.
+        """
+
+        symbols = tuple(
+            sorted(
+                {
+                    symbol.strip().upper()
+                    for symbol in default_disabled_symbols
+                    if symbol.strip()
+                }
+            )
+        )
+        normalized_strategy = legacy_strategy_id.strip()
+        if not normalized_strategy:
+            raise ValueError("legacy strategy id is required")
+        global_inserted = 0
+        category_inserted = 0
+        async with self.transaction() as conn:
+            for symbol in symbols:
+                exists = await (
+                    await conn.execute(
+                        "SELECT 1 FROM exchange_symbols WHERE symbol = %s",
+                        (symbol,),
+                    )
+                ).fetchone()
+                if exists is None:
+                    continue
+                current = await (
+                    await conn.execute(
+                        "SELECT 1 FROM symbol_global_admission WHERE symbol = %s",
+                        (symbol,),
+                    )
+                ).fetchone()
+                if current is not None:
+                    continue
+                await conn.execute(
+                    "INSERT INTO symbol_global_admission "
+                    "(symbol, enabled, version, updated_by, reason) "
+                    "VALUES (%s, FALSE, 1, %s, %s)",
+                    (symbol, updated_by, default_reason),
+                )
+                await conn.execute(
+                    "INSERT INTO symbol_global_admission_audit "
+                    "(symbol, previous_enabled, enabled, version, changed_by, reason) "
+                    "VALUES (%s, NULL, FALSE, 1, %s, %s)",
+                    (symbol, updated_by, default_reason),
+                )
+                global_inserted += 1
+
+            category_rows = await (
+                await conn.execute(
+                    """
+                    WITH legacy_codes AS (
+                        SELECT UPPER(BTRIM(subcategory)) AS code
+                        FROM subcategory_admission
+                        WHERE enabled = FALSE
+                    ), matched_categories AS (
+                        SELECT legacy.code, category.category_key
+                        FROM legacy_codes AS legacy
+                        JOIN exchange_categories AS category
+                          ON UPPER(category.code) = legacy.code
+                        WHERE category.active = TRUE
+                    ), unambiguous_categories AS (
+                        SELECT code, MIN(category_key) AS category_key
+                        FROM matched_categories
+                        GROUP BY code
+                        HAVING COUNT(*) = 1
+                    )
+                    SELECT category_key
+                    FROM unambiguous_categories
+                    ORDER BY category_key
+                    """
+                )
+            ).fetchall()
+            for row in category_rows:
+                category_key = str(row[0])
+                current = await (
+                    await conn.execute(
+                        "SELECT 1 FROM strategy_category_admission "
+                        "WHERE strategy_id = %s AND category_key = %s",
+                        (normalized_strategy, category_key),
+                    )
+                ).fetchone()
+                if current is not None:
+                    continue
+                await conn.execute(
+                    "INSERT INTO strategy_category_admission "
+                    "(strategy_id, category_key, enabled, version, updated_by, reason) "
+                    "VALUES (%s, %s, FALSE, 1, %s, %s)",
+                    (normalized_strategy, category_key, updated_by, legacy_reason),
+                )
+                await conn.execute(
+                    "INSERT INTO strategy_category_admission_audit "
+                    "(strategy_id, category_key, previous_enabled, enabled, "
+                    "version, changed_by, reason) "
+                    "VALUES (%s, %s, NULL, FALSE, 1, %s, %s)",
+                    (normalized_strategy, category_key, updated_by, legacy_reason),
+                )
+                category_inserted += 1
+        return global_inserted, category_inserted
+
     async def get_exchange_symbol(self, symbol: str) -> Optional[ExchangeSymbol]:
         async with self.pool.connection() as conn:
             cursor = conn.cursor(row_factory=class_row(ExchangeSymbol))

@@ -21,6 +21,43 @@ from .db.models import LedgerDB, create_connection_pool
 logger = logging.getLogger(__name__)
 BINANCE_USDM_METADATA_BASE_URL = "https://fapi.binance.com"
 DEFAULT_SYMBOL_SYNC_INTERVAL_SECONDS = 24 * 60 * 60
+DEFAULT_LEGACY_STRATEGY_ID = "spike_short"
+DEFAULT_MAINSTREAM_DISABLED_SYMBOLS = (
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "SOLUSDT",
+    "TRXUSDT",
+    "HYPEUSDT",
+    "DOGEUSDT",
+    "ZECUSDT",
+    "ADAUSDT",
+    "XMRUSDT",
+    "LINKUSDT",
+    "XLMUSDT",
+    "BCHUSDT",
+    "LTCUSDT",
+    "HBARUSDT",
+    "SUIUSDT",
+    "AVAXUSDT",
+    "UNIUSDT",
+    "NEARUSDT",
+    "TAOUSDT",
+    "ONDOUSDT",
+    "AAVEUSDT",
+    "DOTUSDT",
+    "ICPUSDT",
+    "ETCUSDT",
+    "ATOMUSDT",
+    "FILUSDT",
+    "OPUSDT",
+    "ARBUSDT",
+    "INJUSDT",
+    "APTUSDT",
+)
+DEFAULT_MAINSTREAM_ADMISSION_REASON = "default mainstream asset exclusion"
+LEGACY_CATEGORY_ADMISSION_REASON = "migrated legacy disabled subcategory"
 
 
 @dataclass(frozen=True)
@@ -79,6 +116,19 @@ async def sync_exchange_symbol_metadata(
         on_retry=on_retry,
     )
     synced = await db.sync_exchange_symbols(exchange_info)
+    global_seeded, category_seeded = await db.seed_exchange_symbol_admissions(
+        default_disabled_symbols=DEFAULT_MAINSTREAM_DISABLED_SYMBOLS,
+        legacy_strategy_id=DEFAULT_LEGACY_STRATEGY_ID,
+        updated_by="system-default",
+        default_reason=DEFAULT_MAINSTREAM_ADMISSION_REASON,
+        legacy_reason=LEGACY_CATEGORY_ADMISSION_REASON,
+    )
+    if global_seeded or category_seeded:
+        logger.info(
+            "seeded exchange symbol admissions: global=%s legacy_categories=%s",
+            global_seeded,
+            category_seeded,
+        )
     return synced, exchange_info
 
 
