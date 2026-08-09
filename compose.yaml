@@ -7,6 +7,8 @@ services:
       POSTGRES_DB: ${DB_DATABASE:-trading_platform}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
     networks:
       - trading_net
     healthcheck:

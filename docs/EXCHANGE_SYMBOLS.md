@@ -11,6 +11,15 @@
 uv run exchange-symbol-sync
 ```
 
+本地宿主机运行 CLI 前先启动 PostgreSQL：
+
+```bash
+docker compose up -d postgres
+uv run exchange-symbol-sync
+```
+
+Compose 将 PostgreSQL 映射到 `localhost:5432`；容器内服务仍使用网络名 `postgres`。
+
 可用 `--dsn` 指定 PostgreSQL，`--attempts` 和 `--timeout` 控制网络请求。默认输出简洁
 摘要，只有传入 `--json` 才输出 JSON。同步固定访问 `https://fapi.binance.com`，不受
 testnet 执行配置影响。
