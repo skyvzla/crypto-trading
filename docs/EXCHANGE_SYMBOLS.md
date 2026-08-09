@@ -31,6 +31,7 @@ Compose 的 `symbol-sync` 服务启动后立即同步一次，之后默认每 86
 
 同步内容包括交易对生命周期、资产、合约字段、原始 metadata，以及 Binance
 `underlyingType` 和 `underlyingSubType` 两级分类。同步只更新 Binance 事实与分类关联，
+并严格按官方 `quoteAsset=USDT` 过滤；USDC、USD1、BTC、U 等其他计价资产不会写入交易对表、分类关联或有效交易池。
 不会覆盖人工维护的全局交易对开关或策略分类开关。
 
 首次同步还会写入缺省准入规则：当前市值最大的基准资产（BTC、ETH、BNB、XRP、SOL
