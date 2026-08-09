@@ -6,6 +6,7 @@ from contextlib import contextmanager
 import hashlib
 import io
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -13,10 +14,13 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from threading import Lock, local
 from typing import BinaryIO
 
+import duckdb
 import httpx
+import pyarrow as pa
 
 from .models import Candle
 
@@ -554,85 +558,141 @@ def parse_monthly_aggtrade_archive(
     symbol: str,
     month: str,
 ) -> Iterator[tuple[date, list[Candle]]]:
-    """Stream one monthly aggTrades ZIP as bounded daily 1s partitions."""
+    """Aggregate one monthly aggTrades ZIP into daily 1s partitions."""
 
+    for partition_day, table in _aggregate_monthly_aggtrade_archive(
+        content, symbol, month
+    ):
+        yield partition_day, _candles_from_arrow(table)
+
+
+def _aggregate_monthly_aggtrade_archive(
+    content: bytes | BinaryIO,
+    symbol: str,
+    month: str,
+) -> Iterator[tuple[date, pa.Table]]:
     normalized_symbol = symbol.strip().upper()
     member = f"{normalized_symbol}-aggTrades-{month}.csv"
-    source: bytes | BinaryIO
     source = io.BytesIO(content) if isinstance(content, bytes) else content
-    with zipfile.ZipFile(source) as archive:
-        with archive.open(member) as raw:
-            rows = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8"))
-            required = {"agg_trade_id", "price", "quantity", "transact_time"}
-            if rows.fieldnames is None or not required.issubset(rows.fieldnames):
-                raise ValueError(f"{member} has incompatible columns")
 
-            partition_day: date | None = None
-            partition: list[Candle] = []
-            second: datetime | None = None
-            first: tuple[datetime, int, float] | None = None
-            last: tuple[datetime, int, float] | None = None
-            high = low = volume = 0.0
-            previous_key: tuple[datetime, int] | None = None
+    with tempfile.TemporaryDirectory(prefix="aggtrades-") as temporary:
+        temporary_path = Path(temporary)
+        csv_path = temporary_path / member
+        with zipfile.ZipFile(source) as archive:
+            with archive.open(member) as raw, csv_path.open("wb") as extracted:
+                shutil.copyfileobj(raw, extracted, length=1024 * 1024)
 
-            def flush_second() -> None:
-                nonlocal second, first, last, high, low, volume
-                if second is None or first is None or last is None:
-                    return
-                partition.append(
-                    Candle(
-                        symbol=normalized_symbol,
-                        timeframe="1s",
-                        open_time=second,
-                        open=first[2],
-                        high=high,
-                        low=low,
-                        close=last[2],
-                        volume=volume,
-                        close_time=second + timedelta(seconds=1),
+        with csv_path.open(encoding="utf-8", newline="") as extracted:
+            fieldnames = next(csv.reader(extracted), None)
+        required = {"agg_trade_id", "price", "quantity", "transact_time"}
+        if fieldnames is None or not required.issubset(fieldnames):
+            raise ValueError(f"{member} has incompatible columns")
+
+        connection = duckdb.connect(
+            config={
+                "threads": "1",
+                "memory_limit": "768MB",
+                "preserve_insertion_order": "false",
+                "temp_directory": str(temporary_path / "spill"),
+            }
+        )
+        try:
+            connection.execute("SET TimeZone = 'UTC'")
+            connection.execute("SET enable_progress_bar = false")
+            connection.execute(
+                """
+                CREATE TEMP TABLE monthly_candles AS
+                WITH source AS (
+                    SELECT
+                        agg_trade_id,
+                        price,
+                        quantity,
+                        CASE
+                            WHEN abs(transact_time) >= 100000000000000
+                                THEN transact_time
+                            ELSE transact_time * 1000
+                        END AS event_micros
+                    FROM read_csv(
+                        ?,
+                        header = true,
+                        columns = {
+                            'agg_trade_id': 'BIGINT',
+                            'price': 'DOUBLE',
+                            'quantity': 'DOUBLE',
+                            'first_trade_id': 'BIGINT',
+                            'last_trade_id': 'BIGINT',
+                            'transact_time': 'BIGINT',
+                            'is_buyer_maker': 'BOOLEAN'
+                        }
                     )
+                ), trades AS (
+                    SELECT
+                        *,
+                        event_micros // 1000000 AS second_epoch,
+                        struct_pack(
+                            event_micros := event_micros,
+                            trade_id := agg_trade_id
+                        ) AS event_key
+                    FROM source
                 )
-                second = None
-                first = None
-                last = None
+                SELECT
+                    second_epoch,
+                    arg_min(price, event_key) AS open,
+                    max(price) AS high,
+                    min(price) AS low,
+                    arg_max(price, event_key) AS close,
+                    sum(quantity) AS volume
+                FROM trades
+                GROUP BY second_epoch
+                """,
+                [str(csv_path)],
+            )
+            days = connection.execute(
+                """
+                SELECT DISTINCT CAST(to_timestamp(second_epoch) AS DATE) AS day
+                FROM monthly_candles
+                ORDER BY day
+                """
+            ).fetchall()
+            for (partition_day,) in days:
+                table = connection.execute(
+                    """
+                    SELECT
+                        ?::VARCHAR AS symbol,
+                        '1s'::VARCHAR AS timeframe,
+                        to_timestamp(second_epoch) AS open_time,
+                        open,
+                        high,
+                        low,
+                        close,
+                        volume,
+                        to_timestamp(second_epoch + 1) AS close_time
+                    FROM monthly_candles
+                    WHERE CAST(to_timestamp(second_epoch) AS DATE) = ?
+                    ORDER BY second_epoch
+                    """,
+                    [normalized_symbol, partition_day],
+                ).arrow().read_all()
+                yield partition_day, table
+        finally:
+            connection.close()
 
-            for row in rows:
-                occurred = _epoch_datetime(int(row["transact_time"]))
-                trade_id = int(row["agg_trade_id"])
-                price = float(row["price"])
-                quantity = float(row["quantity"])
-                key = (occurred, trade_id)
-                if previous_key is not None and key < previous_key:
-                    raise ValueError(f"{member} is not ordered by trade time and id")
-                previous_key = key
 
-                row_second = occurred.replace(microsecond=0)
-                row_day = row_second.date()
-                if partition_day is None:
-                    partition_day = row_day
-                if row_day != partition_day:
-                    flush_second()
-                    yield partition_day, partition
-                    partition_day = row_day
-                    partition = []
-
-                row_key = (occurred, trade_id, price)
-                if second != row_second:
-                    flush_second()
-                    second = row_second
-                    first = last = row_key
-                    high = low = price
-                    volume = quantity
-                else:
-                    assert first is not None
-                    last = row_key
-                    high = max(high, price)
-                    low = min(low, price)
-                    volume += quantity
-
-            flush_second()
-            if partition_day is not None:
-                yield partition_day, partition
+def _candles_from_arrow(table: pa.Table) -> list[Candle]:
+    return [
+        Candle(
+            symbol=row["symbol"],
+            timeframe=row["timeframe"],
+            open_time=row["open_time"],
+            open=row["open"],
+            high=row["high"],
+            low=row["low"],
+            close=row["close"],
+            volume=row["volume"],
+            close_time=row["close_time"],
+        )
+        for row in table.to_pylist()
+    ]
 
 
 def parse_kline_archive(
@@ -850,7 +910,8 @@ def download_history(
                         )
                     )
                     rows = 0
-                    for day, candles in parse_monthly_aggtrade_archive(
+                    upsert_table = getattr(archive, "upsert_table", None)
+                    for day, table in _aggregate_monthly_aggtrade_archive(
                         content, symbol, label
                     ):
                         if day not in relevant_days:
@@ -861,7 +922,17 @@ def download_history(
                             continue
                         if storage_check is not None:
                             storage_check()
-                        rows += archive.upsert(candles)
+                        if callable(upsert_table):
+                            rows += upsert_table(
+                                table,
+                                symbol=symbol,
+                                timeframe=timeframe,
+                                year=day.year,
+                                month=day.month,
+                                day=day.day,
+                            )
+                        else:
+                            rows += archive.upsert(_candles_from_arrow(table))
                 else:
                     if isinstance(period, date):
                         candles = parse_aggtrade_archive(content, symbol, label)

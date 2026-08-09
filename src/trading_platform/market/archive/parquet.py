@@ -62,10 +62,6 @@ class ParquetCandleArchive:
                 "one Parquet write must contain exactly one archive partition"
             )
         symbol, timeframe, year, month, day = keys.pop()
-        partition = self._partition_dir(symbol, timeframe, year, month, day)
-        partition.mkdir(parents=True, exist_ok=True)
-        target = partition / "candles.parquet"
-        temporary = partition / f".candles-{uuid4().hex}.tmp.parquet"
         table = pa.table(
             {
                 "symbol": pa.array([symbol] * len(rows), type=pa.string()),
@@ -85,6 +81,49 @@ class ParquetCandleArchive:
                 ),
             }
         )
+        return self.upsert_table(
+            table,
+            symbol=symbol,
+            timeframe=timeframe,
+            year=year,
+            month=month,
+            day=day,
+        )
+
+    def upsert_table(
+        self,
+        table: pa.Table,
+        *,
+        symbol: str,
+        timeframe: str,
+        year: int,
+        month: int,
+        day: int,
+    ) -> int:
+        """Atomically store one already-columnar archive partition."""
+
+        if not table.num_rows:
+            return 0
+        schema = pa.schema(
+            [
+                ("symbol", pa.string()),
+                ("timeframe", pa.string()),
+                ("open_time", pa.timestamp("ms", tz="UTC")),
+                ("open", pa.float64()),
+                ("high", pa.float64()),
+                ("low", pa.float64()),
+                ("close", pa.float64()),
+                ("volume", pa.float64()),
+                ("close_time", pa.timestamp("ms", tz="UTC")),
+            ]
+        )
+        if set(table.column_names) != set(schema.names):
+            raise ValueError("candle Arrow table has incompatible columns")
+        table = table.select(schema.names).cast(schema)
+        partition = self._partition_dir(symbol, timeframe, year, month, day)
+        partition.mkdir(parents=True, exist_ok=True)
+        target = partition / "candles.parquet"
+        temporary = partition / f".candles-{uuid4().hex}.tmp.parquet"
         lock_file = (partition / ".write.lock").open("a+")
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -100,7 +139,7 @@ class ParquetCandleArchive:
             temporary.unlink(missing_ok=True)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             lock_file.close()
-        return len(rows)
+        return table.num_rows
 
     def _partition_dir(
         self,

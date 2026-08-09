@@ -373,6 +373,66 @@ def test_download_history_uses_one_monthly_aggtrade_archive_for_complete_month(
     assert (archive_root / "AKEUSDT/1s/2026/07/02/candles.parquet").is_file()
 
 
+def test_monthly_aggtrade_download_uses_arrow_table_upsert():
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(
+            "AKEUSDT-aggTrades-2026-07.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "transact_time,is_buyer_maker\n"
+            "1,10,2,1,1,1782864000100,false\n"
+            "2,12,3,2,2,1782864000900000,true\n",
+        )
+
+    tables = []
+
+    class ArrowArchive:
+        @staticmethod
+        def partition_rows(*_args):
+            return None
+
+        @staticmethod
+        def upsert(_candles):
+            pytest.fail("monthly 1s data must use Arrow table upsert")
+
+        @staticmethod
+        def upsert_table(table, **partition):
+            tables.append((table, partition))
+            return table.num_rows
+
+    results = download_history(
+        ArrowArchive(),
+        fetch=lambda _url: payload.getvalue(),
+        symbols=["AKEUSDT"],
+        timeframes=["1s"],
+        start=datetime(2026, 7, 1, tzinfo=UTC),
+        end=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+
+    assert results[0].rows == 1
+    assert len(tables) == 1
+    table, partition = tables[0]
+    assert table.column_names == [
+        "symbol",
+        "timeframe",
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+    ]
+    assert table.to_pylist()[0]["close"] == 12.0
+    assert partition == {
+        "symbol": "AKEUSDT",
+        "timeframe": "1s",
+        "year": 2026,
+        "month": 7,
+        "day": 1,
+    }
+
+
 def test_monthly_aggtrade_download_resumes_without_replacing_existing_days(
     tmp_path,
 ):
