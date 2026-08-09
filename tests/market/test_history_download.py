@@ -3,7 +3,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from io import BytesIO
-from threading import Event, Lock
+from threading import Barrier
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -614,7 +614,7 @@ def test_http_fetcher_exposes_verified_seekable_stream():
             assert source.read(8) == b"verified"
 
 
-def test_worker_pool_round_robins_requests_across_fetchers():
+def test_worker_pool_keeps_a_fetcher_bound_to_a_worker_thread():
     calls: list[str] = []
 
     class Fetcher:
@@ -629,42 +629,33 @@ def test_worker_pool_round_robins_requests_across_fetchers():
 
     assert [pool("first"), pool("second"), pool("third")] == [
         b"a",
-        b"b",
+        b"a",
         b"a",
     ]
-    assert calls == ["a", "b", "a"]
+    assert calls == ["a", "a", "a"]
 
 
-def test_worker_pool_does_not_assign_a_busy_proxy_twice():
-    started = {"a": Event(), "b": Event()}
-    release = Event()
-    calls: list[str] = []
-    calls_lock = Lock()
+def test_worker_pool_assigns_a_different_fetcher_to_each_worker_thread():
+    barrier = Barrier(2)
 
     class Fetcher:
         def __init__(self, name: str) -> None:
             self.name = name
 
         def __call__(self, _url: str) -> bytes:
-            with calls_lock:
-                calls.append(self.name)
-            started[self.name].set()
-            release.wait(timeout=2)
             return self.name.encode()
 
     pool = BinanceVisionWorkerPoolFetcher([Fetcher("a"), Fetcher("b")])
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        first = executor.submit(pool, "first")
-        second = executor.submit(pool, "second")
-        assert started["a"].wait(timeout=1)
-        assert started["b"].wait(timeout=1)
-        third = executor.submit(pool, "third")
-        assert third.done() is False
-        release.set()
-        assert {first.result(), second.result(), third.result()} == {b"a", b"b"}
+    def fetch_twice() -> tuple[bytes, bytes]:
+        first = pool("first")
+        barrier.wait(timeout=1)
+        return first, pool("second")
 
-    assert calls[:2] == ["a", "b"]
-    assert calls[2] in {"a", "b"}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _value: fetch_twice(), range(2)))
+
+    assert {result[0] for result in results} == {b"a", b"b"}
+    assert all(first == second for first, second in results)
 
 
 def test_cli_progress_uses_monotonic_completion_count(capsys):
@@ -674,6 +665,7 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
         2,
         3,
         httpx.ConnectError("temporary outage"),
+        proxy="socks5h://proxy-a:1080",
     )
     reporter(
         DownloadProgress(
@@ -711,7 +703,10 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
     )
 
     output = capsys.readouterr().err
-    assert "Retry 2/3 BTWUSDT-aggTrades-2026-06-04.zip" in output
+    assert (
+        "Retry 2/3 BTWUSDT-aggTrades-2026-06-04.zip "
+        "proxy=socks5h://proxy-a:1080" in output
+    )
     assert "Processing 68 files with 4 workers." in output
     assert "[1/68] BANKUSDT 15m 2026-07 stored 2976 rows" in output
     assert "2.0 MiB at 4.0 MiB/s" in output
@@ -825,7 +820,7 @@ def test_cli_without_symbols_loads_all_tradable_symbols(
     assert "Downloading data for 2 trading pairs." in stderr
 
 
-def test_cli_uses_round_robin_proxy_pool(
+def test_cli_uses_thread_bound_proxy_pool(
     tmp_path, monkeypatch, capsys
 ):
     client_options: list[dict[str, object]] = []
@@ -887,7 +882,7 @@ def test_cli_uses_round_robin_proxy_pool(
         "http://proxy-b:8080",
     ]
     assert all(options["trust_env"] is False for options in client_options)
-    assert "Using 2 busy-aware round-robin proxies." in capsys.readouterr().err
+    assert "Using 2 thread-bound proxies with 2 workers." in capsys.readouterr().err
 
 
 def test_cli_accepts_socks5_proxy(tmp_path, monkeypatch):

@@ -86,7 +86,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="proxies",
         action="append",
         help=(
-            "HTTP(S) proxy URL; repeat for multiple busy-aware round-robin proxies "
+            "HTTP(S) proxy URL; repeat for thread-bound download proxies "
             "(or set MARKET_HISTORY_PROXIES as a comma-separated list)"
         ),
     )
@@ -118,6 +118,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--timeout must be positive")
     if workers < 1:
         parser.error("--workers must be positive")
+    if proxies and workers > len(proxies):
+        workers = len(proxies)
     if args.delisting_freeze_days < 0:
         parser.error("--delisting-freeze-days must be non-negative")
     if args.min_free_gb < 0:
@@ -148,7 +150,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if proxies:
             print(
-                f"Using {len(proxies)} busy-aware round-robin proxies.",
+                f"Using {len(proxies)} thread-bound proxies with {workers} workers.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -193,14 +195,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             except Exception as error:
                 reporter.metadata_fallback(error)
                 symbol_availability = {}
-            worker_fetchers = [
-                BinanceVisionHTTPFetcher(
-                    client,
-                    attempts=args.attempts,
-                    on_retry=reporter.retry,
-                )
-                for client in clients
-            ]
+            if proxies:
+                worker_fetchers = [
+                    BinanceVisionHTTPFetcher(
+                        client,
+                        attempts=args.attempts,
+                        on_retry=_proxy_retry_handler(
+                            reporter, _proxy_label(proxy)
+                        ),
+                    )
+                    for client, proxy in zip(clients, proxies, strict=True)
+                ]
+            else:
+                worker_fetchers = [
+                    BinanceVisionHTTPFetcher(
+                        clients[0],
+                        attempts=args.attempts,
+                        on_retry=reporter.retry,
+                    )
+                ]
             fetch = (
                 BinanceVisionWorkerPoolFetcher(worker_fetchers)
                 if proxies
@@ -254,6 +267,22 @@ def _validate_proxies(parser: argparse.ArgumentParser, proxies: Sequence[str]) -
             or not parsed.host
         ):
             parser.error("proxy must be an HTTP(S) or SOCKS5 URL")
+
+
+def _proxy_label(proxy: str) -> str:
+    parsed = httpx.URL(proxy)
+    authority = parsed.host or "unknown"
+    if parsed.port is not None:
+        authority = f"{authority}:{parsed.port}"
+    return f"{parsed.scheme}://{authority}"
+
+
+def _proxy_retry_handler(
+    reporter: _ProgressReporter, proxy: str
+) -> Callable[[str, int, int, Exception], None]:
+    return lambda url, attempt, attempts, error: reporter.retry(
+        url, attempt, attempts, error, proxy=proxy
+    )
 
 
 class _DiskSpaceGuard:
@@ -350,11 +379,14 @@ class _ProgressReporter:
         attempt: int,
         attempts: int,
         error: Exception,
+        *,
+        proxy: str | None = None,
     ) -> None:
         with self._lock:
             filename = url.rsplit("/", 1)[-1]
+            source = f" proxy={proxy}" if proxy is not None else ""
             print(
-                f"Retry {attempt}/{attempts} {filename}: "
+                f"Retry {attempt}/{attempts} {filename}{source}: "
                 f"{type(error).__name__}: {error}",
                 file=sys.stderr,
                 flush=True,

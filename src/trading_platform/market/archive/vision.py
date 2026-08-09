@@ -12,7 +12,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from threading import Condition, Lock
+from threading import Lock, get_ident
 from typing import BinaryIO
 
 import httpx
@@ -183,51 +183,36 @@ class BinanceVisionHTTPFetcher:
 
 
 class BinanceVisionWorkerPoolFetcher:
-    """Assign each archive request to the next proxy in round-robin order."""
+    """Bind every archive worker thread to one fetcher for its lifetime."""
 
     def __init__(self, fetchers: Sequence[Callable[[str], bytes]]) -> None:
         if not fetchers:
             raise ValueError("at least one proxy fetcher is required")
         self._fetchers = tuple(fetchers)
-        self._condition = Condition(Lock())
-        self._busy = [False] * len(self._fetchers)
+        self._lock = Lock()
+        self._assignments: dict[int, Callable[[str], bytes]] = {}
         self._next = 0
 
     def __call__(self, url: str) -> bytes:
-        index, fetcher = self._acquire()
-        try:
-            return fetcher(url)
-        finally:
-            self._release(index)
+        return self._fetcher()(url)
 
     @contextmanager
     def open_archive(self, url: str) -> Iterator[bytes | BinaryIO]:
-        index, fetcher = self._acquire()
-        released = False
-        try:
-            with _open_fetched_archive(fetcher, url) as source:
-                self._release(index)
-                released = True
-                yield source
-        finally:
-            if not released:
-                self._release(index)
+        with _open_fetched_archive(self._fetcher(), url) as source:
+            yield source
 
-    def _acquire(self) -> tuple[int, Callable[[str], bytes]]:
-        with self._condition:
-            while True:
-                for offset in range(len(self._fetchers)):
-                    index = (self._next + offset) % len(self._fetchers)
-                    if not self._busy[index]:
-                        self._busy[index] = True
-                        self._next = (index + 1) % len(self._fetchers)
-                        return index, self._fetchers[index]
-                self._condition.wait()
-
-    def _release(self, index: int) -> None:
-        with self._condition:
-            self._busy[index] = False
-            self._condition.notify()
+    def _fetcher(self) -> Callable[[str], bytes]:
+        worker = get_ident()
+        with self._lock:
+            fetcher = self._assignments.get(worker)
+            if fetcher is not None:
+                return fetcher
+            if len(self._assignments) == len(self._fetchers):
+                raise RuntimeError("more download workers than configured proxies")
+            fetcher = self._fetchers[self._next]
+            self._next = (self._next + 1) % len(self._fetchers)
+            self._assignments[worker] = fetcher
+            return fetcher
 
 
 class BinanceFuturesMetadataFetcher:
