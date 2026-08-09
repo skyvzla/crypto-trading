@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import csv
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import hashlib
 import io
 import re
+import tempfile
 import time
 import zipfile
-from collections import defaultdict
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from typing import BinaryIO
 
 import httpx
 
@@ -81,15 +83,66 @@ class BinanceVisionHTTPFetcher:
         self._on_retry = on_retry
 
     def __call__(self, url: str) -> bytes:
-        content = self._get(url).content
-        checksum_text = self._get(url + ".CHECKSUM").text
+        with self.open_archive(url) as source:
+            return source.read()
+
+    @contextmanager
+    def open_archive(self, url: str) -> Iterator[BinaryIO]:
+        """Stream a verified archive to disk and keep it seekable for ZIP."""
+
+        with tempfile.TemporaryFile(mode="w+b") as source:
+            actual = self._download_to(url, source)
+            checksum_text = self._get(url + ".CHECKSUM").text
+            self._verify_checksum(url, checksum_text, actual)
+            source.seek(0)
+            yield source
+
+    @staticmethod
+    def _verify_checksum(url: str, checksum_text: str, actual: str) -> None:
         parts = checksum_text.strip().split()
         if not parts or not SHA256_PATTERN.fullmatch(parts[0]):
             raise ValueError(f"invalid Binance checksum for {url}")
-        actual = hashlib.sha256(content).hexdigest()
         if actual != parts[0].lower():
             raise ValueError(f"Binance checksum mismatch for {url}")
-        return content
+
+    def _download_to(self, url: str, target: BinaryIO) -> str:
+        last_error: Exception | None = None
+        for attempt in range(self._attempts):
+            not_found = False
+            for candidate in _download_urls(url):
+                target.seek(0)
+                target.truncate()
+                digest = hashlib.sha256()
+                try:
+                    with self._client.stream(
+                        "GET",
+                        candidate,
+                        headers={
+                            "User-Agent": "spike-trading-platform-history/1.0"
+                        },
+                    ) as response:
+                        response.raise_for_status()
+                        for chunk in response.iter_bytes():
+                            target.write(chunk)
+                            digest.update(chunk)
+                    target.flush()
+                    return digest.hexdigest()
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code == 404:
+                        not_found = True
+                    else:
+                        last_error = error
+                except httpx.HTTPError as error:
+                    last_error = error
+            if not_found:
+                raise ArchiveNotFoundError(f"Binance archive not found: {url}")
+            if attempt + 1 < self._attempts:
+                if self._on_retry is not None:
+                    assert last_error is not None
+                    self._on_retry(url, attempt + 2, self._attempts, last_error)
+                time.sleep(self._retry_base_seconds * (2**attempt))
+        assert last_error is not None
+        raise last_error
 
     def _get(self, url: str) -> httpx.Response:
         last_error: Exception | None = None
@@ -209,7 +262,7 @@ def _download_urls(url: str) -> tuple[str, ...]:
 
 
 def parse_aggtrade_archive(
-    content: bytes,
+    content: bytes | BinaryIO,
     symbol: str,
     day: str,
 ) -> list[Candle]:
@@ -217,8 +270,21 @@ def parse_aggtrade_archive(
 
     normalized_symbol = symbol.strip().upper()
     member = f"{normalized_symbol}-aggTrades-{day}.csv"
-    trades: list[tuple[datetime, int, float, float]] = []
-    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+    # Keep only aggregate state per second. Vision rows are normally ordered,
+    # but tracking the timestamp/id keys preserves correct open/close prices
+    # for unordered input without retaining the full trade file in memory.
+    grouped: dict[
+        datetime,
+        tuple[
+            tuple[datetime, int, float],
+            tuple[datetime, int, float],
+            float,
+            float,
+            float,
+        ],
+    ] = {}
+    source = io.BytesIO(content) if isinstance(content, bytes) else content
+    with zipfile.ZipFile(source) as archive:
         with archive.open(member) as raw:
             rows = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8"))
             required = {"agg_trade_id", "price", "quantity", "transact_time"}
@@ -227,41 +293,130 @@ def parse_aggtrade_archive(
             for row in rows:
                 timestamp = int(row["transact_time"])
                 occurred = _epoch_datetime(timestamp)
-                trades.append(
-                    (
-                        occurred,
-                        int(row["agg_trade_id"]),
-                        float(row["price"]),
-                        float(row["quantity"]),
-                    )
+                trade_id = int(row["agg_trade_id"])
+                price = float(row["price"])
+                quantity = float(row["quantity"])
+                second = occurred.replace(microsecond=0)
+                key = (occurred, trade_id, price)
+                current = grouped.get(second)
+                if current is None:
+                    grouped[second] = (key, key, price, price, quantity)
+                    continue
+                first, last, high, low, volume = current
+                grouped[second] = (
+                    min(first, key),
+                    max(last, key),
+                    max(high, price),
+                    min(low, price),
+                    volume + quantity,
                 )
 
-    grouped: dict[datetime, list[tuple[datetime, int, float, float]]] = defaultdict(list)
-    for trade in trades:
-        grouped[trade[0].replace(microsecond=0)].append(trade)
-
     candles: list[Candle] = []
-    for second, values in sorted(grouped.items()):
-        ordered = sorted(values, key=lambda item: (item[0], item[1]))
-        prices = [item[2] for item in ordered]
+    for second, (first, last, high, low, volume) in sorted(grouped.items()):
         candles.append(
             Candle(
                 symbol=normalized_symbol,
                 timeframe="1s",
                 open_time=second,
-                open=prices[0],
-                high=max(prices),
-                low=min(prices),
-                close=prices[-1],
-                volume=sum(item[3] for item in ordered),
+                open=first[2],
+                high=high,
+                low=low,
+                close=last[2],
+                volume=volume,
                 close_time=second + timedelta(seconds=1),
             )
         )
     return candles
 
 
+def parse_monthly_aggtrade_archive(
+    content: bytes | BinaryIO,
+    symbol: str,
+    month: str,
+) -> Iterator[tuple[date, list[Candle]]]:
+    """Stream one monthly aggTrades ZIP as bounded daily 1s partitions."""
+
+    normalized_symbol = symbol.strip().upper()
+    member = f"{normalized_symbol}-aggTrades-{month}.csv"
+    source: bytes | BinaryIO
+    source = io.BytesIO(content) if isinstance(content, bytes) else content
+    with zipfile.ZipFile(source) as archive:
+        with archive.open(member) as raw:
+            rows = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8"))
+            required = {"agg_trade_id", "price", "quantity", "transact_time"}
+            if rows.fieldnames is None or not required.issubset(rows.fieldnames):
+                raise ValueError(f"{member} has incompatible columns")
+
+            partition_day: date | None = None
+            partition: list[Candle] = []
+            second: datetime | None = None
+            first: tuple[datetime, int, float] | None = None
+            last: tuple[datetime, int, float] | None = None
+            high = low = volume = 0.0
+            previous_key: tuple[datetime, int] | None = None
+
+            def flush_second() -> None:
+                nonlocal second, first, last, high, low, volume
+                if second is None or first is None or last is None:
+                    return
+                partition.append(
+                    Candle(
+                        symbol=normalized_symbol,
+                        timeframe="1s",
+                        open_time=second,
+                        open=first[2],
+                        high=high,
+                        low=low,
+                        close=last[2],
+                        volume=volume,
+                        close_time=second + timedelta(seconds=1),
+                    )
+                )
+                second = None
+                first = None
+                last = None
+
+            for row in rows:
+                occurred = _epoch_datetime(int(row["transact_time"]))
+                trade_id = int(row["agg_trade_id"])
+                price = float(row["price"])
+                quantity = float(row["quantity"])
+                key = (occurred, trade_id)
+                if previous_key is not None and key < previous_key:
+                    raise ValueError(f"{member} is not ordered by trade time and id")
+                previous_key = key
+
+                row_second = occurred.replace(microsecond=0)
+                row_day = row_second.date()
+                if partition_day is None:
+                    partition_day = row_day
+                if row_day != partition_day:
+                    flush_second()
+                    yield partition_day, partition
+                    partition_day = row_day
+                    partition = []
+
+                row_key = (occurred, trade_id, price)
+                if second != row_second:
+                    flush_second()
+                    second = row_second
+                    first = last = row_key
+                    high = low = price
+                    volume = quantity
+                else:
+                    assert first is not None
+                    last = row_key
+                    high = max(high, price)
+                    low = min(low, price)
+                    volume += quantity
+
+            flush_second()
+            if partition_day is not None:
+                yield partition_day, partition
+
+
 def parse_kline_archive(
-    content: bytes,
+    content: bytes | BinaryIO,
     symbol: str,
     timeframe: str,
     month: str,
@@ -271,7 +426,8 @@ def parse_kline_archive(
     normalized_symbol = symbol.strip().upper()
     member = f"{normalized_symbol}-{timeframe}-{month}.csv"
     candles: list[Candle] = []
-    with zipfile.ZipFile(io.BytesIO(content)) as archive:
+    source = io.BytesIO(content) if isinstance(content, bytes) else content
+    with zipfile.ZipFile(source) as archive:
         with archive.open(member) as raw:
             rows = csv.reader(io.TextIOWrapper(raw, encoding="utf-8"))
             for row in rows:
@@ -338,7 +494,9 @@ def download_history(
     for symbol in normalized_symbols:
         for timeframe in normalized_timeframes:
             if timeframe == "1s":
-                periods: Iterable[date | tuple[int, int]] = _days(start_utc, end_utc)
+                periods: Iterable[date | tuple[int, int]] = _aggtrade_periods(
+                    start_utc, end_utc
+                )
             else:
                 periods = _months(start_utc, end_utc)
             for period in periods:
@@ -356,42 +514,139 @@ def download_history(
         job: tuple[int, tuple[str, str, date | tuple[int, int]]],
     ) -> DownloadResult:
         current, (symbol, timeframe, period) = job
+        monthly_seconds = timeframe == "1s" and not isinstance(period, date)
         if isinstance(period, date):
             label = period.isoformat()
             url = aggtrade_archive_url(symbol, label)
         else:
             label = f"{period[0]:04d}-{period[1]:02d}"
-            url = kline_archive_url(symbol, timeframe, label)
+            if monthly_seconds:
+                url = monthly_aggtrade_archive_url(symbol, label)
+            else:
+                url = kline_archive_url(symbol, timeframe, label)
+        partition_rows = getattr(archive, "partition_rows", None)
+        existing_daily_rows: dict[date, int | None] = {}
         if not overwrite:
-            partition_rows = getattr(archive, "partition_rows", None)
             if partition_rows is not None:
-                if isinstance(period, date):
+                if monthly_seconds:
+                    relevant_days = _relevant_days(
+                        period,
+                        start_utc,
+                        end_utc,
+                        (symbol_availability or {}).get(symbol),
+                    )
+                    existing_daily_rows = {
+                        day: partition_rows(
+                            symbol, timeframe, day.year, day.month, day.day
+                        )
+                        for day in relevant_days
+                    }
+                    if existing_daily_rows and all(
+                        rows is not None for rows in existing_daily_rows.values()
+                    ):
+                        existing_rows = sum(
+                            rows or 0 for rows in existing_daily_rows.values()
+                        )
+                        _notify(
+                            on_progress,
+                            "skipped",
+                            current,
+                            total,
+                            symbol,
+                            timeframe,
+                            label,
+                            rows=existing_rows,
+                        )
+                        return DownloadResult(
+                            symbol,
+                            timeframe,
+                            label,
+                            existing_rows,
+                            skipped=True,
+                        )
+                elif isinstance(period, date):
                     year, month, day = period.year, period.month, period.day
                 else:
                     year, month, day = period[0], period[1], 0
-                existing_rows = partition_rows(
-                    symbol, timeframe, year, month, day
-                )
-                if existing_rows is not None:
-                    _notify(
-                        on_progress,
-                        "skipped",
-                        current,
-                        total,
-                        symbol,
-                        timeframe,
-                        label,
-                        rows=existing_rows,
+                if not monthly_seconds:
+                    existing_rows = partition_rows(
+                        symbol, timeframe, year, month, day
                     )
-                    return DownloadResult(
-                        symbol, timeframe, label, existing_rows, skipped=True
-                    )
+                    if existing_rows is not None:
+                        _notify(
+                            on_progress,
+                            "skipped",
+                            current,
+                            total,
+                            symbol,
+                            timeframe,
+                            label,
+                            rows=existing_rows,
+                        )
+                        return DownloadResult(
+                            symbol, timeframe, label, existing_rows, skipped=True
+                        )
         if storage_check is not None:
             storage_check()
         _notify(on_progress, "downloading", current, total, symbol, timeframe, label)
         started = time.monotonic()
         try:
-            content = fetch(url)
+            with _open_fetched_archive(fetch, url) as content:
+                elapsed = time.monotonic() - started
+                _notify(
+                    on_progress,
+                    "downloaded",
+                    current,
+                    total,
+                    symbol,
+                    timeframe,
+                    label,
+                    downloaded_bytes=_archive_size(content),
+                    elapsed_seconds=elapsed,
+                )
+                _notify(
+                    on_progress,
+                    "processing",
+                    current,
+                    total,
+                    symbol,
+                    timeframe,
+                    label,
+                )
+                if monthly_seconds:
+                    relevant_days = set(
+                        _relevant_days(
+                            period,
+                            start_utc,
+                            end_utc,
+                            (symbol_availability or {}).get(symbol),
+                        )
+                    )
+                    rows = 0
+                    for day, candles in parse_monthly_aggtrade_archive(
+                        content, symbol, label
+                    ):
+                        if day not in relevant_days:
+                            continue
+                        existing_rows = existing_daily_rows.get(day)
+                        if existing_rows is not None:
+                            rows += existing_rows
+                            continue
+                        if storage_check is not None:
+                            storage_check()
+                        rows += archive.upsert(candles)
+                else:
+                    if isinstance(period, date):
+                        candles = parse_aggtrade_archive(content, symbol, label)
+                    else:
+                        candles = parse_kline_archive(
+                            content, symbol, timeframe, label
+                        )
+                    # Vision files are immutable day/month partitions. Store the
+                    # complete source partition rather than a requested slice.
+                    if storage_check is not None:
+                        storage_check()
+                    rows = archive.upsert(candles)
         except ArchiveNotFoundError:
             _notify(
                 on_progress,
@@ -405,28 +660,6 @@ def download_history(
             return DownloadResult(
                 symbol, timeframe, label, 0, unavailable=True
             )
-        elapsed = time.monotonic() - started
-        _notify(
-            on_progress,
-            "downloaded",
-            current,
-            total,
-            symbol,
-            timeframe,
-            label,
-            downloaded_bytes=len(content),
-            elapsed_seconds=elapsed,
-        )
-        _notify(on_progress, "processing", current, total, symbol, timeframe, label)
-        if isinstance(period, date):
-            candles = parse_aggtrade_archive(content, symbol, label)
-        else:
-            candles = parse_kline_archive(content, symbol, timeframe, label)
-        # Vision files are immutable day/month partitions. Store the complete
-        # source partition so partial requests cannot overwrite it.
-        if storage_check is not None:
-            storage_check()
-        rows = archive.upsert(candles)
         _notify(
             on_progress,
             "stored",
@@ -444,6 +677,28 @@ def download_history(
         return [process(job) for job in indexed_jobs]
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         return list(executor.map(process, indexed_jobs))
+
+
+@contextmanager
+def _open_fetched_archive(
+    fetch: Callable[[str], bytes], url: str
+) -> Iterator[bytes | BinaryIO]:
+    streaming_fetch = getattr(type(fetch), "open_archive", None)
+    if callable(streaming_fetch):
+        with streaming_fetch(fetch, url) as source:
+            yield source
+        return
+    yield fetch(url)
+
+
+def _archive_size(content: bytes | BinaryIO) -> int:
+    if isinstance(content, bytes):
+        return len(content)
+    position = content.tell()
+    content.seek(0, io.SEEK_END)
+    size = content.tell()
+    content.seek(position)
+    return size
 
 
 def _notify(
@@ -480,6 +735,12 @@ def aggtrade_archive_url(symbol: str, day: str) -> str:
     return f"{VISION_ROOT}/daily/aggTrades/{normalized}/{filename}"
 
 
+def monthly_aggtrade_archive_url(symbol: str, month: str) -> str:
+    normalized = symbol.strip().upper()
+    filename = f"{normalized}-aggTrades-{month}.zip"
+    return f"{VISION_ROOT}/monthly/aggTrades/{normalized}/{filename}"
+
+
 def kline_archive_url(symbol: str, timeframe: str, month: str) -> str:
     normalized = symbol.strip().upper()
     filename = f"{normalized}-{timeframe}-{month}.zip"
@@ -502,6 +763,40 @@ def _days(start: datetime, end: datetime) -> tuple[date, ...]:
         values.append(current)
         current += timedelta(days=1)
     return tuple(values)
+
+
+def _aggtrade_periods(
+    start: datetime, end: datetime
+) -> tuple[date | tuple[int, int], ...]:
+    periods: list[date | tuple[int, int]] = []
+    for month in _months(start, end):
+        month_start, month_end = _period_bounds(month)
+        slice_start = max(start, month_start)
+        slice_end = min(end, month_end)
+        if slice_start == month_start and slice_end == month_end:
+            periods.append(month)
+        else:
+            periods.extend(_days(slice_start, slice_end))
+    return tuple(periods)
+
+
+def _relevant_days(
+    period: tuple[int, int],
+    start: datetime,
+    end: datetime,
+    availability: SymbolAvailability | None,
+) -> tuple[date, ...]:
+    period_start, period_end = _period_bounds(period)
+    lower = max(period_start, start)
+    upper = min(period_end, end)
+    if availability is not None:
+        if availability.onboard_time is not None:
+            lower = max(lower, availability.onboard_time)
+        if availability.delivery_time is not None:
+            upper = min(upper, availability.delivery_time)
+    if upper <= lower:
+        return ()
+    return _days(lower, upper)
 
 
 def _months(start: datetime, end: datetime) -> tuple[tuple[int, int], ...]:

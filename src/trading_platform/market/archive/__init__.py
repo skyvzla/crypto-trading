@@ -9,8 +9,10 @@ from .vision import (
     aggtrade_archive_url,
     download_history,
     kline_archive_url,
+    monthly_aggtrade_archive_url,
     parse_aggtrade_archive,
     parse_kline_archive,
+    parse_monthly_aggtrade_archive,
 )
 
 __all__ = [
@@ -23,8 +25,10 @@ __all__ = [
     "aggtrade_archive_url",
     "download_history",
     "kline_archive_url",
+    "monthly_aggtrade_archive_url",
     "parse_aggtrade_archive",
     "parse_kline_archive",
+    "parse_monthly_aggtrade_archive",
     "ParquetCandleArchive",
     "create_duckdb_catalog",
 ]

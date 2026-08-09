@@ -48,8 +48,10 @@ CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行�
 上架前及下架后的日/月分区。exchangeInfo 请求失败时会按相同策略重试，耗尽后降级为
 不裁剪并继续下载，由 404 规则兜底。
 
-`1s` 使用 Binance Vision daily `aggTrades` 按交易时间聚合；其他周期使用原生 monthly
-Kline。请求范围只决定要下载哪些完整日/月分区，写入时不会把一个完整分区截断成部分数据。
+`1s` 对完整自然月使用 Binance Vision monthly `aggTrades`，下载后流式按天按交易时间聚合；
+起止边界的残月使用 daily `aggTrades`。其他周期使用原生 monthly Kline。月度 `1s` ZIP
+不会整体加载到内存，解析时最多保留当前日的聚合结果。请求范围只决定要下载哪些完整日/月
+分区，写入时不会把一个完整分区截断成部分数据。
 目录固定为 `SYMBOL/TIMEFRAME/YYYY/MM/DD/candles.parquet`；月度分区最后一层使用
 `00` 表示整月。
 
@@ -67,6 +69,7 @@ Binance `.CHECKSUM`，任何校验失败都会中止该分区写入。
 
 ```text
 https://s3-ap-northeast-1.amazonaws.com/data.binance.vision/data/futures/um/daily/aggTrades/AKEUSDT/AKEUSDT-aggTrades-2026-07-01.zip
+https://s3-ap-northeast-1.amazonaws.com/data.binance.vision/data/futures/um/monthly/aggTrades/AKEUSDT/AKEUSDT-aggTrades-2026-07.zip
 https://s3-ap-northeast-1.amazonaws.com/data.binance.vision/data/futures/um/monthly/klines/AKEUSDT/1m/AKEUSDT-1m-2026-07.zip
 https://s3-ap-northeast-1.amazonaws.com/data.binance.vision/data/futures/um/monthly/klines/AKEUSDT/1m/AKEUSDT-1m-2026-07.zip.CHECKSUM
 ```

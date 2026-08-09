@@ -21,8 +21,10 @@ from trading_platform.market.archive import (
     create_duckdb_catalog,
     download_history,
     kline_archive_url,
+    monthly_aggtrade_archive_url,
     parse_aggtrade_archive,
     parse_kline_archive,
+    parse_monthly_aggtrade_archive,
 )
 from trading_platform.market.archive import cli as archive_cli
 from trading_platform.market.archive.cli import (
@@ -45,6 +47,10 @@ def test_archive_urls_default_to_binance_s3_origin():
     )
     assert kline_archive_url("akeusdt", "1m", "2026-07") == (
         f"{expected_root}/monthly/klines/AKEUSDT/1m/AKEUSDT-1m-2026-07.zip"
+    )
+    assert monthly_aggtrade_archive_url("akeusdt", "2026-07") == (
+        f"{expected_root}/monthly/aggTrades/AKEUSDT/"
+        "AKEUSDT-aggTrades-2026-07.zip"
     )
 
 
@@ -293,6 +299,154 @@ def test_aggtrade_archive_aggregates_millisecond_and_microsecond_timestamps():
     assert candles[0].open_time == datetime(2026, 7, 1, tzinfo=UTC)
 
 
+def test_monthly_aggtrade_archive_streams_daily_candle_partitions():
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(
+            "AKEUSDT-aggTrades-2026-07.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "transact_time,is_buyer_maker\n"
+            "1,10,2,1,1,1782864000100,false\n"
+            "2,12,3,2,2,1782864000900,true\n"
+            "3,11,5,3,3,1782950400100,false\n",
+        )
+
+    partitions = list(
+        parse_monthly_aggtrade_archive(
+            payload.getvalue(), "AKEUSDT", "2026-07"
+        )
+    )
+
+    assert [day.isoformat() for day, _candles in partitions] == [
+        "2026-07-01",
+        "2026-07-02",
+    ]
+    assert [
+        (candle.open, candle.high, candle.low, candle.close, candle.volume)
+        for _day, candles in partitions
+        for candle in candles
+    ] == [
+        (10.0, 12.0, 10.0, 12.0, 5.0),
+        (11.0, 11.0, 11.0, 11.0, 5.0),
+    ]
+
+
+def test_download_history_uses_one_monthly_aggtrade_archive_for_complete_month(
+    tmp_path,
+):
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(
+            "AKEUSDT-aggTrades-2026-07.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "transact_time,is_buyer_maker\n"
+            "1,10,2,1,1,1782864000100,false\n"
+            "2,11,3,2,2,1782950400100,false\n",
+        )
+    requested: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        requested.append(url)
+        return payload.getvalue()
+
+    archive_root = tmp_path / "history"
+    with ParquetCandleArchive(archive_root) as archive:
+        results = download_history(
+            archive,
+            fetch=fetch,
+            symbols=["AKEUSDT"],
+            timeframes=["1s"],
+            start=datetime(2026, 7, 1, tzinfo=UTC),
+            end=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+
+    assert [url.rsplit("/", 1)[-1] for url in requested] == [
+        "AKEUSDT-aggTrades-2026-07.zip"
+    ]
+    assert "/monthly/aggTrades/" in requested[0]
+    assert [(item.period, item.rows) for item in results] == [("2026-07", 2)]
+    assert (archive_root / "AKEUSDT/1s/2026/07/01/candles.parquet").is_file()
+    assert (archive_root / "AKEUSDT/1s/2026/07/02/candles.parquet").is_file()
+
+
+def test_monthly_aggtrade_download_resumes_without_replacing_existing_days(
+    tmp_path,
+):
+    archive_root = tmp_path / "history"
+    existing = Candle(
+        symbol="AKEUSDT",
+        timeframe="1s",
+        open_time=datetime(2026, 7, 1, tzinfo=UTC),
+        open=99,
+        high=99,
+        low=99,
+        close=99,
+        volume=1,
+        close_time=datetime(2026, 7, 1, 0, 0, 1, tzinfo=UTC),
+    )
+    with ParquetCandleArchive(archive_root) as archive:
+        archive.upsert([existing])
+
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as source:
+        source.writestr(
+            "AKEUSDT-aggTrades-2026-07.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "transact_time,is_buyer_maker\n"
+            "1,10,2,1,1,1782864000100,false\n"
+            "2,11,3,2,2,1782950400100,false\n",
+        )
+
+    with ParquetCandleArchive(archive_root) as archive:
+        download_history(
+            archive,
+            fetch=lambda _url: payload.getvalue(),
+            symbols=["AKEUSDT"],
+            timeframes=["1s"],
+            start=datetime(2026, 7, 1, tzinfo=UTC),
+            end=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+
+    catalog = create_duckdb_catalog(archive_root, tmp_path / "history.duckdb")
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        rows = connection.execute(
+            "SELECT day(open_time), open FROM candles ORDER BY open_time"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert rows == [(1, 99.0), (2, 11.0)]
+
+
+def test_download_history_keeps_partial_month_seconds_on_daily_archives(tmp_path):
+    requested: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        requested.append(url)
+        label = url.removesuffix(".zip").rsplit("aggTrades-", 1)[1]
+        payload = BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr(
+                f"AKEUSDT-aggTrades-{label}.csv",
+                "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+                "transact_time,is_buyer_maker\n",
+            )
+        return payload.getvalue()
+
+    with ParquetCandleArchive(tmp_path / "history") as archive:
+        download_history(
+            archive,
+            fetch=fetch,
+            symbols=["AKEUSDT"],
+            timeframes=["1s"],
+            start=datetime(2026, 7, 30, tzinfo=UTC),
+            end=datetime(2026, 8, 2, tzinfo=UTC),
+        )
+
+    assert len(requested) == 3
+    assert all("/daily/aggTrades/" in url for url in requested)
+
+
 def test_kline_archive_parses_epoch_without_session_timezone_conversion():
     payload = BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
@@ -438,6 +592,23 @@ def test_http_fetcher_verifies_binance_checksum():
         result = fetch("https://data.binance.vision/archive.zip")
 
     assert result == content
+
+
+def test_http_fetcher_exposes_verified_seekable_stream():
+    content = b"verified streamed archive"
+    checksum = hashlib.sha256(content).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(".CHECKSUM"):
+            return httpx.Response(200, text=checksum)
+        return httpx.Response(200, content=content)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        fetch = BinanceVisionHTTPFetcher(client, attempts=1)
+        with fetch.open_archive("https://data.binance.vision/archive.zip") as source:
+            assert source.read() == content
+            source.seek(0)
+            assert source.read(8) == b"verified"
 
 
 def test_cli_progress_uses_monotonic_completion_count(capsys):
