@@ -156,6 +156,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         storage_guard()
         with ExitStack() as stack:
             if proxies:
+                metadata_client = stack.enter_context(
+                    httpx.Client(
+                        timeout=args.timeout,
+                        follow_redirects=True,
+                        trust_env=False,
+                    )
+                )
                 clients = [
                     stack.enter_context(
                         httpx.Client(
@@ -176,9 +183,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     )
                 ]
+                metadata_client = clients[0]
             try:
                 symbol_availability = BinanceFuturesMetadataFetcher(
-                    clients[0],
+                    metadata_client,
                     attempts=args.attempts,
                     on_retry=reporter.retry,
                 )(symbols)
@@ -241,7 +249,10 @@ def _validate_proxies(parser: argparse.ArgumentParser, proxies: Sequence[str]) -
             parsed = httpx.URL(proxy)
         except httpx.InvalidURL:
             parser.error("invalid proxy URL")
-        if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.host:
+        if (
+            parsed.scheme not in {"http", "https", "socks5", "socks5h"}
+            or not parsed.host
+        ):
             parser.error("proxy must be an HTTP(S) or SOCKS5 URL")
 
 

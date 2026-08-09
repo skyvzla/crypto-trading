@@ -56,6 +56,8 @@ SOCKS5 代理示例：
 --proxy socks5h://user:pass@proxy-b:1080
 ```
 
+配置代理时，Binance `exchangeInfo` 元数据请求始终直连，只有历史行情归档下载和校验使用代理池。
+
 不传 `--proxy` 时继续使用 `httpx` 的 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量行为。
 
 磁盘保护默认保留 10 GiB 可用空间，并在启动、每个网络下载前以及每次 Parquet 写入前
