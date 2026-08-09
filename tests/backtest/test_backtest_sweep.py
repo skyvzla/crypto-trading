@@ -1,6 +1,7 @@
 from pathlib import Path
 import subprocess
 import sys
+import time
 
 import duckdb
 import pandas as pd
@@ -87,9 +88,11 @@ def test_child_process_registry_terminates_running_subprocess():
     registry = ChildProcessRegistry()
     registry.add(process)
 
+    started = time.monotonic()
     registry.terminate_all()
 
     assert process.wait(timeout=2) != 0
+    assert time.monotonic() - started < 2
 
 
 def test_collision_summary_uses_lowest_trade_as_conservative_result():

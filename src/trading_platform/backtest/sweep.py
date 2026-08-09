@@ -88,18 +88,24 @@ class ChildProcessRegistry:
         for process in processes:
             self._terminate(process, signal.SIGTERM)
 
-        deadline = time.monotonic() + 5
+        # 给正常退出一个很短的窗口，避免 Ctrl+C 后逐个等待 worker。
+        deadline = time.monotonic() + 0.5
+        try:
+            while time.monotonic() < deadline and any(
+                process.poll() is None for process in processes
+            ):
+                time.sleep(0.02)
+        except KeyboardInterrupt:
+            pass
         for process in processes:
-            if process.poll() is not None:
-                continue
-            remaining = deadline - time.monotonic()
-            if remaining > 0:
+            if process.poll() is None:
+                self._terminate(process, signal.SIGKILL)
+        for process in processes:
+            if process.poll() is None:
                 try:
-                    process.wait(timeout=remaining)
-                    continue
-                except subprocess.TimeoutExpired:
+                    process.wait(timeout=1)
+                except (subprocess.TimeoutExpired, KeyboardInterrupt):
                     pass
-            self._terminate(process, signal.SIGKILL)
 
     @staticmethod
     def _terminate(process: subprocess.Popen[str], sig: signal.Signals) -> None:
@@ -134,15 +140,21 @@ def _dsn_from_environment() -> str:
 
 
 def _allowed_symbols(dsn: str, *, freeze_days: int, strategy_id: str) -> set[str]:
-    with psycopg.connect(dsn) as connection:
-        # 交易对筛选只允许读取主库；即使后续误加 SQL，也不能写入。
-        connection.execute("SET TRANSACTION READ ONLY")
-        with connection.cursor() as cursor:
-            cursor.execute(
-                EFFECTIVE_SYMBOL_UNIVERSE_SQL,
-                (timedelta(days=freeze_days), strategy_id, strategy_id),
-            )
-            return {str(row[0]).strip().upper() for row in cursor.fetchall()}
+    try:
+        with psycopg.connect(dsn, connect_timeout=5) as connection:
+            # 交易对筛选只允许读取主库；即使后续误加 SQL，也不能写入。
+            connection.execute("SET TRANSACTION READ ONLY")
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    EFFECTIVE_SYMBOL_UNIVERSE_SQL,
+                    (timedelta(days=freeze_days), strategy_id, strategy_id),
+                )
+                return {str(row[0]).strip().upper() for row in cursor.fetchall()}
+    except psycopg.OperationalError as error:
+        raise RuntimeError(
+            "无法连接 PostgreSQL 主库；请检查 DB_HOST、DB_PORT、DB_USER、"
+            "DB_PASSWORD、DB_DATABASE，以及 postgres 服务是否已启动"
+        ) from error
 
 
 def _archive_coverage(
