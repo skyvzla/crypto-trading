@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from io import BytesIO
-from threading import Event, get_native_id
+from threading import Barrier, Event
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -618,6 +618,7 @@ def test_http_fetcher_exposes_verified_seekable_stream():
 def test_worker_pool_switches_proxy_after_connection_failure():
     calls: list[str] = []
     retries: list[tuple[int, str | None]] = []
+    routes: list[tuple[str, str | None, str, str | None]] = []
 
     class Fetcher:
         def __init__(self, name: str) -> None:
@@ -637,11 +638,41 @@ def test_worker_pool_switches_proxy_after_connection_failure():
         on_retry=lambda _url, attempt, _attempts, _error, proxy=None, **_kwargs: (
             retries.append((attempt, proxy))
         ),
+        on_route=lambda _url, _attempt, _attempts, mode, source,
+        previous_source=None, reason=None, **_kwargs: routes.append(
+            (mode, previous_source, source, reason)
+        ),
     )
 
     assert pool("archive") == b"b"
     assert calls == ["a", "b"]
     assert retries == [(2, "proxy-a")]
+    assert routes == [("switch", "proxy-a", "proxy-b", None)]
+
+
+def test_worker_pool_releases_proxy_when_route_logger_fails():
+    route_fails = True
+
+    def route(*_args, **_kwargs) -> None:
+        nonlocal route_fails
+        if route_fails:
+            route_fails = False
+            raise RuntimeError("route logger failed")
+
+    def fail_proxy_a(_url: str) -> bytes:
+        raise httpx.ConnectError("proxy-a reset")
+
+    pool = BinanceVisionWorkerPoolFetcher(
+        [fail_proxy_a, lambda _url: b"proxy-b"],
+        direct_fetcher=lambda _url: b"direct",
+        attempts=5,
+        retry_base_seconds=0,
+        on_route=route,
+    )
+
+    with pytest.raises(RuntimeError, match="route logger failed"):
+        pool("first")
+    assert pool("second") == b"proxy-b"
 
 
 def test_worker_pool_switches_proxy_for_streaming_archives():
@@ -682,11 +713,16 @@ def test_worker_pool_uses_direct_when_all_proxies_are_occupied():
             release.wait(timeout=1)
             return b"proxy"
 
+    routes: list[tuple[str, str | None]] = []
     pool = BinanceVisionWorkerPoolFetcher(
         [Fetcher()],
         direct_fetcher=lambda _url: b"direct",
         attempts=5,
         labels=["proxy-a"],
+        on_route=lambda _url, _attempt, _attempts, _mode, _source,
+        previous_source=None, reason=None, **_kwargs: routes.append(
+            (previous_source, reason)
+        ),
     )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -696,10 +732,12 @@ def test_worker_pool_uses_direct_when_all_proxies_are_occupied():
         assert fallback.result(timeout=1) == b"direct"
         release.set()
         assert occupied.result(timeout=1) == b"proxy"
+    assert routes == [(None, "no-available-proxy")]
 
 
 def test_worker_pool_reserves_final_attempt_for_direct_access():
     calls: list[str] = []
+    routes: list[tuple[int, str | None]] = []
 
     def failing_proxy(url: str) -> bytes:
         calls.append(url)
@@ -710,14 +748,18 @@ def test_worker_pool_reserves_final_attempt_for_direct_access():
         direct_fetcher=lambda _url: b"direct",
         attempts=5,
         retry_base_seconds=0,
+        on_route=lambda _url, attempt, _attempts, _mode, _source,
+        reason=None, **_kwargs: routes.append((attempt, reason)),
     )
 
     assert pool("archive") == b"direct"
     assert calls == ["archive"] * 4
+    assert routes[-1] == (5, "final-attempt")
 
 
 def test_worker_pool_reports_final_direct_failure():
     calls: list[str] = []
+    routes: list[tuple[str | None, str, str | None]] = []
 
     def fail(source: str):
         def fetch(_url: str) -> bytes:
@@ -731,11 +773,19 @@ def test_worker_pool_reports_final_direct_failure():
         direct_fetcher=fail("direct"),
         attempts=5,
         retry_base_seconds=0,
+        on_route=lambda _url, _attempt, _attempts, _mode, source,
+        previous_source=None, reason=None, **_kwargs: routes.append(
+            (previous_source, source, reason)
+        ),
     )
 
     with pytest.raises(RuntimeError, match=r"source=direct after 5 attempts"):
         pool("archive")
     assert calls == ["proxy-a", "proxy-b", "direct", "direct", "direct"]
+    assert routes == [
+        ("proxy-1", "proxy-2", None),
+        ("proxy-2", "direct", "no-available-proxy"),
+    ]
 
 
 def test_cli_progress_uses_monotonic_completion_count(capsys):
@@ -747,13 +797,34 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
         httpx.ConnectError("temporary outage"),
         proxy="socks5h://proxy-a:1080",
         elapsed_seconds=10,
+        worker_id=1,
+    )
+    reporter.route(
+        "https://example.com/BTWUSDT-aggTrades-2026-06-04.zip",
+        2,
+        3,
+        "switch",
+        "socks5h://proxy-b:1080",
+        previous_source="socks5h://proxy-a:1080",
+        worker_id=1,
+    )
+    reporter.worker_exit(1)
+    reporter.route(
+        "https://example.com/BTWUSDT-aggTrades-2026-06-04.zip",
+        3,
+        3,
+        "fallback",
+        "direct",
+        previous_source="socks5h://proxy-b:1080",
+        reason="final-attempt",
+        worker_id=1,
     )
     reporter(
         DownloadProgress(
             phase="downloaded",
-            worker_id=101,
+            worker_id=1,
             downloaded_bytes=2 * 1024 * 1024,
-            elapsed_seconds=0.5,
+            elapsed_seconds=1,
             current=68,
             total=68,
             symbol="BANKUSDT",
@@ -764,19 +835,22 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
     reporter(
         DownloadProgress(
             phase="stored",
-            worker_id=101,
+            worker_id=1,
             current=68,
             total=68,
             symbol="BANKUSDT",
             timeframe="15m",
             period="2026-07",
+            elapsed_seconds=5,
+            download_seconds=1,
+            processing_seconds=4.4,
             rows=2976,
         )
     )
     reporter(
         DownloadProgress(
             phase="skipped",
-            worker_id=102,
+            worker_id=2,
             current=64,
             total=68,
             symbol="BANKUSDT",
@@ -788,7 +862,7 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
     reporter(
         DownloadProgress(
             phase="failed",
-            worker_id=103,
+            worker_id=3,
             current=65,
             total=68,
             symbol="BANKUSDT",
@@ -800,20 +874,59 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
     )
 
     output = capsys.readouterr().err
-    assert f"worker={get_native_id()} Retry 2/3" in output
+    assert "worker=1 Retry 2/3" in output
+    assert (
+        "worker=1 Switch 2/3 BTWUSDT-aggTrades-2026-06-04.zip "
+        "from=socks5h://proxy-a:1080 to=socks5h://proxy-b:1080" in output
+    )
+    assert (
+        "worker=1 Fallback 3/3 BTWUSDT-aggTrades-2026-06-04.zip "
+        "from=socks5h://proxy-b:1080 to=direct reason=final-attempt" in output
+    )
+    assert "worker=1 exited" in output
     assert (
         "Retry 2/3 BTWUSDT-aggTrades-2026-06-04.zip "
         "proxy=socks5h://proxy-a:1080 elapsed=10s" in output
     )
     assert "Processing 68 files with 4 workers." in output
-    assert "worker=101 [1/68] BANKUSDT 15m 2026-07 stored 2976 rows" in output
-    assert "2.0 MiB at 4.0 MiB/s" in output
+    assert "worker=1 [1/68] BANKUSDT 15m 2026-07 stored 2976 rows" in output
+    assert (
+        "2.0 MiB at 2.0 MiB/s, download=1s, process=4s, total=5s"
+        in output
+    )
     assert "[2/68] BANKUSDT 1s 2026-07-30 skipped" in output
     assert (
-        "worker=103 [3/68] BANKUSDT 1s 2026-07-31 failed (1m05s): "
+        "worker=3 [3/68] BANKUSDT 1s 2026-07-31 failed (1m05s): "
         "ConnectError: connection reset; task exiting" in output
     )
     assert "[68/68]" not in output
+
+
+def test_download_history_assigns_process_local_worker_sequence_numbers():
+    barrier = Barrier(2)
+    progress: list[DownloadProgress] = []
+    exited_workers: list[int] = []
+
+    class ExistingArchive:
+        def partition_rows(self, *_args) -> int:
+            barrier.wait(timeout=1)
+            return 1
+
+    results = download_history(
+        ExistingArchive(),
+        fetch=lambda _url: pytest.fail("existing partitions must not download"),
+        symbols=["AKEUSDT", "BTCUSDT"],
+        timeframes=["1m"],
+        start=datetime(2026, 7, 1, tzinfo=UTC),
+        end=datetime(2026, 8, 1, tzinfo=UTC),
+        on_progress=progress.append,
+        max_workers=2,
+        on_worker_exit=exited_workers.append,
+    )
+
+    assert all(result.skipped for result in results)
+    assert {item.worker_id for item in progress} == {1, 2}
+    assert exited_workers == [1, 2]
 
 
 def test_cli_result_is_plain_text_by_default(tmp_path, capsys):
@@ -1088,8 +1201,8 @@ def test_cli_handles_keyboard_interrupt_without_traceback(
     assert exit_code == 130
     assert captured.out == ""
     assert captured.err == (
-        f"worker={get_native_id()} Downloading data for 1 trading pair.\n"
-        f"worker={get_native_id()} Cancelled; downloader exiting.\n"
+        "worker=main Downloading data for 1 trading pair.\n"
+        "worker=main Cancelled; downloader exiting.\n"
     )
     assert "Traceback" not in captured.err
 

@@ -24,6 +24,7 @@ from .vision import (
     BinanceVisionWorkerPoolFetcher,
     DownloadProgress,
     DownloadResult,
+    current_archive_worker_id,
     download_history,
 )
 
@@ -123,7 +124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.min_free_gb < 0:
         parser.error("--min-free-gb must be non-negative")
     reporter = _ProgressReporter(workers)
-    main_worker = f"worker={threading.get_native_id()}"
+    main_worker = "worker=main"
     try:
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
@@ -214,6 +215,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     attempts=args.attempts,
                     labels=[_proxy_label(proxy) for proxy in proxies],
                     on_retry=reporter.retry,
+                    on_route=reporter.route,
                 )
             else:
                 fetch = BinanceVisionHTTPFetcher(
@@ -234,6 +236,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     overwrite=args.overwrite,
                     symbol_availability=symbol_availability,
                     storage_check=storage_guard,
+                    on_worker_exit=reporter.worker_exit,
                 )
         catalog_path = args.catalog or args.archive / "history.duckdb"
         create_duckdb_catalog(args.archive, catalog_path)
@@ -380,9 +383,12 @@ class _ProgressReporter:
                 )
             else:
                 size, speed = self._downloads.pop(progress.current, ("?", "?"))
+                download = _format_duration(progress.download_seconds)
+                processing = _format_duration(progress.processing_seconds)
                 message = (
                     f"{prefix} stored {progress.rows} rows "
-                    f"({size} at {speed}/s, {duration})"
+                    f"({size} at {speed}/s, download={download}, "
+                    f"process={processing}, total={duration})"
                 )
             print(message, file=sys.stderr, flush=True)
 
@@ -395,9 +401,10 @@ class _ProgressReporter:
         *,
         proxy: str | None = None,
         elapsed_seconds: float | None = None,
+        worker_id: int | None = None,
     ) -> None:
         with self._lock:
-            worker = f"worker={threading.get_native_id()}"
+            worker = _worker_label(worker_id)
             filename = url.rsplit("/", 1)[-1]
             source = f" proxy={proxy}" if proxy is not None else ""
             duration = (
@@ -413,15 +420,52 @@ class _ProgressReporter:
                 flush=True,
             )
 
+    def route(
+        self,
+        url: str,
+        attempt: int,
+        attempts: int,
+        mode: str,
+        source: str,
+        *,
+        previous_source: str | None = None,
+        reason: str | None = None,
+        worker_id: int | None = None,
+    ) -> None:
+        with self._lock:
+            filename = url.rsplit("/", 1)[-1]
+            previous = previous_source or "none"
+            reason_text = f" reason={reason}" if reason is not None else ""
+            print(
+                f"{_worker_label(worker_id)} {mode.title()} "
+                f"{attempt}/{attempts} {filename} from={previous} "
+                f"to={source}{reason_text}",
+                file=sys.stderr,
+                flush=True,
+            )
+
     def metadata_fallback(self, error: Exception) -> None:
         with self._lock:
             print(
-                f"worker={threading.get_native_id()} Warning: exchangeInfo "
+                "worker=main Warning: exchangeInfo "
                 "unavailable after retries; "
                 f"continuing with 404 fallback: {type(error).__name__}: {error}",
                 file=sys.stderr,
                 flush=True,
             )
+
+    def worker_exit(self, worker_id: int) -> None:
+        with self._lock:
+            print(
+                f"worker={worker_id} exited",
+                file=sys.stderr,
+                flush=True,
+            )
+
+
+def _worker_label(worker_id: int | None = None) -> str:
+    resolved = current_archive_worker_id() if worker_id is None else worker_id
+    return f"worker={resolved}" if resolved > 0 else "worker=main"
 
 
 def _print_result(

@@ -13,7 +13,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from threading import Lock, get_native_id
+from threading import Lock, local
 from typing import BinaryIO
 
 import httpx
@@ -27,6 +27,13 @@ VISION_ROOT = f"{VISION_S3_ROOT}/data/futures/um"
 EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 NATIVE_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+_WORKER_CONTEXT = local()
+
+
+def current_archive_worker_id() -> int:
+    """Return the current download worker's process-local sequence number."""
+
+    return int(getattr(_WORKER_CONTEXT, "worker_id", 0))
 
 
 class ArchiveNotFoundError(Exception):
@@ -68,6 +75,8 @@ class DownloadProgress:
     rows: int = 0
     error: str = ""
     worker_id: int = 0
+    download_seconds: float = 0.0
+    processing_seconds: float = 0.0
 
 
 class BinanceVisionHTTPFetcher:
@@ -199,6 +208,7 @@ class BinanceVisionWorkerPoolFetcher:
         labels: Sequence[str] | None = None,
         retry_base_seconds: float = 1.0,
         on_retry: Callable[..., None] | None = None,
+        on_route: Callable[..., None] | None = None,
     ) -> None:
         if not fetchers:
             raise ValueError("at least one proxy fetcher is required")
@@ -214,6 +224,7 @@ class BinanceVisionWorkerPoolFetcher:
             )
         self._retry_base_seconds = max(0.0, retry_base_seconds)
         self._on_retry = on_retry
+        self._on_route = on_route
         self._lock = Lock()
         self._busy = [False] * len(self._fetchers)
         self._next = 0
@@ -223,10 +234,23 @@ class BinanceVisionWorkerPoolFetcher:
         started = time.monotonic()
         last_error: Exception | None = None
         last_label = "direct"
+        previous_label: str | None = None
         for attempt in range(1, self._attempts + 1):
+            force_direct = attempt == self._attempts
             index, fetcher, label = self._acquire(
-                excluded, force_direct=attempt == self._attempts
+                excluded, force_direct=force_direct
             )
+            try:
+                self._notify_route(
+                    url,
+                    attempt,
+                    previous_label,
+                    label,
+                    force_direct=force_direct,
+                )
+            except Exception:
+                self._release(index)
+                raise
             last_label = label
             try:
                 return fetcher(url)
@@ -234,6 +258,7 @@ class BinanceVisionWorkerPoolFetcher:
                 raise
             except Exception as error:
                 last_error = error
+                previous_label = label
                 if index is not None:
                     excluded.add(index)
             finally:
@@ -253,10 +278,23 @@ class BinanceVisionWorkerPoolFetcher:
         started = time.monotonic()
         last_error: Exception | None = None
         last_label = "direct"
+        previous_label: str | None = None
         for attempt in range(1, self._attempts + 1):
+            force_direct = attempt == self._attempts
             index, fetcher, label = self._acquire(
-                excluded, force_direct=attempt == self._attempts
+                excluded, force_direct=force_direct
             )
+            try:
+                self._notify_route(
+                    url,
+                    attempt,
+                    previous_label,
+                    label,
+                    force_direct=force_direct,
+                )
+            except Exception:
+                self._release(index)
+                raise
             last_label = label
             source_context = _open_fetched_archive(fetcher, url)
             try:
@@ -266,6 +304,7 @@ class BinanceVisionWorkerPoolFetcher:
                 raise
             except Exception as error:
                 last_error = error
+                previous_label = label
                 if index is not None:
                     excluded.add(index)
                 self._release(index)
@@ -326,7 +365,40 @@ class BinanceVisionWorkerPoolFetcher:
                 error,
                 proxy=label,
                 elapsed_seconds=time.monotonic() - started,
+                worker_id=current_archive_worker_id(),
             )
+
+    def _notify_route(
+        self,
+        url: str,
+        attempt: int,
+        previous_label: str | None,
+        label: str,
+        *,
+        force_direct: bool,
+    ) -> None:
+        if self._on_route is None:
+            return
+        if label == "direct":
+            if previous_label == label:
+                return
+            mode = "fallback"
+            reason = "final-attempt" if force_direct else "no-available-proxy"
+        elif previous_label is not None and previous_label != label:
+            mode = "switch"
+            reason = None
+        else:
+            return
+        self._on_route(
+            url,
+            attempt,
+            self._attempts,
+            mode,
+            label,
+            previous_source=previous_label,
+            reason=reason,
+            worker_id=current_archive_worker_id(),
+        )
 
 
 class BinanceFuturesMetadataFetcher:
@@ -617,6 +689,7 @@ def download_history(
     overwrite: bool = False,
     symbol_availability: Mapping[str, SymbolAvailability] | None = None,
     storage_check: Callable[[], None] | None = None,
+    on_worker_exit: Callable[[int], None] | None = None,
 ) -> list[DownloadResult]:
     """Download a bounded UTC range; network reads are separate from one writer."""
 
@@ -741,9 +814,11 @@ def download_history(
             storage_check()
         _notify(on_progress, "downloading", current, total, symbol, timeframe, label)
         started = time.monotonic()
+        download_seconds = 0.0
+        processing_seconds = 0.0
         try:
             with _open_fetched_archive(fetch, url) as content:
-                elapsed = time.monotonic() - started
+                download_seconds = time.monotonic() - started
                 _notify(
                     on_progress,
                     "downloaded",
@@ -753,8 +828,9 @@ def download_history(
                     timeframe,
                     label,
                     downloaded_bytes=_archive_size(content),
-                    elapsed_seconds=elapsed,
+                    elapsed_seconds=download_seconds,
                 )
+                processing_started = time.monotonic()
                 _notify(
                     on_progress,
                     "processing",
@@ -798,6 +874,7 @@ def download_history(
                     if storage_check is not None:
                         storage_check()
                     rows = archive.upsert(candles)
+                processing_seconds = time.monotonic() - processing_started
         except ArchiveNotFoundError:
             _notify(
                 on_progress,
@@ -821,6 +898,8 @@ def download_history(
             timeframe,
             label,
             elapsed_seconds=time.monotonic() - task_started,
+            download_seconds=download_seconds,
+            processing_seconds=processing_seconds,
             rows=rows,
         )
         return DownloadResult(symbol, timeframe, label, rows)
@@ -853,9 +932,37 @@ def download_history(
 
     indexed_jobs = tuple(enumerate(jobs, start=1))
     if max_workers == 1:
-        return [process(job) for job in indexed_jobs]
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        return list(executor.map(process, indexed_jobs))
+        previous_worker_id = current_archive_worker_id()
+        _WORKER_CONTEXT.worker_id = 1
+        try:
+            return [process(job) for job in indexed_jobs]
+        finally:
+            if indexed_jobs and on_worker_exit is not None:
+                on_worker_exit(1)
+            _WORKER_CONTEXT.worker_id = previous_worker_id
+
+    worker_ids = iter(range(1, max_workers + 1))
+    worker_id_lock = Lock()
+    started_worker_ids: set[int] = set()
+
+    def initialize_worker() -> None:
+        with worker_id_lock:
+            worker_id = next(worker_ids)
+            started_worker_ids.add(worker_id)
+            _WORKER_CONTEXT.worker_id = worker_id
+
+    try:
+        with ThreadPoolExecutor(
+            max_workers=max_workers,
+            initializer=initialize_worker,
+            thread_name_prefix="archive-worker",
+        ) as executor:
+            results = list(executor.map(process, indexed_jobs))
+    finally:
+        if on_worker_exit is not None:
+            for worker_id in sorted(started_worker_ids):
+                on_worker_exit(worker_id)
+    return results
 
 
 @contextmanager
@@ -892,6 +999,8 @@ def _notify(
     elapsed_seconds: float = 0.0,
     rows: int = 0,
     error: str = "",
+    download_seconds: float = 0.0,
+    processing_seconds: float = 0.0,
 ) -> None:
     if callback is not None:
         callback(
@@ -902,11 +1011,13 @@ def _notify(
                 symbol=symbol,
                 timeframe=timeframe,
                 period=period,
-                worker_id=get_native_id(),
+                worker_id=current_archive_worker_id(),
                 downloaded_bytes=downloaded_bytes,
                 elapsed_seconds=elapsed_seconds,
                 rows=rows,
                 error=error,
+                download_seconds=download_seconds,
+                processing_seconds=processing_seconds,
             )
         )
 
