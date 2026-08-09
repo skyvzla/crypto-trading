@@ -31,6 +31,12 @@ import psycopg
 from trading_platform.shared.symbol_universe_query import (
     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
 )
+from trading_platform.market.archive.index import (
+    ARCHIVE_INDEX_FILENAME,
+    load_archive_index,
+    verify_archive_index_files,
+)
+from trading_platform.market.archive.parquet import archive_root_from_catalog
 
 logger = logging.getLogger(__name__)
 
@@ -166,36 +172,25 @@ def _configure_duckdb_connection(
     connection.execute("SET enable_progress_bar = false")
 
 
-def _execute_duckdb_interruptibly(
-    connection: duckdb.DuckDBPyConnection,
-    query: str,
-    parameters: list[Any],
-) -> list[tuple[Any, ...]]:
-    """让主线程可在 DuckDB 原生查询期间及时处理 Ctrl+C。"""
-    completed = threading.Event()
-    rows: list[tuple[Any, ...]] = []
-    errors: list[BaseException] = []
-
-    def execute() -> None:
-        try:
-            rows.extend(connection.execute(query, parameters).fetchall())
-        except BaseException as error:
-            errors.append(error)
-        finally:
-            completed.set()
-
-    query_thread = threading.Thread(target=execute, daemon=True)
-    query_thread.start()
-    try:
-        while not completed.wait(0.1):
-            pass
-    except KeyboardInterrupt:
-        connection.interrupt()
-        completed.wait(2)
-        raise
-    if errors:
-        raise errors[0]
-    return rows
+def _load_catalog_index(
+    duckdb_path: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+    symbols: Collection[str] | None,
+) -> tuple[pd.DataFrame, Path]:
+    archive_root = archive_root_from_catalog(duckdb_path)
+    index_path = archive_root / ARCHIVE_INDEX_FILENAME
+    frame = load_archive_index(index_path)
+    selected = frame[
+        (frame["first_open_ms"] < end_ms)
+        & (frame["last_close_ms"] >= start_ms)
+    ].copy()
+    if symbols is not None:
+        normalized = {str(symbol).strip().upper() for symbol in symbols}
+        selected = selected[selected["symbol"].isin(normalized)].copy()
+    verify_archive_index_files(selected, archive_root)
+    return selected, index_path
 
 
 def _archive_coverage(
@@ -204,38 +199,21 @@ def _archive_coverage(
     start_ms: int,
     end_ms: int,
     symbols: Collection[str] | None,
-    duckdb_threads: int,
 ) -> dict[str, dict[str, tuple[int, int, int]]]:
-    selected_symbols = sorted(set(symbols)) if symbols is not None else None
-    if selected_symbols == []:
+    if symbols is not None and not symbols:
         return {}
-    symbol_filter = ""
-    parameters: list[Any] = [start_ms, end_ms]
-    if selected_symbols is not None:
-        placeholders = ", ".join("?" for _ in selected_symbols)
-        symbol_filter = f"AND symbol IN ({placeholders}) "
-        parameters.extend(selected_symbols)
-    connection = duckdb.connect(duckdb_path, read_only=True)
-    try:
-        _configure_duckdb_connection(connection, threads=duckdb_threads)
-        rows = _execute_duckdb_interruptibly(
-            connection,
-            "SELECT symbol, timeframe, min(epoch_ms(open_time)), "
-            "max(epoch_ms(close_time)), count(*) FROM main.candles "
-            "WHERE timeframe IN ('1s', '1m', '5m', '15m') "
-            "AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ? "
-            f"{symbol_filter}"
-            "GROUP BY symbol, timeframe ORDER BY symbol, timeframe",
-            parameters,
+    frame, _index_path = _load_catalog_index(
+        duckdb_path, start_ms=start_ms, end_ms=end_ms, symbols=symbols
+    )
+    frame = frame[frame["timeframe"].isin(["1s", "1m", "5m", "15m"])]
+    coverage: dict[str, dict[str, tuple[int, int, int]]] = {}
+    for (symbol, timeframe), group in frame.groupby(["symbol", "timeframe"]):
+        coverage.setdefault(str(symbol), {})[str(timeframe)] = (
+            int(group["first_open_ms"].min()),
+            int(group["last_close_ms"].max()),
+            int(group["row_count"].sum()),
         )
-        coverage: dict[str, dict[str, tuple[int, int, int]]] = {}
-        for symbol, timeframe, first_ms, last_ms, count in rows:
-            coverage.setdefault(str(symbol).strip().upper(), {})[
-                str(timeframe)
-            ] = (int(first_ms), int(last_ms), int(count))
-        return coverage
-    finally:
-        connection.close()
+    return coverage
 
 
 def _estimate_monthly_memory(
@@ -246,29 +224,17 @@ def _estimate_monthly_memory(
     end_ms: int,
     chunk_hours: float,
     fetch_batch_size: int,
-    duckdb_threads: int,
 ) -> pd.DataFrame:
     """按币种月份估算全量物化和流式窗口的内存量级。"""
-    placeholders = ", ".join("?" for _ in symbols)
-    connection = duckdb.connect(duckdb_path, read_only=True)
-    try:
-        _configure_duckdb_connection(connection, threads=duckdb_threads)
-        rows = _execute_duckdb_interruptibly(
-            connection,
-            "SELECT symbol, date_trunc('month', timezone('UTC', open_time)) AS month, "
-            "count(*) FILTER (WHERE timeframe = '1s') AS rows_1s, "
-            "count(*) AS event_rows FROM main.candles "
-            f"WHERE symbol IN ({placeholders}) "
-            "AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ? "
-            "AND timeframe IN ('1s', '1m', '5m', '15m') "
-            "GROUP BY symbol, month ORDER BY symbol, month",
-            [*symbols, start_ms, end_ms],
-        )
-    finally:
-        connection.close()
+    frame, _index_path = _load_catalog_index(
+        duckdb_path, start_ms=start_ms, end_ms=end_ms, symbols=symbols
+    )
+    frame = frame[frame["timeframe"].isin(["1s", "1m", "5m", "15m"])]
+    grouped = frame.groupby(["symbol", "year", "month"], sort=True)
     records = []
-    for symbol, month, rows_1s, event_rows in rows:
-        event_rows = int(event_rows)
+    for (symbol, year, month), group in grouped:
+        event_rows = int(group["row_count"].sum())
+        rows_1s = int(group.loc[group["timeframe"] == "1s", "row_count"].sum())
         chunk_fraction = max(float(chunk_hours) / (24 * 30), 1 / (24 * 30))
         chunk_rows = max(1, math.ceil(event_rows * chunk_fraction))
         materialized = event_rows * ESTIMATED_PYTHON_EVENT_BYTES
@@ -278,7 +244,7 @@ def _estimate_monthly_memory(
             + WORKER_FIXED_OVERHEAD_BYTES
         )
         records.append({
-            "symbol": str(symbol), "month": str(month),
+            "symbol": str(symbol), "month": f"{int(year):04d}-{int(month):02d}-01",
             "rows_1s": int(rows_1s), "event_rows": event_rows,
             "estimated_materialized_gb": materialized / 1024**3,
             "estimated_stream_peak_gb": stream_peak / 1024**3,
@@ -305,7 +271,6 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
 
     start_ms = _timestamp_ms(config["start"])
     end_ms = _timestamp_ms(config["end"])
-    duckdb_threads = int(config.get("execution", {}).get("duckdb_threads", 1))
     allowed = _allowed_symbols(
         config.get("database_dsn") or _dsn_from_environment(),
         freeze_days=int(universe.get("freeze_days", 15)),
@@ -319,7 +284,6 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
         start_ms=start_ms,
         end_ms=end_ms,
         symbols=archive_scan_symbols,
-        duckdb_threads=duckdb_threads,
     )
     archived = {
         symbol for symbol, timeframes in coverage.items() if "1s" in timeframes
@@ -482,6 +446,9 @@ def _run_one(
     command = [sys.executable, "-m", "trading_platform.backtest.run_spike_short",
                "--symbol", spec.symbol, "--start", config["start"], "--end", config["end"],
                "--duckdb-path", config["duckdb_path"], "--output", str(run_dir)]
+    archive_index_path = config.get("archive_index_path")
+    if archive_index_path:
+        command.extend(["--archive-index", str(archive_index_path)])
     for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
         if key in params:
             command.extend([flag, str(params[key])])
@@ -869,6 +836,7 @@ def _write_report(
         f"- 实际 worker：{workers}",
         f"- 每 worker DuckDB 内存上限：{duckdb_memory_limit}",
         "- 行情：DuckDB/Parquet 只读流式窗口",
+        "- 预检：Parquet sidecar 索引（不扫描 K 线正文）",
         "- 交易对：PostgreSQL 主库只读有效集合与历史归档集合的交集",
         "- conservative_net_pnl：每个多币种冲突组仅保留最低盈亏后的保守结果",
         "",
@@ -919,6 +887,9 @@ def _main(argv: list[str] | None = None) -> int:
     output_root = Path(config.get("output", f"reports/{config.get('name', 'spike_sweep')}"))
     print("正在筛选交易对并检查历史归档覆盖...", flush=True)
     symbols, universe_rows = resolve_universe(config)
+    config["archive_index_path"] = str(
+        archive_root_from_catalog(config["duckdb_path"]) / ARCHIVE_INDEX_FILENAME
+    )
     specs = expand_specs(config, symbols)
     output_root.mkdir(parents=True, exist_ok=True)
     with (output_root / "universe.csv").open("w", newline="") as stream:
@@ -949,7 +920,6 @@ def _main(argv: list[str] | None = None) -> int:
         end_ms=_timestamp_ms(config["end"]),
         chunk_hours=float(execution.get("chunk_hours", 24 * 90)),
         fetch_batch_size=int(execution.get("fetch_batch_size", 10_000)),
-        duckdb_threads=duckdb_threads,
     )
     memory_estimate.to_csv(output_root / "memory_estimate.csv", index=False)
     memory_limit_bytes = _memory_bytes(actual_memory_limit)

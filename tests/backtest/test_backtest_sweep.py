@@ -34,22 +34,17 @@ def test_configure_duckdb_connection_limits_threads():
         connection.close()
 
 
-def test_archive_coverage_filters_symbols(tmp_path: Path):
-    archive = tmp_path / "history.duckdb"
-    connection = duckdb.connect(str(archive))
-    connection.execute(
-        "CREATE TABLE candles (symbol VARCHAR, timeframe VARCHAR, "
-        "open_time TIMESTAMPTZ, close_time TIMESTAMPTZ)"
+def test_archive_coverage_filters_symbols(monkeypatch):
+    frame = pd.DataFrame([
+        {"symbol": "AKEUSDT", "timeframe": "1s", "first_open_ms": 0,
+         "last_close_ms": 999, "row_count": 1},
+    ])
+    monkeypatch.setattr(
+        sweep, "_load_catalog_index", lambda *args, **kwargs: (frame, Path("index"))
     )
-    connection.executemany(
-        "INSERT INTO candles VALUES (?, '1s', to_timestamp(0), to_timestamp(1))",
-        [("AKEUSDT",), ("BANKUSDT",)],
-    )
-    connection.close()
 
     coverage = _archive_coverage(
-        str(archive), start_ms=0, end_ms=2_000,
-        symbols={"AKEUSDT"}, duckdb_threads=1,
+        "history.duckdb", start_ms=0, end_ms=2_000, symbols={"AKEUSDT"},
     )
 
     assert set(coverage) == {"AKEUSDT"}
@@ -86,7 +81,6 @@ def test_explicit_universe_only_scans_requested_symbols(monkeypatch):
 
     assert symbols == ["AKEUSDT"]
     assert captured["symbols"] == {"AKEUSDT"}
-    assert captured["duckdb_threads"] == 2
 
 
 def test_main_handles_duckdb_query_interrupt_without_traceback(
@@ -216,7 +210,9 @@ def test_simultaneous_signal_groups_require_multiple_symbols():
     assert groups.iloc[0]["signal_count"] == 2
 
 
-def test_breakout_context_uses_only_completed_minutes(tmp_path: Path):
+def test_breakout_context_uses_only_completed_minutes(
+    tmp_path: Path, monkeypatch
+):
     archive = tmp_path / "history.duckdb"
     connection = duckdb.connect(str(archive))
     connection.execute(
@@ -249,10 +245,18 @@ def test_breakout_context_uses_only_completed_minutes(tmp_path: Path):
     assert enriched.iloc[0]["rise_from_4h_low"] == 0.5
     assert "low_4h_7d_position" in enriched.columns
 
+    index_frame = pd.DataFrame([{
+        "symbol": "AKEUSDT", "timeframe": "1m", "year": 1970, "month": 1,
+        "row_count": 480, "first_open_ms": 0, "last_close_ms": entry_time - 1,
+    }])
+    monkeypatch.setattr(
+        sweep,
+        "_load_catalog_index",
+        lambda *args, **kwargs: (index_frame, Path("index")),
+    )
     estimate = _estimate_monthly_memory(
         str(archive), symbols=["AKEUSDT"], start_ms=0,
         end_ms=entry_time, chunk_hours=720, fetch_batch_size=10_000,
-        duckdb_threads=1,
     )
     assert estimate.iloc[0]["event_rows"] == 480
     assert estimate.iloc[0]["estimated_stream_peak_gb"] > 0

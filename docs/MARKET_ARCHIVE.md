@@ -3,6 +3,9 @@
 `market-history` 是一次性维护命令，不属于常驻行情进程，也不属于回测执行路径。
 下载得到的 Binance Vision 文件按不可变分区写入 Parquet，DuckDB 只生成查询 catalog。
 CLI 会显示总文件数、当前文件、平均下载速度、解析状态和写入行数。
+每批归档完成后会并行读取 Parquet footer，并原子更新根目录下的
+`archive_index.parquet` 与 `archive_index.meta.json`。索引记录每个分区的行数、首尾时间、
+文件大小和修改时间；回测预检只读该索引，不再扫描 K 线正文。
 
 不传 `--symbols` 时，CLI 默认从 PostgreSQL `exchange_symbols` 读取当前允许交易的
 USD-M 永续币种；也可以显式传 `--all-symbols` 表达相同意图。筛选条件与交易门禁一致：
@@ -32,6 +35,18 @@ uv run market-history data/market/history-parquet \
 
 CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行，或按网络和 CPU
 调整。不同分区可以并行写入，同一分区仍由独立锁保护。
+
+首次启用索引，或曾经绕过 `market-history` 手工移动 Parquet 文件时，运行：
+
+```bash
+uv run market-history-index data/market/history-parquet \
+  --catalog data/market/history.duckdb \
+  --workers 6
+```
+
+该命令只读取 Parquet footer，不读取 OHLCV 正文。`--workers` 控制并行 footer reader；
+索引缺失、生成未完成或文件大小/修改时间不一致时，参数回测会明确拒绝并要求重建，
+不会退回昂贵的全量扫描。
 
 如果单个代理有带宽上限，可以重复传入 `--proxy` 配置代理池。连接重置、超时等网络异常会释放
 当前代理，并切换到另一个未占用且本任务尚未失败过的代理；没有空闲代理时立即回退直连，不等待

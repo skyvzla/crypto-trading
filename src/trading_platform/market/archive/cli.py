@@ -225,7 +225,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     attempts=args.attempts,
                     on_retry=reporter.retry,
                 )
-            with ParquetCandleArchive(args.archive) as archive:
+            with ParquetCandleArchive(
+                args.archive, index_workers=min(workers, 8)
+            ) as archive:
                 results = download_history(
                     archive,
                     fetch=fetch,

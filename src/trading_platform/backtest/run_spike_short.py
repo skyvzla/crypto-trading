@@ -160,6 +160,12 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="单个 DuckDB worker 使用的线程数",
     )
+    parser.add_argument(
+        "--archive-index",
+        type=Path,
+        default=None,
+        help="归档 sidecar 索引；参数矩阵回测用它跳过重复全区间扫描",
+    )
     return parser.parse_args()
 
 
@@ -210,6 +216,7 @@ def main() -> None:
             else ["1m", "5m"]
         ),
         duckdb_path=args.duckdb_path,
+        archive_index_path=args.archive_index,
         bar1s_time_shift_ms=bar1s_time_shift_ms,
     )
     event_iter = loader.iter_all(

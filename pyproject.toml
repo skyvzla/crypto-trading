@@ -30,6 +30,7 @@ dev = [
 spike-live = "trading_platform.strategies.spike.main:main"
 ledger-migrate = "trading_platform.ledger.db.migrations:main"
 market-history = "trading_platform.market.archive.cli:main"
+market-history-index = "trading_platform.market.archive.index_cli:main"
 exchange-symbol-sync = "trading_platform.ledger.exchange_symbols:main"
 spike-backtest-sweep = "trading_platform.backtest.sweep:main"
 

@@ -11,6 +11,10 @@ from typing import Union
 
 import duckdb
 import pandas as pd
+from trading_platform.market.archive.index import (
+    load_archive_index,
+    verify_archive_index_files,
+)
 from trading_platform.shared.events import Bar1s, Kline
 
 logger = logging.getLogger(__name__)
@@ -42,6 +46,7 @@ class BacktestDataLoader:
         require_aggtrades: bool = False,
         required_kline_intervals: list[str] | None = None,
         duckdb_path: str | None = None,
+        archive_index_path: str | None = None,
         bar1s_time_shift_ms: int = 0,
     ):
         """
@@ -65,6 +70,9 @@ class BacktestDataLoader:
         self.require_aggtrades = require_aggtrades
         self.required_kline_intervals = set(required_kline_intervals or [])
         self.duckdb_path = Path(duckdb_path) if duckdb_path else None
+        self.archive_index_path = (
+            Path(archive_index_path) if archive_index_path else None
+        )
         self.bar1s_time_shift_ms = int(bar1s_time_shift_ms)
         self._duckdb_connection: duckdb.DuckDBPyConnection | None = None
 
@@ -134,6 +142,9 @@ class BacktestDataLoader:
 
     def _validate_stream_datasets(self) -> None:
         """在开始 yield 前完整校验必需数据集，避免半程失败。"""
+        if self.archive_index_path is not None:
+            self._validate_stream_datasets_from_index()
+            return
         connection = self._require_duckdb_connection()
         placeholders = ", ".join("?" for _ in self.symbols)
         rows = connection.execute(
@@ -163,6 +174,36 @@ class BacktestDataLoader:
                     raise ValueError(
                         f"Missing required {interval} Kline data for {symbol}"
                     )
+
+    def _validate_stream_datasets_from_index(self) -> None:
+        frame = load_archive_index(self.archive_index_path)
+        raw_one_second_start = self.start_ms - self.bar1s_time_shift_ms
+        raw_one_second_end = self.end_ms - self.bar1s_time_shift_ms
+        selected_parts = []
+        required = set(self.required_kline_intervals)
+        if self.require_aggtrades:
+            required.add("1s")
+        for symbol in self.symbols:
+            for timeframe in required:
+                start_ms = (
+                    raw_one_second_start if timeframe == "1s" else self.start_ms
+                )
+                end_ms = raw_one_second_end if timeframe == "1s" else self.end_ms
+                matches = frame[
+                    (frame["symbol"] == symbol)
+                    & (frame["timeframe"] == timeframe)
+                    & (frame["first_open_ms"] < end_ms)
+                    & (frame["last_close_ms"] >= start_ms)
+                ]
+                if matches.empty:
+                    label = "1s market data" if timeframe == "1s" else f"{timeframe} Kline"
+                    raise ValueError(f"Missing required {label} for {symbol}")
+                selected_parts.append(matches)
+        if selected_parts:
+            selected = pd.concat(selected_parts, ignore_index=True).drop_duplicates(
+                "relative_path"
+            )
+            verify_archive_index_files(selected, self.archive_index_path.parent)
 
     def _execute_stream_query(
         self, *, chunk_start_ms: int, chunk_end_ms: int

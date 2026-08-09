@@ -16,9 +16,19 @@ from .models import Candle
 class ParquetCandleArchive:
     """Immutable, atomically replaced candle partitions."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        index_workers: int = 1,
+        rebuild_index_on_close: bool = True,
+    ) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        self.index_workers = index_workers
+        self.rebuild_index_on_close = rebuild_index_on_close
+        self._dirty = False
+        self._closed = False
 
     def __enter__(self) -> "ParquetCandleArchive":
         return self
@@ -27,7 +37,13 @@ class ParquetCandleArchive:
         self.close()
 
     def close(self) -> None:
-        return None
+        if self._closed:
+            return
+        self._closed = True
+        if self._dirty and self.rebuild_index_on_close:
+            from .index import build_archive_index
+
+            build_archive_index(self.root, workers=self.index_workers)
 
     def partition_rows(
         self,
@@ -135,6 +151,7 @@ class ParquetCandleArchive:
         try:
             pq.write_table(table, temporary, compression="zstd")
             os.replace(temporary, target)
+            self._dirty = True
         finally:
             temporary.unlink(missing_ok=True)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -161,7 +178,7 @@ class ParquetCandleArchive:
 
 def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
     dataset = Path(root).resolve()
-    files = list(dataset.glob("*/*/*/*/*/candles.parquet"))
+    has_files = next(dataset.glob("*/*/*/*/*/candles.parquet"), None) is not None
     catalog = Path(catalog_path).resolve()
     catalog.parent.mkdir(parents=True, exist_ok=True)
     glob = _sql_literal(
@@ -170,7 +187,19 @@ def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
     connection = duckdb.connect(str(catalog))
     try:
         connection.execute("SET TimeZone = 'UTC'")
-        if files:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS archive_catalog_metadata "
+            "(key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL)"
+        )
+        connection.execute(
+            "INSERT OR REPLACE INTO archive_catalog_metadata VALUES "
+            "('archive_root', ?), ('archive_index', ?)",
+            [
+                str(dataset),
+                str(dataset / "archive_index.parquet"),
+            ],
+        )
+        if has_files:
             connection.execute(
                 f"""
             CREATE OR REPLACE VIEW candles AS
@@ -209,6 +238,26 @@ def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
     finally:
         connection.close()
     return catalog
+
+
+def archive_root_from_catalog(catalog_path: str | Path) -> Path:
+    connection = duckdb.connect(str(catalog_path), read_only=True)
+    try:
+        row = connection.execute(
+            "SELECT value FROM archive_catalog_metadata "
+            "WHERE key = 'archive_root'"
+        ).fetchone()
+    except duckdb.Error as error:
+        raise RuntimeError(
+            "DuckDB catalog has no archive metadata; rebuild the archive index"
+        ) from error
+    finally:
+        connection.close()
+    if row is None:
+        raise RuntimeError(
+            "DuckDB catalog has no archive root; rebuild the archive index"
+        )
+    return Path(str(row[0])).resolve()
 
 
 def _sql_literal(value: str) -> str:
