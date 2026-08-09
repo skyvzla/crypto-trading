@@ -1,9 +1,10 @@
 import hashlib
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from io import BytesIO
-from threading import Barrier
+from threading import Event, get_native_id
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -614,48 +615,127 @@ def test_http_fetcher_exposes_verified_seekable_stream():
             assert source.read(8) == b"verified"
 
 
-def test_worker_pool_keeps_a_fetcher_bound_to_a_worker_thread():
+def test_worker_pool_switches_proxy_after_connection_failure():
     calls: list[str] = []
-
-    class Fetcher:
-        def __init__(self, name: str) -> None:
-            self.name = name
-
-        def __call__(self, url: str) -> bytes:
-            calls.append(self.name)
-            return self.name.encode()
-
-    pool = BinanceVisionWorkerPoolFetcher([Fetcher("a"), Fetcher("b")])
-
-    assert [pool("first"), pool("second"), pool("third")] == [
-        b"a",
-        b"a",
-        b"a",
-    ]
-    assert calls == ["a", "a", "a"]
-
-
-def test_worker_pool_assigns_a_different_fetcher_to_each_worker_thread():
-    barrier = Barrier(2)
+    retries: list[tuple[int, str | None]] = []
 
     class Fetcher:
         def __init__(self, name: str) -> None:
             self.name = name
 
         def __call__(self, _url: str) -> bytes:
+            calls.append(self.name)
+            if self.name == "a":
+                raise httpx.ConnectError("connection reset")
             return self.name.encode()
 
-    pool = BinanceVisionWorkerPoolFetcher([Fetcher("a"), Fetcher("b")])
-    def fetch_twice() -> tuple[bytes, bytes]:
-        first = pool("first")
-        barrier.wait(timeout=1)
-        return first, pool("second")
+    pool = BinanceVisionWorkerPoolFetcher(
+        [Fetcher("a"), Fetcher("b")],
+        direct_fetcher=Fetcher("direct"),
+        attempts=5,
+        labels=["proxy-a", "proxy-b"],
+        on_retry=lambda _url, attempt, _attempts, _error, proxy=None, **_kwargs: (
+            retries.append((attempt, proxy))
+        ),
+    )
+
+    assert pool("archive") == b"b"
+    assert calls == ["a", "b"]
+    assert retries == [(2, "proxy-a")]
+
+
+def test_worker_pool_switches_proxy_for_streaming_archives():
+    calls: list[str] = []
+
+    class Fetcher:
+        def __init__(self, name: str, *, fails: bool = False) -> None:
+            self.name = name
+            self.fails = fails
+
+        @contextmanager
+        def open_archive(self, _url: str):
+            calls.append(self.name)
+            if self.fails:
+                raise httpx.ConnectError("connection reset")
+            yield BytesIO(self.name.encode())
+
+    pool = BinanceVisionWorkerPoolFetcher(
+        [Fetcher("a", fails=True), Fetcher("b")],
+        direct_fetcher=Fetcher("direct"),
+        attempts=5,
+        labels=["proxy-a", "proxy-b"],
+        retry_base_seconds=0,
+    )
+
+    with pool.open_archive("archive") as source:
+        assert source.read() == b"b"
+    assert calls == ["a", "b"]
+
+
+def test_worker_pool_uses_direct_when_all_proxies_are_occupied():
+    started = Event()
+    release = Event()
+
+    class Fetcher:
+        def __call__(self, _url: str) -> bytes:
+            started.set()
+            release.wait(timeout=1)
+            return b"proxy"
+
+    pool = BinanceVisionWorkerPoolFetcher(
+        [Fetcher()],
+        direct_fetcher=lambda _url: b"direct",
+        attempts=5,
+        labels=["proxy-a"],
+    )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _value: fetch_twice(), range(2)))
+        occupied = executor.submit(pool, "first")
+        assert started.wait(timeout=1)
+        fallback = executor.submit(pool, "second")
+        assert fallback.result(timeout=1) == b"direct"
+        release.set()
+        assert occupied.result(timeout=1) == b"proxy"
 
-    assert {result[0] for result in results} == {b"a", b"b"}
-    assert all(first == second for first, second in results)
+
+def test_worker_pool_reserves_final_attempt_for_direct_access():
+    calls: list[str] = []
+
+    def failing_proxy(url: str) -> bytes:
+        calls.append(url)
+        raise httpx.ConnectError("connection reset")
+
+    pool = BinanceVisionWorkerPoolFetcher(
+        [failing_proxy] * 8,
+        direct_fetcher=lambda _url: b"direct",
+        attempts=5,
+        retry_base_seconds=0,
+    )
+
+    assert pool("archive") == b"direct"
+    assert calls == ["archive"] * 4
+
+
+def test_worker_pool_reports_final_direct_failure():
+    calls: list[str] = []
+
+    def fail(source: str):
+        def fetch(_url: str) -> bytes:
+            calls.append(source)
+            raise httpx.ConnectError(f"{source} reset")
+
+        return fetch
+
+    pool = BinanceVisionWorkerPoolFetcher(
+        [fail("proxy-a"), fail("proxy-b")],
+        direct_fetcher=fail("direct"),
+        attempts=5,
+        retry_base_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match=r"source=direct after 5 attempts"):
+        pool("archive")
+    assert calls == ["proxy-a", "proxy-b", "direct", "direct", "direct"]
 
 
 def test_cli_progress_uses_monotonic_completion_count(capsys):
@@ -666,10 +746,12 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
         3,
         httpx.ConnectError("temporary outage"),
         proxy="socks5h://proxy-a:1080",
+        elapsed_seconds=10,
     )
     reporter(
         DownloadProgress(
             phase="downloaded",
+            worker_id=101,
             downloaded_bytes=2 * 1024 * 1024,
             elapsed_seconds=0.5,
             current=68,
@@ -682,6 +764,7 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
     reporter(
         DownloadProgress(
             phase="stored",
+            worker_id=101,
             current=68,
             total=68,
             symbol="BANKUSDT",
@@ -693,6 +776,7 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
     reporter(
         DownloadProgress(
             phase="skipped",
+            worker_id=102,
             current=64,
             total=68,
             symbol="BANKUSDT",
@@ -701,16 +785,34 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
             rows=86249,
         )
     )
+    reporter(
+        DownloadProgress(
+            phase="failed",
+            worker_id=103,
+            current=65,
+            total=68,
+            symbol="BANKUSDT",
+            timeframe="1s",
+            period="2026-07-31",
+            elapsed_seconds=65,
+            error="ConnectError: connection reset",
+        )
+    )
 
     output = capsys.readouterr().err
+    assert f"worker={get_native_id()} Retry 2/3" in output
     assert (
         "Retry 2/3 BTWUSDT-aggTrades-2026-06-04.zip "
-        "proxy=socks5h://proxy-a:1080" in output
+        "proxy=socks5h://proxy-a:1080 elapsed=10s" in output
     )
     assert "Processing 68 files with 4 workers." in output
-    assert "[1/68] BANKUSDT 15m 2026-07 stored 2976 rows" in output
+    assert "worker=101 [1/68] BANKUSDT 15m 2026-07 stored 2976 rows" in output
     assert "2.0 MiB at 4.0 MiB/s" in output
     assert "[2/68] BANKUSDT 1s 2026-07-30 skipped" in output
+    assert (
+        "worker=103 [3/68] BANKUSDT 1s 2026-07-31 failed (1m05s): "
+        "ConnectError: connection reset; task exiting" in output
+    )
     assert "[68/68]" not in output
 
 
@@ -820,7 +922,7 @@ def test_cli_without_symbols_loads_all_tradable_symbols(
     assert "Downloading data for 2 trading pairs." in stderr
 
 
-def test_cli_uses_thread_bound_proxy_pool(
+def test_cli_uses_failover_proxy_pool(
     tmp_path, monkeypatch, capsys
 ):
     client_options: list[dict[str, object]] = []
@@ -882,7 +984,10 @@ def test_cli_uses_thread_bound_proxy_pool(
         "http://proxy-b:8080",
     ]
     assert all(options["trust_env"] is False for options in client_options)
-    assert "Using 2 thread-bound proxies with 2 workers." in capsys.readouterr().err
+    assert (
+        "Using 2 failover proxies with 2 workers and direct fallback."
+        in capsys.readouterr().err
+    )
 
 
 def test_cli_accepts_socks5_proxy(tmp_path, monkeypatch):
@@ -983,8 +1088,8 @@ def test_cli_handles_keyboard_interrupt_without_traceback(
     assert exit_code == 130
     assert captured.out == ""
     assert captured.err == (
-        "Downloading data for 1 trading pair.\n"
-        "Cancelled.\n"
+        f"worker={get_native_id()} Downloading data for 1 trading pair.\n"
+        f"worker={get_native_id()} Cancelled; downloader exiting.\n"
     )
     assert "Traceback" not in captured.err
 
@@ -1030,6 +1135,21 @@ def test_http_fetcher_falls_back_to_public_endpoint_from_s3():
     assert result == content
 
 
+def test_http_fetcher_does_not_hide_network_error_behind_other_origin_404():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "s3-ap-northeast-1.amazonaws.com":
+            return httpx.Response(404, request=request)
+        raise httpx.ConnectError("public endpoint reset", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        fetcher = BinanceVisionHTTPFetcher(client, attempts=1)
+        with pytest.raises(httpx.ConnectError, match="public endpoint reset"):
+            fetcher(
+                "https://s3-ap-northeast-1.amazonaws.com/"
+                "data.binance.vision/data/archive.zip"
+            )
+
+
 def test_download_history_skips_pre_listing_404_and_continues(tmp_path):
     payload = BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
@@ -1064,6 +1184,8 @@ def test_download_history_skips_pre_listing_404_and_continues(tmp_path):
     assert [item.phase for item in progress if item.phase == "unavailable"] == [
         "unavailable"
     ]
+    assert progress
+    assert all(item.worker_id > 0 for item in progress)
 
 
 def test_download_history_rechecks_disk_space_before_each_download_and_write(
@@ -1079,6 +1201,7 @@ def test_download_history_rechecks_disk_space_before_each_download_and_write(
         )
     fetch = MagicMock(return_value=payload.getvalue())
     checks = 0
+    progress: list[DownloadProgress] = []
 
     def storage_check() -> None:
         nonlocal checks
@@ -1096,10 +1219,14 @@ def test_download_history_rechecks_disk_space_before_each_download_and_write(
                 start=datetime(2026, 7, 1, tzinfo=UTC),
                 end=datetime(2026, 7, 3, tzinfo=UTC),
                 storage_check=storage_check,
+                on_progress=progress.append,
             )
 
     assert fetch.call_count == 1
     assert checks == 3
+    assert progress[-1].phase == "failed"
+    assert progress[-1].worker_id > 0
+    assert "insufficient disk space" in progress[-1].error
     assert (tmp_path / "history/AKEUSDT/1s/2026/07/01/candles.parquet").is_file()
 
 

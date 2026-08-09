@@ -6,13 +6,14 @@ from contextlib import contextmanager
 import hashlib
 import io
 import re
+import sys
 import tempfile
 import time
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from threading import Lock, get_ident
+from threading import Lock, get_native_id
 from typing import BinaryIO
 
 import httpx
@@ -65,6 +66,8 @@ class DownloadProgress:
     downloaded_bytes: int = 0
     elapsed_seconds: float = 0.0
     rows: int = 0
+    error: str = ""
+    worker_id: int = 0
 
 
 class BinanceVisionHTTPFetcher:
@@ -108,9 +111,10 @@ class BinanceVisionHTTPFetcher:
 
     def _download_to(self, url: str, target: BinaryIO) -> str:
         last_error: Exception | None = None
+        candidates = _download_urls(url)
         for attempt in range(self._attempts):
-            not_found = False
-            for candidate in _download_urls(url):
+            not_found_count = 0
+            for candidate in candidates:
                 target.seek(0)
                 target.truncate()
                 digest = hashlib.sha256()
@@ -130,12 +134,12 @@ class BinanceVisionHTTPFetcher:
                     return digest.hexdigest()
                 except httpx.HTTPStatusError as error:
                     if error.response.status_code == 404:
-                        not_found = True
+                        not_found_count += 1
                     else:
                         last_error = error
                 except httpx.HTTPError as error:
                     last_error = error
-            if not_found:
+            if not_found_count == len(candidates):
                 raise ArchiveNotFoundError(f"Binance archive not found: {url}")
             if attempt + 1 < self._attempts:
                 if self._on_retry is not None:
@@ -147,9 +151,10 @@ class BinanceVisionHTTPFetcher:
 
     def _get(self, url: str) -> httpx.Response:
         last_error: Exception | None = None
+        candidates = _download_urls(url)
         for attempt in range(self._attempts):
-            not_found = False
-            for candidate in _download_urls(url):
+            not_found_count = 0
+            for candidate in candidates:
                 try:
                     response = self._client.get(
                         candidate,
@@ -159,12 +164,12 @@ class BinanceVisionHTTPFetcher:
                     return response
                 except httpx.HTTPStatusError as error:
                     if error.response.status_code == 404:
-                        not_found = True
+                        not_found_count += 1
                     else:
                         last_error = error
                 except httpx.HTTPError as error:
                     last_error = error
-            if not_found:
+            if not_found_count == len(candidates):
                 raise ArchiveNotFoundError(
                     f"Binance archive not found: {url}"
                 )
@@ -183,36 +188,145 @@ class BinanceVisionHTTPFetcher:
 
 
 class BinanceVisionWorkerPoolFetcher:
-    """Bind every archive worker thread to one fetcher for its lifetime."""
+    """Retry archives across free proxies, then fall back to direct access."""
 
-    def __init__(self, fetchers: Sequence[Callable[[str], bytes]]) -> None:
+    def __init__(
+        self,
+        fetchers: Sequence[Callable[[str], bytes]],
+        *,
+        direct_fetcher: Callable[[str], bytes],
+        attempts: int = 5,
+        labels: Sequence[str] | None = None,
+        retry_base_seconds: float = 1.0,
+        on_retry: Callable[..., None] | None = None,
+    ) -> None:
         if not fetchers:
             raise ValueError("at least one proxy fetcher is required")
         self._fetchers = tuple(fetchers)
+        self._direct_fetcher = direct_fetcher
+        self._attempts = max(1, attempts)
+        self._labels = tuple(labels or ())
+        if self._labels and len(self._labels) != len(self._fetchers):
+            raise ValueError("proxy labels must match proxy fetchers")
+        if not self._labels:
+            self._labels = tuple(
+                f"proxy-{index + 1}" for index in range(len(self._fetchers))
+            )
+        self._retry_base_seconds = max(0.0, retry_base_seconds)
+        self._on_retry = on_retry
         self._lock = Lock()
-        self._assignments: dict[int, Callable[[str], bytes]] = {}
+        self._busy = [False] * len(self._fetchers)
         self._next = 0
 
     def __call__(self, url: str) -> bytes:
-        return self._fetcher()(url)
+        excluded: set[int] = set()
+        started = time.monotonic()
+        last_error: Exception | None = None
+        last_label = "direct"
+        for attempt in range(1, self._attempts + 1):
+            index, fetcher, label = self._acquire(
+                excluded, force_direct=attempt == self._attempts
+            )
+            last_label = label
+            try:
+                return fetcher(url)
+            except ArchiveNotFoundError:
+                raise
+            except Exception as error:
+                last_error = error
+                if index is not None:
+                    excluded.add(index)
+            finally:
+                self._release(index)
+            if attempt < self._attempts:
+                self._notify_retry(url, attempt + 1, last_error, label, started)
+                time.sleep(self._retry_base_seconds * (2 ** (attempt - 1)))
+        assert last_error is not None
+        raise RuntimeError(
+            f"archive fetch failed source={last_label} after "
+            f"{self._attempts} attempts: {last_error}"
+        ) from last_error
 
     @contextmanager
     def open_archive(self, url: str) -> Iterator[bytes | BinaryIO]:
-        with _open_fetched_archive(self._fetcher(), url) as source:
-            yield source
+        excluded: set[int] = set()
+        started = time.monotonic()
+        last_error: Exception | None = None
+        last_label = "direct"
+        for attempt in range(1, self._attempts + 1):
+            index, fetcher, label = self._acquire(
+                excluded, force_direct=attempt == self._attempts
+            )
+            last_label = label
+            source_context = _open_fetched_archive(fetcher, url)
+            try:
+                source = source_context.__enter__()
+            except ArchiveNotFoundError:
+                self._release(index)
+                raise
+            except Exception as error:
+                last_error = error
+                if index is not None:
+                    excluded.add(index)
+                self._release(index)
+                if attempt < self._attempts:
+                    self._notify_retry(
+                        url, attempt + 1, error, label, started
+                    )
+                    time.sleep(
+                        self._retry_base_seconds * (2 ** (attempt - 1))
+                    )
+                continue
+            self._release(index)
+            try:
+                yield source
+            finally:
+                source_context.__exit__(*sys.exc_info())
+            return
+        assert last_error is not None
+        raise RuntimeError(
+            f"archive fetch failed source={last_label} after "
+            f"{self._attempts} attempts: {last_error}"
+        ) from last_error
 
-    def _fetcher(self) -> Callable[[str], bytes]:
-        worker = get_ident()
+    def _acquire(
+        self, excluded: set[int], *, force_direct: bool = False
+    ) -> tuple[int | None, Callable[[str], bytes], str]:
+        if force_direct:
+            return None, self._direct_fetcher, "direct"
         with self._lock:
-            fetcher = self._assignments.get(worker)
-            if fetcher is not None:
-                return fetcher
-            if len(self._assignments) == len(self._fetchers):
-                raise RuntimeError("more download workers than configured proxies")
-            fetcher = self._fetchers[self._next]
-            self._next = (self._next + 1) % len(self._fetchers)
-            self._assignments[worker] = fetcher
-            return fetcher
+            for offset in range(len(self._fetchers)):
+                index = (self._next + offset) % len(self._fetchers)
+                if index in excluded or self._busy[index]:
+                    continue
+                self._busy[index] = True
+                self._next = (index + 1) % len(self._fetchers)
+                return index, self._fetchers[index], self._labels[index]
+        return None, self._direct_fetcher, "direct"
+
+    def _release(self, index: int | None) -> None:
+        if index is None:
+            return
+        with self._lock:
+            self._busy[index] = False
+
+    def _notify_retry(
+        self,
+        url: str,
+        next_attempt: int,
+        error: Exception,
+        label: str,
+        started: float,
+    ) -> None:
+        if self._on_retry is not None:
+            self._on_retry(
+                url,
+                next_attempt,
+                self._attempts,
+                error,
+                proxy=label,
+                elapsed_seconds=time.monotonic() - started,
+            )
 
 
 class BinanceFuturesMetadataFetcher:
@@ -544,8 +658,9 @@ def download_history(
 
     total = len(jobs)
 
-    def process(
+    def run_process(
         job: tuple[int, tuple[str, str, date | tuple[int, int]]],
+        task_started: float,
     ) -> DownloadResult:
         current, (symbol, timeframe, period) = job
         monthly_seconds = timeframe == "1s" and not isinstance(period, date)
@@ -589,6 +704,7 @@ def download_history(
                             symbol,
                             timeframe,
                             label,
+                            elapsed_seconds=time.monotonic() - task_started,
                             rows=existing_rows,
                         )
                         return DownloadResult(
@@ -615,6 +731,7 @@ def download_history(
                             symbol,
                             timeframe,
                             label,
+                            elapsed_seconds=time.monotonic() - task_started,
                             rows=existing_rows,
                         )
                         return DownloadResult(
@@ -690,6 +807,7 @@ def download_history(
                 symbol,
                 timeframe,
                 label,
+                elapsed_seconds=time.monotonic() - task_started,
             )
             return DownloadResult(
                 symbol, timeframe, label, 0, unavailable=True
@@ -702,9 +820,36 @@ def download_history(
             symbol,
             timeframe,
             label,
+            elapsed_seconds=time.monotonic() - task_started,
             rows=rows,
         )
         return DownloadResult(symbol, timeframe, label, rows)
+
+    def process(
+        job: tuple[int, tuple[str, str, date | tuple[int, int]]],
+    ) -> DownloadResult:
+        task_started = time.monotonic()
+        current, (symbol, timeframe, period) = job
+        label = (
+            period.isoformat()
+            if isinstance(period, date)
+            else f"{period[0]:04d}-{period[1]:02d}"
+        )
+        try:
+            return run_process(job, task_started)
+        except Exception as error:
+            _notify(
+                on_progress,
+                "failed",
+                current,
+                total,
+                symbol,
+                timeframe,
+                label,
+                elapsed_seconds=time.monotonic() - task_started,
+                error=f"{type(error).__name__}: {error}",
+            )
+            raise
 
     indexed_jobs = tuple(enumerate(jobs, start=1))
     if max_workers == 1:
@@ -746,6 +891,7 @@ def _notify(
     downloaded_bytes: int = 0,
     elapsed_seconds: float = 0.0,
     rows: int = 0,
+    error: str = "",
 ) -> None:
     if callback is not None:
         callback(
@@ -756,9 +902,11 @@ def _notify(
                 symbol=symbol,
                 timeframe=timeframe,
                 period=period,
+                worker_id=get_native_id(),
                 downloaded_bytes=downloaded_bytes,
                 elapsed_seconds=elapsed_seconds,
                 rows=rows,
+                error=error,
             )
         )
 

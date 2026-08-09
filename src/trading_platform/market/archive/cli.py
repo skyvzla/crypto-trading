@@ -73,7 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--timeframes", nargs="+", required=True)
     parser.add_argument("--start", required=True, help="ISO 8601 inclusive UTC time")
     parser.add_argument("--end", required=True, help="ISO 8601 exclusive UTC time")
-    parser.add_argument("--attempts", type=int, default=3)
+    parser.add_argument("--attempts", type=int, default=5)
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument(
         "--workers",
@@ -86,7 +86,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="proxies",
         action="append",
         help=(
-            "HTTP(S) proxy URL; repeat for thread-bound download proxies "
+            "HTTP(S) proxy URL; repeat for failover download proxies "
             "(or set MARKET_HISTORY_PROXIES as a comma-separated list)"
         ),
     )
@@ -118,13 +118,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--timeout must be positive")
     if workers < 1:
         parser.error("--workers must be positive")
-    if proxies and workers > len(proxies):
-        workers = len(proxies)
     if args.delisting_freeze_days < 0:
         parser.error("--delisting-freeze-days must be non-negative")
     if args.min_free_gb < 0:
         parser.error("--min-free-gb must be non-negative")
     reporter = _ProgressReporter(workers)
+    main_worker = f"worker={threading.get_native_id()}"
     try:
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
@@ -135,7 +134,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         if args.symbols is None:
             print(
-                f"Loaded {len(symbols)} tradable symbols from PostgreSQL.",
+                f"{main_worker} Loaded {len(symbols)} tradable symbols "
+                "from PostgreSQL.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -144,13 +144,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         symbol_label = "trading pair" if symbol_count == 1 else "trading pairs"
         print(
-            f"Downloading data for {symbol_count} {symbol_label}.",
+            f"{main_worker} Downloading data for {symbol_count} {symbol_label}.",
             file=sys.stderr,
             flush=True,
         )
         if proxies:
             print(
-                f"Using {len(proxies)} thread-bound proxies with {workers} workers.",
+                f"{main_worker} Using {len(proxies)} failover proxies with "
+                f"{workers} workers "
+                "and direct fallback.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -199,26 +201,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 worker_fetchers = [
                     BinanceVisionHTTPFetcher(
                         client,
-                        attempts=args.attempts,
-                        on_retry=_proxy_retry_handler(
-                            reporter, _proxy_label(proxy)
-                        ),
+                        attempts=1,
                     )
-                    for client, proxy in zip(clients, proxies, strict=True)
+                    for client in clients
                 ]
+                fetch = BinanceVisionWorkerPoolFetcher(
+                    worker_fetchers,
+                    direct_fetcher=BinanceVisionHTTPFetcher(
+                        metadata_client,
+                        attempts=1,
+                    ),
+                    attempts=args.attempts,
+                    labels=[_proxy_label(proxy) for proxy in proxies],
+                    on_retry=reporter.retry,
+                )
             else:
-                worker_fetchers = [
-                    BinanceVisionHTTPFetcher(
-                        clients[0],
-                        attempts=args.attempts,
-                        on_retry=reporter.retry,
-                    )
-                ]
-            fetch = (
-                BinanceVisionWorkerPoolFetcher(worker_fetchers)
-                if proxies
-                else worker_fetchers[0]
-            )
+                fetch = BinanceVisionHTTPFetcher(
+                    clients[0],
+                    attempts=args.attempts,
+                    on_retry=reporter.retry,
+                )
             with ParquetCandleArchive(args.archive) as archive:
                 results = download_history(
                     archive,
@@ -236,13 +238,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         catalog_path = args.catalog or args.archive / "history.duckdb"
         create_duckdb_catalog(args.archive, catalog_path)
     except KeyboardInterrupt:
-        print("Cancelled.", file=sys.stderr)
+        print(f"{main_worker} Cancelled; downloader exiting.", file=sys.stderr)
         return 130
     except Exception as error:
         if args.json:
             print(json.dumps({"status": "failed", "error": str(error)}))
         else:
-            print(f"Failed: {error}", file=sys.stderr)
+            print(
+                f"{main_worker} Failed: {error}; downloader exiting.",
+                file=sys.stderr,
+            )
         return 1
     _print_result(results, args.archive, catalog_path, as_json=args.json)
     return 0
@@ -275,14 +280,6 @@ def _proxy_label(proxy: str) -> str:
     if parsed.port is not None:
         authority = f"{authority}:{parsed.port}"
     return f"{parsed.scheme}://{authority}"
-
-
-def _proxy_retry_handler(
-    reporter: _ProgressReporter, proxy: str
-) -> Callable[[str, int, int, Exception], None]:
-    return lambda url, attempt, attempts, error: reporter.retry(
-        url, attempt, attempts, error, proxy=proxy
-    )
 
 
 class _DiskSpaceGuard:
@@ -339,10 +336,11 @@ class _ProgressReporter:
 
     def __call__(self, progress: DownloadProgress) -> None:
         with self._lock:
+            worker = f"worker={progress.worker_id}"
             if not self._started:
                 self._started = True
                 print(
-                    f"Processing {progress.total} files with "
+                    f"{worker} Processing {progress.total} files with "
                     f"{self._workers} workers.",
                     file=sys.stderr,
                     flush=True,
@@ -354,22 +352,37 @@ class _ProgressReporter:
                     _format_bytes(progress.downloaded_bytes / seconds),
                 )
                 return
-            if progress.phase not in {"stored", "skipped", "unavailable"}:
+            if progress.phase not in {
+                "stored",
+                "skipped",
+                "unavailable",
+                "failed",
+            }:
                 return
             self._completed += 1
+            duration = _format_duration(progress.elapsed_seconds)
             prefix = (
-                f"[{self._completed}/{progress.total}] {progress.symbol} "
+                f"{worker} [{self._completed}/{progress.total}] "
+                f"{progress.symbol} "
                 f"{progress.timeframe} {progress.period}"
             )
             if progress.phase == "skipped":
-                message = f"{prefix} skipped, already exists ({progress.rows} rows)"
+                message = (
+                    f"{prefix} skipped, already exists ({progress.rows} rows, "
+                    f"{duration})"
+                )
             elif progress.phase == "unavailable":
-                message = f"{prefix} unavailable (404), skipped"
+                message = f"{prefix} unavailable (404), skipped ({duration})"
+            elif progress.phase == "failed":
+                message = (
+                    f"{prefix} failed ({duration}): {progress.error}; "
+                    "task exiting"
+                )
             else:
                 size, speed = self._downloads.pop(progress.current, ("?", "?"))
                 message = (
                     f"{prefix} stored {progress.rows} rows "
-                    f"({size} at {speed}/s)"
+                    f"({size} at {speed}/s, {duration})"
                 )
             print(message, file=sys.stderr, flush=True)
 
@@ -381,12 +394,20 @@ class _ProgressReporter:
         error: Exception,
         *,
         proxy: str | None = None,
+        elapsed_seconds: float | None = None,
     ) -> None:
         with self._lock:
+            worker = f"worker={threading.get_native_id()}"
             filename = url.rsplit("/", 1)[-1]
             source = f" proxy={proxy}" if proxy is not None else ""
+            duration = (
+                f" elapsed={_format_duration(elapsed_seconds)}"
+                if elapsed_seconds is not None
+                else ""
+            )
             print(
-                f"Retry {attempt}/{attempts} {filename}{source}: "
+                f"{worker} Retry {attempt}/{attempts} "
+                f"{filename}{source}{duration}: "
                 f"{type(error).__name__}: {error}",
                 file=sys.stderr,
                 flush=True,
@@ -395,7 +416,8 @@ class _ProgressReporter:
     def metadata_fallback(self, error: Exception) -> None:
         with self._lock:
             print(
-                "Warning: exchangeInfo unavailable after retries; "
+                f"worker={threading.get_native_id()} Warning: exchangeInfo "
+                "unavailable after retries; "
                 f"continuing with 404 fallback: {type(error).__name__}: {error}",
                 file=sys.stderr,
                 flush=True,
@@ -451,6 +473,14 @@ def _format_bytes(value: float) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     raise AssertionError("unreachable")
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, round(seconds))
+    minutes, remaining = divmod(total_seconds, 60)
+    if minutes:
+        return f"{minutes}m{remaining:02d}s"
+    return f"{remaining}s"
 
 
 def _parse_datetime(value: str) -> datetime:
