@@ -241,8 +241,8 @@ def _validate_proxies(parser: argparse.ArgumentParser, proxies: Sequence[str]) -
             parsed = httpx.URL(proxy)
         except httpx.InvalidURL:
             parser.error("invalid proxy URL")
-        if parsed.scheme not in {"http", "https"} or not parsed.host:
-            parser.error("proxy must be an HTTP(S) URL")
+        if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.host:
+            parser.error("proxy must be an HTTP(S) or SOCKS5 URL")
 
 
 class _DiskSpaceGuard:

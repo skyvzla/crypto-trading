@@ -35,7 +35,7 @@ CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行�
 
 如果单个代理有带宽上限，可以重复传入 `--proxy` 配置代理池；每个网络下载请求按轮询顺序
 选择一个空闲代理，同一代理在下载和校验完成前不会被再次分配。代理释放后才进入下一轮，
-因此 `--workers` 可以大于代理数，超出的 worker 会等待空闲代理。代理 URL 只接受 HTTP(S)，
+因此 `--workers` 可以大于代理数，超出的 worker 会等待空闲代理。代理 URL 支持 HTTP(S) 和 SOCKS5，
 也可以用逗号或换行分隔的 `MARKET_HISTORY_PROXIES` 配置：
 
 ```bash
@@ -47,6 +47,13 @@ uv run market-history data/market/history-parquet \
   --workers 8 \
   --proxy http://user:pass@proxy-a:8080 \
   --proxy http://user:pass@proxy-b:8080
+```
+
+SOCKS5 代理示例：
+
+```bash
+--proxy socks5://user:pass@proxy-a:1080
+--proxy socks5h://user:pass@proxy-b:1080
 ```
 
 不传 `--proxy` 时继续使用 `httpx` 的 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量行为。

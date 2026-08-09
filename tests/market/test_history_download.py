@@ -889,6 +889,46 @@ def test_cli_uses_round_robin_proxy_pool(
     assert "Using 2 busy-aware round-robin proxies." in capsys.readouterr().err
 
 
+def test_cli_accepts_socks5_proxy(tmp_path, monkeypatch):
+    client_options: list[dict[str, object]] = []
+
+    class Client:
+        def __init__(self, **kwargs) -> None:
+            client_options.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            return None
+
+    monkeypatch.setattr(archive_cli.httpx, "Client", Client)
+    monkeypatch.setattr(
+        archive_cli,
+        "BinanceFuturesMetadataFetcher",
+        lambda *args, **kwargs: lambda symbols: {},
+    )
+    monkeypatch.setattr(archive_cli, "download_history", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        archive_cli,
+        "create_duckdb_catalog",
+        lambda _archive, catalog: catalog,
+    )
+
+    assert archive_cli.main(
+        [
+            str(tmp_path / "parquet"),
+            "--symbols", "AKEUSDT",
+            "--timeframes", "1m",
+            "--start", "2026-07-01T00:00:00Z",
+            "--end", "2026-08-01T00:00:00Z",
+            "--min-free-gb", "0",
+            "--proxy", "socks5://proxy-a:1080",
+        ]
+    ) == 0
+    assert client_options[0]["proxy"] == "socks5://proxy-a:1080"
+
+
 def test_catalog_supports_an_all_unavailable_download(tmp_path):
     catalog = create_duckdb_catalog(
         tmp_path / "empty-parquet", tmp_path / "history.duckdb"
