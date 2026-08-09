@@ -398,6 +398,35 @@ def _worker_memory_plan(
     return workers, f"{duckdb_bytes // 1024**2}MB"
 
 
+def _symbol_worker_memory_plan(
+    requested: int | None,
+    symbol_count: int,
+    minimum_memory_limit: str,
+    budget_percent: int,
+    *,
+    available_memory_bytes: int | None = None,
+) -> tuple[int, str]:
+    if symbol_count <= 0:
+        raise ValueError("symbol_count must be positive")
+    effective_requested = (
+        min(requested, symbol_count) if requested is not None else None
+    )
+    workers, memory_limit = _worker_memory_plan(
+        effective_requested,
+        minimum_memory_limit,
+        budget_percent,
+        available_memory_bytes=available_memory_bytes,
+    )
+    if workers <= symbol_count:
+        return workers, memory_limit
+    return _worker_memory_plan(
+        symbol_count,
+        minimum_memory_limit,
+        budget_percent,
+        available_memory_bytes=available_memory_bytes,
+    )
+
+
 def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
     fixed = dict(config.get("fixed", {}))
     matrix = dict(config.get("matrix", {}))
@@ -429,29 +458,114 @@ def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
     return specs
 
 
-def _run_one(
+def _run_arguments(
     spec: RunSpec,
+    config: dict[str, Any],
+    run_dir: Path,
+) -> list[str]:
+    arguments = [
+        "--symbol", spec.symbol,
+        "--start", config["start"],
+        "--end", config["end"],
+        "--duckdb-path", config["duckdb_path"],
+        "--output", str(run_dir),
+    ]
+    archive_index_path = config.get("archive_index_path")
+    if archive_index_path:
+        arguments.extend(["--archive-index", str(archive_index_path)])
+    params = {**spec.params, **config.get("execution", {})}
+    for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
+        if key in params:
+            arguments.extend([flag, str(params[key])])
+    return arguments
+
+
+def _failed_summary_row(
+    spec: RunSpec,
+    *,
+    returncode: int,
+    error: str | None = None,
+) -> dict[str, Any]:
+    row = {
+        "run_id": spec.run_id, "symbol": spec.symbol, "status": "failed",
+        "returncode": returncode,
+        "parameters": json.dumps(spec.params, sort_keys=True, default=str),
+        "trades": 0, "wins": 0, "win_rate": 0.0, "net_pnl": 0.0,
+        "total_profit": 0.0, "total_loss": 0.0, "commission": 0.0,
+        "max_drawdown": 0.0, "profit_factor": 0.0,
+    }
+    if error:
+        row["error"] = error
+    return row
+
+
+def _stream_process_output(
+    process: subprocess.Popen[str],
+    *,
+    symbol: str,
+) -> tuple[str, str]:
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+
+    def drain(stream, target: list[str], label: str) -> None:
+        if stream is None:
+            return
+        for line in stream:
+            target.append(line)
+            print(f"[{symbol}{label}] {line}", end="", flush=True)
+
+    stderr_thread = threading.Thread(
+        target=drain,
+        args=(process.stderr, stderr_lines, " stderr"),
+        daemon=True,
+    )
+    stderr_thread.start()
+    drain(process.stdout, stdout_lines, "")
+    stderr_thread.join()
+    process.wait()
+    return "".join(stdout_lines), "".join(stderr_lines)
+
+
+def _run_symbol(
+    specs: list[RunSpec],
     config: dict[str, Any],
     output_root: Path,
     processes: ChildProcessRegistry | None = None,
-) -> dict[str, Any]:
-    run_dir = output_root / "runs" / spec.run_id
-    summary_path = run_dir / "summary.json"
-    if config.get("execution", {}).get("resume", True) and summary_path.exists():
-        summary = json.loads(summary_path.read_text())
-        return _summary_row(spec, summary, "resumed")
+) -> list[dict[str, Any]]:
+    rows = []
+    active: list[tuple[RunSpec, Path, list[str]]] = []
+    resume = config.get("execution", {}).get("resume", True)
+    for spec in specs:
+        run_dir = output_root / "runs" / spec.run_id
+        summary_path = run_dir / "summary.json"
+        if resume and summary_path.exists():
+            rows.append(_summary_row(
+                spec, json.loads(summary_path.read_text()), "resumed"
+            ))
+            continue
+        run_dir.mkdir(parents=True, exist_ok=True)
+        active.append((spec, run_dir, _run_arguments(spec, config, run_dir)))
+    if not active:
+        return rows
 
-    run_dir.mkdir(parents=True, exist_ok=True)
-    params = {**spec.params, **config.get("execution", {})}
-    command = [sys.executable, "-m", "trading_platform.backtest.run_spike_short",
-               "--symbol", spec.symbol, "--start", config["start"], "--end", config["end"],
-               "--duckdb-path", config["duckdb_path"], "--output", str(run_dir)]
-    archive_index_path = config.get("archive_index_path")
-    if archive_index_path:
-        command.extend(["--archive-index", str(archive_index_path)])
-    for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
-        if key in params:
-            command.extend([flag, str(params[key])])
+    task_dir = output_root / "symbol_tasks"
+    task_dir.mkdir(parents=True, exist_ok=True)
+    symbol = specs[0].symbol
+    task_path = task_dir / f"{symbol}.json"
+    task_path.write_text(json.dumps({
+        "symbol": symbol,
+        "runs": [
+            {"run_id": spec.run_id, "arguments": arguments}
+            for spec, _run_dir, arguments in active
+        ],
+    }, indent=2, ensure_ascii=False))
+    command = [
+        sys.executable,
+        "-m",
+        "trading_platform.backtest.run_spike_sweep_symbol",
+        "--task",
+        str(task_path),
+    ]
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -462,23 +576,42 @@ def _run_one(
     if processes is not None:
         processes.add(process)
     try:
-        stdout, stderr = process.communicate()
+        print(
+            f"[{symbol}] 启动共享行情回测：参数实例={len(active)}",
+            flush=True,
+        )
+        stdout, stderr = _stream_process_output(process, symbol=symbol)
     finally:
         if processes is not None:
             processes.remove(process)
-    (run_dir / "command.txt").write_text(shlex.join(command) + "\n")
-    (run_dir / "stdout.log").write_text(stdout)
-    (run_dir / "stderr.log").write_text(stderr)
-    if process.returncode != 0 or not summary_path.exists():
-        return {
-            "run_id": spec.run_id, "symbol": spec.symbol, "status": "failed",
-            "returncode": process.returncode,
-            "parameters": json.dumps(spec.params, sort_keys=True, default=str),
-            "trades": 0, "wins": 0, "win_rate": 0.0, "net_pnl": 0.0,
-            "total_profit": 0.0, "total_loss": 0.0, "commission": 0.0,
-            "max_drawdown": 0.0, "profit_factor": 0.0,
-        }
-    return _summary_row(spec, json.loads(summary_path.read_text()), "ok")
+
+    for spec, run_dir, arguments in active:
+        standalone_command = [
+            sys.executable,
+            "-m",
+            "trading_platform.backtest.run_spike_short",
+            *arguments,
+        ]
+        (run_dir / "command.txt").write_text(
+            shlex.join(standalone_command) + "\n"
+        )
+        (run_dir / "symbol_command.txt").write_text(
+            shlex.join(command) + "\n"
+        )
+        (run_dir / "stdout.log").write_text(stdout)
+        (run_dir / "stderr.log").write_text(stderr)
+        summary_path = run_dir / "summary.json"
+        if summary_path.exists():
+            rows.append(_summary_row(
+                spec, json.loads(summary_path.read_text()), "ok"
+            ))
+        else:
+            rows.append(_failed_summary_row(
+                spec,
+                returncode=process.returncode,
+                error=stderr.strip() or None,
+            ))
+    return rows
 
 
 def _summary_row(spec: RunSpec, summary: dict[str, Any], status: str) -> dict[str, Any]:
@@ -835,7 +968,7 @@ def _write_report(
         f"- 回测任务：{run_count}",
         f"- 实际 worker：{workers}",
         f"- 每 worker DuckDB 内存上限：{duckdb_memory_limit}",
-        "- 行情：DuckDB/Parquet 只读流式窗口",
+        "- 行情：DuckDB/Parquet 只读流式窗口；同交易对且相同 1s 时间偏移的参数实例共享一次读取",
         "- 预检：Parquet sidecar 索引（不扫描 K 线正文）",
         "- 交易对：PostgreSQL 主库只读有效集合与历史归档集合的交集",
         "- conservative_net_pnl：每个多币种冲突组仅保留最低盈亏后的保守结果",
@@ -905,11 +1038,21 @@ def _main(argv: list[str] | None = None) -> int:
         }, indent=2, ensure_ascii=False)
     )
     minimum_memory_limit = str(execution.get("duckdb_memory_limit", "4GB"))
-    workers, actual_memory_limit = _worker_memory_plan(
+    specs_by_symbol: dict[str, list[RunSpec]] = {}
+    for spec in specs:
+        specs_by_symbol.setdefault(spec.symbol, []).append(spec)
+    workers, actual_memory_limit = _symbol_worker_memory_plan(
         args.workers,
+        len(specs_by_symbol),
         minimum_memory_limit,
         int(execution.get("memory_budget_percent", 80)),
     )
+    if args.workers is not None and workers != args.workers:
+        print(
+            f"请求 worker={args.workers}，但仅有 {len(specs_by_symbol)} 个"
+            f"交易对任务；实际启动 worker={workers}。",
+            flush=True,
+        )
     execution["minimum_duckdb_memory_limit"] = minimum_memory_limit
     execution["duckdb_memory_limit"] = actual_memory_limit
     print("正在估算所选交易对的流式回测内存...", flush=True)
@@ -941,40 +1084,42 @@ def _main(argv: list[str] | None = None) -> int:
     failed_count = 0
     started_at = time.monotonic()
     print(
-        f"开始回测：任务={len(specs)}，worker={workers}，输出={output_root}",
+        f"开始回测：交易对任务={len(specs_by_symbol)}，"
+        f"参数组合={len(specs)}，worker={workers}，输出={output_root}",
         flush=True,
     )
     try:
         futures = {
-            pool.submit(_run_one, spec, config, output_root, processes): spec
-            for spec in specs
+            pool.submit(
+                _run_symbol, symbol_specs, config, output_root, processes
+            ): (symbol, symbol_specs)
+            for symbol, symbol_specs in specs_by_symbol.items()
         }
         for future in as_completed(futures):
-            spec = futures[future]
+            symbol, symbol_specs = futures[future]
             try:
-                row = future.result()
+                symbol_rows = future.result()
             except Exception as error:
-                row = {
-                    "run_id": spec.run_id, "symbol": spec.symbol,
-                    "status": "failed", "returncode": -1,
-                    "parameters": json.dumps(spec.params, sort_keys=True, default=str),
-                    "error": str(error), "trades": 0, "wins": 0,
-                    "win_rate": 0.0, "net_pnl": 0.0, "total_profit": 0.0,
-                    "total_loss": 0.0, "commission": 0.0,
-                    "max_drawdown": 0.0, "profit_factor": 0.0,
-                }
-            rows.append(row)
-            completed_count += 1
-            if row["status"] in {"ok", "resumed"}:
-                succeeded_count += 1
-            else:
-                failed_count += 1
+                symbol_rows = [
+                    _failed_summary_row(
+                        spec, returncode=-1, error=str(error)
+                    )
+                    for spec in symbol_specs
+                ]
+            rows.extend(symbol_rows)
+            completed_count += len(symbol_rows)
+            succeeded_count += sum(
+                row["status"] in {"ok", "resumed"} for row in symbol_rows
+            )
+            failed_count += sum(
+                row["status"] not in {"ok", "resumed"} for row in symbol_rows
+            )
             elapsed = time.monotonic() - started_at
             print(
                 f"进度 {completed_count}/{len(specs)} "
                 f"({completed_count / len(specs):.1%})，"
                 f"成功={succeeded_count}，失败={failed_count}，"
-                f"当前={spec.symbol}，状态={row['status']}，耗时={elapsed:.0f}s",
+                f"当前={symbol}，参数完成={len(symbol_rows)}，耗时={elapsed:.0f}s",
                 flush=True,
             )
     except KeyboardInterrupt:

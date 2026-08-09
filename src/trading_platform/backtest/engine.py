@@ -87,6 +87,7 @@ class BacktestEngine:
         self._event_count_hint = len(events) if isinstance(events, Sized) else None
         self._events_processed = 0
         self._first_event_time: int | None = None
+        self._finished_result: BacktestResult | None = None
         self.config = config
         self.account_id = account_id
 
@@ -144,58 +145,62 @@ class BacktestEngine:
         logger.info(f"Backtest starting: {event_label} events")
 
         for i, event in enumerate(self.events):
-            if self._first_event_time is None:
-                self._first_event_time = event.available_time
-            self._events_processed = i + 1
-            # 1. 更新虚拟时钟（使用 available_time，避免未来信息）
-            self.virtual_time_ms = event.available_time
-
-            trading_enabled = (
-                self.config.trading_start_ms is None
-                or self.virtual_time_ms >= self.config.trading_start_ms
-            )
-            if trading_enabled != self._trading_enabled:
-                self._trading_enabled = trading_enabled
-                self._set_strategy_trading_enabled(trading_enabled)
-
-            if isinstance(event, Bar1s):
-                self.last_prices[event.symbol] = event.close
-
-            # 2. 先检查订单成交（重要！成交判断在事件推送之前）
-            self._check_fills(event)
-
-            # 3. 再推送事件给策略（V1：同步调用，策略返回 OrderIntent 列表）
-            order_intents: list[OrderIntent] | None = None
-
-            if isinstance(event, Bar1s):
-                order_intents = self.strategy.on_bar1s(event)
-            elif isinstance(event, Kline):
-                order_intents = self.strategy.on_kline(event)
-
-            # 4. 执行策略返回的下单意图
-            if self._trading_enabled and order_intents:
-                for intent in order_intents:
-                    order = self.executor.place_order(intent)
-                    if order.type == 'MARKET' and order.status == 'NEW':
-                        fill = self._execute_fill(order, event)
-                        if fill is None:
-                            continue
-                        self.fills.append(fill)
-                        self.fill_records.append(fill)
-                        if hasattr(self.strategy, 'on_fill'):
-                            self.strategy.on_fill(fill)
-            self._collect_strategy_audit_events()
-
-            # 5. 进度打印（可选）
+            self.process_event(event)
             if i % 10000 == 0 and i > 0:
                 if self._event_count_hint is None:
                     logger.info(f"Progress: {i} events")
                 else:
                     logger.info(f"Progress: {i}/{self._event_count_hint}")
 
-        # 6. 生成结果报告
         logger.info("Backtest completed")
-        return self._generate_result()
+        return self.finish()
+
+    def process_event(self, event: Event) -> None:
+        """处理一个已排序事件，供多个隔离引擎共享同一行情流。"""
+        if self._finished_result is not None:
+            raise RuntimeError("backtest engine is already finished")
+        if self._first_event_time is None:
+            self._first_event_time = event.available_time
+        self._events_processed += 1
+        self.virtual_time_ms = event.available_time
+
+        trading_enabled = (
+            self.config.trading_start_ms is None
+            or self.virtual_time_ms >= self.config.trading_start_ms
+        )
+        if trading_enabled != self._trading_enabled:
+            self._trading_enabled = trading_enabled
+            self._set_strategy_trading_enabled(trading_enabled)
+
+        if isinstance(event, Bar1s):
+            self.last_prices[event.symbol] = event.close
+
+        # 成交判断必须先于策略事件处理，保持单引擎回测的既有语义。
+        self._check_fills(event)
+        order_intents: list[OrderIntent] | None = None
+        if isinstance(event, Bar1s):
+            order_intents = self.strategy.on_bar1s(event)
+        elif isinstance(event, Kline):
+            order_intents = self.strategy.on_kline(event)
+
+        if self._trading_enabled and order_intents:
+            for intent in order_intents:
+                order = self.executor.place_order(intent)
+                if order.type == 'MARKET' and order.status == 'NEW':
+                    fill = self._execute_fill(order, event)
+                    if fill is None:
+                        continue
+                    self.fills.append(fill)
+                    self.fill_records.append(fill)
+                    if hasattr(self.strategy, 'on_fill'):
+                        self.strategy.on_fill(fill)
+        self._collect_strategy_audit_events()
+
+    def finish(self) -> BacktestResult:
+        """结束事件流并生成一次最终结果；重复调用返回同一结果。"""
+        if self._finished_result is None:
+            self._finished_result = self._generate_result()
+        return self._finished_result
 
     def _set_strategy_trading_enabled(self, enabled: bool) -> None:
         setter = getattr(self.strategy, 'set_trading_enabled', None)

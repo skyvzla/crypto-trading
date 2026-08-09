@@ -64,6 +64,29 @@ class MockStrategy:
 class TestBacktestEngine(unittest.TestCase):
     """回测引擎测试"""
 
+    def test_events_can_be_pushed_incrementally_before_finishing(self):
+        strategy = MockStrategy()
+        events = [
+            Bar1s(
+                symbol='BTCUSDT', timestamp=index * 1_000,
+                available_time=(index + 1) * 1_000,
+                open=Decimal('100'), high=Decimal('101'), low=Decimal('99'),
+                close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+                vwap=Decimal('100'),
+            )
+            for index in range(2)
+        ]
+        engine = BacktestEngine(strategy, [], BacktestConfig())
+
+        for event in events:
+            engine.process_event(event)
+        result = engine.finish()
+
+        self.assertEqual(result.events_processed, 2)
+        self.assertEqual(strategy.bars_received, events)
+        with self.assertRaisesRegex(RuntimeError, "finished"):
+            engine.process_event(events[-1])
+
     def test_strategy_is_bound_to_engine(self):
         """支持回测适配能力的策略会在引擎初始化时完成绑定。"""
         class BindableStrategy(MockStrategy):

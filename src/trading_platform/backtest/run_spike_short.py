@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Dynamic Spike Short 策略专用回测入口。"""
 import argparse
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from itertools import chain
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from trading_platform.backtest.engine import BacktestEngine
+from trading_platform.backtest.engine import BacktestEngine, Event
 from trading_platform.backtest.loader import BacktestDataLoader
 from trading_platform.backtest.result import ResultAnalyzer
 from trading_platform.backtest.runner import load_symbol_rules
@@ -67,6 +69,19 @@ class NoPriorHighDynamicSpikeBacktestStrategy(DynamicSpikeBacktestStrategy):
         self.active_symbol = None
 
 
+@dataclass(frozen=True)
+class SpikeBacktestSettings:
+    start_ms: int
+    end_ms: int
+    load_start_ms: int
+    bar1s_time_shift_ms: int
+    prior_high_lookback_minutes: int
+    required_kline_intervals: tuple[str, ...]
+    data_dir: str
+    data_source: str
+    output_path: Path
+
+
 def _timestamp_ms(value: str) -> int:
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
@@ -74,7 +89,7 @@ def _timestamp_ms(value: str) -> int:
     return int(parsed.timestamp() * 1000)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Dynamic Spike Short Strategy Backtest"
     )
@@ -166,83 +181,55 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="归档 sidecar 索引；参数矩阵回测用它跳过重复全区间扫描",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
     if args.total_notional <= 0:
-        print("Error: --total-notional must be positive", file=sys.stderr)
-        raise SystemExit(2)
-
+        raise ValueError("--total-notional must be positive")
     start_ms = _timestamp_ms(args.start)
     end_ms = _timestamp_ms(args.end)
     if start_ms >= end_ms:
-        print("Error: --start must be earlier than --end", file=sys.stderr)
-        raise SystemExit(2)
+        raise ValueError("--start must be earlier than --end")
     if args.warmup_hours < 0:
-        print("Error: --warmup-hours must not be negative", file=sys.stderr)
-        raise SystemExit(2)
+        raise ValueError("--warmup-hours must not be negative")
     if args.prior_high_lookback_hours < 0:
-        print("Error: --prior-high-lookback-hours must not be negative", file=sys.stderr)
-        raise SystemExit(2)
+        raise ValueError("--prior-high-lookback-hours must not be negative")
     warmup_hours = max(args.warmup_hours, float(args.prior_high_lookback_hours))
-    load_start_ms = start_ms - int(warmup_hours * 3_600_000)
-    bar1s_time_shift_ms = int(args.bar1s_time_shift_hours * Decimal("3600000"))
-    prior_high_lookback_minutes = args.prior_high_lookback_hours * 60
+    bar1s_time_shift_ms = int(
+        args.bar1s_time_shift_hours * Decimal("3600000")
+    )
     data_dir = args.data_dir or "data/market"
-    data_source = args.duckdb_path or data_dir
-
-    print("=== Dynamic Spike Short Strategy Backtest ===")
-    print(f"Symbol: {args.symbol}")
-    print(f"Period: {args.start} to {args.end}")
-    print(f"Data source: {data_source}")
-    prior_high_label = (
-        "disabled" if args.prior_high_lookback_hours == 0
-        else f"{args.prior_high_lookback_hours}h"
-    )
-    print(f"Prior high lookback: {prior_high_label}")
-    print(f"Warmup: {warmup_hours:g}h")
-
-    loader = BacktestDataLoader(
-        data_dir=data_dir,
-        symbols=[args.symbol],
-        start_ms=load_start_ms,
+    return SpikeBacktestSettings(
+        start_ms=start_ms,
         end_ms=end_ms,
-        require_aggtrades=True,
+        load_start_ms=start_ms - int(warmup_hours * 3_600_000),
+        bar1s_time_shift_ms=bar1s_time_shift_ms,
+        prior_high_lookback_minutes=args.prior_high_lookback_hours * 60,
         required_kline_intervals=(
-            ["1m", "5m", "15m"]
+            ("1m", "5m", "15m")
             if args.exit_policy == "candidate-v1"
-            else ["1m", "5m"]
+            else ("1m", "5m")
         ),
-        duckdb_path=args.duckdb_path,
-        archive_index_path=args.archive_index,
-        bar1s_time_shift_ms=bar1s_time_shift_ms,
+        data_dir=data_dir,
+        data_source=args.duckdb_path or data_dir,
+        output_path=Path(args.output),
     )
-    event_iter = loader.iter_all(
-        chunk_hours=args.chunk_hours,
-        fetch_batch_size=args.fetch_batch_size,
-        duckdb_memory_limit=args.duckdb_memory_limit,
-        duckdb_threads=args.duckdb_threads,
-    )
-    try:
-        first_event = next(event_iter)
-    except StopIteration:
-        print("Error: no market data found in the requested range", file=sys.stderr)
-        raise SystemExit(1)
-    events = chain((first_event,), event_iter)
 
-    output_path = Path(args.output)
+
+def create_spike_engine(
+    args: argparse.Namespace,
+    settings: SpikeBacktestSettings,
+    events: Iterable[Event],
+) -> BacktestEngine:
     config = BacktestConfig(
-        data_dir=data_source,
-        output_dir=str(output_path),
-        trading_start_ms=start_ms,
+        data_dir=settings.data_source,
+        output_dir=str(settings.output_path),
+        trading_start_ms=settings.start_ms,
         limit_fill_fraction_per_bar=args.limit_fill_fraction,
-        bar1s_time_shift_ms=bar1s_time_shift_ms,
-        # BacktestConfig 保留历史上的正数校验；无过滤实验先用合法值构造，
-        # 再把实际回测口径写入报告元数据，不影响共享配置模型。
+        bar1s_time_shift_ms=settings.bar1s_time_shift_ms,
         prior_high_lookback_minutes=(
-            prior_high_lookback_minutes or 1
+            settings.prior_high_lookback_minutes or 1
         ),
     )
     if args.prior_high_lookback_hours == 0:
@@ -270,25 +257,82 @@ def main() -> None:
                 if args.exit_policy == "candidate-v1"
                 else "execution-test-d007"
             ),
-            prior_high_lookback_minutes=prior_high_lookback_minutes,
+            prior_high_lookback_minutes=settings.prior_high_lookback_minutes,
         )
-    result = BacktestEngine(
+    return BacktestEngine(
         events=events,
         strategy=strategy,
         config=config,
         symbol_rules=load_symbol_rules(args.exchange_info, [args.symbol]),
-    ).run()
+    )
 
+
+def save_backtest_result(result, output_path: Path) -> dict:
     analyzer = ResultAnalyzer(result)
     summary = analyzer.analyze()
     analyzer.save_results(str(output_path.parent), output_path.name)
+    return summary
+
+
+def main() -> None:
+    args = parse_args()
+    try:
+        settings = resolve_settings(args)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        raise SystemExit(2) from error
+    warmup_hours = (
+        settings.start_ms - settings.load_start_ms
+    ) / 3_600_000
+
+    print("=== Dynamic Spike Short Strategy Backtest ===")
+    print(f"Symbol: {args.symbol}")
+    print(f"Period: {args.start} to {args.end}")
+    print(f"Data source: {settings.data_source}")
+    prior_high_label = (
+        "disabled" if args.prior_high_lookback_hours == 0
+        else f"{args.prior_high_lookback_hours}h"
+    )
+    print(f"Prior high lookback: {prior_high_label}")
+    print(f"Warmup: {warmup_hours:g}h")
+
+    loader = BacktestDataLoader(
+        data_dir=settings.data_dir,
+        symbols=[args.symbol],
+        start_ms=settings.load_start_ms,
+        end_ms=settings.end_ms,
+        require_aggtrades=True,
+        required_kline_intervals=list(settings.required_kline_intervals),
+        duckdb_path=args.duckdb_path,
+        archive_index_path=args.archive_index,
+        bar1s_time_shift_ms=settings.bar1s_time_shift_ms,
+    )
+    event_iter = loader.iter_all(
+        chunk_hours=args.chunk_hours,
+        fetch_batch_size=args.fetch_batch_size,
+        duckdb_memory_limit=args.duckdb_memory_limit,
+        duckdb_threads=args.duckdb_threads,
+    )
+    try:
+        first_event = next(event_iter)
+    except StopIteration:
+        print("Error: no market data found in the requested range", file=sys.stderr)
+        raise SystemExit(1)
+    events = chain((first_event,), event_iter)
+
+    result = create_spike_engine(
+        args,
+        settings,
+        events=events,
+    ).run()
+    summary = save_backtest_result(result, settings.output_path)
 
     print("\n=== Backtest Results ===")
     print(f"Orders: {summary['orders']['total']}")
     print(f"Filled orders: {summary['orders']['filled']}")
     print(f"Positions: {summary['positions']['total']}")
     print(f"Net PnL: {summary['pnl']['net_pnl']:.2f} USDT")
-    print(f"Results saved to: {output_path}")
+    print(f"Results saved to: {settings.output_path}")
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from trading_platform.backtest import run_spike_short, runner
+from trading_platform.backtest import run_spike_short, run_spike_sweep_symbol, runner
 
 
 def _write_sample_data(data_dir: Path) -> None:
@@ -139,6 +139,37 @@ def test_spike_cli_runs_on_sample_data(tmp_path, monkeypatch, entrypoint):
 def test_spike_loader_requires_explicit_notional():
     with pytest.raises(ValueError, match="total-notional"):
         runner.load_strategy("spike", "backtest", symbols=["BTCUSDT"])
+
+
+def test_symbol_sweep_runner_writes_multiple_reports_from_one_market_stream(
+    tmp_path,
+):
+    data_dir = tmp_path / "market"
+    _write_sample_data(data_dir)
+    common = [
+        "--symbol", "BTCUSDT",
+        "--start", "2026-06-01",
+        "--end", "2026-06-02",
+        "--data-dir", str(data_dir),
+        "--total-notional", "1000",
+    ]
+    task = {"runs": [
+        {
+            "run_id": run_id,
+            "arguments": [*common, "--output", str(tmp_path / run_id)],
+        }
+        for run_id in ("parameter-a", "parameter-b")
+    ]}
+
+    assert run_spike_sweep_symbol.run_symbol_task(task) == 0
+
+    summaries = [
+        json.loads((tmp_path / run_id / "summary.json").read_text())
+        for run_id in ("parameter-a", "parameter-b")
+    ]
+    assert summaries[0] == summaries[1]
+    assert (tmp_path / "parameter-a" / "trades.csv").exists()
+    assert (tmp_path / "parameter-b" / "audit_events.parquet").exists()
 
 
 def test_spike_cli_persists_positive_replay_audit(tmp_path, monkeypatch):

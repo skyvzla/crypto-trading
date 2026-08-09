@@ -1,7 +1,10 @@
+import json
+from io import StringIO
 from pathlib import Path
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import duckdb
 import pandas as pd
@@ -17,6 +20,9 @@ from trading_platform.backtest.sweep import (
     _estimate_monthly_memory,
     _find_simultaneous_signals,
     _parameter_summary,
+    _run_symbol,
+    _stream_process_output,
+    _symbol_worker_memory_plan,
     _worker_memory_plan,
     expand_specs,
 )
@@ -157,6 +163,73 @@ def test_worker_memory_budget_auto_selects_workers_when_unspecified():
     assert int(memory_limit.removesuffix("MB")) >= 4096
 
 
+def test_symbol_worker_count_never_exceeds_selected_symbols():
+    workers, memory_limit = _symbol_worker_memory_plan(
+        5,
+        2,
+        "4GB",
+        75,
+        available_memory_bytes=48 * 1024**3,
+    )
+
+    assert workers == 2
+    assert int(memory_limit.removesuffix("MB")) > 4096
+
+
+def test_symbol_task_uses_one_subprocess_for_multiple_parameters(
+    tmp_path: Path, monkeypatch
+):
+    process_commands = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            process_commands.append(command)
+            self.stdout = StringIO("shared stream\n")
+            self.stderr = StringIO("")
+            task = json.loads(Path(command[-1]).read_text())
+            for run in task["runs"]:
+                arguments = run["arguments"]
+                output = Path(arguments[arguments.index("--output") + 1])
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "summary.json").write_text(
+                    '{"positions":{"total":0,"profitable":0},'
+                    '"pnl":{"net_pnl":0,"total_profit":0,'
+                    '"total_loss":0,"total_commission":0}}'
+                )
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(sweep.subprocess, "Popen", FakeProcess)
+    specs = [
+        sweep.RunSpec(f"run-{lookback}", "AKEUSDT", {
+            "total_notional": 1000,
+            "prior_high_lookback_hours": lookback,
+        })
+        for lookback in (4, 8)
+    ]
+    config = {
+        "start": "2026-07-01",
+        "end": "2026-08-01",
+        "duckdb_path": "history.duckdb",
+        "execution": {"resume": False},
+    }
+
+    rows = _run_symbol(specs, config, tmp_path)
+
+    assert len(process_commands) == 1
+    assert {row["run_id"] for row in rows} == {"run-4", "run-8"}
+    assert all(row["status"] == "ok" for row in rows)
+    assert "--prior-high-lookback-hours 4" in (
+        tmp_path / "runs/run-4/command.txt"
+    ).read_text()
+    assert "run_spike_sweep_symbol" in (
+        tmp_path / "runs/run-4/symbol_command.txt"
+    ).read_text()
+
+
 def test_child_process_registry_terminates_running_subprocess():
     process = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(60)"],
@@ -170,6 +243,34 @@ def test_child_process_registry_terminates_running_subprocess():
 
     assert process.wait(timeout=2) != 0
     assert time.monotonic() - started < 2
+
+
+def test_streamed_symbol_process_can_be_terminated_without_hanging():
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import time; print('started', flush=True); time.sleep(60)",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    registry = ChildProcessRegistry()
+    registry.add(process)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        output = pool.submit(
+            _stream_process_output, process, symbol="AKEUSDT"
+        )
+        time.sleep(0.1)
+        registry.terminate_all()
+        stdout, stderr = output.result(timeout=2)
+
+    assert "started" in stdout
+    assert stderr == ""
+    assert process.returncode != 0
 
 
 def test_collision_summary_uses_lowest_trade_as_conservative_result():
