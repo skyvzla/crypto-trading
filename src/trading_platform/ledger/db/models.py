@@ -1102,6 +1102,9 @@ class LedgerDB:
         for item in exchange_info["symbols"]:
             if not isinstance(item, dict):
                 raise ValueError("Binance exchangeInfo contains an invalid symbol row")
+            quote_asset = _optional_upper_string(item.get("quoteAsset"))
+            if quote_asset != "USDT":
+                continue
             symbol = str(item.get("symbol", "")).strip().upper()
             if not symbol:
                 raise ValueError("Binance exchangeInfo contains a symbol without a name")
@@ -1130,7 +1133,7 @@ class LedgerDB:
                     onboard_date,
                     delivery_date,
                     _optional_upper_string(item.get("baseAsset")),
-                    _optional_upper_string(item.get("quoteAsset")),
+                    quote_asset,
                     _optional_upper_string(item.get("marginAsset")),
                     underlying_type,
                     Jsonb(item),
@@ -1188,6 +1191,37 @@ class LedgerDB:
                 raise ValueError(
                     "Binance exchangeInfo symbol count dropped by more than 50%"
                 )
+            await conn.execute(
+                """
+                DELETE FROM symbol_global_admission_audit
+                WHERE symbol IN (
+                    SELECT symbol FROM exchange_symbols
+                    WHERE quote_asset IS DISTINCT FROM 'USDT'
+                )
+                """
+            )
+            await conn.execute(
+                """
+                DELETE FROM symbol_global_admission
+                WHERE symbol IN (
+                    SELECT symbol FROM exchange_symbols
+                    WHERE quote_asset IS DISTINCT FROM 'USDT'
+                )
+                """
+            )
+            await conn.execute(
+                """
+                DELETE FROM exchange_symbol_categories
+                WHERE symbol IN (
+                    SELECT symbol FROM exchange_symbols
+                    WHERE quote_asset IS DISTINCT FROM 'USDT'
+                )
+                """
+            )
+            await conn.execute(
+                "DELETE FROM exchange_symbols "
+                "WHERE quote_asset IS DISTINCT FROM 'USDT'"
+            )
             await conn.execute("UPDATE exchange_symbols SET active = FALSE")
             await conn.execute(
                 """

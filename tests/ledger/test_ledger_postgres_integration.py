@@ -933,11 +933,26 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
                 "status": "SETTLING",
                 "onboardDate": 1_680_000_000_000,
                 "deliveryDate": 1_786_093_200_000,
+                "baseAsset": "HFT",
+                "quoteAsset": "USDT",
+                "marginAsset": "USDT",
+            },
+            {
+                "symbol": "BTCUSDC",
+                "pair": "BTCUSDC",
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "onboardDate": 1_680_000_000_000,
+                "deliveryDate": 4_133_404_800_000,
+                "baseAsset": "BTC",
+                "quoteAsset": "USDC",
+                "marginAsset": "USDC",
             },
         ]
     }
 
     assert await ledger.sync_exchange_symbols(first) == 2
+    assert await ledger.get_exchange_symbol("BTCUSDC") is None
     btc = await ledger.get_exchange_symbol(symbol.lower())
     assert btc is not None
     assert btc.base_asset == "BTC"
@@ -1092,7 +1107,9 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     assert (await ledger.get_exchange_symbol("HFTUSDT")).active is True
 
     with pytest.raises(ValueError, match="incomplete lifecycle metadata"):
-        await ledger.sync_exchange_symbols({"symbols": [{"symbol": "BROKENUSDT"}]})
+        await ledger.sync_exchange_symbols(
+            {"symbols": [{"symbol": "BROKENUSDT", "quoteAsset": "USDT"}]}
+        )
     assert (await ledger.get_exchange_symbol("HFTUSDT")).active is True
 
     await ledger.mark_exchange_symbol_sync_failed(RuntimeError("network down"))
@@ -1120,6 +1137,9 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
                 "status": "TRADING",
                 "onboardDate": 1_564_611_200_000,
                 "deliveryDate": 4_133_404_800_000,
+                "baseAsset": f"BULK{index:02d}{suffix}",
+                "quoteAsset": "USDT",
+                "marginAsset": "USDT",
             }
             for index in range(20)
         ]
