@@ -12,8 +12,11 @@ import logging
 import math
 import os
 import shlex
+import signal
 import subprocess
 import sys
+import threading
+import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -56,6 +59,61 @@ class RunSpec:
     run_id: str
     symbol: str
     params: dict[str, Any]
+
+
+class ChildProcessRegistry:
+    """让调度器能在中断时统一终止活动回测子进程。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._processes: set[subprocess.Popen[str]] = set()
+        self._stopping = False
+
+    def add(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            stopping = self._stopping
+            if not stopping:
+                self._processes.add(process)
+        if stopping:
+            self._terminate(process, signal.SIGTERM)
+
+    def remove(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._processes.discard(process)
+
+    def terminate_all(self) -> None:
+        with self._lock:
+            self._stopping = True
+            processes = list(self._processes)
+        for process in processes:
+            self._terminate(process, signal.SIGTERM)
+
+        deadline = time.monotonic() + 5
+        for process in processes:
+            if process.poll() is not None:
+                continue
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                try:
+                    process.wait(timeout=remaining)
+                    continue
+                except subprocess.TimeoutExpired:
+                    pass
+            self._terminate(process, signal.SIGKILL)
+
+    @staticmethod
+    def _terminate(process: subprocess.Popen[str], sig: signal.Signals) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, sig)
+            elif sig == signal.SIGKILL:
+                process.kill()
+            else:
+                process.terminate()
+        except ProcessLookupError:
+            return
 
 
 def _timestamp_ms(value: str) -> int:
@@ -323,7 +381,12 @@ def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
     return specs
 
 
-def _run_one(spec: RunSpec, config: dict[str, Any], output_root: Path) -> dict[str, Any]:
+def _run_one(
+    spec: RunSpec,
+    config: dict[str, Any],
+    output_root: Path,
+    processes: ChildProcessRegistry | None = None,
+) -> dict[str, Any]:
     run_dir = output_root / "runs" / spec.run_id
     summary_path = run_dir / "summary.json"
     if config.get("execution", {}).get("resume", True) and summary_path.exists():
@@ -338,14 +401,27 @@ def _run_one(spec: RunSpec, config: dict[str, Any], output_root: Path) -> dict[s
     for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
         if key in params:
             command.extend([flag, str(params[key])])
-    completed = subprocess.run(command, capture_output=True, text=True)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    if processes is not None:
+        processes.add(process)
+    try:
+        stdout, stderr = process.communicate()
+    finally:
+        if processes is not None:
+            processes.remove(process)
     (run_dir / "command.txt").write_text(shlex.join(command) + "\n")
-    (run_dir / "stdout.log").write_text(completed.stdout)
-    (run_dir / "stderr.log").write_text(completed.stderr)
-    if completed.returncode != 0 or not summary_path.exists():
+    (run_dir / "stdout.log").write_text(stdout)
+    (run_dir / "stderr.log").write_text(stderr)
+    if process.returncode != 0 or not summary_path.exists():
         return {
             "run_id": spec.run_id, "symbol": spec.symbol, "status": "failed",
-            "returncode": completed.returncode,
+            "returncode": process.returncode,
             "parameters": json.dumps(spec.params, sort_keys=True, default=str),
             "trades": 0, "wins": 0, "win_rate": 0.0, "net_pnl": 0.0,
             "total_profit": 0.0, "total_loss": 0.0, "commission": 0.0,
@@ -795,14 +871,25 @@ def main(argv: list[str] | None = None) -> int:
             "reduce chunk_hours or raise the per-worker limit"
         )
     rows = []
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_run_one, spec, config, output_root): spec for spec in specs}
+    processes = ChildProcessRegistry()
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futures = {}
+    completed_count = 0
+    succeeded_count = 0
+    failed_count = 0
+    started_at = time.monotonic()
+    print(f"开始回测：任务={len(specs)}，worker={workers}，输出={output_root}")
+    try:
+        futures = {
+            pool.submit(_run_one, spec, config, output_root, processes): spec
+            for spec in specs
+        }
         for future in as_completed(futures):
             spec = futures[future]
             try:
-                rows.append(future.result())
+                row = future.result()
             except Exception as error:
-                rows.append({
+                row = {
                     "run_id": spec.run_id, "symbol": spec.symbol,
                     "status": "failed", "returncode": -1,
                     "parameters": json.dumps(spec.params, sort_keys=True, default=str),
@@ -810,7 +897,33 @@ def main(argv: list[str] | None = None) -> int:
                     "win_rate": 0.0, "net_pnl": 0.0, "total_profit": 0.0,
                     "total_loss": 0.0, "commission": 0.0,
                     "max_drawdown": 0.0, "profit_factor": 0.0,
-                })
+                }
+            rows.append(row)
+            completed_count += 1
+            if row["status"] in {"ok", "resumed"}:
+                succeeded_count += 1
+            else:
+                failed_count += 1
+            elapsed = time.monotonic() - started_at
+            print(
+                f"进度 {completed_count}/{len(specs)} "
+                f"({completed_count / len(specs):.1%})，"
+                f"成功={succeeded_count}，失败={failed_count}，"
+                f"当前={spec.symbol}，状态={row['status']}，耗时={elapsed:.0f}s"
+            )
+    except KeyboardInterrupt:
+        print("收到 Ctrl+C，正在终止活动回测子进程...")
+        processes.terminate_all()
+        for future in futures:
+            future.cancel()
+        pool.shutdown(wait=True, cancel_futures=True)
+        print(
+            f"回测已停止：已完成={completed_count}/{len(specs)}；"
+            "已完成任务可在下次运行时通过 resume 复用。"
+        )
+        return 130
+    else:
+        pool.shutdown(wait=True)
     comparison = pd.DataFrame(rows).sort_values(["status", "net_pnl"], ascending=[True, False])
     comparison.to_csv(output_root / "comparison.csv", index=False)
     all_trades = []

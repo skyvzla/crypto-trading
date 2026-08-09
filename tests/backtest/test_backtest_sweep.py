@@ -1,4 +1,6 @@
 from pathlib import Path
+import subprocess
+import sys
 
 import duckdb
 import pandas as pd
@@ -7,6 +9,7 @@ import pytest
 from trading_platform.backtest.sweep import (
     _annotate_collisions,
     _attach_breakout_context,
+    ChildProcessRegistry,
     _estimate_monthly_memory,
     _find_simultaneous_signals,
     _parameter_summary,
@@ -74,6 +77,19 @@ def test_worker_memory_budget_auto_selects_workers_when_unspecified():
 
     assert workers == 4
     assert int(memory_limit.removesuffix("MB")) >= 4096
+
+
+def test_child_process_registry_terminates_running_subprocess():
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+    )
+    registry = ChildProcessRegistry()
+    registry.add(process)
+
+    registry.terminate_all()
+
+    assert process.wait(timeout=2) != 0
 
 
 def test_collision_summary_uses_lowest_trade_as_conservative_result():
