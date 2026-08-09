@@ -23,6 +23,15 @@ logger = logging.getLogger(__name__)
 Event = Union[Bar1s, Kline]
 
 
+def _decimal_value(value: object) -> Decimal:
+    """将归档数值转为 Decimal，避免对已格式化字符串重复调用 str。"""
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, str):
+        return Decimal(value)
+    return Decimal(str(value))
+
+
 class BacktestDataLoader:
     """
     回测数据加载器
@@ -217,7 +226,9 @@ class BacktestDataLoader:
         )
         query = (
             "SELECT symbol, timeframe, epoch_ms(open_time), epoch_ms(close_time), "
-            "open, high, low, close, volume, "
+            "CAST(open AS VARCHAR), CAST(high AS VARCHAR), "
+            "CAST(low AS VARCHAR), CAST(close AS VARCHAR), "
+            "CAST(volume AS VARCHAR), "
             f"{available_time_sql} AS available_time "
             "FROM main.candles "
             f"WHERE symbol IN ({placeholders}) "
@@ -262,18 +273,18 @@ class BacktestDataLoader:
                     f"invalid 1s candle duration for {symbol}: "
                     f"{shifted_open}..{shifted_close}"
                 )
-            close_decimal = Decimal(str(close))
+            close_decimal = _decimal_value(close)
             return Bar1s(
                 symbol=symbol,
                 timestamp=shifted_open,
                 available_time=available_time,
                 type_priority=1,
                 sequence=sequence,
-                open=Decimal(str(open_)),
-                high=Decimal(str(high)),
-                low=Decimal(str(low)),
+                open=_decimal_value(open_),
+                high=_decimal_value(high),
+                low=_decimal_value(low),
                 close=close_decimal,
-                volume=Decimal(str(volume)),
+                volume=_decimal_value(volume),
                 trade_count=0,
                 vwap=close_decimal,
             )
@@ -285,11 +296,11 @@ class BacktestDataLoader:
             available_time=available_time,
             type_priority=2,
             sequence=sequence,
-            open=Decimal(str(open_)),
-            high=Decimal(str(high)),
-            low=Decimal(str(low)),
-            close=Decimal(str(close)),
-            volume=Decimal(str(volume)),
+            open=_decimal_value(open_),
+            high=_decimal_value(high),
+            low=_decimal_value(low),
+            close=_decimal_value(close),
+            volume=_decimal_value(volume),
         )
 
     def _load_all_from_source(self) -> list[Event]:

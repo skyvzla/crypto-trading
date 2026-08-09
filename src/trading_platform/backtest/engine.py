@@ -128,6 +128,12 @@ class BacktestEngine:
             bind_engine = getattr(self.strategy, 'bind_engine', None)
             if callable(bind_engine):
                 bind_engine(self)
+        drain_audit_events = getattr(self.strategy, 'drain_audit_events', None)
+        self._drain_audit_events = (
+            drain_audit_events if callable(drain_audit_events) else None
+        )
+        on_fill = getattr(self.strategy, 'on_fill', None)
+        self._on_fill = on_fill if callable(on_fill) else None
         self._set_strategy_trading_enabled(self._trading_enabled)
 
     def run(self) -> BacktestResult:
@@ -192,8 +198,8 @@ class BacktestEngine:
                         continue
                     self.fills.append(fill)
                     self.fill_records.append(fill)
-                    if hasattr(self.strategy, 'on_fill'):
-                        self.strategy.on_fill(fill)
+                    if self._on_fill is not None:
+                        self._on_fill(fill)
         self._collect_strategy_audit_events()
 
     def finish(self) -> BacktestResult:
@@ -208,9 +214,8 @@ class BacktestEngine:
             setter(enabled)
 
     def _collect_strategy_audit_events(self) -> None:
-        drain = getattr(self.strategy, 'drain_audit_events', None)
-        if callable(drain):
-            self.audit_records.extend(drain())
+        if self._drain_audit_events is not None:
+            self.audit_records.extend(self._drain_audit_events())
 
     # StrategyAccount implementation
     def get_order(self, order_id: str) -> Order | None:
@@ -277,8 +282,8 @@ class BacktestEngine:
                 self.fill_records.append(fill)
 
                 # 通知策略
-                if hasattr(self.strategy, 'on_fill'):
-                    self.strategy.on_fill(fill)
+                if self._on_fill is not None:
+                    self._on_fill(fill)
                     self._collect_strategy_audit_events()
 
     def _execute_fill(self, order: Order, event: Bar1s) -> Fill | None:

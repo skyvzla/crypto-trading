@@ -990,7 +990,8 @@ class DynamicSpikeShortStrategy:
     def _update_cache(self, bar: Bar1s) -> None:
         self.bars_1s.append(bar)
         if len(self.bars_1s) > self.BAR_BUFFER:
-            self.bars_1s = self.bars_1s[-self.BAR_BUFFER:]
+            # 原地删除过期前缀，避免每秒重新分配并复制整个窗口。
+            del self.bars_1s[:-self.BAR_BUFFER]
 
     def _detect_signal(self, bar: Bar1s) -> Optional[SpikeSignal]:
         """
