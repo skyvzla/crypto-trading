@@ -557,7 +557,8 @@ def _run_symbol(
     config: dict[str, Any],
     output_root: Path,
     processes: ChildProcessRegistry | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], float]:
+    started_at = time.monotonic()
     rows = []
     active: list[tuple[RunSpec, Path, list[str]]] = []
     resume = config.get("execution", {}).get("resume", True)
@@ -572,7 +573,7 @@ def _run_symbol(
         run_dir.mkdir(parents=True, exist_ok=True)
         active.append((spec, run_dir, _run_arguments(spec, config, run_dir)))
     if not active:
-        return rows
+        return rows, time.monotonic() - started_at
 
     task_dir = output_root / "symbol_tasks"
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -637,7 +638,7 @@ def _run_symbol(
                 returncode=process.returncode,
                 error=stderr.strip() or None,
             ))
-    return rows
+    return rows, time.monotonic() - started_at
 
 
 def _summary_row(spec: RunSpec, summary: dict[str, Any], status: str) -> dict[str, Any]:
@@ -1138,7 +1139,7 @@ def _main(argv: list[str] | None = None) -> int:
         for future in as_completed(futures):
             symbol, symbol_specs = futures[future]
             try:
-                symbol_rows = future.result()
+                symbol_rows, symbol_elapsed = future.result()
             except Exception as error:
                 symbol_rows = [
                     _failed_summary_row(
@@ -1146,6 +1147,7 @@ def _main(argv: list[str] | None = None) -> int:
                     )
                     for spec in symbol_specs
                 ]
+                symbol_elapsed = 0.0
             rows.extend(symbol_rows)
             completed_count += len(symbol_rows)
             succeeded_count += sum(
@@ -1154,12 +1156,14 @@ def _main(argv: list[str] | None = None) -> int:
             failed_count += sum(
                 row["status"] not in {"ok", "resumed"} for row in symbol_rows
             )
-            elapsed = time.monotonic() - started_at
+            total_elapsed = time.monotonic() - started_at
             print(
                 f"进度 {completed_count}/{len(specs)} "
                 f"({completed_count / len(specs):.1%})，"
                 f"成功={succeeded_count}，失败={failed_count}，"
-                f"当前={symbol}，参数完成={len(symbol_rows)}，耗时={elapsed:.0f}s",
+                f"当前={symbol}，参数完成={len(symbol_rows)}，"
+                f"交易对耗时={symbol_elapsed:.0f}s，"
+                f"累计耗时={total_elapsed:.0f}s",
                 flush=True,
             )
     except KeyboardInterrupt:

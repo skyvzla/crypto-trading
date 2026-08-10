@@ -252,9 +252,10 @@ def test_symbol_task_uses_one_subprocess_for_multiple_parameters(
         "execution": {"resume": False},
     }
 
-    rows = _run_symbol(specs, config, tmp_path)
+    rows, elapsed = _run_symbol(specs, config, tmp_path)
 
     assert len(process_commands) == 1
+    assert elapsed >= 0
     assert {row["run_id"] for row in rows} == {"run-4", "run-8"}
     assert all(row["status"] == "ok" for row in rows)
     assert "--prior-high-lookback-hours 4" in (
