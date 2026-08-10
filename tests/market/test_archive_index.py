@@ -157,6 +157,10 @@ def test_indexed_loader_validates_required_datasets_without_catalog_scan(
                 symbol="AKEUSDT", timeframe=timeframe,
                 year=2026, month=7, day=1 if timeframe == "1s" else 0,
             )
+        archive.upsert_table(
+            _table("BANKUSDT", "1s", datetime(2026, 7, 1, tzinfo=UTC), 2),
+            symbol="BANKUSDT", timeframe="1s", year=2026, month=7, day=1,
+        )
     catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
     loader = BacktestDataLoader(
         duckdb_path=str(catalog),
@@ -169,6 +173,14 @@ def test_indexed_loader_validates_required_datasets_without_catalog_scan(
     )
 
     loader._validate_stream_datasets_from_index()
+    files = loader._source_files_for_chunk(
+        chunk_start_ms=1782864000000,
+        chunk_end_ms=1782864120000,
+    )
+
+    assert files is not None
+    assert len(files) == 3
+    assert all("/AKEUSDT/" in path for path in files)
 
 
 def test_index_cli_rebuilds_catalog_metadata(tmp_path: Path, capsys):

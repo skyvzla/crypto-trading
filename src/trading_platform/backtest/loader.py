@@ -9,9 +9,11 @@ import duckdb
 import pandas as pd
 
 from trading_platform.market.archive.index import (
+    ARCHIVE_INDEX_FILENAME,
     load_archive_index,
     verify_archive_index_files,
 )
+from trading_platform.market.archive.parquet import archive_root_from_catalog
 from trading_platform.shared.events import Bar1s, Kline
 
 Event = Union[Bar1s, Kline]
@@ -54,8 +56,18 @@ class BacktestDataLoader:
         self.archive_index_path = (
             Path(archive_index_path) if archive_index_path else None
         )
+        if self.archive_index_path is None:
+            try:
+                self.archive_index_path = (
+                    archive_root_from_catalog(self.duckdb_path)
+                    / ARCHIVE_INDEX_FILENAME
+                )
+            except RuntimeError:
+                # 独立 DuckDB 表可直接查询；生产归档 catalog 必须带 sidecar。
+                pass
         self.bar1s_time_shift_ms = int(bar1s_time_shift_ms)
         self._duckdb_connection: duckdb.DuckDBPyConnection | None = None
+        self._source_index: pd.DataFrame | None = None
 
         if not self.duckdb_path.is_file():
             raise FileNotFoundError(f"DuckDB archive not found: {self.duckdb_path}")
@@ -96,6 +108,9 @@ class BacktestDataLoader:
                     chunk_start_ms=chunk_start_ms,
                     chunk_end_ms=chunk_end_ms,
                 )
+                if cursor is None:
+                    chunk_start_ms = chunk_end_ms
+                    continue
                 while rows := cursor.fetchmany(fetch_batch_size):
                     for row in rows:
                         symbol = str(row[0])
@@ -149,9 +164,7 @@ class BacktestDataLoader:
         raw_start = self.start_ms - self.bar1s_time_shift_ms
         raw_end = self.end_ms - self.bar1s_time_shift_ms
         selected_parts = []
-        required = set(self.required_kline_intervals)
-        if self.require_aggtrades:
-            required.add("1s")
+        required = {"1s", *self.required_kline_intervals}
         for symbol in self.symbols:
             for timeframe in required:
                 start_ms = raw_start if timeframe == "1s" else self.start_ms
@@ -171,12 +184,24 @@ class BacktestDataLoader:
                 "relative_path"
             )
             verify_archive_index_files(selected, self.archive_index_path.parent)
+            self._source_index = selected
 
     def _execute_stream_query(
         self, *, chunk_start_ms: int, chunk_end_ms: int
-    ) -> duckdb.DuckDBPyConnection:
+    ) -> duckdb.DuckDBPyConnection | None:
         connection = self._require_duckdb_connection()
         placeholders = ", ".join("?" for _ in self.symbols)
+        source_sql = "main.candles"
+        source_parameters: list[object] = []
+        if self._source_index is not None:
+            source_files = self._source_files_for_chunk(
+                chunk_start_ms=chunk_start_ms,
+                chunk_end_ms=chunk_end_ms,
+            )
+            if not source_files:
+                return None
+            source_sql = "read_parquet(?, union_by_name=true)"
+            source_parameters.append(source_files)
         available_time_sql = (
             "CASE WHEN timeframe = '1s' "
             "THEN epoch_ms(open_time) + 1000 + ? "
@@ -188,7 +213,7 @@ class BacktestDataLoader:
             "CAST(low AS VARCHAR), CAST(close AS VARCHAR), "
             "CAST(volume AS VARCHAR), "
             f"{available_time_sql} AS available_time "
-            "FROM main.candles "
+            f"FROM {source_sql} "
             f"WHERE symbol IN ({placeholders}) "
             "AND timeframe IN ('1s', '1m', '5m', '15m') "
             "AND ((timeframe = '1s' AND epoch_ms(open_time) >= ? "
@@ -206,6 +231,7 @@ class BacktestDataLoader:
             query,
             [
                 shift,
+                *source_parameters,
                 *self.symbols,
                 self.start_ms - shift,
                 self.end_ms - shift,
@@ -217,6 +243,23 @@ class BacktestDataLoader:
                 chunk_end_ms,
             ],
         )
+
+    def _source_files_for_chunk(
+        self, *, chunk_start_ms: int, chunk_end_ms: int
+    ) -> list[str] | None:
+        if self._source_index is None:
+            return None
+        shift = self.bar1s_time_shift_ms
+        raw_chunk_start = chunk_start_ms - shift - 1_001
+        raw_chunk_end = chunk_end_ms - shift
+        selected = self._source_index[
+            (self._source_index["first_open_ms"] < raw_chunk_end)
+            & (self._source_index["last_close_ms"] >= raw_chunk_start)
+        ]
+        return [
+            str(self.archive_index_path.parent / relative_path)
+            for relative_path in selected["relative_path"].drop_duplicates()
+        ]
 
     def _stream_row_to_event(self, row: tuple, sequence: int) -> Event:
         symbol, timeframe = str(row[0]), str(row[1])
