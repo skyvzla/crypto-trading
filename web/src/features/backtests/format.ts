@@ -1,5 +1,13 @@
 import type { JsonValue } from '@/api/types'
 
+type NumericLike = number | string | null | undefined
+
+function numericValue(value: NumericLike): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const numeric = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
 export function timestampMs(value: string | number | null | undefined): number | null {
   if (value === null || value === undefined || value === '') return null
   if (typeof value === 'number') return value < 10_000_000_000 ? value * 1000 : value
@@ -18,19 +26,22 @@ export function formatTime(value: string | number | null | undefined): string {
   }).format(ms)
 }
 
-export function formatNumber(value: number | null | undefined, digits = 2): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '-'
-  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(value)
+export function formatNumber(value: NumericLike, digits = 2): string {
+  const numeric = numericValue(value)
+  if (numeric === null) return '-'
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(numeric)
 }
 
-export function formatPercent(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '-'
-  const normalized = Math.abs(value) <= 1 ? value * 100 : value
+export function formatPercent(value: NumericLike): string {
+  const numeric = numericValue(value)
+  if (numeric === null) return '-'
+  const normalized = Math.abs(numeric) <= 1 ? numeric * 100 : numeric
   return `${formatNumber(normalized, 2)}%`
 }
 
-export function formatDuration(seconds: number | null | undefined): string {
-  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return '-'
+export function formatDuration(value: NumericLike): string {
+  const seconds = numericValue(value)
+  if (seconds === null) return '-'
   if (seconds < 60) return `${Math.round(seconds)}秒`
   if (seconds < 3600) return `${formatNumber(seconds / 60, 1)}分钟`
   if (seconds < 86400) return `${formatNumber(seconds / 3600, 1)}小时`
@@ -48,7 +59,8 @@ export function displayValue(value: JsonValue | undefined, type?: string): strin
   return String(value)
 }
 
-export function pnlClass(value: number | null | undefined): string {
-  if (!value) return ''
-  return value > 0 ? 'value-positive' : 'value-negative'
+export function pnlClass(value: NumericLike): string {
+  const numeric = numericValue(value)
+  if (numeric === null || numeric === 0) return ''
+  return numeric > 0 ? 'value-positive' : 'value-negative'
 }

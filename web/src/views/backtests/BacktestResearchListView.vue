@@ -24,7 +24,7 @@ const columns: DataTableColumns<BacktestResearch> = [
   { title: '交易对', key: 'symbol_count', width: 80 },
   { title: '交易数', key: 'trade_count', width: 90 },
   { title: '胜率', key: 'win_rate', width: 90, render: (row) => formatPercent(row.win_rate) },
-  { title: '净盈亏', key: 'net_pnl', width: 110, render: (row) => h('span', { class: pnlClass(row.net_pnl) }, formatNumber(row.net_pnl)) },
+  { title: '最佳参数净盈亏', key: 'net_pnl', width: 140, render: (row) => h('span', { class: pnlClass(row.net_pnl) }, formatNumber(row.net_pnl)) },
   { title: '创建时间', key: 'created_at', width: 180, render: (row) => formatTime(row.created_at) },
   {
     title: '操作', key: 'actions', width: 118, fixed: 'right',

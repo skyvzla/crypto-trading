@@ -138,7 +138,7 @@ class RecordBatch(Generic[RecordT]):
 
 _REQUIRED_ROOT_FILES = ("experiment.json", "comparison.csv", "all_trades.csv")
 _REQUIRED_RUN_FILES = ("orders.parquet", "fills.parquet", "audit_events.parquet")
-_NON_REPORT_CSV_FILES = {"comparison.csv", "all_trades.csv"}
+_NON_REPORT_CSV_FILES = {"all_trades.csv"}
 _JSON_FIELDS = {"parameters", "tier_prices", "tier_weights", "details"}
 
 

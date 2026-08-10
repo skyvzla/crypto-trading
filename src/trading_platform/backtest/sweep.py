@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 from bisect import bisect_left
 import csv
 import hashlib
@@ -1257,6 +1258,11 @@ def _main(argv: list[str] | None = None) -> int:
         default=None,
         help="强制 worker 数；内存不足时报错，不传时按可用内存自动计算",
     )
+    parser.add_argument(
+        "--persist-results",
+        action="store_true",
+        help="完成报告后将研究、报表和逐笔交易导入 PostgreSQL",
+    )
     args = parser.parse_args(argv)
     config = tomllib.loads(args.config.read_text())
     config["duckdb_path"] = str(config.get("duckdb_path", "data/market/history.duckdb"))
@@ -1472,6 +1478,19 @@ def _main(argv: list[str] | None = None) -> int:
         "worker_memory_budget": worker_memory_budget,
         "duckdb_memory_limit_per_worker": actual_memory_limit,
     }, indent=2, default=str))
+    if args.persist_results:
+        from trading_platform.backtest.report_import_cli import (
+            import_report_directory,
+        )
+
+        print("正在将回测研究导入 PostgreSQL...", flush=True)
+        research_id = asyncio.run(
+            import_report_directory(
+                output_root,
+                config.get("database_dsn") or _dsn_from_environment(),
+            )
+        )
+        print(f"回测研究入库完成: {research_id}", flush=True)
     print(
         f"实验完成: {len(specs)} runs, workers={workers}, output={output_root}",
         flush=True,

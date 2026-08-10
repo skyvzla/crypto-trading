@@ -15,6 +15,7 @@ import uvicorn
 from trading_platform.ledger.db.models import LedgerDB, create_connection_pool
 from trading_platform.ledger.db.migrations import apply_migrations, verify_current
 from trading_platform.ledger.api.routes import router
+from trading_platform.ledger.api.backtests import router as backtest_router
 from trading_platform.shared.config import load_config
 
 
@@ -99,6 +100,7 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(router)
+app.include_router(backtest_router)
 
 class SpaStaticFiles(StaticFiles):
     """为 history 模式路由回退 index.html，静态资源缺失仍返回 404。"""

@@ -51,6 +51,18 @@ if (( current_version >= 5 )); then
   'strategy_category_admission', (SELECT COUNT(*) FROM strategy_category_admission),
   'strategy_category_admission_audit', (SELECT COUNT(*) FROM strategy_category_admission_audit),"
 fi
+if (( current_version >= 6 )); then
+  extra_count_sql+="
+  'backtest_researches', (SELECT COUNT(*) FROM backtest_researches),
+  'backtest_runs', (SELECT COUNT(*) FROM backtest_runs),
+  'backtest_trades', (SELECT COUNT(*) FROM backtest_trades),
+  'backtest_orders', (SELECT COUNT(*) FROM backtest_orders),
+  'backtest_fills', (SELECT COUNT(*) FROM backtest_fills),
+  'backtest_events', (SELECT COUNT(*) FROM backtest_events),
+  'backtest_reports', (SELECT COUNT(*) FROM backtest_reports),
+  'backtest_report_rows', (SELECT COUNT(*) FROM backtest_report_rows),
+  'backtest_strategy_schemas', (SELECT COUNT(*) FROM backtest_strategy_schemas),"
+fi
 
 count_sql="
 SELECT jsonb_build_object(

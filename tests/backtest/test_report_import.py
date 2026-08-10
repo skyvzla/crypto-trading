@@ -134,6 +134,7 @@ def test_discovers_summary_and_ad_hoc_reports_with_original_columns(tmp_path: Pa
 
     reports = list(parser.iter_reports())
     assert {report.filename for report in reports} == {
+        "comparison.csv",
         "pnl_bucket_summary.csv",
         "rise_duration_validation_ad_hoc.csv",
     }

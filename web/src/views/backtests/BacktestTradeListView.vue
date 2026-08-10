@@ -27,14 +27,14 @@ const columns: DataTableColumns<BacktestTradeSummary> = [
   { title: '收益率', key: 'net_return', width: 90, render: (row) => formatPercent(row.net_return) },
   { title: '结果', key: 'winner', width: 74, render: (row) => h(NTag, { size: 'small', bordered: false, type: row.winner ? 'success' : 'error' }, { default: () => row.winner ? '盈利' : '亏损' }) },
   { title: '退出原因', key: 'exit_reason', minWidth: 170 },
-  { title: '', key: 'action', width: 64, fixed: 'right', render: (row) => h(NTooltip, null, { trigger: () => h(RouterLink, { to: `/backtests/${encodeURIComponent(researchId.value)}/trades/${encodeURIComponent(row.trade_id || row.id)}` }, () => h(NButton, { quaternary: true, circle: true, 'aria-label': '打开K线复盘' }, { icon: () => h(NIcon, { component: CandlestickChart }) })), default: () => '打开 K 线复盘' }) }
+  { title: '', key: 'action', width: 64, fixed: 'right', render: (row) => h(NTooltip, null, { trigger: () => h(RouterLink, { to: `/backtests/${encodeURIComponent(researchId.value)}/trades/${encodeURIComponent(row.id)}` }, () => h(NButton, { quaternary: true, circle: true, 'aria-label': '打开K线复盘' }, { icon: () => h(NIcon, { component: CandlestickChart }) })), default: () => '打开 K 线复盘' }) }
 ]
 </script>
 
 <template>
-  <BacktestPage :title="`${symbol} 交易记录`" :eyebrow="researchId" :back-to="`/backtests/${researchId}/symbols`" :crumbs="[{ label: '回测复盘', to: '/backtests' }, { label: '交易对数据', to: `/backtests/${researchId}/symbols` }, { label: symbol }]">
+    <BacktestPage :title="`${symbol} 交易记录`" :eyebrow="researchId" :back-to="`/backtests/${researchId}/symbols`" :crumbs="[{ label: '回测复盘', to: '/backtests' }, { label: '交易对数据', to: `/backtests/${researchId}/symbols` }, { label: symbol }]">
     <QueryPanel :pending="query.isPending.value" :error="query.error.value" :empty="query.data.value?.items.length === 0" @retry="query.refetch()">
-      <div class="table-frame"><NDataTable :columns="columns" :data="query.data.value?.items || []" :row-key="(row: BacktestTradeSummary) => row.trade_id || row.id" :scroll-x="1320" striped /><div class="pagination-bar"><span>共 {{ query.data.value?.total || 0 }} 笔</span><NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="query.data.value?.total || 0" show-size-picker :page-sizes="[25, 50, 100]" /></div></div>
+      <div class="table-frame"><NDataTable :columns="columns" :data="query.data.value?.items || []" :row-key="(row: BacktestTradeSummary) => row.id" :scroll-x="1320" striped /><div class="pagination-bar"><span>共 {{ query.data.value?.total || 0 }} 笔</span><NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="query.data.value?.total || 0" show-size-picker :page-sizes="[25, 50, 100]" /></div></div>
     </QueryPanel>
   </BacktestPage>
 </template>
