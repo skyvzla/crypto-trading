@@ -28,9 +28,7 @@ const router = useRouter()
       <div class="page-actions">
         <slot name="actions" />
         <a-tooltip v-if="backTo" title="返回">
-          <template #trigger>
-            <a-button type="text" shape="circle" aria-label="返回" @click="router.push(backTo!)"><ArrowLeft :size="16" /></a-button>
-          </template>
+          <a-button type="text" shape="circle" aria-label="返回" @click="router.push(backTo!)"><ArrowLeft :size="16" /></a-button>
         </a-tooltip>
       </div>
     </div>

@@ -99,7 +99,7 @@ describe('回测关键视图', () => {
       symbol: 'AKEUSDT', interval: '5m', source: 'binance',
       candles: [{ time: 1_750_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }]
     })
-    const { list } = await plugins('/backtests/r-1/trades/t-1')
+    const { list } = await plugins('/backtests/r-1/trades/t-1?symbol_filter=AKE&result=loss')
     const wrapper = mount(BacktestTradeReplayView, {
       global: { plugins: list as never, stubs: { TradeCandlestickChart: true } }
     })
@@ -108,6 +108,7 @@ describe('回测关键视图', () => {
     expect(wrapper.find('.event-heading time').text()).not.toBe('')
     expect(wrapper.find('.event-content').text()).toContain('tier_prices')
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
       start_ms: 1_749_775_000_000,
       end_ms: 1_750_225_000_000
@@ -118,5 +119,9 @@ describe('回测关键视图', () => {
       start_ms: 1_749_776_800_000,
       end_ms: 1_750_226_800_000
     }))
+    await wrapper.get('button[aria-label="返回"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/backtests/r-1/symbols/AKEUSDT/trades')
+    expect(router.currentRoute.value.query).toMatchObject({ symbol_filter: 'AKE', result: 'loss' })
   })
 })
