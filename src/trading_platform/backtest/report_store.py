@@ -39,8 +39,8 @@ REPORT_TITLES = {
 
 def _source_identity(root: Path) -> tuple[str, UUID]:
     digest = hashlib.sha256()
-    for filename in ("experiment.json", "comparison.csv", "all_trades.csv"):
-        path = root / filename
+    for path in sorted(path for path in root.rglob("*") if path.is_file()):
+        filename = path.relative_to(root).as_posix()
         digest.update(filename.encode("utf-8"))
         with path.open("rb") as stream:
             while chunk := stream.read(1024 * 1024):

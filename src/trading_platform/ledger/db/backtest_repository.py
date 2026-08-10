@@ -59,6 +59,14 @@ class BacktestRepository:
             (research_id,),
         )
 
+    async def has_symbol(self, research_id: UUID, symbol: str) -> bool:
+        row = await self._fetchone(
+            "SELECT 1 AS present FROM backtest_trades "
+            "WHERE research_id = %s AND symbol = %s LIMIT 1",
+            (research_id, symbol),
+        )
+        return row is not None
+
     async def list_reports(self, research_id: UUID) -> list[dict[str, Any]]:
         return await self._fetchall(
             "SELECT report_type AS type, title, category, description, columns, "
@@ -107,9 +115,13 @@ class BacktestRepository:
                    COALESCE(SUM(net_pnl), 0) AS net_pnl,
                    COALESCE(AVG(exit_time - entry_time) / 1000.0, 0)
                        AS average_holding_seconds,
-                   COUNT(*) FILTER (WHERE entry_fill_count >= 3)::BIGINT
+                   COUNT(*) FILTER (WHERE
+                       COALESCE(NULLIF(strategy_data->>'tier1_fill_count', '')::INTEGER, 0) > 0
+                       AND COALESCE(NULLIF(strategy_data->>'tier2_fill_count', '')::INTEGER, 0) > 0
+                       AND COALESCE(NULLIF(strategy_data->>'tier3_fill_count', '')::INTEGER, 0) > 0
+                   )::BIGINT
                        AS three_tier_count,
-                   COUNT(DISTINCT parameters)::BIGINT AS run_count
+                   COUNT(DISTINCT run_id)::BIGINT AS run_count
             FROM backtest_trades
             WHERE research_id = %s
             GROUP BY symbol
@@ -191,7 +203,8 @@ class BacktestRepository:
             "SELECT order_id, campaign_id, symbol, side, price, quantity, status, "
             "created_at, fill_time, payload FROM backtest_orders "
             "WHERE research_id = %s AND run_id = %s "
-            "AND (%s::TEXT IS NULL OR campaign_id = %s::TEXT) "
+            "AND ((%s::TEXT IS NULL AND campaign_id IS NULL) "
+            "OR campaign_id = %s::TEXT) "
             "ORDER BY created_at, order_id",
             (research_id, run_id, campaign_id, campaign_id),
         )
@@ -201,7 +214,8 @@ class BacktestRepository:
             "JOIN backtest_orders o ON o.research_id = f.research_id "
             "AND o.run_id = f.run_id AND o.order_id = f.order_id "
             "WHERE f.research_id = %s AND f.run_id = %s "
-            "AND (%s::TEXT IS NULL OR o.campaign_id = %s::TEXT) "
+            "AND ((%s::TEXT IS NULL AND o.campaign_id IS NULL) "
+            "OR o.campaign_id = %s::TEXT) "
             "ORDER BY f.fill_time, f.fill_id",
             (research_id, run_id, campaign_id, campaign_id),
         )
@@ -270,7 +284,8 @@ class BacktestRepository:
         rows = await self._fetchall(
             "SELECT id, event_time, event_type, symbol, payload FROM backtest_events "
             "WHERE research_id = %s AND run_id = %s "
-            "AND (%s::TEXT IS NULL OR campaign_id = %s::TEXT) "
+            "AND ((%s::TEXT IS NULL AND campaign_id IS NULL) "
+            "OR campaign_id = %s::TEXT) "
             "ORDER BY event_time, id",
             (
                 research_id,
@@ -279,17 +294,32 @@ class BacktestRepository:
                 trade["campaign_id"],
             ),
         )
-        return [
-            {
-                "time": row["event_time"],
-                "type": row["event_type"],
-                "title": row["event_type"],
-                "data": row["payload"],
-                "symbol": row["symbol"],
-                "id": row["id"],
-            }
-            for row in rows
-        ]
+        events = []
+        for row in rows:
+            payload = row["payload"] or {}
+            price = next(
+                (
+                    _float_or_none(payload.get(key))
+                    for key in ("price", "trigger_price", "fill_price")
+                    if payload.get(key) is not None
+                ),
+                None,
+            )
+            events.append(
+                {
+                    "time": row["event_time"],
+                    "type": row["event_type"],
+                    "title": row["event_type"],
+                    "description": payload.get("description")
+                    or payload.get("reason")
+                    or payload.get("message"),
+                    "price": price,
+                    "data": payload,
+                    "symbol": row["symbol"],
+                    "id": row["id"],
+                }
+            )
+        return events
 
     async def get_strategy_schema(self, strategy_id: str) -> dict[str, Any] | None:
         row = await self._fetchone(

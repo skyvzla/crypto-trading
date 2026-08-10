@@ -52,9 +52,9 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
     first = await apply_migrations(pool, schema=schema)
     second = await apply_migrations(pool, schema=schema)
 
-    assert first.current_version == 6
-    assert first.applied_versions == (1, 2, 3, 4, 5, 6)
-    assert second.current_version == 6
+    assert first.current_version == 7
+    assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7)
+    assert second.current_version == 7
     assert second.applied_versions == ()
     assert await verify_current(pool, schema=schema) == 6
 
@@ -90,7 +90,7 @@ async def test_existing_schema_is_adopted_without_losing_rows(migration_db):
                 ("existing",),
             )
         ).fetchone()
-    assert result.applied_versions == (1, 2, 3, 4, 5, 6)
+    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7)
     assert count == (1,)
 
 
@@ -105,7 +105,7 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
 
     assert sorted((first.applied_versions, second.applied_versions)) == [
         (),
-        (1, 2, 3, 4, 5, 6),
+        (1, 2, 3, 4, 5, 6, 7),
     ]
     async with pool.connection() as conn:
         row = await (
@@ -116,7 +116,7 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
                 ).format(sql.Identifier(schema))
             )
         ).fetchone()
-    assert row == (6, 1, 6)
+    assert row == (7, 1, 7)
 
 
 @pytest.mark.asyncio

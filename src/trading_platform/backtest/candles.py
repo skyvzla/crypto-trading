@@ -48,9 +48,12 @@ def validate_candle_request(
         raise ValueError("invalid Binance symbol")
     if normalized_interval not in INTERVAL_MS:
         raise ValueError("unsupported candle interval")
-    if start_ms >= end_ms:
+    if start_ms < 0 or start_ms >= end_ms:
         raise ValueError("start_ms must be earlier than end_ms")
-    estimated = (end_ms - start_ms) // INTERVAL_MS[normalized_interval] + 1
+    interval_ms = INTERVAL_MS[normalized_interval]
+    first_open = ((start_ms + interval_ms - 1) // interval_ms) * interval_ms
+    last_open = ((end_ms - 1) // interval_ms) * interval_ms
+    estimated = max(0, (last_open - first_open) // interval_ms + 1)
     if estimated > MAX_CANDLES:
         raise ValueError(f"candle range exceeds {MAX_CANDLES} bars")
     return normalized_symbol, normalized_interval
@@ -157,19 +160,44 @@ def load_archive_candles(
                 query, (files, symbol, preferred, start_ms, end_ms)
             ).fetchall()
         else:
+            source_start_ms = (start_ms // INTERVAL_MS[interval]) * INTERVAL_MS[interval]
+            first_full_bucket_ms = (
+                (start_ms + INTERVAL_MS[interval] - 1) // INTERVAL_MS[interval]
+            ) * INTERVAL_MS[interval]
+            last_full_bucket_ms = (
+                (end_ms - 1) // INTERVAL_MS[interval]
+            ) * INTERVAL_MS[interval]
             query = f"""
                 WITH source AS (
                     SELECT *, time_bucket(INTERVAL '{target}', open_time) AS bucket
                     FROM read_parquet(?, union_by_name=true)
-                    WHERE symbol = ? AND timeframe = ?
-                      AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ?
+                      WHERE symbol = ? AND timeframe = ?
+                  AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ?
+                ), aggregated AS (
+                    SELECT epoch_ms(bucket) AS bucket_ms,
+                           first(open ORDER BY open_time) AS open,
+                           max(high) AS high,
+                           min(low) AS low,
+                           first(close ORDER BY open_time DESC) AS close,
+                           sum(volume) AS volume
+                    FROM source GROUP BY bucket
                 )
-                SELECT epoch_ms(bucket), first(open ORDER BY open_time), max(high),
-                       min(low), first(close ORDER BY open_time DESC), sum(volume)
-                FROM source GROUP BY bucket ORDER BY bucket
+                SELECT bucket_ms, open, high, low, close, volume
+                FROM aggregated
+                WHERE bucket_ms >= ? AND bucket_ms <= ?
+                ORDER BY bucket_ms
             """
             rows = connection.execute(
-                query, (files, symbol, preferred, start_ms, end_ms)
+                query,
+                (
+                    files,
+                    symbol,
+                    preferred,
+                    source_start_ms,
+                    end_ms,
+                    first_full_bucket_ms,
+                    last_full_bucket_ms,
+                ),
             ).fetchall()
     finally:
         connection.close()

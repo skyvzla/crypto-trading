@@ -232,3 +232,14 @@ def test_rejects_invalid_json_field_when_streamed(tmp_path: Path):
 
     with pytest.raises(ReportValidationError, match="parameters"):
         list(parser.iter_runs())
+
+
+@pytest.mark.parametrize("run_id", ["../outside", "/tmp/outside", ""])
+def test_rejects_path_like_run_id(tmp_path: Path, run_id: str):
+    root = _write_report(tmp_path / "study")
+    comparison = pd.read_csv(root / "comparison.csv")
+    comparison.loc[0, "run_id"] = run_id
+    comparison.to_csv(root / "comparison.csv", index=False)
+
+    with pytest.raises(ReportValidationError, match="invalid run_id"):
+        ReportDirectoryParser(root)

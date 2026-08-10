@@ -194,6 +194,20 @@ class ReportDirectoryParser:
         if len(run_ids) != len(set(run_ids)):
             raise ReportValidationError("comparison.csv contains duplicate run_id values")
 
+        invalid_run_ids = [
+            run_id
+            for run_id in run_ids
+            if not run_id
+            or run_id.casefold() in {"nan", "none"}
+            or run_id in {".", ".."}
+            or Path(run_id).name != run_id
+            or Path(run_id).is_absolute()
+        ]
+        if invalid_run_ids:
+            raise ReportValidationError(
+                "comparison.csv contains invalid run_id values: "
+                + ", ".join(invalid_run_ids[:5])
+            )
         run_directories = tuple(runs_root / run_id for run_id in run_ids)
         missing_run_dirs = [
             str(path.relative_to(self.root))

@@ -190,6 +190,11 @@ async def get_backtest_candles(
                 raise HTTPException(
                     status_code=404, detail="backtest research not found"
                 )
+            normalized_symbol = symbol.strip().upper()
+            if not await repository.has_symbol(research_id, normalized_symbol):
+                raise HTTPException(
+                    status_code=404, detail="symbol not found in backtest research"
+                )
             config = research.get("config") or {}
             source_metadata = research.get("source_metadata") or {}
             index_path = (
@@ -208,7 +213,7 @@ async def get_backtest_candles(
             candles = await run_in_threadpool(
                 load_archive_candles,
                 index_path,
-                symbol,
+                normalized_symbol,
                 interval,
                 start_ms,
                 end_ms,

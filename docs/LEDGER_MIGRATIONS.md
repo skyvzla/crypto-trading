@@ -53,6 +53,8 @@ runner 使用事务级 PostgreSQL advisory lock 串行化并发实例；全部�
 `0006_backtest_research.sql` 保存独立回测研究、参数运行、逐笔交易、委托成交、审计事件、
 分析报表及策略展示 schema，为回测复盘 Web 模块提供统一 PostgreSQL 数据源。
 
+`0007_backtest_integrity.sql` 补充回测业务 ID 非空约束，并确保成交记录始终关联对应委托。
+
 ## 备份恢复演练
 
 以下命令对当前 Compose PostgreSQL 创建权限为 `0600` 的 custom-format 归档，恢复到随机命名

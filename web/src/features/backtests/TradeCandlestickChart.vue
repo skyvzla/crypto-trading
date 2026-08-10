@@ -61,6 +61,10 @@ async function renderChart() {
   const markerTime = (value: string | number | null | undefined): UTCTimestamp | null => {
     const exact = seconds(value)
     if (exact === null || !barTimes.length) return null
+    const intervalSeconds = barTimes.length > 1
+      ? barTimes[1] - barTimes[0]
+      : 60
+    if (exact < barTimes[0] || exact > barTimes[barTimes.length - 1] + intervalSeconds) return null
     let low = 0
     let high = barTimes.length - 1
     let matched = barTimes[0]

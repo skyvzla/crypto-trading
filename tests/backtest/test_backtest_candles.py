@@ -20,6 +20,8 @@ def test_candle_request_rejects_unbounded_or_unsupported_queries():
         validate_candle_request("BTCUSDT", "1m", 0, 5001 * 60_000)
     with pytest.raises(ValueError, match="symbol"):
         validate_candle_request("BTC/USDT", "1m", 0, 60_000)
+    with pytest.raises(ValueError, match="earlier"):
+        validate_candle_request("BTCUSDT", "1m", -1, 60_000)
 
 
 @pytest.mark.asyncio
@@ -85,4 +87,35 @@ def test_archive_reader_aggregates_one_minute_candles(tmp_path):
             "close": 5.5,
             "volume": 60.0,
         }
+    ]
+
+
+def test_archive_reader_discards_partial_boundary_bars(tmp_path):
+    start = datetime(2025, 7, 1, tzinfo=UTC)
+    rows = [
+        Candle(
+            symbol="AKEUSDT",
+            timeframe="1m",
+            open_time=start + timedelta(minutes=index),
+            open=1 + index,
+            high=2 + index,
+            low=0.5 + index,
+            close=1.5 + index,
+            volume=10 + index,
+            close_time=start + timedelta(minutes=index + 1) - timedelta(milliseconds=1),
+        )
+        for index in range(10)
+    ]
+    with ParquetCandleArchive(tmp_path, rebuild_index_on_close=False) as archive:
+        archive.upsert(rows)
+    index = build_archive_index(tmp_path, workers=1)
+    request_start = int((start + timedelta(minutes=1)).timestamp() * 1000)
+    request_end = int((start + timedelta(minutes=9)).timestamp() * 1000)
+
+    candles = load_archive_candles(
+        index, "AKEUSDT", "5m", request_start, request_end
+    )
+
+    assert [candle["time"] for candle in candles] == [
+        int((start + timedelta(minutes=5)).timestamp())
     ]

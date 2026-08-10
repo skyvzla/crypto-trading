@@ -43,6 +43,11 @@ const candlesQuery = useQuery({
   staleTime: 5 * 60_000
 })
 const allAttributes = computed(() => ({ ...(tradeQuery.data.value?.parameters || {}), ...(tradeQuery.data.value?.strategy_data || {}), ...(tradeQuery.data.value?.metrics || {}), ...(tradeQuery.data.value?.attributes || {}) }))
+function eventContent(event: { data?: Record<string, unknown>; description?: string | null; price?: number | null }): string {
+  if (event.description) return event.description
+  if (event.price != null) return `价格 ${formatNumber(event.price, 8)}`
+  return event.data && Object.keys(event.data).length ? JSON.stringify(event.data) : ''
+}
 const backTo = computed(() => tradeQuery.data.value ? `/backtests/${encodeURIComponent(researchId.value)}/symbols/${encodeURIComponent(tradeQuery.data.value.symbol)}/trades` : `/backtests/${encodeURIComponent(researchId.value)}/symbols`)
 </script>
 
@@ -90,7 +95,7 @@ const backTo = computed(() => tradeQuery.data.value ? `/backtests/${encodeURICom
           <section class="detail-section timeline-section">
             <h3>事件时间线</h3>
             <QueryPanel :pending="eventsQuery.isPending.value" :error="eventsQuery.error.value" :empty="eventsQuery.data.value?.items.length === 0" @retry="eventsQuery.refetch()">
-              <NTimeline><NTimelineItem v-for="event in eventsQuery.data.value?.items" :key="event.id || `${event.time}-${event.type}`" :title="event.title || event.type" :time="formatTime(event.time)" :content="event.description || (event.price != null ? `价格 ${formatNumber(event.price, 8)}` : '')" /></NTimeline>
+              <NTimeline><NTimelineItem v-for="event in eventsQuery.data.value?.items" :key="event.id" :title="event.title || event.type" :time="formatTime(event.time)" :content="eventContent(event)" /></NTimeline>
             </QueryPanel>
           </section>
         </div>

@@ -20,6 +20,9 @@ class FakeBacktestRepository:
             return None
         return {"id": research_id, "name": "July", "config": {}}
 
+    async def has_symbol(self, research_id, symbol):
+        return symbol == "AKEUSDT"
+
     async def list_reports(self, research_id):
         return [{"report_type": "parameter_summary", "title": "参数汇总", "columns": [], "row_count": 1}]
 

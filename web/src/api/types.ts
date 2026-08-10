@@ -142,7 +142,7 @@ export interface BacktestTradeSummary {
 }
 
 export interface BacktestOrder {
-  id?: string
+  id: string
   tier?: number | null
   price: number
   quantity?: number | null
@@ -151,7 +151,7 @@ export interface BacktestOrder {
 }
 
 export interface BacktestFill {
-  id?: string
+  id: string
   tier?: number | null
   time: string | number
   price: number
@@ -208,7 +208,7 @@ export interface BacktestTradeDetail extends BacktestTradeSummary {
 }
 
 export interface BacktestEvent {
-  id?: string
+  id: number
   time: string | number
   type: string
   title?: string | null
