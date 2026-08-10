@@ -8,7 +8,9 @@ import {
   createChart,
   createSeriesMarkers,
   type IChartApi,
+  type MouseEventParams,
   type SeriesMarker,
+  type Time,
   type UTCTimestamp
 } from 'lightweight-charts'
 import type { BacktestCandle, BacktestTradeDetail, ChartOverlay } from '@/api/types'
@@ -19,10 +21,15 @@ const props = defineProps<{
   trade: BacktestTradeDetail
   overlays?: ChartOverlay[]
 }>()
+const emit = defineEmits<{ 'request-more': [direction: 'before' | 'after'] }>()
 
 const host = ref<HTMLElement | null>(null)
 let chart: IChartApi | null = null
 let observer: ResizeObserver | null = null
+let unsubscribeRange: (() => void) | null = null
+let unsubscribeCrosshair: (() => void) | null = null
+let requestedEdge: 'before' | 'after' | null = null
+const hoverLabel = ref<{ left: number; top: number; text: string } | null>(null)
 
 function seconds(value: string | number | null | undefined): UTCTimestamp | null {
   const ms = timestampMs(value)
@@ -32,6 +39,12 @@ function seconds(value: string | number | null | undefined): UTCTimestamp | null
 function destroy() {
   observer?.disconnect()
   observer = null
+  unsubscribeRange?.()
+  unsubscribeRange = null
+  unsubscribeCrosshair?.()
+  unsubscribeCrosshair = null
+  hoverLabel.value = null
+  requestedEdge = null
   chart?.remove()
   chart = null
 }
@@ -105,26 +118,81 @@ async function renderChart() {
       const record = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : null
       const time = markerTime(record?.time as string | number | undefined)
       const price = record?.price
-      if (time && typeof price === 'number') overlayMarkers.push({ time, position: 'atPriceTop', price, color: overlay.color || '#d6a84b', shape: 'circle', text: overlay.label || overlay.key })
+      if (time && typeof price === 'number') overlayMarkers.push({ time, position: 'aboveBar', color: overlay.color || '#d6a84b', shape: 'circle', text: overlay.label || overlay.key })
       else if (time) overlayMarkers.push({ time, position: 'aboveBar', color: overlay.color || '#d6a84b', shape: 'circle', text: overlay.label || overlay.key })
     }
   }
 
   const markers: SeriesMarker<UTCTimestamp>[] = []
   const signalTime = markerTime(props.trade.signal_time)
-  if (signalTime && props.trade.signal_price != null) markers.push({ time: signalTime, position: 'atPriceTop', price: props.trade.signal_price, color: '#e0a526', shape: 'circle', text: '信号' })
-  else if (signalTime) markers.push({ time: signalTime, position: 'aboveBar', color: '#e0a526', shape: 'circle', text: '信号' })
+  const isShort = String(props.trade.side || '').toLowerCase().includes('short') || String(props.trade.side || '').toLowerCase() === 'sell'
+  const entryPosition = isShort ? 'aboveBar' : 'belowBar'
+  const exitPosition = isShort ? 'belowBar' : 'aboveBar'
+  const entryShape = isShort ? 'arrowDown' : 'arrowUp'
+  const exitShape = isShort ? 'arrowUp' : 'arrowDown'
+  if (signalTime) markers.push({ time: signalTime, position: entryPosition, color: '#e0a526', shape: 'circle', text: '信号' })
   for (const fill of props.trade.fills || []) {
     const time = markerTime(fill.time)
-    if (time) markers.push({ time, position: 'atPriceTop', price: fill.price, color: '#1677ff', shape: 'arrowDown', text: `成交${fill.tier ? ` T${fill.tier}` : ''}` })
+    if (time) markers.push({ time, position: entryPosition, color: '#1677ff', shape: entryShape, text: `成交${fill.tier ? ` T${fill.tier}` : ''}` })
   }
   const entryTime = markerTime(props.trade.entry_time)
-  if (entryTime && !(props.trade.fills?.length)) markers.push({ time: entryTime, position: 'aboveBar', color: '#f2f4f7', shape: 'arrowDown', text: '开仓' })
+  if (entryTime && !(props.trade.fills?.length)) markers.push({ time: entryTime, position: entryPosition, color: '#1677ff', shape: entryShape, text: '开仓' })
   const exitTime = markerTime(props.trade.exit_time)
-  if (exitTime && props.trade.exit_price != null) markers.push({ time: exitTime, position: 'atPriceBottom', price: props.trade.exit_price, color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: 'arrowUp', text: '退出' })
-  else if (exitTime) markers.push({ time: exitTime, position: 'belowBar', color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: 'arrowUp', text: '退出' })
+  if (exitTime) markers.push({ time: exitTime, position: exitPosition, color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: exitShape, text: '退出' })
   createSeriesMarkers(series, [...markers, ...overlayMarkers].sort((a, b) => Number(a.time) - Number(b.time)))
-  chart.timeScale().fitContent()
+  const eventPrices = new Map<number, number[]>()
+  const addEventPrice = (value: string | number | null | undefined, price: number | null | undefined) => {
+    const time = seconds(value)
+    if (time === null || typeof price !== 'number') return
+    eventPrices.set(Number(time), [...(eventPrices.get(Number(time)) || []), price])
+  }
+  for (const fill of props.trade.fills || []) addEventPrice(fill.time, fill.price)
+  addEventPrice(props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price)
+  addEventPrice(props.trade.exit_time, props.trade.exit_price)
+  const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toPrecision(8)
+  const handleCrosshair = (param: MouseEventParams<Time>) => {
+    if (!param.point || param.time === undefined) {
+      hoverLabel.value = null
+      return
+    }
+    const candle = param.seriesData.get(series) as { open?: number; high?: number; low?: number; close?: number } | undefined
+    if (!candle || !host.value) return
+    const prices = eventPrices.get(Number(param.time)) || []
+    const eventText = prices.length ? `  事件价 ${prices.map(formatPrice).join(' / ')}` : ''
+    hoverLabel.value = {
+      left: Math.min(Math.max(8, param.point.x + 12), Math.max(8, host.value.clientWidth - 260)),
+      top: Math.max(8, param.point.y - 48),
+      text: `收 ${formatPrice(candle.close)} O${formatPrice(candle.open)} H${formatPrice(candle.high)} L${formatPrice(candle.low)}${eventText}`
+    }
+  }
+  const focusTimes = [seconds(props.trade.signal_time), seconds(props.trade.entry_time), seconds(props.trade.exit_time)]
+    .filter((time): time is UTCTimestamp => time !== null)
+  const focusTime = focusTimes.length
+    ? focusTimes.reduce((sum, time) => sum + Number(time), 0) / focusTimes.length
+    : Number(barTimes[Math.floor(barTimes.length / 2)])
+  let focusIndex = barTimes.findIndex((time) => time >= focusTime)
+  if (focusIndex < 0) focusIndex = barTimes.length - 1
+  const timeScale = chart.timeScale()
+  chart.subscribeCrosshairMove(handleCrosshair)
+  unsubscribeCrosshair = () => chart?.unsubscribeCrosshairMove(handleCrosshair)
+  const requestMore = (range: { from: number; to: number } | null) => {
+    if (!range) return
+    const nearStart = range.from < 80
+    const nearEnd = range.to > barTimes.length - 80
+    const edge = nearStart ? 'before' : nearEnd ? 'after' : null
+    if (edge && edge !== requestedEdge) {
+      requestedEdge = edge
+      emit('request-more', edge)
+    } else if (!edge) {
+      requestedEdge = null
+    }
+  }
+  timeScale.subscribeVisibleLogicalRangeChange(requestMore)
+  unsubscribeRange = () => timeScale.unsubscribeVisibleLogicalRangeChange(requestMore)
+  timeScale.setVisibleLogicalRange({
+    from: Math.max(0, focusIndex - 30),
+    to: Math.min(barTimes.length - 1, focusIndex + 30)
+  })
 
   observer = new ResizeObserver((entries) => {
     const width = entries[0]?.contentRect.width
@@ -137,4 +205,25 @@ watch(() => [props.candles, props.trade, props.overlays], renderChart, { immedia
 onBeforeUnmount(destroy)
 </script>
 
-<template><div ref="host" class="candlestick-host" /></template>
+<template>
+  <div ref="host" class="candlestick-host">
+    <div v-if="hoverLabel" class="chart-hover-label" :style="{ left: `${hoverLabel.left}px`, top: `${hoverLabel.top}px` }">{{ hoverLabel.text }}</div>
+  </div>
+</template>
+
+<style scoped>
+.candlestick-host { position: relative; }
+.chart-hover-label {
+  position: absolute;
+  z-index: 2;
+  max-width: calc(100% - 16px);
+  padding: 5px 8px;
+  border: 1px solid #d0d5dd;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .94);
+  color: #344054;
+  font: 11px/1.4 "JetBrains Mono", monospace;
+  pointer-events: none;
+  white-space: nowrap;
+}
+</style>

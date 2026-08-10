@@ -28,6 +28,7 @@ const researchId = computed(() => String(route.params.researchId))
 const tradeId = computed(() => String(route.params.tradeId))
 const interval = ref('5m')
 const source = ref<'binance' | 'archive'>('binance')
+const windowShiftBars = ref(0)
 
 const tradeQuery = useQuery({ queryKey: computed(() => ['backtest-trade', researchId.value, tradeId.value]), queryFn: () => backtestApi.trade(researchId.value, tradeId.value) })
 const eventsQuery = useQuery({ queryKey: computed(() => ['backtest-events', researchId.value, tradeId.value]), queryFn: () => backtestApi.events(researchId.value, tradeId.value) })
@@ -41,13 +42,17 @@ const candleParams = computed(() => {
   const exit = timestampMs(trade.exit_time) ?? entry
   if (entry === null) return null
   const points = [entry, exit, timestampMs(trade.signal_time)].filter((value): value is number => value !== null)
-  const padding = intervalMs[interval.value] * 30
+  // 请求窗口和默认视窗分离：保留约 5000 根 K 供拖动复核，事件群位于数据中部。
+  const focus = points.reduce((sum, value) => sum + value, 0) / points.length
+  const baseBars = 2500
+  const padding = intervalMs[interval.value] * baseBars
+  const windowCenter = Math.max(padding, focus + windowShiftBars.value * intervalMs[interval.value])
   return {
     research_id: researchId.value,
     symbol: trade.symbol,
     interval: interval.value,
-    start_ms: Math.max(0, Math.min(...points) - padding),
-    end_ms: Math.max(...points) + padding,
+    start_ms: windowCenter - padding,
+    end_ms: windowCenter + padding,
     source: source.value
   }
 })
@@ -59,7 +64,11 @@ const candlesQuery = useQuery({
 })
 function selectInterval(value: string) {
   interval.value = value
+  windowShiftBars.value = 0
   if (value === '1s') source.value = 'archive'
+}
+function requestMore(direction: 'before' | 'after') {
+  windowShiftBars.value += direction === 'before' ? -2500 : 2500
 }
 const allAttributes = computed(() => ({ ...(tradeQuery.data.value?.parameters || {}), ...(tradeQuery.data.value?.strategy_data || {}), ...(tradeQuery.data.value?.metrics || {}), ...(tradeQuery.data.value?.attributes || {}) }))
 function eventContent(event: { data?: Record<string, unknown>; description?: string | null; price?: number | null }): string {
@@ -96,7 +105,7 @@ const backTo = computed(() => tradeQuery.data.value ? `/backtests/${encodeURICom
           </div>
           <div v-if="candlesQuery.isPending.value" class="chart-loading"><a-spin /><span>加载 {{ source === 'binance' ? 'Binance' : '本地归档' }} K线</span></div>
           <QueryPanel v-else :error="candlesQuery.error.value" :empty="candlesQuery.data.value?.candles.length === 0" @retry="candlesQuery.refetch()">
-            <TradeCandlestickChart :candles="candlesQuery.data.value?.candles || []" :trade="tradeQuery.data.value" :overlays="schemaQuery.data.value?.chart_overlays" />
+            <TradeCandlestickChart :candles="candlesQuery.data.value?.candles || []" :trade="tradeQuery.data.value" :overlays="schemaQuery.data.value?.chart_overlays" @request-more="requestMore" />
           </QueryPanel>
           <div class="chart-legend"><a-tag color="blue">{{ candlesQuery.data.value?.source || source }}</a-tag><span>信号</span><span>三档挂单</span><span>实际成交</span><span>开仓均价</span><span>失效价</span><span>退出</span></div>
         </section>

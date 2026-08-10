@@ -9,7 +9,7 @@ import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import { displayValue } from '@/features/backtests/format'
 import { useBacktestPagination } from '@/features/backtests/pagination'
-import { reportLabel } from '@/features/backtests/reportLabels'
+import { hasReportLabel, reportLabel } from '@/features/backtests/reportLabels'
 
 const route = useRoute()
 const researchId = computed(() => String(route.params.researchId))
@@ -25,7 +25,11 @@ const query = useQuery({
 })
 const columns = computed<TableColumnsType<JsonObject>>(() => (query.data.value?.columns || []).map((item) => {
   const column: ReportColumn = typeof item === 'string' ? { key: item } : item
-  return { title: column.title || column.label || reportLabel(column.key), key: column.key, dataIndex: column.key, width: 140, sorter: column.sortable === false ? undefined : true, customRender: ({ record: row }) => h('span', { class: 'report-value' }, displayValue(row[column.key] as JsonValue, column.type)) }
+  const providedTitle = column.title || column.label || ''
+  const title = /[\u4e00-\u9fff]/.test(providedTitle)
+    ? providedTitle
+    : (hasReportLabel(column.key) ? reportLabel(column.key) : (providedTitle || reportLabel(column.key)))
+  return { title, key: column.key, dataIndex: column.key, width: 140, sorter: column.sortable === false ? undefined : true, customRender: ({ record: row }) => h('span', { class: 'report-value' }, displayValue(row[column.key] as JsonValue, column.type)) }
 }))
 function onTableChange(_: unknown, __: unknown, sorter: { field?: string; order?: string } | Array<{ field?: string; order?: string }>) {
   const item = Array.isArray(sorter) ? sorter[0] : sorter
