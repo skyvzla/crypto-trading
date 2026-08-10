@@ -790,6 +790,55 @@ def _write_trade_breakdowns(
     grouped("pnl_bucket").to_csv(output_root / "pnl_bucket_summary.csv", index=False)
 
 
+def _write_tier_fill_summary(trades: pd.DataFrame, output_root: Path) -> None:
+    """按实际有成交量的开仓档位数汇总，供比较分批挂单的结果。"""
+    columns = [
+        "parameters", "filled_tier_count", "filled_tier_label", "trades",
+        "wins", "win_rate", "gross_pnl", "commission", "net_pnl",
+        "avg_entry_notional",
+    ]
+    if trades.empty:
+        pd.DataFrame(columns=columns).to_csv(
+            output_root / "tier_fill_summary.csv", index=False
+        )
+        return
+
+    frame = trades.copy()
+    tier_quantity_columns = [
+        f"tier{tier}_fill_quantity" for tier in (1, 2, 3)
+        if f"tier{tier}_fill_quantity" in frame
+    ]
+    if not tier_quantity_columns:
+        pd.DataFrame(columns=columns).to_csv(
+            output_root / "tier_fill_summary.csv", index=False
+        )
+        return
+    quantities = frame[tier_quantity_columns].apply(
+        pd.to_numeric, errors="coerce"
+    ).fillna(0)
+    frame["filled_tier_count"] = (quantities > 0).sum(axis=1)
+    frame["filled_tier_label"] = frame["filled_tier_count"].map({
+        0: "未成交", 1: "一档成交", 2: "两档成交", 3: "三档全成交",
+    }).fillna("未知")
+    for column in ("net_pnl", "gross_pnl", "commission", "entry_notional"):
+        frame[column] = pd.to_numeric(frame.get(column), errors="coerce").fillna(0)
+    summary = frame.groupby(
+        ["parameters", "filled_tier_count", "filled_tier_label"], dropna=False
+    ).agg(
+        trades=("net_pnl", "size"),
+        wins=("net_pnl", lambda values: int((values > 0).sum())),
+        gross_pnl=("gross_pnl", "sum"),
+        commission=("commission", "sum"),
+        net_pnl=("net_pnl", "sum"),
+        avg_entry_notional=("entry_notional", "mean"),
+    ).reset_index()
+    summary["win_rate"] = summary["wins"] / summary["trades"]
+    summary = summary[columns].sort_values(
+        ["parameters", "filled_tier_count"]
+    )
+    summary.to_csv(output_root / "tier_fill_summary.csv", index=False)
+
+
 def _attach_breakout_context(
     trades: pd.DataFrame,
     *,
@@ -1105,6 +1154,10 @@ def _write_report(
         "- `signal_collisions.csv`：同一秒附近触发的多币种信号组。",
         "- `holding_bucket_summary.csv`：持仓周期分档。",
         "- `pnl_bucket_summary.csv`：输赢金额分档。",
+        "- `tier_fill_summary.csv`：实际成交一档、两档、三档全成交的收益分档。",
+        "- `breakout_window_summary.csv`：入场前各上涨窗口的低点距离与整体表现。",
+        "- `box_position_summary.csv`：4 小时低点在 3/7 天箱体的位置分档。",
+        "- `box_proximity_summary.csv`：4 小时低点贴近 3/7 天箱体底部的阈值分档。",
         "- `universe.csv`：交易对纳入和排除原因。",
         "- `memory_estimate.csv`：按币种月份估算的全量与流式内存。",
     ])
@@ -1310,6 +1363,7 @@ def _main(argv: list[str] | None = None) -> int:
         trades, output_root,
         pnl_split_usdt=float(config.get("analysis", {}).get("pnl_split_usdt", 10)),
     )
+    _write_tier_fill_summary(trades, output_root)
     _write_breakout_summaries(
         trades, output_root, windows_hours=windows_hours,
         proximity_percentages=[float(value) for value in analysis.get("box_proximity_percentages", [1, 3, 5, 10])],

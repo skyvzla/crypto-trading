@@ -27,6 +27,7 @@ from trading_platform.backtest.sweep import (
     _symbol_worker_memory_plan,
     _symbol_worker_resources,
     _worker_memory_plan,
+    _write_tier_fill_summary,
     expand_specs,
 )
 from trading_platform.market.archive.index import build_archive_index
@@ -348,6 +349,30 @@ def test_simultaneous_signal_groups_require_multiple_symbols():
 
     assert len(groups) == 1
     assert groups.iloc[0]["signal_count"] == 2
+
+
+def test_tier_fill_summary_uses_actual_filled_quantities(tmp_path: Path):
+    trades = pd.DataFrame([
+        {
+            "parameters": "p", "tier1_fill_quantity": 1.0,
+            "tier2_fill_quantity": 0.0, "tier3_fill_quantity": 0.0,
+            "gross_pnl": 12.0, "commission": 1.0, "net_pnl": 11.0,
+            "entry_notional": 300.0,
+        },
+        {
+            "parameters": "p", "tier1_fill_quantity": 1.0,
+            "tier2_fill_quantity": 1.0, "tier3_fill_quantity": 1.0,
+            "gross_pnl": -8.0, "commission": 1.0, "net_pnl": -9.0,
+            "entry_notional": 1_000.0,
+        },
+    ])
+
+    _write_tier_fill_summary(trades, tmp_path)
+
+    summary = pd.read_csv(tmp_path / "tier_fill_summary.csv")
+    assert summary["filled_tier_label"].tolist() == ["一档成交", "三档全成交"]
+    assert summary["trades"].tolist() == [1, 1]
+    assert summary["net_pnl"].tolist() == [11.0, -9.0]
 
 
 def test_breakout_context_uses_only_completed_minutes(
