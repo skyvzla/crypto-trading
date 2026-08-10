@@ -56,7 +56,7 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
     assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7)
     assert second.current_version == 7
     assert second.applied_versions == ()
-    assert await verify_current(pool, schema=schema) == 6
+    assert await verify_current(pool, schema=schema) == 7
 
 
 @pytest.mark.asyncio
