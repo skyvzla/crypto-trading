@@ -839,6 +839,89 @@ def _write_tier_fill_summary(trades: pd.DataFrame, output_root: Path) -> None:
     summary.to_csv(output_root / "tier_fill_summary.csv", index=False)
 
 
+def _write_tier3_only_projection_summary(
+    trades: pd.DataFrame, output_root: Path
+) -> None:
+    """用原退出价格推算仅挂第三档的结果，不能替代实际单档回测。"""
+    columns = [
+        "parameters", "trades", "wins", "win_rate", "gross_pnl",
+        "commission", "net_pnl", "avg_tier3_entry_notional",
+        "scaled_to_total_notional_net_pnl",
+    ]
+    required = {
+        "tier3_fill_quantity", "tier3_avg_fill_price", "exit_price",
+        "entry_notional", "entry_quantity", "commission", "parameters",
+    }
+    if trades.empty or not required.issubset(trades.columns):
+        pd.DataFrame(columns=columns).to_csv(
+            output_root / "tier3_only_projection_summary.csv", index=False
+        )
+        return
+
+    frame = trades.copy()
+    numeric_columns = [
+        "tier3_fill_quantity", "tier3_avg_fill_price", "exit_price",
+        "entry_notional", "entry_quantity", "commission",
+    ]
+    for column in numeric_columns:
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    frame = frame[
+        (frame["tier3_fill_quantity"] > 0)
+        & frame["tier3_avg_fill_price"].notna()
+        & frame["exit_price"].notna()
+    ].copy()
+    if frame.empty:
+        pd.DataFrame(columns=columns).to_csv(
+            output_root / "tier3_only_projection_summary.csv", index=False
+        )
+        return
+
+    frame["tier3_entry_notional"] = (
+        frame["tier3_fill_quantity"] * frame["tier3_avg_fill_price"]
+    )
+    short_gross = (
+        frame["tier3_avg_fill_price"] - frame["exit_price"]
+    ) * frame["tier3_fill_quantity"]
+    frame["gross_pnl"] = short_gross
+    if "side" in frame:
+        frame.loc[frame["side"] != "SHORT", "gross_pnl"] = -short_gross
+    original_turnover = (
+        frame["entry_notional"]
+        + frame["exit_price"] * frame["entry_quantity"]
+    )
+    tier3_turnover = frame["tier3_entry_notional"] + (
+        frame["exit_price"] * frame["tier3_fill_quantity"]
+    )
+    frame["commission"] = (
+        frame["commission"] * tier3_turnover / original_turnover
+    ).where(original_turnover > 0, 0)
+    frame["net_pnl"] = frame["gross_pnl"] - frame["commission"]
+
+    def total_notional(parameters: str) -> float:
+        try:
+            return float(json.loads(parameters).get("total_notional", 0))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return 0.0
+
+    frame["configured_total_notional"] = frame["parameters"].map(total_notional)
+    frame["scaled_net_pnl"] = frame["net_pnl"] * (
+        frame["configured_total_notional"] / frame["tier3_entry_notional"]
+    ).where(frame["tier3_entry_notional"] > 0, 0)
+    summary = frame.groupby("parameters", dropna=False).agg(
+        trades=("net_pnl", "size"),
+        wins=("net_pnl", lambda values: int((values > 0).sum())),
+        gross_pnl=("gross_pnl", "sum"),
+        commission=("commission", "sum"),
+        net_pnl=("net_pnl", "sum"),
+        avg_tier3_entry_notional=("tier3_entry_notional", "mean"),
+        scaled_to_total_notional_net_pnl=("scaled_net_pnl", "sum"),
+    ).reset_index()
+    summary["win_rate"] = summary["wins"] / summary["trades"]
+    summary[columns].to_csv(
+        output_root / "tier3_only_projection_summary.csv", index=False
+    )
+
+
 def _attach_breakout_context(
     trades: pd.DataFrame,
     *,
@@ -1155,6 +1238,7 @@ def _write_report(
         "- `holding_bucket_summary.csv`：持仓周期分档。",
         "- `pnl_bucket_summary.csv`：输赢金额分档。",
         "- `tier_fill_summary.csv`：实际成交一档、两档、三档全成交的收益分档。",
+        "- `tier3_only_projection_summary.csv`：仅挂第三档的逐笔重算汇总；复用原退出价，非实际单档回测。",
         "- `breakout_window_summary.csv`：入场前各上涨窗口的低点距离与整体表现。",
         "- `box_position_summary.csv`：4 小时低点在 3/7 天箱体的位置分档。",
         "- `box_proximity_summary.csv`：4 小时低点贴近 3/7 天箱体底部的阈值分档。",
@@ -1364,6 +1448,7 @@ def _main(argv: list[str] | None = None) -> int:
         pnl_split_usdt=float(config.get("analysis", {}).get("pnl_split_usdt", 10)),
     )
     _write_tier_fill_summary(trades, output_root)
+    _write_tier3_only_projection_summary(trades, output_root)
     _write_breakout_summaries(
         trades, output_root, windows_hours=windows_hours,
         proximity_percentages=[float(value) for value in analysis.get("box_proximity_percentages", [1, 3, 5, 10])],

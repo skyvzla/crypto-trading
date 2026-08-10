@@ -27,6 +27,7 @@ from trading_platform.backtest.sweep import (
     _symbol_worker_memory_plan,
     _symbol_worker_resources,
     _worker_memory_plan,
+    _write_tier3_only_projection_summary,
     _write_tier_fill_summary,
     expand_specs,
 )
@@ -373,6 +374,26 @@ def test_tier_fill_summary_uses_actual_filled_quantities(tmp_path: Path):
     assert summary["filled_tier_label"].tolist() == ["一档成交", "三档全成交"]
     assert summary["trades"].tolist() == [1, 1]
     assert summary["net_pnl"].tolist() == [11.0, -9.0]
+
+
+def test_tier3_only_projection_reprices_third_tier_and_scales_notional(
+    tmp_path: Path,
+):
+    trades = pd.DataFrame([{
+        "parameters": '{"total_notional": 1000}', "side": "SHORT",
+        "tier3_fill_quantity": 3.0, "tier3_avg_fill_price": 100.0,
+        "exit_price": 90.0, "entry_notional": 1_000.0,
+        "entry_quantity": 10.0, "commission": 1.9,
+    }])
+
+    _write_tier3_only_projection_summary(trades, tmp_path)
+
+    summary = pd.read_csv(tmp_path / "tier3_only_projection_summary.csv")
+    assert summary.iloc[0]["trades"] == 1
+    assert summary.iloc[0]["gross_pnl"] == 30.0
+    assert summary.iloc[0]["commission"] == pytest.approx(0.57)
+    assert summary.iloc[0]["net_pnl"] == pytest.approx(29.43)
+    assert summary.iloc[0]["scaled_to_total_notional_net_pnl"] == pytest.approx(98.1)
 
 
 def test_breakout_context_uses_only_completed_minutes(
