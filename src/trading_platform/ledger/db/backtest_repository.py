@@ -122,17 +122,37 @@ class BacktestRepository:
         return descriptor, [row["data"] for row in rows]
 
     async def list_symbols(
-        self, research_id: UUID, *, limit: int, offset: int
+        self,
+        research_id: UUID,
+        *,
+        limit: int,
+        offset: int,
+        symbol_filter: str | None = None,
+        sort_by: str = "net_pnl",
+        sort_order: str = "desc",
     ) -> tuple[list[dict[str, Any]], int]:
+        sort_expressions = {
+            "symbol": "symbol",
+            "trade_count": "trade_count",
+            "win_rate": "win_rate",
+            "net_pnl": "net_pnl",
+            "average_win": "average_win",
+            "average_loss": "average_loss",
+            "average_holding_seconds": "average_holding_seconds",
+            "full_tier_fill_rate": "full_tier_fill_rate",
+        }
+        sort_sql = sort_expressions.get(sort_by, "net_pnl")
+        direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+        pattern = f"%{symbol_filter.strip().upper()}%" if symbol_filter else "%"
         rows = await self._fetchall(
-            """
+            f"""
             WITH unique_trades AS (
                 SELECT DISTINCT ON (symbol, trade_id) *
                 FROM backtest_trades
                 WHERE research_id = %s
                 ORDER BY symbol, trade_id, run_id
             )
-            SELECT symbol,
+            , summary AS (SELECT symbol,
                    COUNT(*)::BIGINT AS trade_count,
                    COUNT(*) FILTER (WHERE winner)::BIGINT AS win_count,
                    COALESCE(AVG(CASE WHEN winner THEN net_pnl END), 0) AS average_win,
@@ -150,16 +170,22 @@ class BacktestRepository:
                        AS three_tier_count,
                    COUNT(DISTINCT run_id)::BIGINT AS run_count
             FROM unique_trades
-            GROUP BY symbol
-            ORDER BY net_pnl DESC, symbol
+            GROUP BY symbol)
+            SELECT summary.*,
+                   win_count::NUMERIC / NULLIF(trade_count, 0) AS win_rate,
+                   three_tier_count::NUMERIC / NULLIF(trade_count, 0)
+                       AS full_tier_fill_rate
+            FROM summary
+            WHERE symbol ILIKE %s
+            ORDER BY {sort_sql} {direction} NULLS LAST, symbol
             LIMIT %s OFFSET %s
             """,
-            (research_id, limit, offset),
+            (research_id, pattern, limit, offset),
         )
         total = await self._fetchone(
             "SELECT COUNT(DISTINCT symbol) AS count FROM backtest_trades "
-            "WHERE research_id = %s",
-            (research_id,),
+            "WHERE research_id = %s AND symbol ILIKE %s",
+            (research_id, pattern),
         )
         for row in rows:
             trades = int(row["trade_count"])

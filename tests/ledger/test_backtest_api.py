@@ -31,7 +31,7 @@ class FakeBacktestRepository:
             return None, []
         return ({"report_type": report_type, "columns": [{"key": "net_pnl"}], "row_count": 1}, [{"net_pnl": 12.5}])
 
-    async def list_symbols(self, research_id, *, limit, offset):
+    async def list_symbols(self, research_id, *, limit, offset, symbol_filter=None, sort_by="net_pnl", sort_order="desc"):
         return ([{"symbol": "AKEUSDT", "trade_count": 2}], 1)
 
     async def list_trades(self, research_id, symbol, **kwargs):

@@ -29,6 +29,7 @@ $surface: #fff;
 .page-actions { display: flex; align-items: center; flex: 0 0 auto; }
 .page-description { margin: -6px 0 16px; color: $muted; }
 .table-frame { overflow: hidden; border: 1px solid $line; border-radius: 6px; background: $surface; }
+.symbol-table-tools { display: flex; align-items: center; gap: 8px; max-width: 520px; margin-bottom: 12px; }
 .pagination-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 54px; padding: 8px 14px; border-top: 1px solid $line; color: $muted; font-size: 12px; }
 .primary-cell {
   display: flex; flex-direction: column; gap: 2px;

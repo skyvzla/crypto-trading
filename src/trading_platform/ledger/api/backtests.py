@@ -95,10 +95,14 @@ async def list_symbols(
     research_id: UUID,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    symbol_filter: str | None = Query(None, max_length=64),
+    sort_by: str = Query("net_pnl", max_length=64),
+    sort_order: Literal["asc", "desc"] = "desc",
     repository: BacktestRepository = Depends(get_repository),
 ) -> dict:
     items, total = await repository.list_symbols(
-        research_id, limit=limit, offset=offset
+        research_id, limit=limit, offset=offset,
+        symbol_filter=symbol_filter, sort_by=sort_by, sort_order=sort_order,
     )
     return _page(items, total, limit, offset)
 

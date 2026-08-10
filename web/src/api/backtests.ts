@@ -24,10 +24,10 @@ export const backtestApi = {
       `/backtest-researches/${segment(researchId)}/reports/${segment(type)}`,
       { limit, offset, ...(sortBy ? { sort_by: sortBy, sort_order: sortOrder || 'desc' } : {}) }
     ),
-  symbols: (researchId: string, limit: number, offset: number) =>
+  symbols: (researchId: string, limit: number, offset: number, symbolFilter = '', sortBy = 'net_pnl', sortOrder = 'desc') =>
     api.get<Page<BacktestSymbolSummary>>(
       `/backtest-researches/${segment(researchId)}/symbols`,
-      { limit, offset }
+      { limit, offset, symbol_filter: symbolFilter || undefined, sort_by: sortBy, sort_order: sortOrder }
     ),
   trades: (researchId: string, symbol: string, limit: number, offset: number) =>
     api.get<Page<BacktestTradeSummary>>(
