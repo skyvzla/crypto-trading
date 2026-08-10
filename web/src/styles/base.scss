@@ -30,6 +30,10 @@ $surface: #fff;
 .page-description { margin: -6px 0 16px; color: $muted; }
 .table-frame { overflow: hidden; border: 1px solid $line; border-radius: 6px; background: $surface; }
 .symbol-table-tools { display: flex; align-items: center; gap: 8px; max-width: 520px; margin-bottom: 12px; }
+.trade-table-tools { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+.trade-table-tools .ant-select { width: 120px; }
+.trade-table-tools .ant-input { width: 220px; }
+.trade-table-tools .ant-input-number { width: 140px; }
 .pagination-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 54px; padding: 8px 14px; border-top: 1px solid $line; color: $muted; font-size: 12px; }
 .primary-cell {
   display: flex; flex-direction: column; gap: 2px;
@@ -81,6 +85,10 @@ $surface: #fff;
 .detail-section h3 { margin: 0 0 9px; font-size: 14px; letter-spacing: 0; }
 .timeline-section { padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .timeline-section .query-state, .timeline-section .query-empty { min-height: 120px; }
+.event-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+.event-heading strong { min-width: 0; overflow-wrap: anywhere; }
+.event-heading time { flex: 0 0 auto; color: $muted; font-size: 11px; white-space: nowrap; }
+.event-content { margin-top: 3px; color: $muted; font-size: 12px; overflow-wrap: anywhere; word-break: break-word; }
 .json-groups > .detail-section:first-child { margin-top: 0; }
 .schema-fallback { margin-bottom: 10px; }
 
@@ -91,6 +99,7 @@ $surface: #fff;
   .replay-details { grid-template-columns: 1fr; }
   .chart-toolbar { align-items: flex-start; flex-direction: column; }
   .source-tools { width: 100%; justify-content: space-between; }
+  .trade-table-tools { flex-wrap: wrap; }
 }
 
 @media (max-width: 600px) {

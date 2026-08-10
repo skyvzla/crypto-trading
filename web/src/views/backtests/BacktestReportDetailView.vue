@@ -2,7 +2,7 @@
 import { computed, h, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import type { TableColumnsType } from 'ant-design-vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import type { JsonObject, JsonValue, ReportColumn } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
@@ -12,13 +12,18 @@ import { useBacktestPagination } from '@/features/backtests/pagination'
 import { hasReportLabel, reportLabel } from '@/features/backtests/reportLabels'
 
 const route = useRoute()
+const router = useRouter()
 const researchId = computed(() => String(route.params.researchId))
 const reportType = computed(() => String(route.params.reportType))
-const { page, pageSize } = useBacktestPagination(50)
+const { page, pageSize } = useBacktestPagination(50, 'report')
 const backTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/reports`, query: route.query }))
-const sortBy = ref('')
-const sortOrder = ref('descend')
+const rootTo = computed(() => ({ path: '/backtests', query: route.query }))
+const sortBy = ref(typeof route.query.report_sort_by === 'string' ? route.query.report_sort_by : '')
+const sortOrder = ref(route.query.report_sort_order === 'asc' ? 'ascend' : 'descend')
 watch(reportType, () => { page.value = 1 })
+watch([sortBy, sortOrder], ([nextSort, nextOrder]) => {
+  void router.replace({ query: { ...route.query, report_sort_by: nextSort || undefined, report_sort_order: nextOrder === 'ascend' ? 'asc' : 'desc' } })
+})
 const query = useQuery({
   queryKey: computed(() => ['backtest-report', researchId.value, reportType.value, page.value, pageSize.value, sortBy.value, sortOrder.value]),
   queryFn: () => backtestApi.report(researchId.value, reportType.value, pageSize.value, (page.value - 1) * pageSize.value, sortBy.value, sortOrder.value === 'ascend' ? 'asc' : 'desc')
@@ -40,7 +45,7 @@ function onTableChange(_: unknown, __: unknown, sorter: { field?: string; order?
 </script>
 
 <template>
-  <BacktestPage :title="query.data.value?.descriptor.title || reportType" :eyebrow="reportType" :back-to="backTo" :crumbs="[{ label: '回测复盘', to: '/backtests' }, { label: '分析报表', to: `/backtests/${researchId}/reports` }, { label: query.data.value?.descriptor.title || reportType }]">
+  <BacktestPage :title="query.data.value?.descriptor.title || reportType" :eyebrow="reportType" :back-to="backTo" :crumbs="[{ label: '回测复盘', to: rootTo }, { label: '分析报表', to: backTo }, { label: query.data.value?.descriptor.title || reportType }]">
     <p v-if="query.data.value?.descriptor.description" class="page-description">{{ query.data.value.descriptor.description }}</p>
     <QueryPanel :pending="query.isPending.value" :error="query.error.value" :empty="query.data.value?.rows.length === 0" @retry="query.refetch()">
       <div class="table-frame">

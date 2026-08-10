@@ -9,11 +9,12 @@ import QueryPanel from '@/features/backtests/QueryPanel.vue'
 
 const route = useRoute()
 const researchId = computed(() => String(route.params.researchId))
+const rootTo = computed(() => ({ path: '/backtests', query: route.query }))
 const query = useQuery({ queryKey: computed(() => ['backtest-reports', researchId.value]), queryFn: () => backtestApi.reports(researchId.value) })
 </script>
 
 <template>
-  <BacktestPage title="分析报表" :eyebrow="researchId" back-to="/backtests" :crumbs="[{ label: '回测复盘', to: '/backtests' }, { label: '分析报表' }]">
+  <BacktestPage title="分析报表" :eyebrow="researchId" :back-to="rootTo" :crumbs="[{ label: '回测复盘', to: rootTo }, { label: '分析报表' }]">
     <QueryPanel :pending="query.isPending.value" :error="query.error.value" :empty="query.data.value?.items.length === 0" @retry="query.refetch()">
       <div class="catalog-list">
         <article v-for="report in query.data.value?.items" :key="report.type" class="catalog-row">
@@ -23,7 +24,7 @@ const query = useQuery({ queryKey: computed(() => ['backtest-reports', researchI
             <p>{{ report.description || report.type }}</p>
           </div>
           <span class="row-count">{{ report.row_count ?? '-' }} 行</span>
-          <RouterLink :to="`/backtests/${encodeURIComponent(researchId)}/reports/${encodeURIComponent(report.type)}`">
+          <RouterLink :to="{ path: `/backtests/${encodeURIComponent(researchId)}/reports/${encodeURIComponent(report.type)}`, query: route.query }">
             <a-button>打开<template #icon><ArrowRight :size="16" /></template></a-button>
           </RouterLink>
         </article>

@@ -206,6 +206,8 @@ class BacktestRepository:
         exit_reason: str | None = None,
         min_pnl: float | None = None,
         max_pnl: float | None = None,
+        sort_by: str = "entry_time",
+        sort_order: str = "desc",
     ) -> tuple[list[dict[str, Any]], int]:
         clauses = ["research_id = %s", "symbol = %s"]
         values: list[object] = [research_id, symbol]
@@ -219,6 +221,20 @@ class BacktestRepository:
                 clauses.append(clause)
                 values.append(value)
         where = " AND ".join(clauses)
+        sort_expressions = {
+            "entry_time": "entry_time",
+            "entry_price": "entry_price",
+            "exit_time": "exit_time",
+            "exit_price": "exit_price",
+            "filled_tier_count": "entry_fill_count",
+            "holding_seconds": "exit_time - entry_time",
+            "net_pnl": "net_pnl",
+            "net_return": "net_return",
+            "winner": "winner",
+            "exit_reason": "exit_reason",
+        }
+        sort_sql = sort_expressions.get(sort_by, "entry_time")
+        direction = "ASC" if sort_order.lower() == "asc" else "DESC"
         fields = (
             "id, run_id, trade_id, campaign_id, symbol, side, signal_time, "
             "entry_time, exit_time, entry_price, exit_price, "
@@ -232,7 +248,8 @@ class BacktestRepository:
             f"SELECT DISTINCT ON (symbol, trade_id) * FROM backtest_trades "
             f"WHERE research_id = %s ORDER BY symbol, trade_id, run_id) "
             f"SELECT {fields} FROM unique_trades WHERE {where} "
-            "ORDER BY entry_time DESC, run_id LIMIT %s OFFSET %s",
+            f"ORDER BY {sort_sql} {direction} NULLS LAST, entry_time DESC, run_id "
+            "LIMIT %s OFFSET %s",
             (research_id, *values, limit, offset),
         )
         count = await self._fetchone(

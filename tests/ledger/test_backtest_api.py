@@ -11,6 +11,7 @@ class FakeBacktestRepository:
     def __init__(self) -> None:
         self.research_id = uuid4()
         self.trade_id = uuid4()
+        self.last_trade_filters = {}
 
     async def list_researches(self, *, limit, offset):
         return ([{"id": self.research_id, "name": "July", "strategy_id": "spike_short"}], 1)
@@ -35,6 +36,7 @@ class FakeBacktestRepository:
         return ([{"symbol": "AKEUSDT", "trade_count": 2}], 1)
 
     async def list_trades(self, research_id, symbol, **kwargs):
+        self.last_trade_filters = kwargs
         return ([{"id": self.trade_id, "symbol": symbol, "net_pnl": -10}], 1)
 
     async def get_trade(self, research_id, trade_id):
@@ -70,7 +72,10 @@ async def test_backtest_navigation_endpoints_follow_linear_hierarchy(api_app):
         reports = await client.get(f"{base}/reports")
         report = await client.get(f"{base}/reports/parameter_summary")
         symbols = await client.get(f"{base}/symbols")
-        trades = await client.get(f"{base}/symbols/akeusdt/trades")
+        trades = await client.get(
+            f"{base}/symbols/akeusdt/trades",
+            params={"winner": False, "min_pnl": -100, "sort_by": "net_pnl", "sort_order": "asc"},
+        )
         trade = await client.get(f"{base}/trades/{repository.trade_id}")
         events = await client.get(f"{base}/trades/{repository.trade_id}/events")
 
@@ -79,6 +84,10 @@ async def test_backtest_navigation_endpoints_follow_linear_hierarchy(api_app):
     assert report.json()["rows"] == [{"net_pnl": 12.5}]
     assert symbols.json()["items"][0]["symbol"] == "AKEUSDT"
     assert trades.json()["items"][0]["symbol"] == "AKEUSDT"
+    assert repository.last_trade_filters["winner"] is False
+    assert repository.last_trade_filters["min_pnl"] == -100
+    assert repository.last_trade_filters["sort_by"] == "net_pnl"
+    assert repository.last_trade_filters["sort_order"] == "asc"
     assert trade.json()["strategy_data"]["invalid_price"] == 1.2
     assert events.json()["items"][0]["type"] == "signal_triggered"
 

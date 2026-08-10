@@ -117,11 +117,15 @@ function eventContent(event: { data?: Record<string, unknown>; description?: str
   if (event.price != null) return `价格 ${formatNumber(event.price, 8)}`
   return event.data && Object.keys(event.data).length ? JSON.stringify(event.data) : ''
 }
-const backTo = computed(() => tradeQuery.data.value ? `/backtests/${encodeURIComponent(researchId.value)}/symbols/${encodeURIComponent(tradeQuery.data.value.symbol)}/trades` : `/backtests/${encodeURIComponent(researchId.value)}/symbols`)
+const rootTo = computed(() => ({ path: '/backtests', query: route.query }))
+const symbolsTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/symbols`, query: route.query }))
+const backTo = computed(() => tradeQuery.data.value
+  ? { path: `/backtests/${encodeURIComponent(researchId.value)}/symbols/${encodeURIComponent(tradeQuery.data.value.symbol)}/trades`, query: route.query }
+  : symbolsTo.value)
 </script>
 
 <template>
-  <BacktestPage :title="tradeQuery.data.value ? `${tradeQuery.data.value.symbol} 单笔复盘` : '单笔复盘'" :eyebrow="tradeId" :back-to="backTo" :crumbs="[{ label: '回测复盘', to: '/backtests' }, { label: '交易对数据', to: `/backtests/${researchId}/symbols` }, { label: '单笔复盘' }]">
+  <BacktestPage :title="tradeQuery.data.value ? `${tradeQuery.data.value.symbol} 单笔复盘` : '单笔复盘'" :eyebrow="tradeId" :back-to="backTo" :crumbs="[{ label: '回测复盘', to: rootTo }, { label: '交易对数据', to: symbolsTo }, { label: '单笔复盘' }]">
     <QueryPanel :pending="tradeQuery.isPending.value" :error="tradeQuery.error.value" @retry="tradeQuery.refetch()">
       <template v-if="tradeQuery.data.value">
         <div class="trade-summary-strip">
@@ -174,7 +178,7 @@ const backTo = computed(() => tradeQuery.data.value ? `/backtests/${encodeURICom
           <section class="detail-section timeline-section">
             <h3>事件时间线</h3>
             <QueryPanel :pending="eventsQuery.isPending.value" :error="eventsQuery.error.value" :empty="eventsQuery.data.value?.items.length === 0" @retry="eventsQuery.refetch()">
-              <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id" :label="formatTime(event.time)"><strong>{{ event.title || event.type }}</strong><div>{{ eventContent(event) }}</div></a-timeline-item></a-timeline>
+              <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id"><div class="event-heading"><strong>{{ event.title || event.type }}</strong><time>{{ formatTime(event.time) }}</time></div><div class="event-content">{{ eventContent(event) }}</div></a-timeline-item></a-timeline>
             </QueryPanel>
           </section>
         </div>

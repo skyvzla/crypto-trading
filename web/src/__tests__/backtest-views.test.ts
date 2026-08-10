@@ -3,6 +3,8 @@ import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import BacktestResearchListView from '@/views/backtests/BacktestResearchListView.vue'
 import BacktestReportDetailView from '@/views/backtests/BacktestReportDetailView.vue'
+import BacktestSymbolListView from '@/views/backtests/BacktestSymbolListView.vue'
+import BacktestTradeListView from '@/views/backtests/BacktestTradeListView.vue'
 import BacktestTradeReplayView from '@/views/backtests/BacktestTradeReplayView.vue'
 import { backtestApi } from '@/api/backtests'
 import { router } from '@/router'
@@ -11,6 +13,8 @@ vi.mock('@/api/backtests', () => ({
   backtestApi: {
     researches: vi.fn(),
     report: vi.fn(),
+    symbols: vi.fn(),
+    trades: vi.fn(),
     trade: vi.fn(),
     events: vi.fn(),
     strategySchema: vi.fn(),
@@ -54,13 +58,42 @@ describe('回测关键视图', () => {
     expect(wrapper.text()).toContain('盈利大于10U')
   })
 
+  it('交易对列表从 URL 恢复筛选和服务端排序', async () => {
+    vi.mocked(backtestApi.symbols).mockResolvedValue({
+      items: [{ symbol: 'AKEUSDT', trade_count: 2, win_rate: 0.5, net_pnl: -10 }], total: 1, limit: 25, offset: 0
+    })
+    const { list } = await plugins('/backtests/r-1/symbols?symbol_filter=AKE&sort_by=win_rate&sort_order=asc')
+    const wrapper = mount(BacktestSymbolListView, { global: { plugins: list as never } })
+    await flushPromises()
+    expect(backtestApi.symbols).toHaveBeenCalledWith('r-1', 25, 0, 'AKE', 'win_rate', 'asc')
+    expect((wrapper.get('input').element as HTMLInputElement).value).toBe('AKE')
+    expect(wrapper.findAll('.ant-table-column-sorters').length).toBeGreaterThanOrEqual(8)
+  })
+
+  it('交易明细从 URL 恢复筛选并提供主要字段排序', async () => {
+    vi.mocked(backtestApi.trades).mockResolvedValue({
+      items: [{ id: 't-1', symbol: 'AKEUSDT', entry_time: 1_750_000_000_000, entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10, net_return: -0.1, winner: false }],
+      total: 1, limit: 25, offset: 0
+    })
+    const { list } = await plugins('/backtests/r-1/symbols/AKEUSDT/trades?result=loss&min_pnl=-100&trade_sort_by=net_pnl&trade_sort_order=asc')
+    const wrapper = mount(BacktestTradeListView, { global: { plugins: list as never } })
+    await flushPromises()
+    expect(backtestApi.trades).toHaveBeenCalledWith('r-1', 'AKEUSDT', 25, 0, expect.objectContaining({
+      winner: false, min_pnl: -100, sort_by: 'net_pnl', sort_order: 'asc'
+    }))
+    expect(wrapper.find('input[placeholder="最低盈亏 U"]').exists()).toBe(true)
+    expect(wrapper.findAll('.ant-table-column-sorters').length).toBeGreaterThanOrEqual(10)
+  })
+
   it('单笔复盘按1500根窗口加载，并在退出定位时重新以退出时间取数', async () => {
     vi.mocked(backtestApi.trade).mockResolvedValue({
       id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000,
       entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10,
       fills: [{ id: 'f-1', time: 1_750_000_000_000, price: 1.1 }]
     })
-    vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
+    vi.mocked(backtestApi.events).mockResolvedValue({
+      items: [{ id: 1, time: 1_750_000_000_000, type: 'entry_plan_created', title: 'entry_plan_created', description: null, price: null, data: { tier_prices: ['1.1', '1.2', '1.3'] } }]
+    })
     vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
     vi.mocked(backtestApi.candles).mockResolvedValue({
       symbol: 'AKEUSDT', interval: '5m', source: 'binance',
@@ -71,6 +104,10 @@ describe('回测关键视图', () => {
       global: { plugins: list as never, stubs: { TradeCandlestickChart: true } }
     })
     await flushPromises()
+    expect(wrapper.find('.event-heading').text()).toContain('entry_plan_created')
+    expect(wrapper.find('.event-heading time').text()).not.toBe('')
+    expect(wrapper.find('.event-content').text()).toContain('tier_prices')
+    expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
       start_ms: 1_749_775_000_000,
       end_ms: 1_750_225_000_000

@@ -29,10 +29,17 @@ export const backtestApi = {
       `/backtest-researches/${segment(researchId)}/symbols`,
       { limit, offset, symbol_filter: symbolFilter || undefined, sort_by: sortBy, sort_order: sortOrder }
     ),
-  trades: (researchId: string, symbol: string, limit: number, offset: number) =>
+  trades: (researchId: string, symbol: string, limit: number, offset: number, filters: {
+    winner?: boolean
+    exit_reason?: string
+    min_pnl?: number
+    max_pnl?: number
+    sort_by?: string
+    sort_order?: 'asc' | 'desc'
+  } = {}) =>
     api.get<Page<BacktestTradeSummary>>(
       `/backtest-researches/${segment(researchId)}/symbols/${segment(symbol)}/trades`,
-      { limit, offset }
+      { limit, offset, ...filters }
     ),
   trade: (researchId: string, tradeId: string) =>
     api.get<BacktestTradeDetail>(

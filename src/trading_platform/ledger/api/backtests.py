@@ -115,6 +115,8 @@ async def list_trades(
     exit_reason: str | None = Query(None, max_length=128),
     min_pnl: float | None = None,
     max_pnl: float | None = None,
+    sort_by: str = Query("entry_time", max_length=64),
+    sort_order: Literal["asc", "desc"] = "desc",
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     repository: BacktestRepository = Depends(get_repository),
@@ -126,6 +128,8 @@ async def list_trades(
         exit_reason=exit_reason,
         min_pnl=min_pnl,
         max_pnl=max_pnl,
+        sort_by=sort_by,
+        sort_order=sort_order,
         limit=limit,
         offset=offset,
     )

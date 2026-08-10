@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref } from 'vue'
+import { computed, h } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { BarChart3, CandlestickChart } from 'lucide-vue-next'
 import { Button, Space, Tag, Tooltip, type TableColumnsType } from 'ant-design-vue'
@@ -9,9 +9,9 @@ import type { BacktestResearch } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import { formatNumber, formatPercent, formatTime, pnlClass } from '@/features/backtests/format'
+import { useBacktestPagination } from '@/features/backtests/pagination'
 
-const page = ref(1)
-const pageSize = ref(25)
+const { page, pageSize, preservedQuery } = useBacktestPagination(25, 'research')
 const query = useQuery({
   queryKey: computed(() => ['backtest-researches', page.value, pageSize.value]),
   queryFn: () => backtestApi.researches(pageSize.value, (page.value - 1) * pageSize.value)
@@ -29,8 +29,8 @@ const columns: TableColumnsType<BacktestResearch> = [
   {
     title: '操作', key: 'actions', width: 118, fixed: 'right',
     customRender: ({ record: row }) => h(Space, { size: 4 }, () => [
-      h(Tooltip, { title: '查看分析报表' }, () => h(RouterLink, { to: `/backtests/${encodeURIComponent(row.id)}/reports` }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看分析报表' }, () => h(BarChart3, { size: 16 })))),
-      h(Tooltip, { title: '查看交易对' }, () => h(RouterLink, { to: `/backtests/${encodeURIComponent(row.id)}/symbols` }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看交易对' }, () => h(CandlestickChart, { size: 16 }))))
+      h(Tooltip, { title: '查看分析报表' }, () => h(RouterLink, { to: { path: `/backtests/${encodeURIComponent(row.id)}/reports`, query: preservedQuery.value } }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看分析报表' }, () => h(BarChart3, { size: 16 })))),
+      h(Tooltip, { title: '查看交易对' }, () => h(RouterLink, { to: { path: `/backtests/${encodeURIComponent(row.id)}/symbols`, query: preservedQuery.value } }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看交易对' }, () => h(CandlestickChart, { size: 16 }))))
     ])
   }
 ]
