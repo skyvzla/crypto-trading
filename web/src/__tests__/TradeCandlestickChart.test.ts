@@ -14,6 +14,7 @@ const disconnect = vi.fn()
 const paneSetStretchFactor = vi.fn()
 const subscribeCrosshairMove = vi.fn()
 const seriesApis: Array<{ setData: typeof setData; createPriceLine: typeof createPriceLine }> = []
+const seriesOptions: Array<Record<string, unknown>> = []
 const paneMocks = Array.from({ length: 4 }, (_, index) => ({
   getHeight: vi.fn(() => index === 0 ? 300 : 100),
   getStretchFactor: vi.fn(() => index === 0 ? 3 : 1),
@@ -30,9 +31,10 @@ vi.mock('lightweight-charts', () => ({
   LineStyle: { Solid: 0, Dashed: 2, Dotted: 1 },
   createSeriesMarkers: (...args: unknown[]) => createSeriesMarkers(...args),
   createChart: vi.fn(() => ({
-    addSeries: () => {
+    addSeries: (_definition: unknown, options: Record<string, unknown> = {}) => {
       const api = { setData, createPriceLine }
       seriesApis.push(api)
+      seriesOptions.push(options)
       return api
     },
     timeScale: () => ({ fitContent: vi.fn(), getVisibleRange: vi.fn(() => ({ from: 1_754_000_030, to: 1_754_000_060 })), setVisibleRange, setVisibleLogicalRange, subscribeVisibleLogicalRangeChange: vi.fn(), unsubscribeVisibleLogicalRangeChange: vi.fn() }),
@@ -48,6 +50,7 @@ vi.mock('lightweight-charts', () => ({
 beforeEach(() => {
   vi.clearAllMocks()
   seriesApis.length = 0
+  seriesOptions.length = 0
   localStorage.clear()
   vi.stubGlobal('ResizeObserver', class {
     observe = observe
@@ -166,6 +169,26 @@ describe('TradeCandlestickChart', () => {
     expect(hoverText).toContain('收')
     expect(hoverText).toContain('成交量')
     expect(wrapper.findAll('.indicator-hover-label')).toHaveLength(4)
+  })
+
+  it('低价币价格轴、价格线和EMA保留行情实际精度', async () => {
+    mount(TradeCandlestickChart, {
+      props: {
+        candles: [
+          { time: 1_754_000_000, open: 0.00000712, high: 0.00000719, low: 0.00000708, close: 0.00000716, volume: 10 },
+          { time: 1_754_000_001, open: 0.00000716, high: 0.00000721, low: 0.00000711, close: 0.00000718, volume: 12 }
+        ],
+        trade: {
+          id: 't-low', symbol: 'LOWUSDT', strategy_id: 'spike-short', signal_time: 1_754_000_000_000,
+          signal_price: 0.00000712, entry_time: 1_754_000_001_000, entry_price: 0.00000718,
+          invalid_price: 0.00000745, tier_prices: [0.00000718, 0.00000726, 0.00000734], net_pnl: 1
+        },
+        indicators: { ema: true, macd: true }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const expected = { type: 'price', precision: 8, minMove: 0.00000001 }
+    seriesOptions.slice(0, 6).forEach((options) => expect(options.priceFormat).toEqual(expected))
   })
 
   it('恢复并保存指标窗格高度，整体图表高度只在当前页面调整', async () => {

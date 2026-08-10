@@ -79,6 +79,15 @@ function normalizeCandles(candles: BacktestCandle[]): ChartCandle[] {
     .sort((a, b) => Number(a.time) - Number(b.time))
 }
 
+function chartPricePrecision(data: ChartCandle[]): number {
+  const decimalPlaces = (value: number) => {
+    const fixed = Math.abs(value).toFixed(12).replace(/0+$/, '')
+    const separator = fixed.indexOf('.')
+    return separator === -1 ? 0 : fixed.length - separator - 1
+  }
+  return Math.min(12, Math.max(2, ...data.flatMap((bar) => [bar.open, bar.high, bar.low, bar.close].map(decimalPlaces))))
+}
+
 function emaValues(data: ChartCandle[], period: number): number[] {
   const multiplier = 2 / (period + 1)
   let previous: number | null = null
@@ -189,6 +198,8 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   await nextTick()
   if (!host.value || !props.candles.length) return
   const data = normalizeCandles(props.candles)
+  const pricePrecision = chartPricePrecision(data)
+  const priceFormat = { type: 'price' as const, precision: pricePrecision, minMove: 10 ** -pricePrecision }
   const candleSpacing = data.length > 1 ? Number(data[1].time) - Number(data[0].time) : 60
   chart = createChart(host.value, {
     width: host.value.clientWidth,
@@ -212,7 +223,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   })
   const series = chart.addSeries(CandlestickSeries, {
     upColor: '#2ebd85', downColor: '#f05252', borderVisible: false,
-    wickUpColor: '#2ebd85', wickDownColor: '#f05252'
+    wickUpColor: '#2ebd85', wickDownColor: '#f05252', priceFormat
   })
   renderedCandles = data
   renderedBarTimes = data.map((bar) => Number(bar.time))
@@ -253,8 +264,8 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
 
   const indicatorSettings = props.indicators || {}
   if (indicatorSettings.ema) {
-    const ema9 = chart.addSeries(LineSeries, { color: '#f5c451', lineWidth: 1, title: 'EMA9' })
-    const ema21 = chart.addSeries(LineSeries, { color: '#66b3ff', lineWidth: 1, title: 'EMA21' })
+    const ema9 = chart.addSeries(LineSeries, { color: '#f5c451', lineWidth: 1, title: 'EMA9', priceFormat })
+    const ema21 = chart.addSeries(LineSeries, { color: '#66b3ff', lineWidth: 1, title: 'EMA21', priceFormat })
     const updateEma = (nextData: ChartCandle[]) => {
       ema9.setData(lineData(nextData, emaValues(nextData, 9)))
       ema21.setData(lineData(nextData, emaValues(nextData, 21)))
@@ -284,9 +295,9 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     indicatorPane += 1
   }
   if (indicatorSettings.macd) {
-    const macd = chart.addSeries(LineSeries, { color: '#4da3ff', lineWidth: 1, title: 'DIF' }, indicatorPane)
-    const macdSignal = chart.addSeries(LineSeries, { color: '#f5c451', lineWidth: 1, title: 'DEA' }, indicatorPane)
-    const macdHistogram = chart.addSeries(HistogramSeries, { color: '#2ebd85' }, indicatorPane)
+    const macd = chart.addSeries(LineSeries, { color: '#4da3ff', lineWidth: 1, title: 'DIF', priceFormat }, indicatorPane)
+    const macdSignal = chart.addSeries(LineSeries, { color: '#f5c451', lineWidth: 1, title: 'DEA', priceFormat }, indicatorPane)
+    const macdHistogram = chart.addSeries(HistogramSeries, { color: '#2ebd85', priceFormat }, indicatorPane)
     const updateMacd = (nextData: ChartCandle[]) => {
       const fast = emaValues(nextData, 12)
       const slow = emaValues(nextData, 26)
@@ -385,7 +396,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   fills.forEach((fill, index) => addEventPrice(fill.tier ? `第${fill.tier}档成交` : `成交 ${index + 1}`, fill.time, fill.price))
   addEventPrice('开仓均价', props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price)
   addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price)
-  const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toPrecision(8)
+  const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toFixed(pricePrecision)
   const formatIndicatorValue = (value: number, format?: 'volume' | 'oscillator') => {
     if (format === 'volume') return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(value)
     if (format === 'oscillator') return Number(value).toFixed(4)
