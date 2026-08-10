@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Database, Globe2, RefreshCw } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
@@ -42,10 +42,10 @@ const candleParams = computed(() => {
   const exit = timestampMs(trade.exit_time) ?? entry
   if (entry === null) return null
   const points = [entry, exit, timestampMs(trade.signal_time)].filter((value): value is number => value !== null)
-  // 请求窗口和默认视窗分离：保留约 5000 根 K 供拖动复核，事件群位于数据中部。
+  // 在线合约接口按单次上限取 1500 根；本地归档取 5000 根。
   const focus = points.reduce((sum, value) => sum + value, 0) / points.length
-  const baseBars = 2500
-  const padding = intervalMs[interval.value] * baseBars
+  const halfWindowBars = source.value === 'binance' ? 750 : 2500
+  const padding = intervalMs[interval.value] * halfWindowBars
   const windowCenter = Math.max(padding, focus + windowShiftBars.value * intervalMs[interval.value])
   return {
     research_id: researchId.value,
@@ -68,8 +68,10 @@ function selectInterval(value: string) {
   if (value === '1s') source.value = 'archive'
 }
 function requestMore(direction: 'before' | 'after') {
-  windowShiftBars.value += direction === 'before' ? -2500 : 2500
+  const shiftBars = source.value === 'binance' ? 750 : 2500
+  windowShiftBars.value += direction === 'before' ? -shiftBars : shiftBars
 }
+watch(source, () => { windowShiftBars.value = 0 })
 const allAttributes = computed(() => ({ ...(tradeQuery.data.value?.parameters || {}), ...(tradeQuery.data.value?.strategy_data || {}), ...(tradeQuery.data.value?.metrics || {}), ...(tradeQuery.data.value?.attributes || {}) }))
 function eventContent(event: { data?: Record<string, unknown>; description?: string | null; price?: number | null }): string {
   if (event.description) return event.description

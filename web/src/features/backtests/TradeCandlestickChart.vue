@@ -188,8 +188,8 @@ async function renderChart() {
     }
   }
   timeScale.setVisibleLogicalRange({
-    from: Math.max(0, focusIndex - 30),
-    to: Math.min(barTimes.length - 1, focusIndex + 30)
+    from: Math.max(0, focusIndex - 15),
+    to: Math.min(barTimes.length - 1, focusIndex + 15)
   })
   timeScale.subscribeVisibleLogicalRangeChange(requestMore)
   unsubscribeRange = () => timeScale.unsubscribeVisibleLogicalRangeChange(requestMore)
