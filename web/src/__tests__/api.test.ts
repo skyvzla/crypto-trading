@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { api, ApiError } from '@/api/client'
+import { backtestApi } from '@/api/backtests'
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -39,6 +40,22 @@ describe('api client', () => {
       expect.stringContaining('/api/v1/positions'),
       expect.anything()
     )
+  })
+
+  it('backtest candles includes research id for archive resolution', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ symbol: 'AKEUSDT', interval: '5m', source: 'archive', candles: [] })
+    } as Response)
+
+    await backtestApi.candles({
+      research_id: 'research-7', symbol: 'AKEUSDT', interval: '5m',
+      start_ms: 1000, end_ms: 2000, source: 'archive'
+    })
+
+    const [url] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(url).toContain('research_id=research-7')
+    expect(url).toContain('source=archive')
   })
 
   it('put sends JSON body', async () => {

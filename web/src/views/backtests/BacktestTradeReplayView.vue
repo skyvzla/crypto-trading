@@ -34,7 +34,7 @@ const candleParams = computed(() => {
   const exit = timestampMs(trade.exit_time) ?? entry
   if (entry === null) return null
   const padding = windowDays[interval.value] * 86_400_000
-  return { symbol: trade.symbol, interval: interval.value, start_ms: entry - padding, end_ms: Math.max(entry, exit || entry) + padding, source: source.value }
+  return { research_id: researchId.value, symbol: trade.symbol, interval: interval.value, start_ms: entry - padding, end_ms: Math.max(entry, exit || entry) + padding, source: source.value }
 })
 const candlesQuery = useQuery({
   queryKey: computed(() => ['backtest-candles', candleParams.value]),

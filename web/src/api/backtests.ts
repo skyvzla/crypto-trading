@@ -43,6 +43,7 @@ export const backtestApi = {
       `/backtest-researches/${segment(researchId)}/trades/${segment(tradeId)}/events`
     ),
   candles: (query: {
+    research_id: string
     symbol: string
     interval: string
     start_ms: number
