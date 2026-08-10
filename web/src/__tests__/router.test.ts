@@ -17,7 +17,13 @@ describe('router', () => {
         'stats',
         'symbols',
         'universe',
-        'admissions'
+        'admissions',
+        'backtests',
+        'backtest-reports',
+        'backtest-report-detail',
+        'backtest-symbols',
+        'backtest-symbol-trades',
+        'backtest-trade-replay'
       ])
     )
   })
@@ -38,5 +44,11 @@ describe('router', () => {
   it('resolves deep links correctly', () => {
     expect(router.resolve('/positions').name).toBe('positions')
     expect(router.resolve('/stats').name).toBe('stats')
+    expect(router.resolve('/backtests').name).toBe('backtests')
+    expect(router.resolve('/backtests/r-1/reports').name).toBe('backtest-reports')
+    expect(router.resolve('/backtests/r-1/reports/pnl_bucket').name).toBe('backtest-report-detail')
+    expect(router.resolve('/backtests/r-1/symbols').name).toBe('backtest-symbols')
+    expect(router.resolve('/backtests/r-1/symbols/AKEUSDT/trades').name).toBe('backtest-symbol-trades')
+    expect(router.resolve('/backtests/r-1/trades/t-1').name).toBe('backtest-trade-replay')
   })
 })

@@ -1,0 +1,62 @@
+import { api, ApiError } from '@/api/client'
+import type {
+  BacktestCandlesResponse,
+  BacktestEvent,
+  BacktestReportPage,
+  BacktestResearch,
+  BacktestStrategyDescriptor,
+  BacktestSymbolSummary,
+  BacktestTradeDetail,
+  BacktestTradeSummary,
+  Page,
+  ReportDescriptor
+} from '@/api/types'
+
+const segment = (value: string) => encodeURIComponent(value)
+
+export const backtestApi = {
+  researches: (limit: number, offset: number) =>
+    api.get<Page<BacktestResearch>>('/backtest-researches', { limit, offset }),
+  reports: (researchId: string) =>
+    api.get<{ items: ReportDescriptor[] }>(`/backtest-researches/${segment(researchId)}/reports`),
+  report: (researchId: string, type: string, limit: number, offset: number) =>
+    api.get<BacktestReportPage>(
+      `/backtest-researches/${segment(researchId)}/reports/${segment(type)}`,
+      { limit, offset }
+    ),
+  symbols: (researchId: string, limit: number, offset: number) =>
+    api.get<Page<BacktestSymbolSummary>>(
+      `/backtest-researches/${segment(researchId)}/symbols`,
+      { limit, offset }
+    ),
+  trades: (researchId: string, symbol: string, limit: number, offset: number) =>
+    api.get<Page<BacktestTradeSummary>>(
+      `/backtest-researches/${segment(researchId)}/symbols/${segment(symbol)}/trades`,
+      { limit, offset }
+    ),
+  trade: (researchId: string, tradeId: string) =>
+    api.get<BacktestTradeDetail>(
+      `/backtest-researches/${segment(researchId)}/trades/${segment(tradeId)}`
+    ),
+  events: (researchId: string, tradeId: string) =>
+    api.get<{ items: BacktestEvent[] }>(
+      `/backtest-researches/${segment(researchId)}/trades/${segment(tradeId)}/events`
+    ),
+  candles: (query: {
+    symbol: string
+    interval: string
+    start_ms: number
+    end_ms: number
+    source: 'binance' | 'archive'
+  }) => api.get<BacktestCandlesResponse>('/backtest-candles', query),
+  strategySchema: async (strategyId: string): Promise<BacktestStrategyDescriptor | null> => {
+    try {
+      return await api.get<BacktestStrategyDescriptor>(
+        `/backtest-strategies/${segment(strategyId)}/schema`
+      )
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  }
+}

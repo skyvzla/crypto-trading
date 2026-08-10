@@ -3,6 +3,12 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 // 骨架阶段所有视图都指向同一个占位组件；接口定稿后逐个替换 component。
 const Placeholder = () => import('@/views/PlaceholderView.vue')
 const Universe = () => import('@/views/UniverseView.vue')
+const BacktestResearchList = () => import('@/views/backtests/BacktestResearchListView.vue')
+const BacktestReportCatalog = () => import('@/views/backtests/BacktestReportCatalogView.vue')
+const BacktestReportDetail = () => import('@/views/backtests/BacktestReportDetailView.vue')
+const BacktestSymbolList = () => import('@/views/backtests/BacktestSymbolListView.vue')
+const BacktestTradeList = () => import('@/views/backtests/BacktestTradeListView.vue')
+const BacktestTradeReplay = () => import('@/views/backtests/BacktestTradeReplayView.vue')
 
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/overview' },
@@ -47,6 +53,42 @@ const routes: RouteRecordRaw[] = [
     name: 'universe',
     component: Universe,
     meta: { title: '交易对管理', ready: true }
+  },
+  {
+    path: '/backtests',
+    name: 'backtests',
+    component: BacktestResearchList,
+    meta: { title: '回测复盘', ready: true }
+  },
+  {
+    path: '/backtests/:researchId/reports',
+    name: 'backtest-reports',
+    component: BacktestReportCatalog,
+    meta: { title: '回测分析报表', ready: true }
+  },
+  {
+    path: '/backtests/:researchId/reports/:reportType',
+    name: 'backtest-report-detail',
+    component: BacktestReportDetail,
+    meta: { title: '回测报表详情', ready: true }
+  },
+  {
+    path: '/backtests/:researchId/symbols',
+    name: 'backtest-symbols',
+    component: BacktestSymbolList,
+    meta: { title: '回测交易对', ready: true }
+  },
+  {
+    path: '/backtests/:researchId/symbols/:symbol/trades',
+    name: 'backtest-symbol-trades',
+    component: BacktestTradeList,
+    meta: { title: '回测交易记录', ready: true }
+  },
+  {
+    path: '/backtests/:researchId/trades/:tradeId',
+    name: 'backtest-trade-replay',
+    component: BacktestTradeReplay,
+    meta: { title: '单笔 K 线复盘', ready: true }
   },
   {
     path: '/admissions',

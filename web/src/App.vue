@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted } from 'vue'
+import { FlaskConical } from 'lucide-vue-next'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import {
   NConfigProvider,
@@ -11,6 +12,7 @@ import {
   NMessageProvider,
   NBadge,
   NText,
+  NIcon,
   zhCN,
   dateZhCN,
   type MenuOption
@@ -28,14 +30,16 @@ const menuOptions: MenuOption[] = [
   { key: 'trades', label: '成交与买卖点', to: '/trades' },
   { key: 'stats', label: '胜率与盈亏比', to: '/stats' },
   { key: 'symbols', label: '交易对统计', to: '/symbols' },
+  { key: 'backtests', label: '回测复盘', to: '/backtests', icon: FlaskConical },
   { key: 'universe', label: '交易对管理', to: '/universe' },
   { key: 'admissions', label: 'Subcategory 管理', to: '/admissions' }
 ].map((item) => ({
   key: item.key,
-  label: () => h(RouterLink, { to: item.to }, { default: () => item.label })
+  label: () => h(RouterLink, { to: item.to }, { default: () => item.label }),
+  icon: item.icon ? () => h(NIcon, { component: item.icon }) : undefined
 }))
 
-const activeKey = computed(() => String(route.name ?? ''))
+const activeKey = computed(() => String(route.name ?? '').startsWith('backtest') ? 'backtests' : String(route.name ?? ''))
 const title = computed(() => String(route.meta.title ?? ''))
 const healthType = computed(() =>
   health.status === 'healthy'
@@ -65,7 +69,7 @@ onMounted(health.check)
   >
     <NMessageProvider>
     <NLayout has-sider position="absolute">
-      <NLayoutSider bordered :width="220" content-style="display:flex;flex-direction:column">
+      <NLayoutSider bordered :width="220" :collapsed-width="56" collapse-mode="width" show-trigger="bar" :native-scrollbar="false" content-style="display:flex;flex-direction:column">
         <div class="brand">
           <span class="brand-mark">TL</span>
           <span class="brand-name">Trade Ledger</span>
