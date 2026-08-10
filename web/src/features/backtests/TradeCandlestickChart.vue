@@ -142,7 +142,7 @@ async function renderChart() {
   createSeriesMarkers(series, [...markers, ...overlayMarkers].sort((a, b) => Number(a.time) - Number(b.time)))
   const eventPrices = new Map<number, number[]>()
   const addEventPrice = (value: string | number | null | undefined, price: number | null | undefined) => {
-    const time = seconds(value)
+    const time = markerTime(value)
     if (time === null || typeof price !== 'number') return
     eventPrices.set(Number(time), [...(eventPrices.get(Number(time)) || []), price])
   }
