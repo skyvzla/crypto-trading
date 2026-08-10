@@ -39,6 +39,8 @@ scripts/deploy.sh
 ```
 
 开发 API：行情层 `http://localhost:8000`，账本层 `http://localhost:8001`。
+前端开发服务器监听 `0.0.0.0:5173`，内网设备访问
+`http://<宿主机内网IP>:5173/ui/backtests`；`/api` 请求由 Vite 代理到宿主机账本服务。
 历史行情数据不随代码仓迁移，回测时通过 Compose 挂载的 `data/` 目录提供。
 
 当前已修复 testnet URL 隔离、行情订阅刷新和 combined stream 解包，并有回归测试。
