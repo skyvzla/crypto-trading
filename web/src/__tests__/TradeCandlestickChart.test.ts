@@ -103,4 +103,19 @@ describe('TradeCandlestickChart', () => {
     expect(setData).toHaveBeenLastCalledWith(expect.arrayContaining([expect.objectContaining({ time: start + 80 })]))
     expect(setVisibleRange).toHaveBeenCalledWith({ from: 1_754_000_030, to: 1_754_000_060 })
   })
+
+  it('目标成交尚未加载时不把视窗推到数据边缘', async () => {
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 61 }, (_, index) => ({ time: start + index, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }))
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        trade: { id: 't-4', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: (start + 30) * 1000, entry_price: 1.1, exit_time: (start + 600) * 1000, net_pnl: 1 }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const rangeCalls = setVisibleLogicalRange.mock.calls.length
+    ;(wrapper.vm as unknown as { focusExit: () => void }).focusExit()
+    expect(setVisibleLogicalRange).toHaveBeenCalledTimes(rangeCalls)
+  })
 })

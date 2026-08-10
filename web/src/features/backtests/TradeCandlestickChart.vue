@@ -304,6 +304,7 @@ function focusEvent(value: string | number | null | undefined) {
   const time = seconds(value)
   if (!time || !chart || !props.candles.length) return
   const data = props.candles.map((bar) => Number(seconds(bar.time) || 0)).sort((a, b) => a - b)
+  if (Number(time) < data[0] || Number(time) > data[data.length - 1]) return
   let index = data.findIndex((item) => item >= Number(time))
   if (index < 0) index = data.length - 1
   chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, index - 30), to: Math.min(data.length - 1, index + 30) })
