@@ -90,8 +90,9 @@ class BacktestReportStore:
         async with self.pool.connection() as connection:
             async with connection.transaction():
                 await connection.execute(
-                    "DELETE FROM backtest_researches WHERE source_key = %s",
-                    (source_key,),
+                    "DELETE FROM backtest_researches "
+                    "WHERE source_key = %s OR report_path = %s",
+                    (source_key, metadata.source_path),
                 )
                 await connection.execute(
                     """
