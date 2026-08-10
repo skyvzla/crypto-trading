@@ -43,6 +43,7 @@ type ChartCandle = Omit<BacktestCandle, 'time'> & { time: UTCTimestamp }
 let renderedCandles: ChartCandle[] = []
 let renderedBarTimes: number[] = []
 let dataUpdaters: Array<(data: ChartCandle[]) => void> = []
+let suppressEdgeRequestsUntil = 0
 
 function seconds(value: string | number | null | undefined): UTCTimestamp | null {
   const ms = timestampMs(value)
@@ -274,7 +275,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   chart.subscribeCrosshairMove(handleCrosshair)
   unsubscribeCrosshair = () => chart?.unsubscribeCrosshairMove(handleCrosshair)
   const requestMore = (range: { from: number; to: number } | null) => {
-    if (!range) return
+    if (!range || Date.now() < suppressEdgeRequestsUntil) return
     const nearStart = range.from < 80
     const nearEnd = range.to > renderedBarTimes.length - 80
     const edge = nearStart ? 'before' : nearEnd ? 'after' : null
@@ -285,6 +286,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
       requestedEdge = null
     }
   }
+  suppressEdgeRequestsUntil = Date.now() + 500
   if (preservedRange) timeScale.setVisibleRange(preservedRange)
   else timeScale.setVisibleLogicalRange({
     from: Math.max(0, focusIndex - 30),
@@ -307,6 +309,7 @@ function focusEvent(value: string | number | null | undefined) {
   if (Number(time) < data[0] || Number(time) > data[data.length - 1]) return
   let index = data.findIndex((item) => item >= Number(time))
   if (index < 0) index = data.length - 1
+  suppressEdgeRequestsUntil = Date.now() + 500
   chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, index - 30), to: Math.min(data.length - 1, index + 30) })
 }
 
@@ -337,7 +340,10 @@ async function updateChartData() {
   renderedCandles = nextData
   renderedBarTimes = nextData.map((bar) => Number(bar.time))
   dataUpdaters.forEach((update) => update(nextData))
-  if (visibleRange) chart.timeScale().setVisibleRange(visibleRange)
+  if (visibleRange) {
+    suppressEdgeRequestsUntil = Date.now() + 500
+    chart.timeScale().setVisibleRange(visibleRange)
+  }
 }
 
 watch(() => props.candles, updateChartData, { deep: true })
