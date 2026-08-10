@@ -3,6 +3,7 @@ import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import {
   CandlestickSeries,
   ColorType,
+  CrosshairMode,
   LineStyle,
   createChart,
   createSeriesMarkers,
@@ -46,7 +47,7 @@ async function renderChart() {
     grid: { vertLines: { color: '#1c242d' }, horzLines: { color: '#1c242d' } },
     rightPriceScale: { borderColor: '#303944' },
     timeScale: { borderColor: '#303944', timeVisible: true, secondsVisible: false },
-    crosshair: { vertLine: { color: '#73808f' }, horzLine: { color: '#73808f' } },
+    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#73808f' }, horzLine: { color: '#73808f' } },
     localization: { locale: 'zh-CN' }
   })
   const series = chart.addSeries(CandlestickSeries, {
@@ -115,13 +116,13 @@ async function renderChart() {
   else if (signalTime) markers.push({ time: signalTime, position: 'aboveBar', color: '#e0a526', shape: 'circle', text: '信号' })
   for (const fill of props.trade.fills || []) {
     const time = markerTime(fill.time)
-    if (time) markers.push({ time, position: 'atPriceTop', price: fill.price, color: '#f2f4f7', shape: 'arrowDown', text: `成交${fill.tier ? ` T${fill.tier}` : ''} ${fill.price}` })
+    if (time) markers.push({ time, position: 'atPriceTop', price: fill.price, color: '#1677ff', shape: 'arrowDown', text: `成交${fill.tier ? ` T${fill.tier}` : ''}` })
   }
   const entryTime = markerTime(props.trade.entry_time)
   if (entryTime && !(props.trade.fills?.length)) markers.push({ time: entryTime, position: 'aboveBar', color: '#f2f4f7', shape: 'arrowDown', text: '开仓' })
   const exitTime = markerTime(props.trade.exit_time)
-  if (exitTime && props.trade.exit_price != null) markers.push({ time: exitTime, position: 'atPriceBottom', price: props.trade.exit_price, color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: 'arrowUp', text: `退出 ${props.trade.exit_reason || ''}` })
-  else if (exitTime) markers.push({ time: exitTime, position: 'belowBar', color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: 'arrowUp', text: `退出 ${props.trade.exit_reason || ''}` })
+  if (exitTime && props.trade.exit_price != null) markers.push({ time: exitTime, position: 'atPriceBottom', price: props.trade.exit_price, color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: 'arrowUp', text: '退出' })
+  else if (exitTime) markers.push({ time: exitTime, position: 'belowBar', color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: 'arrowUp', text: '退出' })
   createSeriesMarkers(series, [...markers, ...overlayMarkers].sort((a, b) => Number(a.time) - Number(b.time)))
   chart.timeScale().fitContent()
 

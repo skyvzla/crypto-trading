@@ -70,10 +70,13 @@ async def get_report(
     report_type: str,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    sort_by: str | None = Query(None, max_length=128),
+    sort_order: Literal["asc", "desc"] = "desc",
     repository: BacktestRepository = Depends(get_repository),
 ) -> dict:
     descriptor, rows = await repository.get_report(
-        research_id, report_type, limit=limit, offset=offset
+        research_id, report_type, limit=limit, offset=offset,
+        sort_by=sort_by, sort_order=sort_order,
     )
     if descriptor is None:
         raise HTTPException(status_code=404, detail="backtest report not found")

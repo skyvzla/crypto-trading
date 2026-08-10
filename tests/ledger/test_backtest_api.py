@@ -26,7 +26,7 @@ class FakeBacktestRepository:
     async def list_reports(self, research_id):
         return [{"report_type": "parameter_summary", "title": "参数汇总", "columns": [], "row_count": 1}]
 
-    async def get_report(self, research_id, report_type, *, limit, offset):
+    async def get_report(self, research_id, report_type, *, limit, offset, sort_by=None, sort_order="desc"):
         if report_type == "missing":
             return None, []
         return ({"report_type": report_type, "columns": [{"key": "net_pnl"}], "row_count": 1}, [{"net_pnl": 12.5}])

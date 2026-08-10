@@ -83,6 +83,8 @@ class BacktestRepository:
         *,
         limit: int,
         offset: int,
+        sort_by: str | None = None,
+        sort_order: str = "desc",
     ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         descriptor = await self._fetchone(
             "SELECT report_type AS type, title, category, description, columns, "
@@ -92,11 +94,30 @@ class BacktestRepository:
         )
         if descriptor is None:
             return None, []
+        columns = descriptor.get("columns") or []
+        allowed = {
+            item if isinstance(item, str) else item.get("key")
+            for item in columns
+        }
+        if sort_by not in allowed:
+            sort_by = None
+        direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+        if sort_by is None:
+            order_sql = "row_index"
+            order_values: tuple[object, ...] = ()
+        else:
+            column = next(
+                (item for item in columns if isinstance(item, dict) and item.get("key") == sort_by),
+                {},
+            )
+            expression = "(data->>%s)::NUMERIC" if column.get("type") == "number" else "data->>%s"
+            order_sql = f"{expression} {direction} NULLS LAST, row_index"
+            order_values = (sort_by,)
         rows = await self._fetchall(
             "SELECT data FROM backtest_report_rows "
             "WHERE research_id = %s AND report_type = %s "
-            "ORDER BY row_index LIMIT %s OFFSET %s",
-            (research_id, report_type, limit, offset),
+            f"ORDER BY {order_sql} LIMIT %s OFFSET %s",
+            (research_id, report_type, *order_values, limit, offset),
         )
         return descriptor, [row["data"] for row in rows]
 

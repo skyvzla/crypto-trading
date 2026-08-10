@@ -56,7 +56,11 @@ onMounted(health.check)
           <h1>{{ title }}</h1>
         </a-layout-header>
         <a-layout-content class="workspace">
-          <RouterView />
+          <RouterView v-slot="{ Component }">
+            <KeepAlive :max="12">
+              <component :is="Component" />
+            </KeepAlive>
+          </RouterView>
         </a-layout-content>
       </a-layout>
   </a-layout>

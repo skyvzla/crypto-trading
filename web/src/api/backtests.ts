@@ -19,10 +19,10 @@ export const backtestApi = {
     api.get<Page<BacktestResearch>>('/backtest-researches', { limit, offset }),
   reports: (researchId: string) =>
     api.get<{ items: ReportDescriptor[] }>(`/backtest-researches/${segment(researchId)}/reports`),
-  report: (researchId: string, type: string, limit: number, offset: number) =>
+  report: (researchId: string, type: string, limit: number, offset: number, sortBy?: string, sortOrder?: string) =>
     api.get<BacktestReportPage>(
       `/backtest-researches/${segment(researchId)}/reports/${segment(type)}`,
-      { limit, offset }
+      { limit, offset, ...(sortBy ? { sort_by: sortBy, sort_order: sortOrder || 'desc' } : {}) }
     ),
   symbols: (researchId: string, limit: number, offset: number) =>
     api.get<Page<BacktestSymbolSummary>>(

@@ -11,6 +11,7 @@ const disconnect = vi.fn()
 vi.mock('lightweight-charts', () => ({
   CandlestickSeries: {},
   ColorType: { Solid: 'solid' },
+  CrosshairMode: { Normal: 0 },
   createSeriesMarkers: vi.fn(),
   createChart: vi.fn(() => ({
     addSeries: () => ({ setData, createPriceLine }),
