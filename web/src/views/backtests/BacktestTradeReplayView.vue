@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, RefreshCw } from 'lucide-vue-next'
+import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, Maximize2, Minimize2, RefreshCw } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import type { BacktestCandle } from '@/api/types'
@@ -31,6 +31,8 @@ const interval = ref('5m')
 const source = ref<'binance' | 'archive'>('binance')
 const windowShiftBars = ref(0)
 const chartRef = ref<InstanceType<typeof TradeCandlestickChart> | null>(null)
+const chartSection = ref<HTMLElement | null>(null)
+const isFullscreen = ref(false)
 const indicators = ref({ volume: true, macd: false, ema: false, kdj: false })
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
@@ -87,6 +89,16 @@ function requestMore(direction: 'before' | 'after') {
   const shiftBars = 750
   windowShiftBars.value += direction === 'before' ? -shiftBars : shiftBars
 }
+async function toggleFullscreen() {
+  if (!chartSection.value) return
+  if (document.fullscreenElement === chartSection.value) await document.exitFullscreen()
+  else await chartSection.value.requestFullscreen()
+}
+function syncFullscreenState() {
+  isFullscreen.value = document.fullscreenElement === chartSection.value
+}
+onMounted(() => document.addEventListener('fullscreenchange', syncFullscreenState))
+onBeforeUnmount(() => document.removeEventListener('fullscreenchange', syncFullscreenState))
 watch(() => candlesQuery.data.value, (response) => {
   if (!response) return
   if (response.interval !== interval.value || response.source !== source.value) return
@@ -121,7 +133,7 @@ const backTo = computed(() => tradeQuery.data.value ? `/backtests/${encodeURICom
           <div><span>退出原因</span><strong>{{ tradeQuery.data.value.exit_reason || '-' }}</strong></div>
         </div>
 
-        <section class="chart-section">
+        <section ref="chartSection" class="chart-section">
           <div class="chart-toolbar">
             <a-radio-group :value="interval" size="small" @change="(event: { target: { value: string } }) => selectInterval(event.target.value)"><a-radio-button v-for="item in intervals" :key="item" :value="item">{{ item }}</a-radio-button></a-radio-group>
             <div class="source-tools">
@@ -139,6 +151,7 @@ const backTo = computed(() => tradeQuery.data.value ? `/backtests/${encodeURICom
               <a-tooltip title="跳转到退出成交"><a-button type="text" class="chart-tool-button" @click="focusTradeEvent('exit')"><template #icon><ArrowDownToLine :size="15" /></template>退出成交</a-button></a-tooltip>
               <a-spin v-if="candlesQuery.isFetching.value" size="small" />
               <a-tooltip title="刷新 K 线"><a-button type="text" shape="circle" aria-label="刷新K线" @click="candlesQuery.refetch()"><template #icon><RefreshCw :size="16" /></template></a-button></a-tooltip>
+              <a-tooltip :title="isFullscreen ? '退出全屏' : '全屏查看'"><a-button type="text" shape="circle" :aria-label="isFullscreen ? '退出全屏' : '全屏查看'" @click="toggleFullscreen"><template #icon><Minimize2 v-if="isFullscreen" :size="16" /><Maximize2 v-else :size="16" /></template></a-button></a-tooltip>
             </div>
           </div>
           <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading"><a-spin /><span>加载 {{ source === 'binance' ? 'Binance' : '本地归档' }} K线</span></div>
