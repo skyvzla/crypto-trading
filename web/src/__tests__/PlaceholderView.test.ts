@@ -1,7 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import PlaceholderView from '@/views/PlaceholderView.vue'
-import { NEmpty } from 'naive-ui'
 
 describe('PlaceholderView', () => {
   it('renders empty placeholder', () => {
@@ -12,6 +11,6 @@ describe('PlaceholderView', () => {
         }
       }
     })
-    expect(wrapper.findComponent(NEmpty).exists()).toBe(true)
+    expect(wrapper.findComponent({ name: 'AEmpty' }).exists()).toBe(true)
   })
 })

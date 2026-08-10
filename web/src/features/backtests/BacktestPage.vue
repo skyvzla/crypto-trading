@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ArrowLeft } from 'lucide-vue-next'
-import { NButton, NBreadcrumb, NBreadcrumbItem, NIcon, NTooltip } from 'naive-ui'
 import { useRouter, type RouteLocationRaw } from 'vue-router'
 
 defineProps<{
@@ -17,25 +16,22 @@ const router = useRouter()
   <section class="backtest-page">
     <div class="page-heading">
       <div class="heading-copy">
-        <NBreadcrumb>
-          <NBreadcrumbItem v-for="crumb in crumbs" :key="crumb.label">
+        <a-breadcrumb>
+          <a-breadcrumb-item v-for="crumb in crumbs" :key="crumb.label">
             <RouterLink v-if="crumb.to" :to="crumb.to">{{ crumb.label }}</RouterLink>
             <span v-else>{{ crumb.label }}</span>
-          </NBreadcrumbItem>
-        </NBreadcrumb>
+          </a-breadcrumb-item>
+        </a-breadcrumb>
         <span v-if="eyebrow" class="eyebrow">{{ eyebrow }}</span>
         <h2>{{ title }}</h2>
       </div>
       <div class="page-actions">
         <slot name="actions" />
-        <NTooltip v-if="backTo" trigger="hover">
+        <a-tooltip v-if="backTo" title="返回">
           <template #trigger>
-            <NButton quaternary circle aria-label="返回" @click="router.push(backTo!)">
-              <template #icon><NIcon :component="ArrowLeft" /></template>
-            </NButton>
+            <a-button type="text" shape="circle" aria-label="返回" @click="router.push(backTo!)"><ArrowLeft :size="16" /></a-button>
           </template>
-          返回
-        </NTooltip>
+        </a-tooltip>
       </div>
     </div>
     <slot />

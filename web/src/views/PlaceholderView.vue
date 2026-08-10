@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { NCard, NEmpty, NTag, NSpace } from 'naive-ui'
 
 const route = useRoute()
 const title = computed(() => String(route.meta.title ?? route.name ?? ''))
@@ -11,16 +10,16 @@ const needsApi = computed(() =>
 </script>
 
 <template>
-  <NCard :title="title" :bordered="true">
-    <NEmpty description="视图待实现">
+  <a-card :title="title">
+    <a-empty description="视图待实现">
       <template #extra>
-        <NSpace vertical align="center" :size="8">
-          <NTag :bordered="false" size="small" type="info">骨架阶段</NTag>
-          <NTag v-if="needsApi" :bordered="false" size="small" type="warning">
+        <a-space direction="vertical" align="center" :size="8">
+          <a-tag color="blue">骨架阶段</a-tag>
+          <a-tag v-if="needsApi" color="orange">
             依赖后端：{{ needsApi }}
-          </NTag>
-        </NSpace>
+          </a-tag>
+        </a-space>
       </template>
-    </NEmpty>
-  </NCard>
+    </a-empty>
+  </a-card>
 </template>

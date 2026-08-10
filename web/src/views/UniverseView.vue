@@ -1,20 +1,9 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
 import {
-  NButton,
-  NDataTable,
-  NDescriptions,
-  NDescriptionsItem,
-  NInput,
-  NModal,
-  NSpace,
-  NSwitch,
-  NTabPane,
-  NTabs,
-  NTag,
-  useMessage,
-  type DataTableColumns
-} from 'naive-ui'
+  Button, Switch, Tag, message,
+  type TableColumnsType
+} from 'ant-design-vue'
 import { api } from '@/api/client'
 import type {
   ExchangeCategory,
@@ -23,7 +12,6 @@ import type {
   StrategyCategoryAdmission
 } from '@/api/types'
 
-const message = useMessage()
 const symbols = ref<ExchangeSymbol[]>([])
 const categories = ref<ExchangeCategory[]>([])
 const categoryAdmissions = ref(new Map<string, StrategyCategoryAdmission>())
@@ -162,47 +150,47 @@ async function openSymbol(item: ExchangeSymbol) {
   }
 }
 
-const symbolColumns: DataTableColumns<ExchangeSymbol> = [
+const symbolColumns: TableColumnsType<ExchangeSymbol> = [
   {
     title: '交易对',
     key: 'symbol',
     width: 150,
-    render: (row) =>
+    customRender: ({ record: row }) =>
       h(
-        NButton,
+        Button,
         { text: true, type: 'primary', onClick: () => openSymbol(row) },
         { default: () => row.symbol }
       )
   },
-  { title: '基础资产', key: 'base_asset', width: 110 },
-  { title: '计价资产', key: 'quote_asset', width: 110 },
+  { title: '基础资产', key: 'base_asset', dataIndex: 'base_asset', width: 110 },
+  { title: '计价资产', key: 'quote_asset', dataIndex: 'quote_asset', width: 110 },
   {
     title: '合约',
     key: 'contract_type',
     width: 130,
-    render: (row) => h(NTag, { size: 'small', bordered: false }, { default: () => row.contract_type })
+    customRender: ({ record: row }) => h(Tag, { color: 'blue' }, () => row.contract_type)
   },
   {
     title: '状态',
     key: 'status',
     width: 110,
-    render: (row) =>
+    customRender: ({ record: row }) =>
       h(
-        NTag,
-        { size: 'small', bordered: false, type: row.status === 'TRADING' ? 'success' : 'warning' },
-        { default: () => row.status }
+        Tag,
+        { color: row.status === 'TRADING' ? 'success' : 'warning' },
+        () => row.status
       )
   },
-  { title: 'Category', key: 'underlying_type', width: 130 },
+  { title: 'Category', key: 'underlying_type', dataIndex: 'underlying_type', width: 130 },
   {
     title: '全局开关',
     key: 'global_enabled',
     width: 110,
-    render: (row) =>
-      h(NSwitch, {
+    customRender: ({ record: row }) =>
+      h(Switch, {
         value: row.global_enabled,
         loading: updatingSymbols.value.has(row.symbol),
-        onUpdateValue: (value) => setSymbolEnabled(row, value)
+        onChange: (value) => setSymbolEnabled(row, Boolean(value))
       })
   }
 ]
@@ -212,27 +200,26 @@ onMounted(() => Promise.all([loadSymbols(), loadCategoryPolicy()]))
 
 <template>
   <div class="universe-page">
-    <NTabs type="line" animated>
-      <NTabPane name="symbols" tab="交易对">
+    <a-tabs type="line" animated>
+      <a-tab-pane key="symbols" tab="交易对">
         <div class="toolbar">
-          <NInput v-model:value="search" clearable placeholder="搜索交易对或资产" />
-          <NTag :bordered="false" type="info">{{ filteredSymbols.length }} / {{ symbols.length }}</NTag>
+          <a-input v-model:value="search" allow-clear placeholder="搜索交易对或资产" />
+          <a-tag color="blue">{{ filteredSymbols.length }} / {{ symbols.length }}</a-tag>
         </div>
-        <NDataTable
+        <a-table
           :columns="symbolColumns"
-          :data="filteredSymbols"
+          :data-source="filteredSymbols"
           :loading="loading"
-          :row-key="(row: ExchangeSymbol) => row.symbol"
-          :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"
-          :scroll-x="850"
-          striped
+          row-key="symbol"
+          :pagination="{ pageSize: 25, showSizeChanger: true, pageSizeOptions: ['25', '50', '100'] }"
+          :scroll="{ x: 850 }"
         />
-      </NTabPane>
+      </a-tab-pane>
 
-      <NTabPane name="categories" tab="策略分类">
+      <a-tab-pane key="categories" tab="策略分类">
         <div class="toolbar strategy-toolbar">
-          <NInput v-model:value="strategyId" placeholder="策略 ID" @keyup.enter="loadCategoryPolicy" />
-          <NButton type="primary" :loading="categoryLoading" @click="loadCategoryPolicy">加载</NButton>
+          <a-input v-model:value="strategyId" placeholder="策略 ID" @keyup.enter="loadCategoryPolicy" />
+          <a-button type="primary" :loading="categoryLoading" @click="loadCategoryPolicy">加载</a-button>
         </div>
         <div class="category-list">
           <div
@@ -243,45 +230,45 @@ onMounted(() => Promise.all([loadSymbols(), loadCategoryPolicy()]))
           >
             <div class="category-name">
               <span>{{ item.name }}</span>
-              <NTag size="small" :bordered="false" type="default">
+              <a-tag>
                 {{ item.category_type === 'CATEGORY' ? 'Category' : 'Subcategory' }}
-              </NTag>
-              <NTag
+              </a-tag>
+              <a-tag
                 v-if="!categoryAdmissions.has(item.category_key)"
                 size="small"
                 :bordered="false"
                 type="info"
-              >默认</NTag>
+              color="blue">默认</a-tag>
             </div>
-            <NSwitch
+            <a-switch
               :value="categoryEnabled(item)"
               :loading="updatingCategories.has(item.category_key)"
-              @update:value="(value: boolean) => setCategoryEnabled(item, value)"
+              @change="(value: boolean | string) => setCategoryEnabled(item, value === true || value === 'true')"
             />
           </div>
         </div>
-      </NTabPane>
-    </NTabs>
+      </a-tab-pane>
+    </a-tabs>
 
-    <NModal v-model:show="detailOpen" preset="card" :title="selectedSymbol?.symbol" class="detail-modal">
-      <NDescriptions v-if="selectedSymbol" :column="2" label-placement="top" bordered>
-        <NDescriptionsItem label="基础资产">{{ selectedSymbol.base_asset || '-' }}</NDescriptionsItem>
-        <NDescriptionsItem label="计价资产">{{ selectedSymbol.quote_asset || '-' }}</NDescriptionsItem>
-        <NDescriptionsItem label="合约类型">{{ selectedSymbol.contract_type }}</NDescriptionsItem>
-        <NDescriptionsItem label="交易状态">{{ selectedSymbol.status }}</NDescriptionsItem>
-        <NDescriptionsItem label="上架时间">{{ selectedSymbol.onboard_date || '-' }}</NDescriptionsItem>
-        <NDescriptionsItem label="下架时间">{{ selectedSymbol.delivery_date || '-' }}</NDescriptionsItem>
-      </NDescriptions>
-      <NSpace class="detail-categories" :size="8" wrap>
-        <NTag v-for="item in selectedCategories" :key="item.category_key" :type="item.category_type === 'CATEGORY' ? 'info' : 'default'">
+    <a-modal v-model:open="detailOpen" :title="selectedSymbol?.symbol" class="detail-modal" :footer="null">
+      <a-descriptions v-if="selectedSymbol" :column="2" layout="vertical" bordered>
+        <a-descriptions-item label="基础资产">{{ selectedSymbol.base_asset || '-' }}</a-descriptions-item>
+        <a-descriptions-item label="计价资产">{{ selectedSymbol.quote_asset || '-' }}</a-descriptions-item>
+        <a-descriptions-item label="合约类型">{{ selectedSymbol.contract_type }}</a-descriptions-item>
+        <a-descriptions-item label="交易状态">{{ selectedSymbol.status }}</a-descriptions-item>
+        <a-descriptions-item label="上架时间">{{ selectedSymbol.onboard_date || '-' }}</a-descriptions-item>
+        <a-descriptions-item label="下架时间">{{ selectedSymbol.delivery_date || '-' }}</a-descriptions-item>
+      </a-descriptions>
+      <a-space class="detail-categories" :size="8" wrap>
+        <a-tag v-for="item in selectedCategories" :key="item.category_key" :color="item.category_type === 'CATEGORY' ? 'blue' : undefined">
           {{ item.name }}
-        </NTag>
-      </NSpace>
-    </NModal>
+        </a-tag>
+      </a-space>
+    </a-modal>
   </div>
 </template>
 
-<style scoped>
+<style scoped lang="less">
 .universe-page {
   max-width: 1400px;
 }

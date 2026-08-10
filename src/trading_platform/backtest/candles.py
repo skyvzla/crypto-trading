@@ -14,6 +14,7 @@ from trading_platform.market.archive.index import load_archive_index
 
 BINANCE_KLINE_URL = "https://fapi.binance.com/fapi/v1/klines"
 INTERVAL_MS = {
+    "1s": 1_000,
     "1m": 60_000,
     "5m": 300_000,
     "15m": 900_000,
@@ -25,6 +26,7 @@ INTERVAL_MS = {
     "1d": 86_400_000,
 }
 _DUCKDB_INTERVAL = {
+    "1s": "1 second",
     "1m": "1 minute",
     "5m": "5 minutes",
     "15m": "15 minutes",
@@ -126,7 +128,7 @@ def load_archive_candles(
     if not index_path.is_file():
         raise FileNotFoundError(f"archive index not found: {index_path}")
     index = load_archive_index(index_path)
-    preferred = interval if interval in {"1m", "5m", "15m"} else "1m"
+    preferred = interval if interval in {"1s", "1m", "5m", "15m"} else "1m"
     selected = index[
         (index["symbol"] == symbol)
         & (index["timeframe"] == preferred)

@@ -1,13 +1,13 @@
-/* 只放 Naive UI 覆盖不到的全局项；组件配色一律走 theme.ts。 */
-:root {
-  color-scheme: dark;
-  --primary: #3b82f6;
-  --line: #22304a;
-}
+/* 页面布局与业务展示样式；控件使用 Ant Design Vue 默认样式。 */
+@line: #f0f0f0;
+@muted: #667085;
+@surface: #fff;
+
+:root { --primary: #3b82f6; --line: @line; }
 
 .backtest-page {
   width: 100%;
-  max-width: 1680px;
+  max-width: none;
   margin: 0 auto;
 }
 
@@ -21,47 +21,56 @@
   border-bottom: 1px solid var(--line);
 }
 
-.heading-copy { min-width: 0; }
-.heading-copy h2 { margin: 5px 0 0; font-size: 20px; line-height: 1.25; letter-spacing: 0; }
+.heading-copy {
+  min-width: 0;
+  h2 { margin: 5px 0 0; font-size: 20px; line-height: 1.25; letter-spacing: 0; }
+}
 .eyebrow { display: block; margin-top: 12px; color: #d6a84b; font: 11px/1.2 monospace; text-transform: uppercase; overflow-wrap: anywhere; }
 .page-actions { display: flex; align-items: center; flex: 0 0 auto; }
-.page-description { margin: -6px 0 16px; color: #8ea3c0; }
-.table-frame { overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: #111a2b; }
-.pagination-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 54px; padding: 8px 14px; border-top: 1px solid var(--line); color: #8ea3c0; font-size: 12px; }
-.primary-cell { display: flex; flex-direction: column; gap: 2px; }
-.primary-cell small { color: #8ea3c0; font-family: monospace; overflow-wrap: anywhere; }
+.page-description { margin: -6px 0 16px; color: @muted; }
+.table-frame { overflow: hidden; border: 1px solid @line; border-radius: 6px; background: @surface; }
+.pagination-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 54px; padding: 8px 14px; border-top: 1px solid @line; color: @muted; font-size: 12px; }
+.primary-cell {
+  display: flex; flex-direction: column; gap: 2px;
+  small { color: @muted; font-family: monospace; overflow-wrap: anywhere; }
+}
 .symbol-name, .mono-value, .report-value { font-family: "JetBrains Mono", "IBM Plex Mono", monospace; }
 .report-value { display: block; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .value-positive { color: #34d399; }
 .value-negative { color: #f87171; }
-.query-state { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 240px; color: #8ea3c0; border: 1px solid var(--line); border-radius: 6px; }
+.query-state { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 240px; color: @muted; border: 1px solid @line; border-radius: 6px; background: @surface; }
 .error-state { color: #f87171; }
 .query-empty { min-height: 240px; padding-top: 72px; border: 1px solid var(--line); border-radius: 6px; }
-.catalog-list { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.catalog-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 90px auto; align-items: center; gap: 14px; min-height: 76px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: #111a2b; }
-.catalog-row:last-child { border-bottom: 0; }
-.catalog-row:hover { background: #16213a; }
+.catalog-list { border: 1px solid @line; border-radius: 6px; overflow: hidden; }
+.catalog-row {
+  display: grid; grid-template-columns: 28px minmax(0, 1fr) 90px auto; align-items: center; gap: 14px; min-height: 76px; padding: 12px 16px; border-bottom: 1px solid @line; background: @surface;
+  &:last-child { border-bottom: 0; }
+  &:hover { background: #fafafa; }
+}
 .catalog-icon { color: #d6a84b; }
-.catalog-copy { min-width: 0; }
-.catalog-copy > div { display: flex; align-items: center; gap: 8px; }
-.catalog-copy p { margin: 4px 0 0; color: #8ea3c0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-count { color: #8ea3c0; font-family: monospace; text-align: right; }
-.trade-summary-strip { display: grid; grid-template-columns: repeat(6, minmax(110px, 1fr)); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #111a2b; }
+.catalog-copy {
+  min-width: 0;
+  > div { display: flex; align-items: center; gap: 8px; }
+  p { margin: 4px 0 0; color: @muted; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+.row-count { color: @muted; font-family: monospace; text-align: right; }
+.trade-summary-strip { display: grid; grid-template-columns: repeat(6, minmax(110px, 1fr)); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #fff; }
 .trade-summary-strip > div { min-width: 0; padding: 11px 13px; border-right: 1px solid var(--line); }
 .trade-summary-strip > div:last-child { border-right: 0; }
-.trade-summary-strip span { display: block; margin-bottom: 4px; color: #8ea3c0; font-size: 11px; }
-.trade-summary-strip strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.trade-summary-strip {
+  span { display: block; margin-bottom: 4px; color: @muted; font-size: 11px; }
+  strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+}
 .chart-section { margin-top: 14px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: #0d1117; }
 .chart-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border-bottom: 1px solid var(--line); overflow-x: auto; }
-.source-tools { display: flex; align-items: center; gap: 5px; }
-.source-tools .n-icon { vertical-align: -2px; }
+.source-tools { display: flex; align-items: center; gap: 5px; svg { vertical-align: -2px; } }
 .candlestick-host { width: 100%; height: min(60vh, 620px); min-height: 420px; }
-.chart-loading { display: flex; align-items: center; justify-content: center; gap: 12px; height: 420px; color: #8ea3c0; }
-.chart-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; min-height: 36px; padding: 6px 12px; border-top: 1px solid var(--line); color: #8ea3c0; font-size: 11px; }
+.chart-loading { display: flex; align-items: center; justify-content: center; gap: 12px; height: 420px; color: @muted; }
+.chart-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; min-height: 36px; padding: 6px 12px; border-top: 1px solid @line; color: @muted; font-size: 11px; }
 .replay-details { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(300px, .6fr); gap: 14px; }
 .detail-section { margin-top: 14px; }
 .detail-section h3 { margin: 0 0 9px; font-size: 14px; letter-spacing: 0; }
-.timeline-section { padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #111a2b; }
+.timeline-section { padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
 .timeline-section .query-state, .timeline-section .query-empty { min-height: 120px; }
 .json-groups > .detail-section:first-child { margin-top: 0; }
 .schema-fallback { margin-bottom: 10px; }

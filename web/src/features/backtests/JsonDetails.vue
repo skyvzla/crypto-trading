@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { NDescriptions, NDescriptionsItem, NEmpty } from 'naive-ui'
 import type { JsonObject, StrategyField, StrategyGroup } from '@/api/types'
 import { displayValue } from './format'
 
@@ -19,19 +18,19 @@ const fieldGroups = computed<StrategyGroup[]>(() => {
 </script>
 
 <template>
-  <NEmpty v-if="!fieldGroups.length" description="无扩展参数" />
+  <a-empty v-if="!fieldGroups.length" description="无扩展参数" />
   <div v-else class="json-groups">
     <section v-for="group in fieldGroups" :key="group.key" class="detail-section">
       <h3>{{ group.label || group.key }}</h3>
-      <NDescriptions :column="3" label-placement="top" bordered responsive="screen">
-        <NDescriptionsItem
+      <a-descriptions :column="3" layout="vertical" bordered>
+        <a-descriptions-item
           v-for="field in group.fields.filter((item) => item.visible !== false)"
           :key="field.key"
           :label="field.label || field.key"
         >
           <span class="mono-value">{{ displayValue(value?.[field.key], field.format || field.type) }}</span>
-        </NDescriptionsItem>
-      </NDescriptions>
+        </a-descriptions-item>
+      </a-descriptions>
     </section>
   </div>
 </template>

@@ -105,6 +105,12 @@ class BacktestRepository:
     ) -> tuple[list[dict[str, Any]], int]:
         rows = await self._fetchall(
             """
+            WITH unique_trades AS (
+                SELECT DISTINCT ON (symbol, trade_id) *
+                FROM backtest_trades
+                WHERE research_id = %s
+                ORDER BY symbol, trade_id, run_id
+            )
             SELECT symbol,
                    COUNT(*)::BIGINT AS trade_count,
                    COUNT(*) FILTER (WHERE winner)::BIGINT AS win_count,
@@ -122,8 +128,7 @@ class BacktestRepository:
                    )::BIGINT
                        AS three_tier_count,
                    COUNT(DISTINCT run_id)::BIGINT AS run_count
-            FROM backtest_trades
-            WHERE research_id = %s
+            FROM unique_trades
             GROUP BY symbol
             ORDER BY net_pnl DESC, symbol
             LIMIT %s OFFSET %s
@@ -176,13 +181,19 @@ class BacktestRepository:
             "strategy_data AS metrics"
         )
         rows = await self._fetchall(
-            f"SELECT {fields} FROM backtest_trades WHERE {where} "
+            f"WITH unique_trades AS ("
+            f"SELECT DISTINCT ON (symbol, trade_id) * FROM backtest_trades "
+            f"WHERE research_id = %s ORDER BY symbol, trade_id, run_id) "
+            f"SELECT {fields} FROM unique_trades WHERE {where} "
             "ORDER BY entry_time DESC, run_id LIMIT %s OFFSET %s",
-            (*values, limit, offset),
+            (research_id, *values, limit, offset),
         )
         count = await self._fetchone(
-            f"SELECT COUNT(*) AS count FROM backtest_trades WHERE {where}",
-            tuple(values),
+            f"WITH unique_trades AS ("
+            f"SELECT DISTINCT ON (symbol, trade_id) * FROM backtest_trades "
+            f"WHERE research_id = %s ORDER BY symbol, trade_id, run_id) "
+            f"SELECT COUNT(*) AS count FROM unique_trades WHERE {where}",
+            (research_id, *values),
         )
         return rows, int(count["count"] if count else 0)
 

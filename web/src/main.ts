@@ -1,9 +1,11 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
+import Antd from 'ant-design-vue'
+import 'ant-design-vue/dist/reset.css'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import App from '@/App.vue'
 import { router } from '@/router'
-import '@/styles/base.css'
+import '@/styles/base.less'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -16,6 +18,7 @@ const queryClient = new QueryClient({
 })
 
 createApp(App)
+  .use(Antd)
   .use(createPinia())
   .use(VueQueryPlugin, { queryClient })
   .use(router)

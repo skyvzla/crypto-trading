@@ -2,28 +2,13 @@
 import { computed, h, onMounted } from 'vue'
 import { FlaskConical } from 'lucide-vue-next'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import {
-  NConfigProvider,
-  NLayout,
-  NLayoutContent,
-  NLayoutHeader,
-  NLayoutSider,
-  NMenu,
-  NMessageProvider,
-  NBadge,
-  NText,
-  NIcon,
-  zhCN,
-  dateZhCN,
-  type MenuOption
-} from 'naive-ui'
-import { darkTheme, themeOverrides } from '@/theme'
+import type { MenuProps } from 'ant-design-vue'
 import { useHealthStore } from '@/stores/health'
 
 const route = useRoute()
 const health = useHealthStore()
 
-const menuOptions: MenuOption[] = [
+const menuOptions: MenuProps['items'] = [
   { key: 'overview', label: '运行总览', to: '/overview' },
   { key: 'calendar', label: '收益日历', to: '/calendar' },
   { key: 'positions', label: '持仓', to: '/positions' },
@@ -36,18 +21,11 @@ const menuOptions: MenuOption[] = [
 ].map((item) => ({
   key: item.key,
   label: () => h(RouterLink, { to: item.to }, { default: () => item.label }),
-  icon: item.icon ? () => h(NIcon, { component: item.icon }) : undefined
+  icon: item.icon ? () => h(item.icon) : undefined
 }))
 
 const activeKey = computed(() => String(route.name ?? '').startsWith('backtest') ? 'backtests' : String(route.name ?? ''))
 const title = computed(() => String(route.meta.title ?? ''))
-const healthType = computed(() =>
-  health.status === 'healthy'
-    ? 'success'
-    : health.status === 'unhealthy'
-      ? 'error'
-      : 'warning'
-)
 const healthLabel = computed(
   () =>
     ({
@@ -61,39 +39,30 @@ onMounted(health.check)
 </script>
 
 <template>
-  <NConfigProvider
-    :theme="darkTheme"
-    :theme-overrides="themeOverrides"
-    :locale="zhCN"
-    :date-locale="dateZhCN"
-  >
-    <NMessageProvider>
-    <NLayout has-sider position="absolute">
-      <NLayoutSider bordered :width="220" :collapsed-width="56" collapse-mode="width" show-trigger="bar" :native-scrollbar="false" content-style="display:flex;flex-direction:column">
+  <a-layout has-sider class="app-layout">
+      <a-layout-sider collapsible :width="220" :collapsed-width="56">
         <div class="brand">
           <span class="brand-mark">TL</span>
           <span class="brand-name">Trade Ledger</span>
         </div>
-        <NMenu :value="activeKey" :options="menuOptions" />
+        <a-menu :selected-keys="[activeKey]" :items="menuOptions" mode="inline" />
         <div class="rail-status">
-          <NBadge dot :type="healthType" />
-          <NText depth="3">{{ healthLabel }}</NText>
+          <a-badge status="processing" />
+          <span>{{ healthLabel }}</span>
         </div>
-      </NLayoutSider>
-      <NLayout>
-        <NLayoutHeader bordered class="topbar">
+      </a-layout-sider>
+      <a-layout>
+        <a-layout-header class="topbar">
           <h1>{{ title }}</h1>
-        </NLayoutHeader>
-        <NLayoutContent class="workspace">
+        </a-layout-header>
+        <a-layout-content class="workspace">
           <RouterView />
-        </NLayoutContent>
-      </NLayout>
-    </NLayout>
-    </NMessageProvider>
-  </NConfigProvider>
+        </a-layout-content>
+      </a-layout>
+  </a-layout>
 </template>
 
-<style scoped>
+<style scoped lang="less">
 .brand {
   display: flex;
   align-items: center;
@@ -109,7 +78,7 @@ onMounted(health.check)
   height: 30px;
   border-radius: 6px;
   background: var(--primary);
-  color: #06101f;
+  color: #fff;
   font-weight: 700;
   font-size: 13px;
 }
@@ -131,13 +100,14 @@ onMounted(health.check)
   align-items: center;
   height: 56px;
   padding: 0 24px;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
 }
-.topbar h1 {
-  margin: 0;
-  font-size: 17px;
-  font-weight: 600;
+.topbar {
+  h1 { margin: 0; font-size: 17px; font-weight: 600; }
 }
 .workspace {
   padding: 20px 24px 32px;
+  overflow: auto;
 }
 </style>
