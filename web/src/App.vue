@@ -40,7 +40,7 @@ onMounted(health.check)
 
 <template>
   <a-layout has-sider class="app-layout">
-      <a-layout-sider collapsible :width="220" :collapsed-width="56" theme="light">
+      <a-layout-sider collapsible breakpoint="md" :width="220" :collapsed-width="0" theme="light">
         <div class="brand">
           <span class="brand-mark">TL</span>
           <span class="brand-name">Trade Ledger</span>
