@@ -268,7 +268,7 @@ onMounted(() => Promise.all([loadSymbols(), loadCategoryPolicy()]))
   </div>
 </template>
 
-<style scoped lang="less">
+<style scoped lang="scss">
 .universe-page {
   max-width: 1400px;
 }

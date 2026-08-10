@@ -62,7 +62,7 @@ onMounted(health.check)
   </a-layout>
 </template>
 
-<style scoped lang="less">
+<style scoped lang="scss">
 .brand {
   display: flex;
   align-items: center;
