@@ -23,6 +23,7 @@ from trading_platform.backtest.sweep import (
     _run_symbol,
     _stream_process_output,
     _symbol_worker_memory_plan,
+    _symbol_worker_resources,
     _worker_memory_plan,
     expand_specs,
 )
@@ -186,6 +187,28 @@ def test_eight_workers_fit_four_gb_budget_at_ninety_percent():
 
     assert workers == 8
     assert memory_limit == "3072MB"
+
+
+def test_memory_limit_switch_disables_budget_and_duckdb_cap():
+    workers, worker_budget, duckdb_limit = _symbol_worker_resources(
+        8,
+        100,
+        {"memory_limit_enabled": False},
+        available_memory_bytes=1,
+    )
+
+    assert workers == 8
+    assert worker_budget is None
+    assert duckdb_limit is None
+
+
+def test_disabled_memory_limit_requires_explicit_workers():
+    with pytest.raises(ValueError, match="--workers"):
+        _symbol_worker_resources(
+            None,
+            100,
+            {"memory_limit_enabled": False},
+        )
 
 
 def test_symbol_task_uses_one_subprocess_for_multiple_parameters(

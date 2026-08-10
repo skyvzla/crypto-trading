@@ -423,6 +423,36 @@ def _symbol_worker_memory_plan(
     )
 
 
+def _symbol_worker_resources(
+    requested: int | None,
+    symbol_count: int,
+    execution: dict[str, Any],
+    *,
+    available_memory_bytes: int | None = None,
+) -> tuple[int, str | None, str | None]:
+    enabled = execution.get("memory_limit_enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("execution.memory_limit_enabled must be true or false")
+    if not enabled:
+        if requested is None:
+            raise ValueError(
+                "关闭内存限制时必须显式传递 --workers，避免无限制自动并发"
+            )
+        if requested <= 0:
+            raise ValueError("--workers must be positive")
+        return min(requested, symbol_count), None, None
+
+    worker_memory_budget = str(execution.get("worker_memory_budget", "4GB"))
+    workers, duckdb_memory_limit = _symbol_worker_memory_plan(
+        requested,
+        symbol_count,
+        worker_memory_budget,
+        int(execution.get("memory_budget_percent", 80)),
+        available_memory_bytes=available_memory_bytes,
+    )
+    return workers, worker_memory_budget, duckdb_memory_limit
+
+
 def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
     fixed = dict(config.get("fixed", {}))
     matrix = dict(config.get("matrix", {}))
@@ -956,16 +986,18 @@ def _write_report(
     *,
     run_count: int,
     workers: int,
-    worker_memory_budget: str,
-    duckdb_memory_limit: str,
+    worker_memory_budget: str | None,
+    duckdb_memory_limit: str | None,
 ) -> None:
+    worker_budget_label = worker_memory_budget or "关闭"
+    duckdb_limit_label = duckdb_memory_limit or "关闭"
     lines = [
         "# Spike 参数对比回测",
         "",
         f"- 回测任务：{run_count}",
         f"- 实际 worker：{workers}",
-        f"- 每 worker 总内存预算：{worker_memory_budget}",
-        f"- 每 worker DuckDB 内存上限：{duckdb_memory_limit}",
+        f"- 每 worker 总内存预算：{worker_budget_label}",
+        f"- 每 worker DuckDB 内存上限：{duckdb_limit_label}",
         "- 行情：DuckDB 只读流式窗口；同交易对且相同 1s 时间偏移的参数实例共享一次读取",
         "- 预检：Parquet sidecar 索引（仅用于覆盖校验，不作为行情源）",
         "- 交易对：PostgreSQL 主库只读有效集合与历史归档集合的交集",
@@ -1040,15 +1072,13 @@ def _main(argv: list[str] | None = None) -> int:
             "execution.duckdb_memory_limit 已移除；请使用表示进程总预算的 "
             "execution.worker_memory_budget"
         )
-    worker_memory_budget = str(execution.get("worker_memory_budget", "4GB"))
     specs_by_symbol: dict[str, list[RunSpec]] = {}
     for spec in specs:
         specs_by_symbol.setdefault(spec.symbol, []).append(spec)
-    workers, actual_memory_limit = _symbol_worker_memory_plan(
+    workers, worker_memory_budget, actual_memory_limit = _symbol_worker_resources(
         args.workers,
         len(specs_by_symbol),
-        worker_memory_budget,
-        int(execution.get("memory_budget_percent", 80)),
+        execution,
     )
     if args.workers is not None and workers != args.workers:
         print(
@@ -1056,8 +1086,10 @@ def _main(argv: list[str] | None = None) -> int:
             f"交易对任务；实际启动 worker={workers}。",
             flush=True,
         )
-    execution["worker_memory_budget"] = worker_memory_budget
-    execution["duckdb_memory_limit"] = actual_memory_limit
+    if actual_memory_limit is not None:
+        execution["duckdb_memory_limit"] = actual_memory_limit
+    else:
+        execution.pop("duckdb_memory_limit", None)
     print("正在估算所选交易对的流式回测内存...", flush=True)
     memory_estimate = _estimate_monthly_memory(
         config["duckdb_path"],
@@ -1068,9 +1100,14 @@ def _main(argv: list[str] | None = None) -> int:
         fetch_batch_size=int(execution.get("fetch_batch_size", 10_000)),
     )
     memory_estimate.to_csv(output_root / "memory_estimate.csv", index=False)
-    memory_limit_bytes = _memory_bytes(worker_memory_budget)
+    memory_limit_bytes = (
+        _memory_bytes(worker_memory_budget)
+        if worker_memory_budget is not None
+        else None
+    )
     if (
-        not memory_estimate.empty
+        memory_limit_bytes is not None
+        and not memory_estimate.empty
         and memory_estimate["estimated_stream_peak_gb"].max() * 1024**3
         > memory_limit_bytes
     ):
