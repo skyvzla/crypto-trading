@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { Database, Globe2, RefreshCw } from 'lucide-vue-next'
+import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, RefreshCw } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
+import type { BacktestCandle } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import JsonDetails from '@/features/backtests/JsonDetails.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
@@ -29,6 +30,10 @@ const tradeId = computed(() => String(route.params.tradeId))
 const interval = ref('5m')
 const source = ref<'binance' | 'archive'>('binance')
 const windowShiftBars = ref(0)
+const chartRef = ref<InstanceType<typeof TradeCandlestickChart> | null>(null)
+const indicators = ref({ volume: true, macd: false, ema: false, kdj: false })
+const focusTimeMs = ref<number | null>(null)
+const loadedCandles = ref<BacktestCandle[]>([])
 
 const tradeQuery = useQuery({ queryKey: computed(() => ['backtest-trade', researchId.value, tradeId.value]), queryFn: () => backtestApi.trade(researchId.value, tradeId.value) })
 const eventsQuery = useQuery({ queryKey: computed(() => ['backtest-events', researchId.value, tradeId.value]), queryFn: () => backtestApi.events(researchId.value, tradeId.value) })
@@ -39,12 +44,10 @@ const candleParams = computed(() => {
   const trade = tradeQuery.data.value
   if (!trade) return null
   const entry = timestampMs(trade.entry_time)
-  const exit = timestampMs(trade.exit_time) ?? entry
   if (entry === null) return null
-  const points = [entry, exit, timestampMs(trade.signal_time)].filter((value): value is number => value !== null)
-  // 在线合约接口按单次上限取 1500 根；本地归档取 5000 根。
-  const focus = points.reduce((sum, value) => sum + value, 0) / points.length
-  const halfWindowBars = source.value === 'binance' ? 750 : 2500
+  // 以第一笔实际成交为主参考，退出较晚时也必须保证入场附近可见。
+  const focus = focusTimeMs.value ?? entry
+  const halfWindowBars = 750
   const padding = intervalMs[interval.value] * halfWindowBars
   const windowCenter = Math.max(padding, focus + windowShiftBars.value * intervalMs[interval.value])
   return {
@@ -60,18 +63,42 @@ const candlesQuery = useQuery({
   queryKey: computed(() => ['backtest-candles', candleParams.value]),
   queryFn: () => backtestApi.candles(candleParams.value!),
   enabled: computed(() => candleParams.value !== null),
-  staleTime: 5 * 60_000
+  staleTime: 5 * 60_000,
+  placeholderData: (previous) => previous
 })
 function selectInterval(value: string) {
   interval.value = value
   windowShiftBars.value = 0
   if (value === '1s') source.value = 'archive'
 }
+async function focusTradeEvent(kind: 'entry' | 'exit') {
+  const trade = tradeQuery.data.value
+  if (!trade) return
+  const firstFillTime = trade.fills?.[0]?.time
+  const target = timestampMs(kind === 'entry' ? (firstFillTime ?? trade.entry_time) : trade.exit_time)
+  if (target === null) return
+  focusTimeMs.value = target
+  windowShiftBars.value = 0
+  await nextTick()
+  if (kind === 'entry') chartRef.value?.focusEntry?.()
+  else chartRef.value?.focusExit?.()
+}
 function requestMore(direction: 'before' | 'after') {
-  const shiftBars = source.value === 'binance' ? 750 : 2500
+  const shiftBars = 750
   windowShiftBars.value += direction === 'before' ? -shiftBars : shiftBars
 }
-watch(source, () => { windowShiftBars.value = 0 })
+watch(() => candlesQuery.data.value, (response) => {
+  if (!response) return
+  if (response.interval !== interval.value || response.source !== source.value) return
+  const byTime = new Map(loadedCandles.value.map((candle) => [candle.time, candle]))
+  response.candles.forEach((candle) => byTime.set(candle.time, candle))
+  loadedCandles.value = [...byTime.values()].sort((left, right) => left.time - right.time)
+}, { immediate: true })
+watch(() => [tradeId.value, interval.value, source.value], () => {
+  loadedCandles.value = []
+  windowShiftBars.value = 0
+})
+watch(tradeId, () => { focusTimeMs.value = null })
 const allAttributes = computed(() => ({ ...(tradeQuery.data.value?.parameters || {}), ...(tradeQuery.data.value?.strategy_data || {}), ...(tradeQuery.data.value?.metrics || {}), ...(tradeQuery.data.value?.attributes || {}) }))
 function eventContent(event: { data?: Record<string, unknown>; description?: string | null; price?: number | null }): string {
   if (event.description) return event.description
@@ -102,12 +129,21 @@ const backTo = computed(() => tradeQuery.data.value ? `/backtests/${encodeURICom
                 <a-radio-button value="binance"><Globe2 :size="14" /> Binance</a-radio-button>
                 <a-radio-button value="archive"><Database :size="14" /> 本地归档</a-radio-button>
               </a-radio-group>
+              <a-divider type="vertical" />
+              <a-checkbox v-model:checked="indicators.volume">VOL</a-checkbox>
+              <a-checkbox v-model:checked="indicators.macd">MACD</a-checkbox>
+              <a-checkbox v-model:checked="indicators.ema">EMA</a-checkbox>
+              <a-checkbox v-model:checked="indicators.kdj">KDJ</a-checkbox>
+              <a-divider type="vertical" />
+              <a-tooltip title="跳转到第一笔成交"><a-button type="text" class="chart-tool-button" @click="focusTradeEvent('entry')"><template #icon><ArrowUpToLine :size="15" /></template>首笔成交</a-button></a-tooltip>
+              <a-tooltip title="跳转到退出成交"><a-button type="text" class="chart-tool-button" @click="focusTradeEvent('exit')"><template #icon><ArrowDownToLine :size="15" /></template>退出成交</a-button></a-tooltip>
+              <a-spin v-if="candlesQuery.isFetching.value" size="small" />
               <a-tooltip title="刷新 K 线"><a-button type="text" shape="circle" aria-label="刷新K线" @click="candlesQuery.refetch()"><template #icon><RefreshCw :size="16" /></template></a-button></a-tooltip>
             </div>
           </div>
-          <div v-if="candlesQuery.isPending.value" class="chart-loading"><a-spin /><span>加载 {{ source === 'binance' ? 'Binance' : '本地归档' }} K线</span></div>
-          <QueryPanel v-else :error="candlesQuery.error.value" :empty="candlesQuery.data.value?.candles.length === 0" @retry="candlesQuery.refetch()">
-            <TradeCandlestickChart :candles="candlesQuery.data.value?.candles || []" :trade="tradeQuery.data.value" :overlays="schemaQuery.data.value?.chart_overlays" @request-more="requestMore" />
+          <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading"><a-spin /><span>加载 {{ source === 'binance' ? 'Binance' : '本地归档' }} K线</span></div>
+          <QueryPanel v-else :error="loadedCandles.length ? null : candlesQuery.error.value" :empty="loadedCandles.length === 0" @retry="candlesQuery.refetch()">
+            <TradeCandlestickChart ref="chartRef" :candles="loadedCandles" :trade="tradeQuery.data.value" :overlays="schemaQuery.data.value?.chart_overlays" :indicators="indicators" :focus-time="focusTimeMs" @request-more="requestMore" />
           </QueryPanel>
           <div class="chart-legend"><a-tag color="blue">{{ candlesQuery.data.value?.source || source }}</a-tag><span>信号</span><span>三档挂单</span><span>实际成交</span><span>开仓均价</span><span>失效价</span><span>退出</span></div>
         </section>
