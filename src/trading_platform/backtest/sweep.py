@@ -57,7 +57,7 @@ EXECUTION_FLAGS = {
 }
 ESTIMATED_PYTHON_EVENT_BYTES = 1_024
 ESTIMATED_DUCKDB_ROW_BYTES = 160
-WORKER_FIXED_OVERHEAD_BYTES = 512 * 1024**2
+WORKER_NON_DUCKDB_RESERVE_BYTES = 1024**3
 
 
 @dataclass(frozen=True)
@@ -241,7 +241,7 @@ def _estimate_monthly_memory(
         stream_peak = (
             chunk_rows * ESTIMATED_DUCKDB_ROW_BYTES
             + fetch_batch_size * ESTIMATED_PYTHON_EVENT_BYTES
-            + WORKER_FIXED_OVERHEAD_BYTES
+            + WORKER_NON_DUCKDB_RESERVE_BYTES
         )
         records.append({
             "symbol": str(symbol), "month": f"{int(year):04d}-{int(month):02d}-01",
@@ -249,7 +249,7 @@ def _estimate_monthly_memory(
             "estimated_materialized_gb": materialized / 1024**3,
             "estimated_stream_peak_gb": stream_peak / 1024**3,
             "chunk_hours": float(chunk_hours),
-            "estimate_note": "1KiB/Python event; 160B/DuckDB row; +512MiB worker",
+            "estimate_note": "1KiB/Python event; 160B/DuckDB row; +1GiB non-DuckDB reserve",
         })
     return pd.DataFrame(records)
 
@@ -357,7 +357,7 @@ def _available_memory_bytes() -> int | None:
 
 def _worker_memory_plan(
     requested: int | None,
-    minimum_memory_limit: str,
+    worker_memory_budget: str,
     budget_percent: int,
     *,
     available_memory_bytes: int | None = None,
@@ -366,24 +366,23 @@ def _worker_memory_plan(
         raise ValueError("execution.workers must be positive")
     if not 1 <= budget_percent <= 95:
         raise ValueError("execution.memory_budget_percent must be 1..95")
-    minimum_per_worker = _memory_bytes(minimum_memory_limit)
-    if minimum_per_worker < 4 * 1024**3:
-        raise ValueError("execution.duckdb_memory_limit must be at least 4GB per worker")
+    per_worker_budget = _memory_bytes(worker_memory_budget)
+    if per_worker_budget < 4 * 1024**3:
+        raise ValueError("execution.worker_memory_budget must be at least 4GB")
     available = available_memory_bytes
     if available is None:
         available = _available_memory_bytes()
     if available is None:
-        return requested or 1, minimum_memory_limit
+        duckdb_bytes = per_worker_budget - WORKER_NON_DUCKDB_RESERVE_BYTES
+        return requested or 1, f"{duckdb_bytes // 1024**2}MB"
     budget = available * budget_percent // 100
-    minimum_process = minimum_per_worker + WORKER_FIXED_OVERHEAD_BYTES
-    max_workers = budget // minimum_process
+    max_workers = budget // per_worker_budget
     if max_workers < 1:
         raise RuntimeError(
-            "available memory cannot provide the minimum 4GB DuckDB limit "
-            "plus worker overhead"
+            "available memory cannot provide the minimum 4GB worker budget"
         )
     if requested is not None and requested > max_workers:
-        required_gib = requested * minimum_process / 1024**3
+        required_gib = requested * per_worker_budget / 1024**3
         budget_gib = budget / 1024**3
         raise RuntimeError(
             f"--workers {requested} requires at least {required_gib:.1f} GiB "
@@ -391,17 +390,14 @@ def _worker_memory_plan(
             f"available; maximum safe workers: {max_workers}"
         )
     workers = max_workers if requested is None else requested
-    duckdb_bytes = max(
-        minimum_per_worker,
-        budget // workers - WORKER_FIXED_OVERHEAD_BYTES,
-    )
+    duckdb_bytes = per_worker_budget - WORKER_NON_DUCKDB_RESERVE_BYTES
     return workers, f"{duckdb_bytes // 1024**2}MB"
 
 
 def _symbol_worker_memory_plan(
     requested: int | None,
     symbol_count: int,
-    minimum_memory_limit: str,
+    worker_memory_budget: str,
     budget_percent: int,
     *,
     available_memory_bytes: int | None = None,
@@ -413,7 +409,7 @@ def _symbol_worker_memory_plan(
     )
     workers, memory_limit = _worker_memory_plan(
         effective_requested,
-        minimum_memory_limit,
+        worker_memory_budget,
         budget_percent,
         available_memory_bytes=available_memory_bytes,
     )
@@ -421,7 +417,7 @@ def _symbol_worker_memory_plan(
         return workers, memory_limit
     return _worker_memory_plan(
         symbol_count,
-        minimum_memory_limit,
+        worker_memory_budget,
         budget_percent,
         available_memory_bytes=available_memory_bytes,
     )
@@ -960,6 +956,7 @@ def _write_report(
     *,
     run_count: int,
     workers: int,
+    worker_memory_budget: str,
     duckdb_memory_limit: str,
 ) -> None:
     lines = [
@@ -967,9 +964,10 @@ def _write_report(
         "",
         f"- 回测任务：{run_count}",
         f"- 实际 worker：{workers}",
+        f"- 每 worker 总内存预算：{worker_memory_budget}",
         f"- 每 worker DuckDB 内存上限：{duckdb_memory_limit}",
-        "- 行情：DuckDB/Parquet 只读流式窗口；同交易对且相同 1s 时间偏移的参数实例共享一次读取",
-        "- 预检：Parquet sidecar 索引（不扫描 K 线正文）",
+        "- 行情：DuckDB 只读流式窗口；同交易对且相同 1s 时间偏移的参数实例共享一次读取",
+        "- 预检：Parquet sidecar 索引（仅用于覆盖校验，不作为行情源）",
         "- 交易对：PostgreSQL 主库只读有效集合与历史归档集合的交集",
         "- conservative_net_pnl：每个多币种冲突组仅保留最低盈亏后的保守结果",
         "",
@@ -1037,14 +1035,19 @@ def _main(argv: list[str] | None = None) -> int:
             "selected_symbols": symbols,
         }, indent=2, ensure_ascii=False)
     )
-    minimum_memory_limit = str(execution.get("duckdb_memory_limit", "4GB"))
+    if "duckdb_memory_limit" in execution:
+        raise ValueError(
+            "execution.duckdb_memory_limit 已移除；请使用表示进程总预算的 "
+            "execution.worker_memory_budget"
+        )
+    worker_memory_budget = str(execution.get("worker_memory_budget", "4GB"))
     specs_by_symbol: dict[str, list[RunSpec]] = {}
     for spec in specs:
         specs_by_symbol.setdefault(spec.symbol, []).append(spec)
     workers, actual_memory_limit = _symbol_worker_memory_plan(
         args.workers,
         len(specs_by_symbol),
-        minimum_memory_limit,
+        worker_memory_budget,
         int(execution.get("memory_budget_percent", 80)),
     )
     if args.workers is not None and workers != args.workers:
@@ -1053,7 +1056,7 @@ def _main(argv: list[str] | None = None) -> int:
             f"交易对任务；实际启动 worker={workers}。",
             flush=True,
         )
-    execution["minimum_duckdb_memory_limit"] = minimum_memory_limit
+    execution["worker_memory_budget"] = worker_memory_budget
     execution["duckdb_memory_limit"] = actual_memory_limit
     print("正在估算所选交易对的流式回测内存...", flush=True)
     memory_estimate = _estimate_monthly_memory(
@@ -1065,15 +1068,15 @@ def _main(argv: list[str] | None = None) -> int:
         fetch_batch_size=int(execution.get("fetch_batch_size", 10_000)),
     )
     memory_estimate.to_csv(output_root / "memory_estimate.csv", index=False)
-    memory_limit_bytes = _memory_bytes(actual_memory_limit)
+    memory_limit_bytes = _memory_bytes(worker_memory_budget)
     if (
         not memory_estimate.empty
         and memory_estimate["estimated_stream_peak_gb"].max() * 1024**3
         > memory_limit_bytes
     ):
         raise RuntimeError(
-            "estimated stream peak exceeds execution.duckdb_memory_limit; "
-            "reduce chunk_hours or raise the per-worker limit"
+            "estimated stream peak exceeds execution.worker_memory_budget; "
+            "reduce chunk_hours or raise the worker budget"
         )
     rows = []
     processes = ChildProcessRegistry()
@@ -1195,12 +1198,14 @@ def _main(argv: list[str] | None = None) -> int:
         parameter_summary,
         run_count=len(specs),
         workers=workers,
+        worker_memory_budget=worker_memory_budget,
         duckdb_memory_limit=actual_memory_limit,
     )
     public_config = {key: value for key, value in config.items() if key != "database_dsn"}
     (output_root / "experiment.json").write_text(json.dumps({
         "config": public_config, "symbols": symbols,
         "runs": len(specs), "workers": workers,
+        "worker_memory_budget": worker_memory_budget,
         "duckdb_memory_limit_per_worker": actual_memory_limit,
     }, indent=2, default=str))
     print(

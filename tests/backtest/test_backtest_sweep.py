@@ -126,7 +126,7 @@ def test_worker_memory_budget_rejects_less_than_four_gb():
         _worker_memory_plan(4, "3GB", 70)
 
 
-def test_worker_memory_budget_raises_limit_with_available_memory():
+def test_worker_memory_budget_does_not_expand_duckdb_limit():
     workers, memory_limit = _worker_memory_plan(
         6,
         "4GB",
@@ -135,13 +135,13 @@ def test_worker_memory_budget_raises_limit_with_available_memory():
     )
 
     assert workers == 6
-    assert memory_limit == "5632MB"
+    assert memory_limit == "3072MB"
 
 
 def test_worker_memory_budget_rejects_explicit_unsafe_worker_count():
     with pytest.raises(
         RuntimeError,
-        match=r"--workers 6 requires at least 27\.0 GiB.*maximum safe workers: 4",
+        match=r"--workers 6 requires at least 24\.0 GiB.*maximum safe workers: 4",
     ):
         _worker_memory_plan(
             6,
@@ -160,7 +160,7 @@ def test_worker_memory_budget_auto_selects_workers_when_unspecified():
     )
 
     assert workers == 4
-    assert int(memory_limit.removesuffix("MB")) >= 4096
+    assert memory_limit == "3072MB"
 
 
 def test_symbol_worker_count_never_exceeds_selected_symbols():
@@ -173,7 +173,19 @@ def test_symbol_worker_count_never_exceeds_selected_symbols():
     )
 
     assert workers == 2
-    assert int(memory_limit.removesuffix("MB")) > 4096
+    assert memory_limit == "3072MB"
+
+
+def test_eight_workers_fit_four_gb_budget_at_ninety_percent():
+    workers, memory_limit = _worker_memory_plan(
+        8,
+        "4GB",
+        90,
+        available_memory_bytes=36 * 1024**3,
+    )
+
+    assert workers == 8
+    assert memory_limit == "3072MB"
 
 
 def test_symbol_task_uses_one_subprocess_for_multiple_parameters(
