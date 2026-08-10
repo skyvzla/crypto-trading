@@ -58,7 +58,7 @@ let dataUpdaters: Array<(data: ChartCandle[]) => void> = []
 let indicatorGroups: IndicatorGroup[] = []
 let suppressEdgeRequestsUntil = 0
 let stopHeightResize: (() => void) | null = null
-const PANE_HEIGHTS_KEY = 'backtest-replay-indicator-pane-heights-v1'
+const PANE_STRETCH_KEY = 'backtest-replay-indicator-pane-stretch-v1'
 
 function seconds(value: string | number | null | undefined): UTCTimestamp | null {
   const ms = timestampMs(value)
@@ -95,9 +95,9 @@ function lineData(data: ChartCandle[], values: Array<number | null>) {
   })
 }
 
-function storedPaneHeights(): Record<string, number> {
+function storedPaneStretch(): Record<string, number> {
   try {
-    const value = JSON.parse(localStorage.getItem(PANE_HEIGHTS_KEY) || '{}')
+    const value = JSON.parse(localStorage.getItem(PANE_STRETCH_KEY) || '{}')
     return value && typeof value === 'object' ? value : {}
   } catch {
     return {}
@@ -106,23 +106,23 @@ function storedPaneHeights(): Record<string, number> {
 
 function restorePaneHeights() {
   if (!chart) return
-  const heights = storedPaneHeights()
+  const stretch = storedPaneStretch()
   const panes = chart.panes()
   indicatorGroups.forEach(({ key, paneIndex }) => {
-    const height = heights[key]
-    if (Number.isFinite(height) && panes[paneIndex]) panes[paneIndex].setHeight(Math.max(60, height))
+    const factor = stretch[key]
+    if (Number.isFinite(factor) && factor > 0 && panes[paneIndex]) panes[paneIndex].setStretchFactor(factor)
   })
 }
 
 function persistPaneHeights() {
   if (!chart) return
   const panes = chart.panes()
-  const heights = storedPaneHeights()
+  const stretch = storedPaneStretch()
   indicatorGroups.forEach(({ key, paneIndex }) => {
-    if (panes[paneIndex]) heights[key] = panes[paneIndex].getHeight()
+    if (panes[paneIndex]) stretch[key] = panes[paneIndex].getStretchFactor()
   })
   try {
-    localStorage.setItem(PANE_HEIGHTS_KEY, JSON.stringify(heights))
+    localStorage.setItem(PANE_STRETCH_KEY, JSON.stringify(stretch))
   } catch {
     // 浏览器禁用本地存储时仍保留本次会话的拖拽结果。
   }

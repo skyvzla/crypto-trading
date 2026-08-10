@@ -11,12 +11,13 @@ const setVisibleRange = vi.fn()
 const createSeriesMarkers = vi.fn()
 const observe = vi.fn()
 const disconnect = vi.fn()
-const paneSetHeight = vi.fn()
+const paneSetStretchFactor = vi.fn()
 const subscribeCrosshairMove = vi.fn()
 const seriesApis: Array<{ setData: typeof setData; createPriceLine: typeof createPriceLine }> = []
 const paneMocks = Array.from({ length: 4 }, (_, index) => ({
   getHeight: vi.fn(() => index === 0 ? 300 : 100),
-  setHeight: paneSetHeight,
+  getStretchFactor: vi.fn(() => index === 0 ? 3 : 1),
+  setStretchFactor: paneSetStretchFactor,
   getHTMLElement: vi.fn(() => ({ getBoundingClientRect: () => ({ top: index * 100 }) }))
 }))
 
@@ -168,7 +169,7 @@ describe('TradeCandlestickChart', () => {
   })
 
   it('恢复并保存指标窗格高度，整体图表高度只在当前页面调整', async () => {
-    localStorage.setItem('backtest-replay-indicator-pane-heights-v1', JSON.stringify({ volume: 146 }))
+    localStorage.setItem('backtest-replay-indicator-pane-stretch-v1', JSON.stringify({ volume: 1.46 }))
     const wrapper = mount(TradeCandlestickChart, {
       props: {
         candles: [{ time: 1_754_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }],
@@ -177,11 +178,11 @@ describe('TradeCandlestickChart', () => {
       }
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(paneSetHeight).toHaveBeenCalledWith(146)
+    expect(paneSetStretchFactor).toHaveBeenCalledWith(1.46)
     await wrapper.get('.candlestick-host').trigger('pointerdown')
     window.dispatchEvent(new Event('pointerup'))
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(JSON.parse(localStorage.getItem('backtest-replay-indicator-pane-heights-v1') || '{}').volume).toBe(100)
+    expect(JSON.parse(localStorage.getItem('backtest-replay-indicator-pane-stretch-v1') || '{}').volume).toBe(1)
 
     wrapper.get('.chart-height-resizer').element.dispatchEvent(new MouseEvent('pointerdown', { button: 0, clientY: 100, bubbles: true }))
     window.dispatchEvent(new MouseEvent('pointermove', { clientY: 180 }))
