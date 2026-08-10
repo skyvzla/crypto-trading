@@ -13,8 +13,8 @@ import { useBacktestPagination } from '@/features/backtests/pagination'
 
 const route = useRoute()
 const router = useRouter()
-const researchId = computed(() => String(route.params.researchId))
-const symbol = computed(() => String(route.params.symbol))
+const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
+const symbol = computed(() => typeof route.params.symbol === 'string' ? route.params.symbol : '')
 const { page, pageSize, preservedQuery } = useBacktestPagination(25, 'trade')
 const backTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/symbols`, query: preservedQuery.value }))
 const rootTo = computed(() => ({ path: '/backtests', query: preservedQuery.value }))
@@ -32,7 +32,11 @@ const tradeFilters = computed(() => ({
   sort_by: sortBy.value,
   sort_order: sortOrder.value
 }))
-const query = useQuery({ queryKey: computed(() => ['backtest-trades', researchId.value, symbol.value, page.value, pageSize.value, tradeFilters.value]), queryFn: () => backtestApi.trades(researchId.value, symbol.value, pageSize.value, (page.value - 1) * pageSize.value, tradeFilters.value) })
+const query = useQuery({
+  queryKey: computed(() => ['backtest-trades', researchId.value, symbol.value, page.value, pageSize.value, tradeFilters.value]),
+  queryFn: () => backtestApi.trades(researchId.value, symbol.value, pageSize.value, (page.value - 1) * pageSize.value, tradeFilters.value),
+  enabled: computed(() => Boolean(researchId.value && symbol.value))
+})
 watch([resultFilter, exitReason, minPnl, maxPnl, sortBy, sortOrder], () => {
   page.value = 1
   void router.replace({ query: {

@@ -13,8 +13,8 @@ import { hasReportLabel, reportLabel } from '@/features/backtests/reportLabels'
 
 const route = useRoute()
 const router = useRouter()
-const researchId = computed(() => String(route.params.researchId))
-const reportType = computed(() => String(route.params.reportType))
+const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
+const reportType = computed(() => typeof route.params.reportType === 'string' ? route.params.reportType : '')
 const { page, pageSize } = useBacktestPagination(50, 'report')
 const backTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/reports`, query: route.query }))
 const rootTo = computed(() => ({ path: '/backtests', query: route.query }))
@@ -26,7 +26,8 @@ watch([sortBy, sortOrder], ([nextSort, nextOrder]) => {
 })
 const query = useQuery({
   queryKey: computed(() => ['backtest-report', researchId.value, reportType.value, page.value, pageSize.value, sortBy.value, sortOrder.value]),
-  queryFn: () => backtestApi.report(researchId.value, reportType.value, pageSize.value, (page.value - 1) * pageSize.value, sortBy.value, sortOrder.value === 'ascend' ? 'asc' : 'desc')
+  queryFn: () => backtestApi.report(researchId.value, reportType.value, pageSize.value, (page.value - 1) * pageSize.value, sortBy.value, sortOrder.value === 'ascend' ? 'asc' : 'desc'),
+  enabled: computed(() => Boolean(researchId.value && reportType.value))
 })
 const columns = computed<TableColumnsType<JsonObject>>(() => (query.data.value?.columns || []).map((item) => {
   const column: ReportColumn = typeof item === 'string' ? { key: item } : item

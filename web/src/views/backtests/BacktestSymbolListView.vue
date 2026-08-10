@@ -13,7 +13,7 @@ import { useBacktestPagination } from '@/features/backtests/pagination'
 
 const route = useRoute()
 const router = useRouter()
-const researchId = computed(() => String(route.params.researchId))
+const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
 const { page, pageSize, preservedQuery } = useBacktestPagination(25, 'symbol')
 const rootTo = computed(() => ({ path: '/backtests', query: preservedQuery.value }))
 const initialSymbolFilter = typeof route.query.symbol_filter === 'string' ? route.query.symbol_filter : ''
@@ -23,7 +23,8 @@ const sortBy = ref(typeof route.query.sort_by === 'string' ? route.query.sort_by
 const sortOrder = ref<'asc' | 'desc'>(route.query.sort_order === 'asc' ? 'asc' : 'desc')
 const query = useQuery({
   queryKey: computed(() => ['backtest-symbols', researchId.value, page.value, pageSize.value, symbolFilter.value, sortBy.value, sortOrder.value]),
-  queryFn: () => backtestApi.symbols(researchId.value, pageSize.value, (page.value - 1) * pageSize.value, symbolFilter.value, sortBy.value, sortOrder.value)
+  queryFn: () => backtestApi.symbols(researchId.value, pageSize.value, (page.value - 1) * pageSize.value, symbolFilter.value, sortBy.value, sortOrder.value),
+  enabled: computed(() => Boolean(researchId.value))
 })
 function onSearch(value: string) {
   symbolFilter.value = value.trim().toUpperCase()

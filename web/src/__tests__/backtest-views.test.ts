@@ -123,5 +123,7 @@ describe('回测关键视图', () => {
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/backtests/r-1/symbols/AKEUSDT/trades')
     expect(router.currentRoute.value.query).toMatchObject({ symbol_filter: 'AKE', result: 'loss' })
+    expect(backtestApi.trade).not.toHaveBeenCalledWith('r-1', '')
+    expect(backtestApi.events).not.toHaveBeenCalledWith('r-1', '')
   })
 })

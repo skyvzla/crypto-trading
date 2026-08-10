@@ -25,8 +25,8 @@ const intervalMs: Record<string, number> = {
   '1d': 86_400_000
 }
 const route = useRoute()
-const researchId = computed(() => String(route.params.researchId))
-const tradeId = computed(() => String(route.params.tradeId))
+const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
+const tradeId = computed(() => typeof route.params.tradeId === 'string' ? route.params.tradeId : '')
 const interval = ref('5m')
 const source = ref<'binance' | 'archive'>('binance')
 const windowShiftBars = ref(0)
@@ -37,8 +37,9 @@ const indicators = ref({ volume: true, macd: false, ema: false, kdj: false })
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
 
-const tradeQuery = useQuery({ queryKey: computed(() => ['backtest-trade', researchId.value, tradeId.value]), queryFn: () => backtestApi.trade(researchId.value, tradeId.value) })
-const eventsQuery = useQuery({ queryKey: computed(() => ['backtest-events', researchId.value, tradeId.value]), queryFn: () => backtestApi.events(researchId.value, tradeId.value) })
+const routeReady = computed(() => Boolean(researchId.value && tradeId.value))
+const tradeQuery = useQuery({ queryKey: computed(() => ['backtest-trade', researchId.value, tradeId.value]), queryFn: () => backtestApi.trade(researchId.value, tradeId.value), enabled: routeReady })
+const eventsQuery = useQuery({ queryKey: computed(() => ['backtest-events', researchId.value, tradeId.value]), queryFn: () => backtestApi.events(researchId.value, tradeId.value), enabled: routeReady })
 const strategyId = computed(() => tradeQuery.data.value?.strategy_id || '')
 const schemaQuery = useQuery({ queryKey: computed(() => ['backtest-strategy-schema', strategyId.value]), queryFn: () => backtestApi.strategySchema(strategyId.value), enabled: computed(() => Boolean(strategyId.value)) })
 

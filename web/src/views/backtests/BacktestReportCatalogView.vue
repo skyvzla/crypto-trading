@@ -8,9 +8,9 @@ import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 
 const route = useRoute()
-const researchId = computed(() => String(route.params.researchId))
+const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
 const rootTo = computed(() => ({ path: '/backtests', query: route.query }))
-const query = useQuery({ queryKey: computed(() => ['backtest-reports', researchId.value]), queryFn: () => backtestApi.reports(researchId.value) })
+const query = useQuery({ queryKey: computed(() => ['backtest-reports', researchId.value]), queryFn: () => backtestApi.reports(researchId.value), enabled: computed(() => Boolean(researchId.value)) })
 </script>
 
 <template>
