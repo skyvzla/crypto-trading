@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import duckdb
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import trading_platform.backtest.sweep as sweep
@@ -27,6 +29,7 @@ from trading_platform.backtest.sweep import (
     _worker_memory_plan,
     expand_specs,
 )
+from trading_platform.market.archive.index import build_archive_index
 
 
 def test_configure_duckdb_connection_limits_threads():
@@ -351,30 +354,40 @@ def test_breakout_context_uses_only_completed_minutes(
     tmp_path: Path, monkeypatch
 ):
     archive = tmp_path / "history.duckdb"
-    connection = duckdb.connect(str(archive))
-    connection.execute(
-        "CREATE TABLE candles (symbol VARCHAR, timeframe VARCHAR, "
-        "open_time TIMESTAMPTZ, close_time TIMESTAMPTZ, "
-        "low DOUBLE, high DOUBLE)"
-    )
+    archive_root = tmp_path / "history-parquet"
+    partition = archive_root / "AKEUSDT/1m/1970/01/00/candles.parquet"
+    partition.parent.mkdir(parents=True)
     entry_time = 8 * 3_600_000
-    rows = []
+    rows = {
+        "symbol": [], "timeframe": [], "open_time": [], "close_time": [],
+        "low": [], "high": [],
+    }
     for minute in range(8 * 60):
         open_time = minute * 60_000
-        rows.append(("AKEUSDT", "1m", open_time, open_time + 59_999,
-                     80.0 if minute == 300 else 100.0, 120.0))
-    connection.executemany(
-        "INSERT INTO candles VALUES (?, ?, to_timestamp(? / 1000.0), "
-        "to_timestamp(? / 1000.0), ?, ?)", rows
-    )
-    connection.close()
+        rows["symbol"].append("AKEUSDT")
+        rows["timeframe"].append("1m")
+        rows["open_time"].append(open_time)
+        rows["close_time"].append(open_time + 59_999)
+        rows["low"].append(80.0 if minute == 300 else 100.0)
+        rows["high"].append(120.0)
+    table = pa.table({
+        "symbol": rows["symbol"], "timeframe": rows["timeframe"],
+        "open_time": pa.array(rows["open_time"], type=pa.timestamp("ms", tz="UTC")),
+        "close_time": pa.array(rows["close_time"], type=pa.timestamp("ms", tz="UTC")),
+        "open": [100.0] * len(rows["low"]), "high": rows["high"],
+        "low": rows["low"], "close": [100.0] * len(rows["low"]),
+        "volume": [1.0] * len(rows["low"]),
+    })
+    pq.write_table(table, partition)
+    index_path = build_archive_index(archive_root, workers=1)
     trades = pd.DataFrame([{
         "symbol": "AKEUSDT", "entry_time": entry_time,
         "entry_price": 120.0, "net_pnl": 5.0, "parameters": "p",
     }])
 
     enriched = _attach_breakout_context(
-        trades, duckdb_path=str(archive), windows_hours=[4, 6], duckdb_threads=1
+        trades, archive_index_path=str(index_path),
+        windows_hours=[4, 6], duckdb_threads=1, workers=1,
     )
 
     assert bool(enriched.iloc[0]["low_4h_valid"])

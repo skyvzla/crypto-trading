@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 import csv
 import hashlib
 import itertools
 import json
 import logging
 import math
+import multiprocessing
 import os
 import shlex
 import signal
@@ -791,78 +793,157 @@ def _write_trade_breakdowns(
 def _attach_breakout_context(
     trades: pd.DataFrame,
     *,
-    duckdb_path: str,
+    archive_index_path: str,
     windows_hours: list[int],
     duckdb_threads: int,
+    workers: int,
 ) -> pd.DataFrame:
-    """从入场前完整1m K线提取上涨周期与3d/7d箱体指标。"""
+    """并行按交易对批量提取入场前1m K线的上涨周期与箱体指标。"""
     if trades.empty:
         return trades
+    calculation_windows = sorted({4, *windows_hours})
+    max_hours = max([168, *calculation_windows])
     frame = trades.copy()
     entry_times = pd.to_numeric(frame["entry_time"], errors="coerce")
     entry_prices = pd.to_numeric(frame["entry_price"], errors="coerce")
-    connection = duckdb.connect(duckdb_path, read_only=True)
-    cache: dict[tuple[str, int], list[tuple[int, int, float, float]]] = {}
-    calculation_windows = sorted({4, *windows_hours})
-    max_hours = max([168, *calculation_windows])
-    try:
-        _configure_duckdb_connection(connection, threads=duckdb_threads)
-        for index, row in frame.iterrows():
-            if pd.isna(entry_times.loc[index]) or pd.isna(entry_prices.loc[index]):
-                continue
-            entry_time = int(entry_times.loc[index])
-            entry_price = float(entry_prices.loc[index])
-            symbol = str(row["symbol"])
-            key = (symbol, entry_time)
-            candles = cache.get(key)
-            if candles is None:
-                candles = [
-                    (int(open_time), int(close_time), float(low), float(high))
-                    for open_time, close_time, low, high in connection.execute(
-                        "SELECT epoch_ms(open_time), epoch_ms(close_time), low, high "
-                        "FROM main.candles WHERE symbol = ? AND timeframe = '1m' "
-                        "AND epoch_ms(close_time) >= ? AND epoch_ms(close_time) < ? "
-                        "ORDER BY close_time",
-                        [symbol, entry_time - max_hours * 3_600_000, entry_time],
-                    ).fetchall()
-                ]
-                cache[key] = candles
-            for hours in calculation_windows:
-                values = [item for item in candles if item[1] >= entry_time - hours * 3_600_000]
-                valid = len(values) >= math.floor(hours * 60 * 0.95)
-                frame.at[index, f"low_{hours}h_valid"] = valid
-                if not values:
-                    continue
-                low_candle = min(values, key=lambda item: (item[2], item[0]))
-                frame.at[index, f"low_{hours}h"] = low_candle[2]
-                frame.at[index, f"low_{hours}h_time"] = low_candle[0]
-                frame.at[index, f"low_{hours}h_age_hours"] = (
-                    entry_time - low_candle[0]
-                ) / 3_600_000
-                frame.at[index, f"rise_from_{hours}h_low"] = (
-                    entry_price / low_candle[2] - 1 if low_candle[2] > 0 else math.nan
-                )
+    valid = frame[entry_times.notna() & entry_prices.notna()]
+    if valid.empty:
+        return frame
+    index = load_archive_index(archive_index_path)
+    archive_root = Path(archive_index_path).resolve().parent
+    tasks = []
+    for symbol, group in frame.groupby(frame["symbol"].astype(str), sort=True):
+        group_times = pd.to_numeric(group["entry_time"], errors="coerce").dropna()
+        if group_times.empty:
+            tasks.append((symbol, group, [], calculation_windows, duckdb_threads))
+            continue
+        start_ms = int(group_times.min()) - max_hours * 3_600_000
+        end_ms = int(group_times.max())
+        selected = index[
+            (index["symbol"] == symbol)
+            & (index["timeframe"] == "1m")
+            & (index["first_open_ms"] < end_ms)
+            & (index["last_close_ms"] >= start_ms)
+        ].drop_duplicates("relative_path")
+        verify_archive_index_files(selected, archive_root)
+        source_files = [
+            str(archive_root / path)
+            for path in selected["relative_path"].tolist()
+        ]
+        tasks.append((
+            symbol, group, source_files, calculation_windows, duckdb_threads
+        ))
 
-            low_4h = frame.at[index, "low_4h"] if "low_4h" in frame else math.nan
-            for days in (3, 7):
-                values = [item for item in candles if item[1] >= entry_time - days * 86_400_000]
-                valid = len(values) >= math.floor(days * 24 * 60 * 0.95)
-                frame.at[index, f"box_{days}d_valid"] = valid
-                if not values:
-                    continue
-                box_low = min(item[2] for item in values)
-                box_high = max(item[3] for item in values)
-                frame.at[index, f"box_{days}d_low"] = box_low
-                frame.at[index, f"box_{days}d_high"] = box_high
-                if pd.notna(low_4h) and box_low > 0:
-                    frame.at[index, f"low_4h_to_{days}d_low"] = low_4h / box_low - 1
-                    span = box_high - box_low
-                    frame.at[index, f"low_4h_{days}d_position"] = (
-                        (low_4h - box_low) / span if span > 0 else 0.0
-                    )
-    finally:
-        connection.close()
-    return frame
+    print(
+        f"开始后计算：交易对={len(tasks)}，"
+        f"worker={min(max(1, workers), len(tasks))}",
+        flush=True,
+    )
+    context = multiprocessing.get_context("spawn")
+    pool = context.Pool(processes=min(max(1, workers), len(tasks)))
+    completed = 0
+    enriched = []
+    try:
+        for symbol, result in pool.imap_unordered(
+            _attach_breakout_context_symbol, tasks, chunksize=1
+        ):
+            enriched.append(result)
+            completed += 1
+            print(f"后计算进度：{completed}/{len(tasks)}，当前={symbol}", flush=True)
+    except BaseException:
+        pool.terminate()
+        pool.join()
+        raise
+    else:
+        pool.close()
+        pool.join()
+    return pd.concat(enriched, axis=0).sort_index() if enriched else frame
+
+
+def _attach_breakout_context_symbol(
+    task: tuple[str, pd.DataFrame, list[str], list[int], int]
+) -> tuple[str, pd.DataFrame]:
+    symbol, frame, source_files, calculation_windows, duckdb_threads = task
+    entry_times = pd.to_numeric(frame["entry_time"], errors="coerce")
+    entry_prices = pd.to_numeric(frame["entry_price"], errors="coerce")
+    max_hours = max([168, *calculation_windows])
+    candles = []
+    if source_files:
+        connection = duckdb.connect()
+        try:
+            _configure_duckdb_connection(connection, threads=duckdb_threads)
+            candles = [
+                (int(open_time), int(close_time), float(low), float(high))
+                for open_time, close_time, low, high in connection.execute(
+                    "SELECT epoch_ms(open_time), epoch_ms(close_time), low, high "
+                    "FROM read_parquet(?, union_by_name=true) "
+                    "WHERE symbol = ? AND timeframe = '1m' "
+                    "ORDER BY close_time",
+                    [source_files, symbol],
+                ).fetchall()
+            ]
+        finally:
+            connection.close()
+    candle_cache: dict[int, list[tuple[int, int, float, float]]] = {}
+    candle_close_times = [item[1] for item in candles]
+    for index in frame.index:
+        if pd.isna(entry_times.loc[index]) or pd.isna(entry_prices.loc[index]):
+            continue
+        entry_time = int(entry_times.loc[index])
+        entry_price = float(entry_prices.loc[index])
+        window_candles = candle_cache.get(entry_time)
+        if window_candles is None:
+            left = bisect_left(
+                candle_close_times,
+                entry_time - max_hours * 3_600_000,
+            )
+            right = bisect_left(candle_close_times, entry_time)
+            window_candles = candles[left:right]
+            candle_cache[entry_time] = window_candles
+        for hours in calculation_windows:
+            values = [
+                item for item in window_candles
+                if item[1] >= entry_time - hours * 3_600_000
+            ]
+            frame.at[index, f"low_{hours}h_valid"] = (
+                len(values) >= math.floor(hours * 60 * 0.95)
+            )
+            if not values:
+                continue
+            low_candle = min(values, key=lambda item: (item[2], item[0]))
+            frame.at[index, f"low_{hours}h"] = low_candle[2]
+            frame.at[index, f"low_{hours}h_time"] = low_candle[0]
+            frame.at[index, f"low_{hours}h_age_hours"] = (
+                entry_time - low_candle[0]
+            ) / 3_600_000
+            frame.at[index, f"rise_from_{hours}h_low"] = (
+                entry_price / low_candle[2] - 1
+                if low_candle[2] > 0 else math.nan
+            )
+        low_4h = frame.at[index, "low_4h"] if "low_4h" in frame else math.nan
+        for days in (3, 7):
+            values = [
+                item for item in window_candles
+                if item[1] >= entry_time - days * 86_400_000
+            ]
+            frame.at[index, f"box_{days}d_valid"] = (
+                len(values) >= math.floor(days * 24 * 60 * 0.95)
+            )
+            if not values:
+                continue
+            box_low = min(item[2] for item in values)
+            box_high = max(item[3] for item in values)
+            frame.at[index, f"box_{days}d_low"] = box_low
+            frame.at[index, f"box_{days}d_high"] = box_high
+            if pd.notna(low_4h) and box_low > 0:
+                frame.at[index, f"low_4h_to_{days}d_low"] = (
+                    low_4h / box_low - 1
+                )
+                span = box_high - box_low
+                frame.at[index, f"low_4h_{days}d_position"] = (
+                    (low_4h - box_low) / span if span > 0 else 0.0
+                )
+    return symbol, frame
 
 
 def _write_breakout_summaries(
@@ -1182,6 +1263,7 @@ def _main(argv: list[str] | None = None) -> int:
         pool.shutdown(wait=True)
     comparison = pd.DataFrame(rows).sort_values(["status", "net_pnl"], ascending=[True, False])
     comparison.to_csv(output_root / "comparison.csv", index=False)
+    print("回测任务已结束，正在合并逐笔交易和信号...", flush=True)
     all_trades = []
     all_signals = []
     for spec in specs:
@@ -1206,10 +1288,12 @@ def _main(argv: list[str] | None = None) -> int:
     windows_hours = [int(value) for value in analysis.get("breakout_windows_hours", [4, 6, 8, 12, 24])]
     trades = _attach_breakout_context(
         trades,
-        duckdb_path=config["duckdb_path"],
+        archive_index_path=config["archive_index_path"],
         windows_hours=windows_hours,
         duckdb_threads=duckdb_threads,
+        workers=workers,
     )
+    print("后计算完成，正在生成冲突、分档和参数汇总报表...", flush=True)
     trades, collisions = _annotate_collisions(
         trades, tolerance_ms=int(config.get("analysis", {}).get("collision_tolerance_seconds", 1) * 1000)
     )
