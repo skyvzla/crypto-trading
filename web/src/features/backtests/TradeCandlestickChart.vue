@@ -187,12 +187,12 @@ async function renderChart() {
       requestedEdge = null
     }
   }
-  timeScale.subscribeVisibleLogicalRangeChange(requestMore)
-  unsubscribeRange = () => timeScale.unsubscribeVisibleLogicalRangeChange(requestMore)
   timeScale.setVisibleLogicalRange({
     from: Math.max(0, focusIndex - 30),
     to: Math.min(barTimes.length - 1, focusIndex + 30)
   })
+  timeScale.subscribeVisibleLogicalRangeChange(requestMore)
+  unsubscribeRange = () => timeScale.unsubscribeVisibleLogicalRangeChange(requestMore)
 
   observer = new ResizeObserver((entries) => {
     const width = entries[0]?.contentRect.width
