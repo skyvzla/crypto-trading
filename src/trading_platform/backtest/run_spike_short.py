@@ -77,8 +77,7 @@ class SpikeBacktestSettings:
     bar1s_time_shift_ms: int
     prior_high_lookback_minutes: int
     required_kline_intervals: tuple[str, ...]
-    data_dir: str
-    data_source: str
+    duckdb_path: str
     output_path: Path
 
 
@@ -102,14 +101,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         required=True,
         help="Total notional allocated to each signal",
     )
-    source_group = parser.add_mutually_exclusive_group()
-    source_group.add_argument(
-        "--data-dir", default=None, help="Parquet market data directory"
-    )
-    source_group.add_argument(
+    parser.add_argument(
         "--duckdb-path",
-        default=None,
-        help="Read-only DuckDB candles archive",
+        required=True,
+        help="只读 DuckDB candles 归档路径",
     )
     parser.add_argument(
         "--output",
@@ -199,7 +194,6 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
     bar1s_time_shift_ms = int(
         args.bar1s_time_shift_hours * Decimal("3600000")
     )
-    data_dir = args.data_dir or "data/market"
     return SpikeBacktestSettings(
         start_ms=start_ms,
         end_ms=end_ms,
@@ -211,8 +205,7 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
             if args.exit_policy == "candidate-v1"
             else ("1m", "5m")
         ),
-        data_dir=data_dir,
-        data_source=args.duckdb_path or data_dir,
+        duckdb_path=args.duckdb_path,
         output_path=Path(args.output),
     )
 
@@ -223,7 +216,7 @@ def create_spike_engine(
     events: Iterable[Event],
 ) -> BacktestEngine:
     config = BacktestConfig(
-        data_dir=settings.data_source,
+        data_dir=settings.duckdb_path,
         output_dir=str(settings.output_path),
         trading_start_ms=settings.start_ms,
         limit_fill_fraction_per_bar=args.limit_fill_fraction,
@@ -288,7 +281,7 @@ def main() -> None:
     print("=== Dynamic Spike Short Strategy Backtest ===")
     print(f"Symbol: {args.symbol}")
     print(f"Period: {args.start} to {args.end}")
-    print(f"Data source: {settings.data_source}")
+    print(f"Data source: {settings.duckdb_path}")
     prior_high_label = (
         "disabled" if args.prior_high_lookback_hours == 0
         else f"{args.prior_high_lookback_hours}h"
@@ -297,13 +290,12 @@ def main() -> None:
     print(f"Warmup: {warmup_hours:g}h")
 
     loader = BacktestDataLoader(
-        data_dir=settings.data_dir,
+        duckdb_path=settings.duckdb_path,
         symbols=[args.symbol],
         start_ms=settings.load_start_ms,
         end_ms=settings.end_ms,
         require_aggtrades=True,
         required_kline_intervals=list(settings.required_kline_intervals),
-        duckdb_path=args.duckdb_path,
         archive_index_path=args.archive_index,
         bar1s_time_shift_ms=settings.bar1s_time_shift_ms,
     )

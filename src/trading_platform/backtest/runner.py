@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
       --symbols BTCUSDT \\
       --start 2026-06-01 \\
       --end 2026-06-02 \\
-      --data-dir data/market \\
+      --duckdb-path data/market/history.duckdb \\
       --output reports/test_run
 
   # 回测多币种
@@ -91,18 +91,11 @@ def parse_args() -> argparse.Namespace:
         help='结束日期（YYYY-MM-DD）'
     )
 
-    source_group = parser.add_mutually_exclusive_group()
-    source_group.add_argument(
-        '--data-dir',
-        type=str,
-        default=None,
-        help='数据目录（默认: data/market）'
-    )
-    source_group.add_argument(
+    parser.add_argument(
         '--duckdb-path',
         type=str,
-        default=None,
-        help='只读 DuckDB candles 归档路径（与 --data-dir 互斥）',
+        required=True,
+        help='只读 DuckDB candles 归档路径',
     )
 
     parser.add_argument(
@@ -274,8 +267,6 @@ def main():
         logger.error("--warmup-hours 不能为负数")
         sys.exit(2)
     load_start_ms = start_ms - int(warmup_hours * 3_600_000)
-    data_dir = args.data_dir or 'data/market'
-    data_source = args.duckdb_path or data_dir
 
     # 生成输出目录
     if args.output:
@@ -292,14 +283,14 @@ def main():
     logger.info(f"策略: {args.strategy}")
     logger.info(f"币种: {args.symbols}")
     logger.info(f"时间范围: {args.start} ~ {args.end}")
-    logger.info(f"数据源: {data_source}")
+    logger.info(f"数据源: {args.duckdb_path}")
     logger.info(f"输出目录: {output_dir}")
     logger.info("=" * 60)
 
     # 1. 加载数据
     logger.info("Step 1/4: 加载数据")
     loader = BacktestDataLoader(
-        data_dir=data_dir,
+        duckdb_path=args.duckdb_path,
         symbols=args.symbols,
         start_ms=load_start_ms,
         end_ms=end_ms,
@@ -307,7 +298,6 @@ def main():
         required_kline_intervals=(
             ['1m', '5m'] if args.strategy == 'spike' else []
         ),
-        duckdb_path=args.duckdb_path,
     )
 
     try:
@@ -348,7 +338,7 @@ def main():
     logger.info("Step 3/4: 运行回测")
 
     config = BacktestConfig(
-        data_dir=data_source,
+        data_dir=args.duckdb_path,
         output_dir=output_dir,
         maker_fee_rate=args.maker_fee,
         taker_fee_rate=args.taker_fee,

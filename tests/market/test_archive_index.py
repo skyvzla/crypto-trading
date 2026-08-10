@@ -159,7 +159,6 @@ def test_indexed_loader_validates_required_datasets_without_catalog_scan(
             )
     catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
     loader = BacktestDataLoader(
-        data_dir="unused",
         duckdb_path=str(catalog),
         archive_index_path=str(root / ARCHIVE_INDEX_FILENAME),
         symbols=["AKEUSDT"],

@@ -61,13 +61,13 @@ scripts/deploy.sh
 docker compose exec -T market python scripts/market_smoke.py e2e
 ```
 
-Spike replay 示例（历史 Parquet 数据需预先放入 `data/market/`）：
+Spike replay 示例（使用只读 DuckDB candles 归档）：
 
 ```bash
 uv run --extra dev python -m trading_platform.backtest.runner \
   --strategy spike --symbols BTCUSDT \
   --start 2026-06-01 --end 2026-06-02 \
-  --data-dir data/market --total-notional 1000
+  --duckdb-path data/market/history.duckdb --total-notional 1000
 ```
 
 已验证的 AKEUSDT 2026 年 7 月只读 DuckDB replay：

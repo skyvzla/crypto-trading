@@ -50,13 +50,12 @@ def _run_shift_group(plans: list[SymbolRunPlan]) -> set[str]:
         for interval in plan.settings.required_kline_intervals
     })
     loader = BacktestDataLoader(
-        data_dir=settings.data_dir,
+        duckdb_path=settings.duckdb_path,
         symbols=[args.symbol],
         start_ms=load_start_ms,
         end_ms=settings.end_ms,
         require_aggtrades=True,
         required_kline_intervals=required_intervals,
-        duckdb_path=args.duckdb_path,
         archive_index_path=args.archive_index,
         bar1s_time_shift_ms=settings.bar1s_time_shift_ms,
     )

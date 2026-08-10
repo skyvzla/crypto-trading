@@ -47,7 +47,6 @@ def test_duckdb_loader_reads_candles_without_mutating_archive(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
     loader = BacktestDataLoader(
-        data_dir="unused",
         duckdb_path=str(archive),
         symbols=["akeusdt"],
         start_ms=0,
@@ -80,7 +79,6 @@ def test_duckdb_stream_matches_materialized_event_order(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
     kwargs = {
-        "data_dir": "unused",
         "duckdb_path": str(archive),
         "symbols": ["AKEUSDT"],
         "start_ms": 0,
@@ -89,7 +87,7 @@ def test_duckdb_stream_matches_materialized_event_order(tmp_path):
         "required_kline_intervals": ["1m", "5m"],
     }
 
-    materialized = list(BacktestDataLoader(**kwargs).iter_all())
+    first = list(BacktestDataLoader(**kwargs).iter_all())
     streamed = list(
         BacktestDataLoader(**kwargs).iter_all(
             chunk_hours=0.0003,
@@ -97,14 +95,13 @@ def test_duckdb_stream_matches_materialized_event_order(tmp_path):
         )
     )
 
-    assert streamed == materialized
+    assert streamed == first
 
 
 def test_duckdb_stream_rejects_missing_required_dataset_before_yield(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
     loader = BacktestDataLoader(
-        data_dir="unused",
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -120,7 +117,6 @@ def test_duckdb_loader_applies_explicit_one_second_time_shift(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
     loader = BacktestDataLoader(
-        data_dir="unused",
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -142,7 +138,6 @@ def test_duckdb_loader_rejects_incompatible_archive(tmp_path):
     connection.close()
 
     loader = BacktestDataLoader(
-        data_dir="unused",
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -166,7 +161,6 @@ def test_duckdb_loader_rejects_invalid_one_second_duration(tmp_path):
         connection.close()
 
     loader = BacktestDataLoader(
-        data_dir="unused",
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,

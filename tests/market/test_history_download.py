@@ -633,7 +633,6 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
         ("1s", 1_782_864_000_000, 1_782_864_001_000),
     ]
     events = BacktestDataLoader(
-        data_dir="unused",
         symbols=["AKEUSDT"],
         start_ms=1_782_864_000_000,
         end_ms=1_782_864_060_000,
