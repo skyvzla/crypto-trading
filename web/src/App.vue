@@ -64,13 +64,17 @@ onMounted(health.check)
 </template>
 
 <style scoped lang="scss">
+.app-sider {
+  --sider-text-color: rgba(255, 255, 255, 0.65);
+  --sider-border-color: rgba(255, 255, 255, 0.12);
+}
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
   height: 64px;
   padding: 0 16px;
-  border-bottom: 1px solid var(--line);
+  border-bottom: 1px solid var(--sider-border-color);
 }
 .app-layout { height: 100%; }
 .app-body { min-width: 0; min-height: 0; }
@@ -87,7 +91,7 @@ onMounted(health.check)
   font-size: 13px;
 }
 .brand-name {
-  color: rgba(255, 255, 255, 0.65);
+  color: var(--sider-text-color);
   font-size: 15px;
   font-weight: 600;
   white-space: nowrap;
@@ -101,7 +105,8 @@ onMounted(health.check)
   gap: 8px;
   margin-top: auto;
   padding: 16px 18px;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--sider-border-color);
+  color: var(--sider-text-color);
   font-size: 12px;
 }
 .app-header {

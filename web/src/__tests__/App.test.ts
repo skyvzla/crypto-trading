@@ -4,7 +4,7 @@ import App from '@/App.vue'
 import { router } from '@/router'
 
 describe('App navigation', () => {
-  it('使用 Ant 浅色侧栏与空白 Header，并正确渲染菜单链接', async () => {
+  it('使用 Ant 默认深色侧栏与空白 Header，并正确渲染菜单链接', async () => {
     await router.push('/overview')
     await router.isReady()
     const wrapper = mount(App)
