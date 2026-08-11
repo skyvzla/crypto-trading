@@ -116,6 +116,8 @@ describe('回测关键视图', () => {
     expect(wrapper.text()).toContain('已成交 1 / 3 档')
     expect(wrapper.text()).toContain('卖1')
     expect(wrapper.text()).toContain('挂单 2')
+    expect(wrapper.text()).toContain('触发 K线')
+    expect(wrapper.text()).toContain('确认')
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({

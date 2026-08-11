@@ -124,6 +124,7 @@ $surface: var(--surface);
 .fill-status strong { color: #047857; }
 .tier-price { margin-right: 8px; font-family: "JetBrains Mono", "IBM Plex Mono", monospace; }
 .tier-status { margin-inline-end: 0; }
+.tier-times { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; color: var(--muted); font: 11px/1.35 "JetBrains Mono", "IBM Plex Mono", monospace; }
 .report-header { display: grid; gap: 2px; min-width: 112px; padding-block: 2px; line-height: 1.1; }
 .report-header-label { color: var(--text); font-size: 12px; font-weight: 600; }
 .report-header-key { color: var(--muted); font: 10px/1.1 "JetBrains Mono", "IBM Plex Mono", monospace; overflow-wrap: anywhere; }

@@ -55,7 +55,7 @@ function onTableChange(_: unknown, __: unknown, sorter: { field?: string; order?
   sortOrder.value = item?.order === 'ascend' ? 'asc' : 'desc'
 }
 const columns: TableColumnsType<BacktestTradeSummary> = [
-  { title: '开仓时间', key: 'entry_time', dataIndex: 'entry_time', width: 180, sorter: true, defaultSortOrder: 'descend', customRender: ({ record: row }) => formatTime(row.entry_time) },
+  { title: '首笔成交确认', key: 'entry_time', dataIndex: 'entry_time', width: 180, sorter: true, defaultSortOrder: 'descend', customRender: ({ record: row }) => formatTime(row.entry_time) },
   { title: '均价', key: 'entry_price', dataIndex: 'entry_price', width: 120, sorter: true, customRender: ({ record: row }) => formatNumber(row.entry_price, 8) },
   { title: '退出时间', key: 'exit_time', dataIndex: 'exit_time', width: 180, sorter: true, customRender: ({ record: row }) => formatTime(row.exit_time) },
   { title: '退出价', key: 'exit_price', dataIndex: 'exit_price', width: 120, sorter: true, customRender: ({ record: row }) => formatNumber(row.exit_price, 8) },

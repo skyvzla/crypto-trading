@@ -126,6 +126,11 @@ const entryFills = computed(() => {
   const expectedSide = entrySideLabel.value === '卖' ? 'sell' : 'buy'
   return (trade.fills || []).filter((fill) => fill.side?.toLowerCase() === expectedSide)
 })
+function triggerCandleTime(fillTime: string | number): number | null {
+  const confirmationTime = timestampMs(fillTime)
+  // 引擎在 1 秒 K 线收齐时记录 fill_time；实际触价发生在该 K 线区间内。
+  return confirmationTime === null ? null : confirmationTime - 1_000
+}
 function samePrice(left: number, right: number): boolean {
   return Math.abs(left - right) <= Math.max(1e-12, Math.max(Math.abs(left), Math.abs(right)) * 1e-9)
 }
@@ -135,7 +140,13 @@ const tierDetails = computed(() => {
   const prices = trade.tier_prices?.length ? trade.tier_prices : (trade.orders || []).map((order) => order.price)
   return prices.map((price, index) => {
     const fill = entryFills.value.find((item) => samePrice(item.price, price))
-    return { index: index + 1, price: fill?.price ?? price, filled: Boolean(fill) }
+    return {
+      index: index + 1,
+      price: fill?.price ?? price,
+      filled: Boolean(fill),
+      confirmationTime: fill?.time ?? null,
+      triggerTime: fill ? triggerCandleTime(fill.time) : null
+    }
   })
 })
 const filledTierCount = computed(() => tierDetails.value.filter((item) => item.filled).length)
@@ -156,7 +167,7 @@ const backTo = computed(() => tradeQuery.data.value
     <QueryPanel :pending="tradeQuery.isPending.value" :error="tradeQuery.error.value" @retry="tradeQuery.refetch()">
       <template v-if="tradeQuery.data.value">
         <div class="trade-summary-strip">
-          <div><span>开仓时间</span><strong>{{ formatTime(tradeQuery.data.value.entry_time) }}</strong></div>
+          <div><span>首笔成交确认</span><strong>{{ formatTime(tradeQuery.data.value.entry_time) }}</strong></div>
           <div><span>开仓均价</span><strong>{{ formatNumber(tradeQuery.data.value.average_entry_price ?? tradeQuery.data.value.entry_price, 8) }}</strong></div>
           <div><span>退出时间</span><strong>{{ formatTime(tradeQuery.data.value.exit_time) }}</strong></div>
           <div><span>净盈亏</span><strong :class="pnlClass(tradeQuery.data.value.net_pnl)">{{ formatNumber(tradeQuery.data.value.net_pnl) }} U</strong></div>
@@ -212,6 +223,10 @@ const backTo = computed(() => tradeQuery.data.value
               <a-descriptions-item v-for="tier in tierDetails" :key="tier.index" :label="tier.filled ? `${entrySideLabel}${tier.index}` : `挂单 ${tier.index}`">
                 <span class="tier-price">{{ formatNumber(tier.price, 8) }}</span>
                 <a-tag :color="tier.filled ? 'success' : 'default'" class="tier-status">{{ tier.filled ? '已成交' : '未成交' }}</a-tag>
+                <span v-if="tier.filled" class="tier-times">
+                  <span>触发 K线 {{ formatTime(tier.triggerTime) }}</span>
+                  <span>确认 {{ formatTime(tier.confirmationTime) }}</span>
+                </span>
               </a-descriptions-item>
             </a-descriptions>
           </section>
