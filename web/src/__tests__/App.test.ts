@@ -4,7 +4,7 @@ import App from '@/App.vue'
 import { router } from '@/router'
 
 describe('App navigation', () => {
-  it('使用 Ant 顶部-侧边布局并正确渲染菜单链接', async () => {
+  it('使用 Ant 浅色侧栏与空白 Header，并正确渲染菜单链接', async () => {
     await router.push('/overview')
     await router.isReady()
     const wrapper = mount(App)
@@ -15,7 +15,10 @@ describe('App navigation', () => {
     expect(wrapper.text()).not.toContain('=>')
     expect(wrapper.find('.app-header').exists()).toBe(true)
     expect(wrapper.find('.app-body').exists()).toBe(true)
-    expect(wrapper.find('.header-menu.ant-menu-horizontal').exists()).toBe(true)
+    expect(wrapper.get('.app-header').text()).toBe('')
+    expect(wrapper.find('.header-menu').exists()).toBe(false)
+    expect(wrapper.find('.app-sider.ant-layout-sider-light').exists()).toBe(true)
+    expect(wrapper.find('.side-menu.ant-menu-light').exists()).toBe(true)
     expect(wrapper.find('.side-menu.ant-menu-inline').exists()).toBe(true)
   })
 })

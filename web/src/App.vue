@@ -24,21 +24,7 @@ const sideMenuOptions: MenuProps['items'] = [
   icon: item.icon ? h(item.icon) : undefined
 }))
 
-const headerMenuOptions: MenuProps['items'] = [
-  { key: 'trading', label: '交易分析', to: '/overview' },
-  { key: 'research', label: '回测研究', to: '/backtests' },
-  { key: 'management', label: '交易管理', to: '/universe' }
-].map((item) => ({
-  key: item.key,
-  label: h(RouterLink, { to: item.to }, { default: () => item.label })
-}))
-
 const activeKey = computed(() => String(route.name ?? '').startsWith('backtest') ? 'backtests' : String(route.name ?? ''))
-const activeHeaderKey = computed(() => {
-  if (String(route.name ?? '').startsWith('backtest')) return 'research'
-  if (['universe', 'admissions'].includes(String(route.name ?? ''))) return 'management'
-  return 'trading'
-})
 const healthLabel = computed(
   () =>
     ({
@@ -53,21 +39,19 @@ onMounted(health.check)
 
 <template>
   <a-layout has-sider class="app-layout">
-      <a-layout-sider collapsible breakpoint="md" class="app-sider">
+      <a-layout-sider collapsible breakpoint="md" theme="light" class="app-sider">
         <div class="brand">
           <span class="brand-mark">TL</span>
           <span class="brand-name">Trade Ledger</span>
         </div>
-        <a-menu :selected-keys="[activeKey]" :items="sideMenuOptions" mode="inline" theme="dark" class="side-menu" />
+        <a-menu :selected-keys="[activeKey]" :items="sideMenuOptions" mode="inline" class="side-menu" />
+        <div class="rail-status">
+          <a-badge status="processing" />
+          <span>{{ healthLabel }}</span>
+        </div>
       </a-layout-sider>
       <a-layout class="app-body">
-        <a-layout-header class="app-header">
-          <a-menu :selected-keys="[activeHeaderKey]" :items="headerMenuOptions" mode="horizontal" theme="dark" class="header-menu" />
-          <div class="header-status">
-            <a-badge status="processing" />
-            <span>{{ healthLabel }}</span>
-          </div>
-        </a-layout-header>
+        <a-layout-header class="app-header" />
         <a-layout-content class="workspace">
           <RouterView v-slot="{ Component }">
             <KeepAlive :max="12">
@@ -86,7 +70,7 @@ onMounted(health.check)
   gap: 10px;
   height: 64px;
   padding: 0 16px;
-  color: #fff;
+  border-bottom: 1px solid var(--line);
 }
 .app-layout { height: 100%; }
 .app-body { min-width: 0; min-height: 0; }
@@ -108,23 +92,26 @@ onMounted(health.check)
   white-space: nowrap;
 }
 .app-sider.ant-layout-sider-collapsed .brand { justify-content: center; padding-inline: 0; }
-.app-sider.ant-layout-sider-collapsed .brand-name { display: none; }
-.app-header {
+.app-sider.ant-layout-sider-collapsed .brand-name,
+.app-sider.ant-layout-sider-collapsed .rail-status span { display: none; }
+.rail-status {
   display: flex;
   align-items: center;
-  padding: 0;
+  gap: 8px;
+  margin-top: auto;
+  padding: 16px 18px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
 }
-.header-menu { flex: 1; min-width: 0; }
-.header-status { display: flex; align-items: center; gap: 8px; padding: 0 24px; color: rgba(255, 255, 255, .65); white-space: nowrap; }
+.app-header {
+  padding: 0;
+  background: #fff;
+  border-bottom: 1px solid var(--line);
+}
 .workspace {
   flex: 1;
   min-height: 0;
   padding: 20px 24px 32px;
   overflow: auto;
-}
-
-@media (max-width: 600px) {
-  .header-status span { display: none; }
-  .header-status { padding-inline: 12px; }
 }
 </style>
