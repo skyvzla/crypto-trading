@@ -1,5 +1,5 @@
 # Spike v2 全量回测配置。
-# 运行：python -m trading_platform.backtest.sweep \
+# 运行：uv run spike-backtest-sweep \
 #   --config experiments/spike_sweep_v2.example.toml --workers 5
 
 name = "spike-v2-parameter-sweep"
