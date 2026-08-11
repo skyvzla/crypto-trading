@@ -34,6 +34,7 @@ from trading_platform.strategies.spike.exit_features import (
     candidate_feature_snapshot,
 )
 from trading_platform.strategies.spike.exit_policy import (
+    CandidateV1Config,
     ExitAction,
     ExitObservation,
     SpikeExitPolicyState,
@@ -140,6 +141,9 @@ class SpikeSignal:
     # 保留 4h 字段，兼容已有报告；非 4h 回测时为空。
     prior_high_4h: Decimal | None = None
     prior_high_4h_time: int | None = None
+    rise_low: Decimal | None = None
+    rise_low_time: int | None = None
+    rise_low_age_minutes: int | None = None
 
 
 class DynamicSpikeShortStrategy:
@@ -183,6 +187,11 @@ class DynamicSpikeShortStrategy:
         account_id: str = "backtest",
         exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007",
         prior_high_lookback_minutes: int | None = None,
+        entry_tier_mode: Literal["three-tier", "tier3-only"] = "three-tier",
+        rise_low_lookback_minutes: int = 0,
+        min_rise_duration_minutes: int = 0,
+        early_profit_unlock_ratio: Decimal | None = None,
+        strategy_version: Literal["v1", "v2"] = "v1",
     ):
         """
         Args:
@@ -199,6 +208,28 @@ class DynamicSpikeShortStrategy:
         self.total_notional = Decimal(total_notional)
         self.account_id = account_id
         self.exit_policy = exit_policy
+        if strategy_version not in {"v1", "v2"}:
+            raise ValueError("strategy_version must be v1 or v2")
+        self.strategy_version = strategy_version
+        if entry_tier_mode not in {"three-tier", "tier3-only"}:
+            raise ValueError("entry_tier_mode must be three-tier or tier3-only")
+        self.entry_tier_mode = entry_tier_mode
+        if (rise_low_lookback_minutes <= 0) != (min_rise_duration_minutes <= 0):
+            raise ValueError(
+                "rise_low_lookback_minutes and min_rise_duration_minutes "
+                "must both be positive or both be zero"
+            )
+        if min_rise_duration_minutes > rise_low_lookback_minutes:
+            raise ValueError(
+                "min_rise_duration_minutes must not exceed rise_low_lookback_minutes"
+            )
+        self.rise_low_lookback_minutes = int(rise_low_lookback_minutes)
+        self.min_rise_duration_minutes = int(min_rise_duration_minutes)
+        if early_profit_unlock_ratio is not None:
+            early_profit_unlock_ratio = Decimal(early_profit_unlock_ratio)
+            if not Decimal("0") < early_profit_unlock_ratio < Decimal("1"):
+                raise ValueError("early_profit_unlock_ratio must be between 0 and 1")
+        self.early_profit_unlock_ratio = early_profit_unlock_ratio
         self.prior_high_lookback_minutes = (
             self.PRIOR_HIGH_LOOKBACK_MINUTES
             if prior_high_lookback_minutes is None
@@ -226,6 +257,8 @@ class DynamicSpikeShortStrategy:
         self._exit_requested = False
         self._campaign_origin_price: Decimal | None = None
         self._candidate_exit_state = SpikeExitPolicyState()
+        self._candidate_exit_config = CandidateV1Config()
+        self._early_profit_risk_unlocked = False
         self._candidate_feature_config = CandidateFeatureConfig()
         self._candidate_features: CandidateFeatureSnapshot | None = None
         self._pending_rotation: SpikeSignal | None = None
@@ -341,6 +374,7 @@ class DynamicSpikeShortStrategy:
         self._exit_requested = False
         self._campaign_origin_price = None
         self._candidate_exit_state = SpikeExitPolicyState()
+        self._early_profit_risk_unlocked = False
         self._candidate_features = None
         self._pending_rotation = None
         self._rotation_exit_requested = False
@@ -375,6 +409,7 @@ class DynamicSpikeShortStrategy:
             reduced_at_origin=reduced_at_origin,
             exit_requested=exit_requested,
         )
+        self._early_profit_risk_unlocked = False
 
     def restore_pending_campaign(
         self, campaign_id: str, *, origin_price: Decimal | None
@@ -510,6 +545,16 @@ class DynamicSpikeShortStrategy:
                         "prior_high_4h_time": signal.prior_high_4h_time,
                         "prior_high_lookback_minutes": self.prior_high_lookback_minutes,
                         "prior_high_guard_all_tiers_above": True,
+                        "entry_tier_mode": self.entry_tier_mode,
+                        "rise_low_lookback_minutes": self.rise_low_lookback_minutes,
+                        "min_rise_duration_minutes": self.min_rise_duration_minutes,
+                        "rise_low": (
+                            str(signal.rise_low)
+                            if signal.rise_low is not None
+                            else None
+                        ),
+                        "rise_low_time": signal.rise_low_time,
+                        "rise_low_age_minutes": signal.rise_low_age_minutes,
                         "origin_price": str(signal.origin_price),
                         "origin_floor": (
                             str(signal.origin_floor)
@@ -526,6 +571,12 @@ class DynamicSpikeShortStrategy:
                         "signal_cooldown_seconds": self.SIGNAL_COOLDOWN,
                         "order_ttl_seconds": self.ORDER_TTL,
                         "exit_policy": self.exit_policy,
+                        "strategy_version": self.strategy_version,
+                        "early_profit_unlock_ratio": (
+                            str(self.early_profit_unlock_ratio)
+                            if self.early_profit_unlock_ratio is not None
+                            else None
+                        ),
                         "tier_prices": [str(price) for price in signal.tier_prices],
                         "tier_weights": [str(weight) for weight in signal.tier_weights],
                         "invalid_price": str(signal.invalid_price),
@@ -681,12 +732,35 @@ class DynamicSpikeShortStrategy:
             (position.entry_price - mark_price) * position.quantity
             - position.total_commission
         )
+        gross_return = (position.entry_price - mark_price) / position.entry_price
+        if (
+            not self._early_profit_risk_unlocked
+            and self.early_profit_unlock_ratio is not None
+            and gross_return > self.early_profit_unlock_ratio
+        ):
+            self._early_profit_risk_unlocked = True
+            self._candidate_exit_state.min_risk_age_ms = 0
+            self._record_audit(
+                event_time=event_time,
+                event_type="candidate_early_risk_unlocked",
+                campaign_id=self._campaign_id_for_timing,
+                details={
+                    "gross_return": str(gross_return),
+                    "threshold": str(self.early_profit_unlock_ratio),
+                },
+            )
+        risk_elapsed_ms = (
+            max(elapsed_ms, self._candidate_exit_config.risk_start_ms)
+            if self._early_profit_risk_unlocked
+            else elapsed_ms
+        )
         time_risk, momentum_risk = candidate_v1_risks(
-            elapsed_ms=elapsed_ms,
+            elapsed_ms=risk_elapsed_ms,
             decay_agreement=features.decay_agreement,
             net_pnl=net_pnl,
             down_channel_5m=features.down_channel_5m,
             down_channel_15m=features.down_channel_15m,
+            config=self._candidate_exit_config,
         )
         observation = ExitObservation(
             event_time=event_time,
@@ -823,7 +897,8 @@ class DynamicSpikeShortStrategy:
         """处理已完成 K 线事件"""
         if kline.interval == "1m":
             self.klines_1m.append(kline)
-            cutoff = kline.close_time - 30 * 3600 * MS_PER_SECOND
+            retained_minutes = max(30 * 60, self.rise_low_lookback_minutes)
+            cutoff = kline.close_time - retained_minutes * MS_PER_MINUTE
             self.klines_1m = [k for k in self.klines_1m if k.close_time >= cutoff]
 
         elif kline.interval == "5m":
@@ -891,6 +966,8 @@ class DynamicSpikeShortStrategy:
             for tier_idx, (tier_price, tier_weight) in enumerate(
                 zip(sig.tier_prices, sig.tier_weights), start=1
             ):
+                if tier_weight <= 0:
+                    continue
                 client_order_id = self._client_order_id(sig, tier_idx)
                 if client_order_id in sig.placed_client_order_ids:
                     continue
@@ -1041,6 +1118,20 @@ class DynamicSpikeShortStrategy:
         if current.close / low_12h - Decimal("1") < self.RISE_FROM_12H_LOW:
             return None
 
+        rise_low = None
+        rise_low_time = None
+        rise_low_age_minutes = None
+        if self.rise_low_lookback_minutes:
+            rise_low_point = self._min_low_point_1m(
+                minute_start, self.rise_low_lookback_minutes
+            )
+            if rise_low_point is None:
+                return None
+            rise_low, rise_low_time = rise_low_point
+            rise_low_age_minutes = (minute_start - rise_low_time) // MS_PER_MINUTE
+            if rise_low_age_minutes < self.min_rise_duration_minutes:
+                return None
+
         # 6. 起涨点（16 小时最低价）
         origin_price = self._min_low_1m(minute_start, self.ORIGIN_MINUTES)
         if origin_price is None or origin_price <= 0:
@@ -1103,7 +1194,11 @@ class DynamicSpikeShortStrategy:
             origin_price=origin_price,
             atr=atr,
             tier_prices=tier_prices,
-            tier_weights=list(self.TIER_WEIGHTS),
+            tier_weights=(
+                [Decimal("0"), Decimal("0"), Decimal("1")]
+                if self.entry_tier_mode == "tier3-only"
+                else list(self.TIER_WEIGHTS)
+            ),
             invalid_price=invalid_price,
             active_time=active_time,
             expire_time=active_time + self.ORDER_TTL * MS_PER_SECOND,
@@ -1120,6 +1215,9 @@ class DynamicSpikeShortStrategy:
             prior_high_time=prior_high_time,
             prior_high_4h=prior_high_4h,
             prior_high_4h_time=prior_high_4h_time,
+            rise_low=rise_low,
+            rise_low_time=rise_low_time,
+            rise_low_age_minutes=rise_low_age_minutes,
         )
 
     # ------------------------------------------------------------------
@@ -1128,8 +1226,18 @@ class DynamicSpikeShortStrategy:
 
     def _min_low_1m(self, minute_start: int, minutes: int) -> Optional[Decimal]:
         """已完成 1m K 线在 [minute_start - minutes, minute_start) 内的最低价"""
+        point = self._min_low_point_1m(minute_start, minutes)
+        return point[0] if point is not None else None
+
+    def _min_low_point_1m(
+        self, minute_start: int, minutes: int
+    ) -> tuple[Decimal, int] | None:
+        """返回窗口最低点；相同低价取最近一次，避免低估上涨持续时间。"""
         window = self._completed_1m_window(minute_start, minutes)
-        return min((k.low for k in window), default=None) if window else None
+        if not window:
+            return None
+        kline = min(window, key=lambda item: (item.low, -item.open_time))
+        return kline.low, kline.open_time
 
     def _completed_1m_window(
         self, minute_start: int, minutes: int
@@ -1266,6 +1374,11 @@ class DynamicSpikeBacktestStrategy:
         account: Optional[StrategyAccount] = None,
         exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007",
         prior_high_lookback_minutes: int | None = None,
+        entry_tier_mode: Literal["three-tier", "tier3-only"] = "three-tier",
+        rise_low_lookback_minutes: int = 0,
+        min_rise_duration_minutes: int = 0,
+        early_profit_unlock_ratio: Decimal | None = None,
+        strategy_version: Literal["v1", "v2"] = "v1",
     ):
         self.strategies = {
             symbol: DynamicSpikeShortStrategy(
@@ -1274,6 +1387,11 @@ class DynamicSpikeBacktestStrategy:
                 account=account,
                 exit_policy=exit_policy,
                 prior_high_lookback_minutes=prior_high_lookback_minutes,
+                entry_tier_mode=entry_tier_mode,
+                rise_low_lookback_minutes=rise_low_lookback_minutes,
+                min_rise_duration_minutes=min_rise_duration_minutes,
+                early_profit_unlock_ratio=early_profit_unlock_ratio,
+                strategy_version=strategy_version,
             )
             for symbol in symbols
         }

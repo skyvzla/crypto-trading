@@ -44,9 +44,14 @@ from trading_platform.market.archive.parquet import archive_root_from_catalog
 logger = logging.getLogger(__name__)
 
 PARAMETER_FLAGS = {
+    "strategy_version": "--strategy-version",
     "total_notional": "--total-notional",
     "exit_policy": "--exit-policy",
     "prior_high_lookback_hours": "--prior-high-lookback-hours",
+    "rise_low_lookback_hours": "--rise-low-lookback-hours",
+    "min_rise_duration_hours": "--min-rise-duration-hours",
+    "entry_tier_mode": "--entry-tier-mode",
+    "profit_unlock_percent": "--profit-unlock-percent",
     "limit_fill_fraction": "--limit-fill-fraction",
     "warmup_hours": "--warmup-hours",
     "bar1s_time_shift_hours": "--bar1s-time-shift-hours",

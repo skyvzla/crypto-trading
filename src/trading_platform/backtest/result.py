@@ -24,10 +24,13 @@ TRADE_COLUMNS = [
     'signal_time_iso', 'entry_pattern', 'pullback_before_first_entry',
     'pullback_time', 'pullback_time_iso', 'pullback_low',
     'pullback_threshold', 'pullback_atr', 'signal_cooldown_seconds',
-    'order_ttl_seconds', 'exit_policy', 'spike_high', 'spike_high_time',
+    'order_ttl_seconds', 'exit_policy', 'strategy_version', 'entry_tier_mode',
+    'early_profit_unlock_ratio', 'spike_high', 'spike_high_time',
     'spike_high_time_iso', 'prior_high', 'prior_high_time',
     'prior_high_time_iso', 'prior_high_4h', 'prior_high_4h_time',
     'prior_high_4h_time_iso', 'prior_high_lookback_minutes',
+    'rise_low_lookback_minutes', 'min_rise_duration_minutes',
+    'rise_low', 'rise_low_time', 'rise_low_time_iso', 'rise_low_age_minutes',
     'atr', 'origin_price', 'origin_floor',
     'trigger_price', 'rise_5s', 'volume_5s', 'median_volume_1s',
     'volume_multiple_5s', 'low_12h', 'rise_from_12h_low', 'tier_prices',
@@ -434,6 +437,12 @@ class ResultAnalyzer:
                     prior_high_4h_time = int(prior_high_4h_time)
                 except (TypeError, ValueError):
                     prior_high_4h_time = None
+            rise_low_time = metrics.get('rise_low_time')
+            if rise_low_time is not None:
+                try:
+                    rise_low_time = int(rise_low_time)
+                except (TypeError, ValueError):
+                    rise_low_time = None
 
             rows.append({
                 'trade_id': campaign_id or f'{position.symbol}:{opened_at}',
@@ -452,6 +461,11 @@ class ResultAnalyzer:
                 'signal_cooldown_seconds': detail_number('signal_cooldown_seconds'),
                 'order_ttl_seconds': detail_number('order_ttl_seconds'),
                 'exit_policy': metrics.get('exit_policy'),
+                'strategy_version': metrics.get('strategy_version', 'v1'),
+                'entry_tier_mode': metrics.get('entry_tier_mode', 'three-tier'),
+                'early_profit_unlock_ratio': detail_number(
+                    'early_profit_unlock_ratio'
+                ),
                 'spike_high': detail_number('spike_high'),
                 'spike_high_time': spike_high_time,
                 'spike_high_time_iso': self._timestamp_iso(spike_high_time),
@@ -464,6 +478,16 @@ class ResultAnalyzer:
                 'prior_high_lookback_minutes': detail_number(
                     'prior_high_lookback_minutes'
                 ),
+                'rise_low_lookback_minutes': detail_number(
+                    'rise_low_lookback_minutes'
+                ),
+                'min_rise_duration_minutes': detail_number(
+                    'min_rise_duration_minutes'
+                ),
+                'rise_low': detail_number('rise_low'),
+                'rise_low_time': rise_low_time,
+                'rise_low_time_iso': self._timestamp_iso(rise_low_time),
+                'rise_low_age_minutes': detail_number('rise_low_age_minutes'),
                 'atr': detail_number('atr'),
                 'origin_price': detail_number('origin_price'),
                 'origin_floor': detail_number('origin_floor'),
@@ -788,6 +812,17 @@ class ResultAnalyzer:
                 'bar1s_time_shift_ms': self.result.config.bar1s_time_shift_ms,
                 'prior_high_lookback_minutes': (
                     self.result.config.prior_high_lookback_minutes
+                ),
+                'spike_strategy_version': self.result.config.spike_strategy_version,
+                'spike_entry_tier_mode': self.result.config.spike_entry_tier_mode,
+                'spike_rise_low_lookback_minutes': (
+                    self.result.config.spike_rise_low_lookback_minutes
+                ),
+                'spike_min_rise_duration_minutes': (
+                    self.result.config.spike_min_rise_duration_minutes
+                ),
+                'spike_early_profit_unlock_ratio': (
+                    self.result.config.spike_early_profit_unlock_ratio
                 ),
             }
         }

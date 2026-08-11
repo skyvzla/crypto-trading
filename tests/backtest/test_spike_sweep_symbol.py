@@ -3,6 +3,7 @@ from pathlib import Path
 
 from trading_platform.shared.events import Bar1s, Kline
 from trading_platform.backtest import run_spike_sweep_symbol as symbol_runner
+from trading_platform.backtest import run_spike_short
 
 
 def test_symbol_runner_keeps_the_ninety_day_default_read_window():
@@ -15,6 +16,47 @@ def test_symbol_runner_keeps_the_ninety_day_default_read_window():
     ])
 
     assert args.chunk_hours == 24 * 90
+
+
+def test_v2_resolves_confirmed_defaults_and_seven_day_warmup():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--total-notional", "1000",
+        "--strategy-version", "v2",
+    ])
+
+    settings = run_spike_short.resolve_settings(args)
+
+    assert settings.strategy_version == "v2"
+    assert settings.prior_high_lookback_minutes == 6 * 60
+    assert settings.rise_low_lookback_minutes == 7 * 24 * 60
+    assert settings.min_rise_duration_minutes == 24 * 60
+    assert settings.entry_tier_mode == "tier3-only"
+    assert settings.early_profit_unlock_ratio == Decimal("0.015")
+    assert settings.start_ms - settings.load_start_ms == 7 * 24 * 3_600_000
+
+
+def test_v1_defaults_remain_unchanged():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--total-notional", "1000",
+    ])
+
+    settings = run_spike_short.resolve_settings(args)
+
+    assert settings.strategy_version == "v1"
+    assert settings.prior_high_lookback_minutes == 4 * 60
+    assert settings.rise_low_lookback_minutes == 0
+    assert settings.min_rise_duration_minutes == 0
+    assert settings.entry_tier_mode == "three-tier"
+    assert settings.early_profit_unlock_ratio is None
+    assert settings.start_ms - settings.load_start_ms == 16 * 3_600_000
 
 
 def test_symbol_runner_reads_market_data_once_for_multiple_parameters(

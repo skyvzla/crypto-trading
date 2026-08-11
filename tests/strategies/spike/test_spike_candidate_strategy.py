@@ -61,13 +61,19 @@ def _features(
     )
 
 
-def _strategy(*, agreement: int | None, quantity: str = "2"):
+def _strategy(
+    *,
+    agreement: int | None,
+    quantity: str = "2",
+    early_profit_unlock_ratio: Decimal | None = None,
+):
     account = PositionAccount(quantity)
     strategy = DynamicSpikeShortStrategy(
         "AKEUSDT",
         total_notional=Decimal("20"),
         account=account,
         exit_policy="candidate-v1",
+        early_profit_unlock_ratio=early_profit_unlock_ratio,
     )
     strategy.restore_campaign_timing(
         "spike_short:AKEUSDT:1",
@@ -228,6 +234,27 @@ def test_candidate_momentum_threshold_tightens_at_90_300_900_seconds(
         assert strategy.campaign_exit_state() == (False, False, True)
     else:
         assert strategy.campaign_exit_state() == (False, False, False)
+
+
+def test_profit_threshold_permanently_unlocks_risk_exit_before_ninety_seconds():
+    strategy, _ = _strategy(
+        agreement=0,
+        early_profit_unlock_ratio=Decimal("0.015"),
+    )
+
+    assert _evaluate(strategy, elapsed_ms=29_000, price="98.5") == []
+    assert strategy.drain_audit_events() == []
+    assert _evaluate(strategy, elapsed_ms=30_000, price="98.4") == []
+    strategy._candidate_features = _features(agreement=3)
+    intents = _evaluate(strategy, elapsed_ms=31_000, price="101")
+
+    assert len(intents) == 1
+    assert intents[0].trigger_reason == "candidate_momentum_exit"
+    audit = strategy.drain_audit_events()
+    assert [event.event_type for event in audit] == [
+        "candidate_early_risk_unlocked",
+        "candidate_exit_requested",
+    ]
 
 
 @pytest.mark.parametrize(

@@ -53,6 +53,11 @@ class NoPriorHighDynamicSpikeBacktestStrategy(DynamicSpikeBacktestStrategy):
         total_notional,
         account=None,
         exit_policy="execution-test-d007",
+        entry_tier_mode="three-tier",
+        rise_low_lookback_minutes=0,
+        min_rise_duration_minutes=0,
+        early_profit_unlock_ratio=None,
+        strategy_version="v1",
     ):
         self.strategies = {
             symbol: NoPriorHighDynamicSpikeShortStrategy(
@@ -60,6 +65,11 @@ class NoPriorHighDynamicSpikeBacktestStrategy(DynamicSpikeBacktestStrategy):
                 total_notional=total_notional,
                 account=account,
                 exit_policy=exit_policy,
+                entry_tier_mode=entry_tier_mode,
+                rise_low_lookback_minutes=rise_low_lookback_minutes,
+                min_rise_duration_minutes=min_rise_duration_minutes,
+                early_profit_unlock_ratio=early_profit_unlock_ratio,
+                strategy_version=strategy_version,
             )
             for symbol in symbols
         }
@@ -71,11 +81,16 @@ class NoPriorHighDynamicSpikeBacktestStrategy(DynamicSpikeBacktestStrategy):
 
 @dataclass(frozen=True)
 class SpikeBacktestSettings:
+    strategy_version: str
     start_ms: int
     end_ms: int
     load_start_ms: int
     bar1s_time_shift_ms: int
     prior_high_lookback_minutes: int
+    rise_low_lookback_minutes: int
+    min_rise_duration_minutes: int
+    entry_tier_mode: str
+    early_profit_unlock_ratio: Decimal | None
     required_kline_intervals: tuple[str, ...]
     duckdb_path: str
     output_path: Path
@@ -120,8 +135,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--exit-policy",
         choices=("confirmed", "candidate-v1", "legacy-script"),
-        default="confirmed",
-        help="Exit policy; legacy-script is replay research only",
+        default=None,
+        help="Exit policy; v2默认candidate-v1，v1默认confirmed",
     )
     parser.add_argument(
         "--limit-fill-fraction",
@@ -136,10 +151,40 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="显式修正历史 1s 数据时间偏移；默认 0，不自动推断",
     )
     parser.add_argument(
+        "--strategy-version",
+        choices=("v1", "v2"),
+        default="v1",
+        help="策略版本；v2 默认使用6h前高、7天低点上涨24h、第三档全仓和1.5%%盈利解锁",
+    )
+    parser.add_argument(
         "--prior-high-lookback-hours",
         type=int,
-        default=4,
-        help="前高过滤回看周期（小时），0 表示禁用过滤，默认 4",
+        default=None,
+        help="前高过滤回看周期（小时），0 表示禁用；默认由策略版本决定",
+    )
+    parser.add_argument(
+        "--rise-low-lookback-hours",
+        type=int,
+        default=None,
+        help="上涨起点最低价的回看窗口（小时）；v2默认168，v1默认禁用",
+    )
+    parser.add_argument(
+        "--min-rise-duration-hours",
+        type=int,
+        default=None,
+        help="窗口最低点距信号的最短小时数；v2默认24，v1默认禁用",
+    )
+    parser.add_argument(
+        "--entry-tier-mode",
+        choices=("three-tier", "tier3-only"),
+        default=None,
+        help="入场挂单模式；v2默认只挂第三档全仓，v1默认三档",
+    )
+    parser.add_argument(
+        "--profit-unlock-percent",
+        type=Decimal,
+        default=None,
+        help="持仓价格盈利超过该百分比后永久解除前90秒风险保护；v2默认1.5",
     )
     parser.add_argument(
         "--exchange-info",
@@ -188,18 +233,63 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         raise ValueError("--start must be earlier than --end")
     if args.warmup_hours < 0:
         raise ValueError("--warmup-hours must not be negative")
-    if args.prior_high_lookback_hours < 0:
+    is_v2 = args.strategy_version == "v2"
+    if args.exit_policy is None:
+        args.exit_policy = "candidate-v1" if is_v2 else "confirmed"
+    prior_high_lookback_hours = args.prior_high_lookback_hours
+    if prior_high_lookback_hours is None:
+        prior_high_lookback_hours = 6 if is_v2 else 4
+    rise_low_lookback_hours = args.rise_low_lookback_hours
+    if rise_low_lookback_hours is None:
+        rise_low_lookback_hours = 7 * 24 if is_v2 else 0
+    min_rise_duration_hours = args.min_rise_duration_hours
+    if min_rise_duration_hours is None:
+        min_rise_duration_hours = 24 if is_v2 else 0
+    entry_tier_mode = args.entry_tier_mode or (
+        "tier3-only" if is_v2 else "three-tier"
+    )
+    profit_unlock_percent = args.profit_unlock_percent
+    if profit_unlock_percent is None and is_v2:
+        profit_unlock_percent = Decimal("1.5")
+
+    if prior_high_lookback_hours < 0:
         raise ValueError("--prior-high-lookback-hours must not be negative")
-    warmup_hours = max(args.warmup_hours, float(args.prior_high_lookback_hours))
+    if rise_low_lookback_hours < 0 or min_rise_duration_hours < 0:
+        raise ValueError("rise lookback and minimum duration must not be negative")
+    if (rise_low_lookback_hours == 0) != (min_rise_duration_hours == 0):
+        raise ValueError("rise lookback and minimum duration must both be zero or positive")
+    if min_rise_duration_hours > rise_low_lookback_hours:
+        raise ValueError("minimum rise duration must not exceed rise lookback")
+    if (
+        profit_unlock_percent is not None
+        and not Decimal("0") < profit_unlock_percent < Decimal("100")
+    ):
+        raise ValueError("--profit-unlock-percent must be between 0 and 100")
+    if profit_unlock_percent is not None and args.exit_policy != "candidate-v1":
+        raise ValueError("--profit-unlock-percent requires --exit-policy candidate-v1")
+    warmup_hours = max(
+        args.warmup_hours,
+        float(prior_high_lookback_hours),
+        float(rise_low_lookback_hours),
+    )
     bar1s_time_shift_ms = int(
         args.bar1s_time_shift_hours * Decimal("3600000")
     )
     return SpikeBacktestSettings(
+        strategy_version=args.strategy_version,
         start_ms=start_ms,
         end_ms=end_ms,
         load_start_ms=start_ms - int(warmup_hours * 3_600_000),
         bar1s_time_shift_ms=bar1s_time_shift_ms,
-        prior_high_lookback_minutes=args.prior_high_lookback_hours * 60,
+        prior_high_lookback_minutes=prior_high_lookback_hours * 60,
+        rise_low_lookback_minutes=rise_low_lookback_hours * 60,
+        min_rise_duration_minutes=min_rise_duration_hours * 60,
+        entry_tier_mode=entry_tier_mode,
+        early_profit_unlock_ratio=(
+            profit_unlock_percent / Decimal("100")
+            if profit_unlock_percent is not None
+            else None
+        ),
         required_kline_intervals=(
             ("1m", "5m", "15m")
             if args.exit_policy == "candidate-v1"
@@ -224,14 +314,23 @@ def create_spike_engine(
         prior_high_lookback_minutes=(
             settings.prior_high_lookback_minutes or 1
         ),
+        spike_strategy_version=settings.strategy_version,
+        spike_entry_tier_mode=settings.entry_tier_mode,
+        spike_rise_low_lookback_minutes=settings.rise_low_lookback_minutes,
+        spike_min_rise_duration_minutes=settings.min_rise_duration_minutes,
+        spike_early_profit_unlock_ratio=(
+            float(settings.early_profit_unlock_ratio)
+            if settings.early_profit_unlock_ratio is not None
+            else None
+        ),
     )
-    if args.prior_high_lookback_hours == 0:
+    if settings.prior_high_lookback_minutes == 0:
         config.prior_high_lookback_minutes = 0
     if args.exit_policy == "legacy-script":
         strategy = LegacyScriptExitSpikeBacktestStrategy(
             symbols=[args.symbol], total_notional=args.total_notional
         )
-    elif args.prior_high_lookback_hours == 0:
+    elif settings.prior_high_lookback_minutes == 0:
         strategy = NoPriorHighDynamicSpikeBacktestStrategy(
             symbols=[args.symbol],
             total_notional=args.total_notional,
@@ -240,6 +339,11 @@ def create_spike_engine(
                 if args.exit_policy == "candidate-v1"
                 else "execution-test-d007"
             ),
+            entry_tier_mode=settings.entry_tier_mode,
+            rise_low_lookback_minutes=settings.rise_low_lookback_minutes,
+            min_rise_duration_minutes=settings.min_rise_duration_minutes,
+            early_profit_unlock_ratio=settings.early_profit_unlock_ratio,
+            strategy_version=settings.strategy_version,
         )
     else:
         strategy = DynamicSpikeBacktestStrategy(
@@ -251,6 +355,11 @@ def create_spike_engine(
                 else "execution-test-d007"
             ),
             prior_high_lookback_minutes=settings.prior_high_lookback_minutes,
+            entry_tier_mode=settings.entry_tier_mode,
+            rise_low_lookback_minutes=settings.rise_low_lookback_minutes,
+            min_rise_duration_minutes=settings.min_rise_duration_minutes,
+            early_profit_unlock_ratio=settings.early_profit_unlock_ratio,
+            strategy_version=settings.strategy_version,
         )
     return BacktestEngine(
         events=events,
@@ -283,9 +392,10 @@ def main() -> None:
     print(f"Period: {args.start} to {args.end}")
     print(f"Data source: {settings.duckdb_path}")
     prior_high_label = (
-        "disabled" if args.prior_high_lookback_hours == 0
-        else f"{args.prior_high_lookback_hours}h"
+        "disabled" if settings.prior_high_lookback_minutes == 0
+        else f"{settings.prior_high_lookback_minutes / 60:g}h"
     )
+    print(f"Strategy version: {settings.strategy_version}")
     print(f"Prior high lookback: {prior_high_label}")
     print(f"Warmup: {warmup_hours:g}h")
 

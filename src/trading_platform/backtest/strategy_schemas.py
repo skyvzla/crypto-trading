@@ -8,7 +8,12 @@ from typing import Any
 SPIKE_SHORT_SCHEMA: dict[str, Any] = {
     "label": "Spike Short",
     "parameter_fields": [
+        {"key": "strategy_version", "label": "策略版本", "format": "text"},
         {"key": "prior_high_lookback_hours", "label": "前高过滤周期", "format": "hours"},
+        {"key": "rise_low_lookback_hours", "label": "上涨低点窗口", "format": "hours"},
+        {"key": "min_rise_duration_hours", "label": "最短上涨周期", "format": "hours"},
+        {"key": "entry_tier_mode", "label": "挂单档位模式", "format": "text"},
+        {"key": "profit_unlock_percent", "label": "提前解除保护盈利", "format": "percent"},
         {"key": "total_notional", "label": "计划名义金额", "format": "usdt"},
         {"key": "exit_policy", "label": "退出策略", "format": "text"},
         {"key": "warmup_hours", "label": "预热时间", "format": "hours"},

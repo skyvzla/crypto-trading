@@ -168,6 +168,82 @@ class TestDynamicSpikeShortStrategy:
 
         assert prior_high == Decimal("200")
 
+    @pytest.mark.parametrize(
+        ("low_age_minutes", "signal_expected"),
+        [(7 * 24 * 60, True), (60, False)],
+    )
+    def test_signal_requires_recent_window_low_to_be_at_least_minimum_age(
+        self, low_age_minutes, signal_expected
+    ):
+        minute = 60_000
+        lookback_minutes = 7 * 24 * 60
+        minute_start = lookback_minutes * minute
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            prior_high_lookback_minutes=6 * 60,
+            rise_low_lookback_minutes=lookback_minutes,
+            min_rise_duration_minutes=24 * 60,
+        )
+        low_open_time = minute_start - low_age_minutes * minute
+        strategy.klines_1m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=index * minute,
+                close_time=(index + 1) * minute - 1,
+                available_time=(index + 1) * minute,
+                open=Decimal("100"),
+                high=Decimal("102"),
+                low=Decimal("80") if index * minute == low_open_time else Decimal("85"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            )
+            for index in range(lookback_minutes)
+        ]
+        strategy.klines_5m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="5m",
+                open_time=minute_start - (15 - index) * 5 * minute,
+                close_time=minute_start - (14 - index) * 5 * minute - 1,
+                available_time=minute_start - (14 - index) * 5 * minute,
+                open=Decimal("100"),
+                high=Decimal("102"),
+                low=Decimal("98"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            )
+            for index in range(15)
+        ]
+        closes = [Decimal("100")] * 56 + [
+            Decimal("100"), Decimal("101"), Decimal("102"),
+            Decimal("104"), Decimal("106"),
+        ]
+        strategy.bars_1s = [
+            Bar1s(
+                symbol="BTCUSDT",
+                timestamp=minute_start - (60 - index) * 1_000,
+                available_time=minute_start - (59 - index) * 1_000,
+                open=close,
+                high=Decimal("120") if index == 60 else close,
+                low=close,
+                close=close,
+                volume=Decimal("4") if index >= 56 else Decimal("1"),
+                trade_count=1,
+                vwap=close,
+            )
+            for index, close in enumerate(closes)
+        ]
+
+        signal = strategy._detect_signal(strategy.bars_1s[-1])
+
+        assert (signal is not None) is signal_expected
+        if signal is not None:
+            assert signal.rise_low == Decimal("80")
+            assert signal.rise_low_time == low_open_time
+            assert signal.rise_low_age_minutes == low_age_minutes
+
     def test_orders_activate_after_one_second_with_full_ttl(self):
         strategy = DynamicSpikeShortStrategy(
             "BTCUSDT", total_notional=Decimal("1000")
@@ -204,6 +280,46 @@ class TestDynamicSpikeShortStrategy:
         intents = strategy._manage_signals(bar_at(2_000))
         assert len(intents) == 3
         assert all(intent.ttl_ms == 180_000 for intent in intents)
+
+    def test_tier3_only_places_one_full_notional_order_at_third_price(self):
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            entry_tier_mode="tier3-only",
+        )
+        signal = SpikeSignal(
+            signal_time=1_000,
+            trigger_price=Decimal("100"),
+            spike_high=Decimal("120"),
+            origin_price=Decimal("90"),
+            atr=Decimal("10"),
+            tier_prices=[Decimal("108.5"), Decimal("112.5"), Decimal("116.5")],
+            tier_weights=[Decimal("0"), Decimal("0"), Decimal("1")],
+            invalid_price=Decimal("155"),
+            active_time=2_000,
+            expire_time=182_000,
+        )
+        strategy.active_signals.append(signal)
+        bar = Bar1s(
+            symbol="BTCUSDT",
+            timestamp=2_000,
+            available_time=3_000,
+            open=Decimal("100"),
+            high=Decimal("101"),
+            low=Decimal("99"),
+            close=Decimal("100"),
+            volume=Decimal("1"),
+            trade_count=1,
+            vwap=Decimal("100"),
+        )
+
+        intents = strategy._manage_signals(bar)
+
+        assert len(intents) == 1
+        assert intents[0].price == Decimal("116.5")
+        assert intents[0].quantity * intents[0].price == Decimal("1000")
+        assert intents[0].trigger_reason == "spike_tier3"
+        assert intents[0].client_order_id.endswith("_e3")
 
     def test_signal_invalidation_cancels_through_account_interface(self):
         class FakeAccount:
