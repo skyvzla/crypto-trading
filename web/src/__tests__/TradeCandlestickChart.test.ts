@@ -71,6 +71,14 @@ describe('TradeCandlestickChart', () => {
       }
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
+    const chartOptions = vi.mocked(createChart).mock.calls.at(-1)?.[1] as {
+      layout: { background: { color: string }; textColor: string }
+      grid: { vertLines: { color: string }; horzLines: { color: string } }
+    }
+    expect(chartOptions.layout.background.color).toBe('#ffffff')
+    expect(chartOptions.layout.textColor).toBe('#595959')
+    expect(chartOptions.grid.vertLines.color).toBe('#f0f0f0')
+    expect(chartOptions.grid.horzLines.color).toBe('#f0f0f0')
     expect(setData).toHaveBeenCalledOnce()
     expect(createPriceLine).toHaveBeenCalledTimes(5)
     expect(observe).toHaveBeenCalledOnce()

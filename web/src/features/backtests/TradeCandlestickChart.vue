@@ -227,13 +227,13 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     width: host.value.clientWidth,
     height: Math.max(420, host.value.clientHeight),
     layout: {
-      background: { type: ColorType.Solid, color: '#0d1117' }, textColor: '#9ca8b8', attributionLogo: true,
-      panes: { enableResize: true, separatorColor: '#303944', separatorHoverColor: '#4b6075' }
+      background: { type: ColorType.Solid, color: '#ffffff' }, textColor: '#595959', attributionLogo: true,
+      panes: { enableResize: true, separatorColor: '#f0f0f0', separatorHoverColor: '#d9d9d9' }
     },
-    grid: { vertLines: { color: '#1c242d' }, horzLines: { color: '#1c242d' } },
-    rightPriceScale: { borderColor: '#303944' },
-    timeScale: { borderColor: '#303944', timeVisible: true, secondsVisible: candleSpacing < 60 },
-    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#73808f' }, horzLine: { color: '#73808f' } },
+    grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
+    rightPriceScale: { borderColor: '#d9d9d9' },
+    timeScale: { borderColor: '#d9d9d9', timeVisible: true, secondsVisible: candleSpacing < 60 },
+    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#8c8c8c' }, horzLine: { color: '#8c8c8c' } },
     localization: {
       locale: 'zh-CN',
       timeFormatter: (time: Time) => {
@@ -281,7 +281,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   addLine(props.trade.signal_price, '信号', '#e0a526')
   ;(props.trade.tier_prices || props.trade.orders?.map((item) => item.price) || []).slice(0, 3)
     .forEach((price, index) => addLine(price, `挂单 ${index + 1}`, ['#65a7c9', '#a58bd4', '#d98b5f'][index]))
-  addLine(props.trade.average_entry_price ?? props.trade.entry_price, '开仓均价', '#f2f4f7', 0)
+  addLine(props.trade.average_entry_price ?? props.trade.entry_price, '开仓均价', '#262626', 0)
   addLine(props.trade.invalid_price, '失效价', '#f05252', 0)
 
   const indicatorSettings = props.indicators || {}
@@ -596,16 +596,16 @@ onBeforeUnmount(() => {
   width: 194px;
   max-width: calc(100% - 16px);
   padding: 6px 9px;
-  border: 1px solid #354352;
+  border: 1px solid #d9d9d9;
   border-radius: 4px;
-  background: rgba(17, 24, 32, .96);
-  color: #d7e0ea;
+  background: rgba(255, 255, 255, .96);
+  color: #262626;
   font: 11px/1.45 "JetBrains Mono", monospace;
   pointer-events: none;
 }
 .hover-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 19px; white-space: nowrap; }
-.hover-row span { color: #8593a3; }
-.hover-row strong { color: #edf2f7; font-weight: 500; }
+.hover-row span { color: #8c8c8c; }
+.hover-row strong { color: #262626; font-weight: 500; }
 .indicator-hover-label {
   position: absolute;
   z-index: 2;
@@ -615,7 +615,8 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 3px 6px;
   border-radius: 3px;
-  background: rgba(13, 17, 23, .74);
+  border: 1px solid #f0f0f0;
+  background: rgba(255, 255, 255, .9);
   font: 11px/1.3 "JetBrains Mono", monospace;
   pointer-events: none;
 }
@@ -629,13 +630,13 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   height: 8px;
-  color: #6f7f90;
-  background: #111820;
+  color: #8c8c8c;
+  background: #fafafa;
   cursor: ns-resize;
   touch-action: none;
 }
 .chart-height-resizer:hover {
-  color: #c8d5e3;
-  background: #1c2a37;
+  color: #595959;
+  background: #f0f0f0;
 }
 </style>
