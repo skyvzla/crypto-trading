@@ -9,8 +9,28 @@ duckdb_path = "data/market/history.duckdb"
 output = "reports/spike-v2-parameter-sweep"
 
 [universe]
-# 主库有效交易对与1秒归档的交集；数据库禁用标的不参与回测。
-mode = "database"
+# 仅回测 v1 的6h前高版本实际产生过交易的92个标的。
+# explicit 模式仍会读取主库，数据库禁用或缺少1秒归档的标的不参与回测。
+mode = "explicit"
+symbols = [
+  "1000000BOBUSDT", "1000RATSUSDT", "2ZUSDT", "4USDT", "AGTUSDT",
+  "AINUSDT", "AIOUSDT", "AKEUSDT", "ALCHUSDT", "ALPINEUSDT", "API3USDT",
+  "ARCUSDT", "AVAAIUSDT", "BANANAS31USDT", "BANKUSDT", "BANUSDT",
+  "BEATUSDT", "BELUSDT", "BIRBUSDT", "BLUAIUSDT", "BOMEUSDT",
+  "BROCCOLIF3BUSDT", "BRUSDT", "BSBUSDT", "BTWUSDT", "BULLAUSDT", "BUSDT",
+  "CLOUSDT", "COAIUSDT", "COLLECTUSDT", "CTSIUSDT", "DEXEUSDT", "DODOXUSDT",
+  "DOGSUSDT", "DUSKUSDT", "ESPORTSUSDT", "ESPUSDT", "ETHWUSDT", "EVAAUSDT",
+  "FFUSDT", "FHEUSDT", "FLUXUSDT", "FOLKSUSDT", "FORMUSDT", "FUSDT",
+  "GIGGLEUSDT", "GPSUSDT", "HEIUSDT", "HMSTRUSDT", "HUSDT", "IDOLUSDT",
+  "IOTAUSDT", "JELLYJELLYUSDT", "KGENUSDT", "KOMAUSDT", "LABUSDT",
+  "LUMIAUSDT", "MAGMAUSDT", "MITOUSDT", "MMTUSDT", "MYXUSDT", "NAORISUSDT",
+  "ONUSDT", "PAXGUSDT", "PIPPINUSDT", "PLAYUSDT", "PNUTUSDT", "POWERUSDT",
+  "PRLUSDT", "PUMPBTCUSDT", "RAVEUSDT", "RIVERUSDT", "SIRENUSDT",
+  "SKYAIUSDT", "SLXUSDT", "SPKUSDT", "STGUSDT", "STOUSDT", "SWARMSUSDT",
+  "SYNUSDT", "TACUSDT", "TAIKOUSDT", "TRADOORUSDT", "UAIUSDT", "USTCUSDT",
+  "VELVETUSDT", "WCTUSDT", "XNYUSDT", "XPINUSDT", "ZEREBROUSDT",
+  "币安人生USDT", "我踏马来了USDT",
+]
 strategy_id = "spike_short"
 freeze_days = 15
 coverage_tolerance_hours = 24
