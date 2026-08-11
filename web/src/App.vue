@@ -44,7 +44,7 @@ onMounted(health.check)
           <span class="brand-mark">TL</span>
           <span class="brand-name">Trade Ledger</span>
         </div>
-        <a-menu :selected-keys="[activeKey]" :items="sideMenuOptions" mode="inline" class="side-menu" />
+        <a-menu :selected-keys="[activeKey]" :items="sideMenuOptions" mode="inline" theme="dark" class="side-menu" />
         <div class="rail-status">
           <a-badge status="processing" />
           <span>{{ healthLabel }}</span>
@@ -87,6 +87,7 @@ onMounted(health.check)
   font-size: 13px;
 }
 .brand-name {
+  color: rgba(255, 255, 255, 0.65);
   font-size: 15px;
   font-weight: 600;
   white-space: nowrap;
