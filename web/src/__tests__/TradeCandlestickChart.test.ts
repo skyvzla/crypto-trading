@@ -100,6 +100,7 @@ describe('TradeCandlestickChart', () => {
     const wrapper = mount(TradeCandlestickChart, {
       props: {
         candles,
+        focusTime: null,
         trade: {
           id: 't-2', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: (start + 40) * 1000,
           entry_price: 1.1, exit_time: (start + 80) * 1000, exit_price: 1.2, net_pnl: -10,
@@ -108,10 +109,43 @@ describe('TradeCandlestickChart', () => {
       }
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(setVisibleLogicalRange).toHaveBeenCalledWith({ from: 10, to: 70 })
+    expect(setVisibleLogicalRange).toHaveBeenCalledWith({ from: 9, to: 69 })
     ;(wrapper.vm as unknown as { focusExit: () => void }).focusExit()
-    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith({ from: 50, to: 100 })
+    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith({ from: 49, to: 100 })
     expect(createSeriesMarkers).toHaveBeenCalled()
+  })
+
+  it('将回测成交确认时刻定位到实际触价的前一根1秒K线', async () => {
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 61 }, (_, index) => ({
+      time: start + index,
+      open: 1,
+      high: 1.2,
+      low: 0.9,
+      close: 1.1,
+      volume: 10
+    }))
+    mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        trade: {
+          id: 't-fill-candle', symbol: 'AKEUSDT', strategy_id: 'spike-short', side: 'SHORT',
+          entry_time: (start + 40) * 1000, entry_price: 1.1,
+          exit_time: (start + 50) * 1000, exit_price: 1, net_pnl: 1,
+          fills: [
+            { id: 'f-1', time: (start + 40) * 1000, price: 1.1, tier: 1 },
+            { id: 'f-2', time: (start + 41) * 1000, price: 1.15, tier: 2 }
+          ]
+        }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const markers = createSeriesMarkers.mock.calls.at(-1)?.[1] as Array<{ time: number; text: string }>
+    expect(markers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ time: start + 39, text: '成交 T1' }),
+      expect.objectContaining({ time: start + 40, text: '成交 T2' }),
+      expect.objectContaining({ time: start + 49, text: '退出' })
+    ]))
   })
 
   it('追加K线时更新现有series并保留缩放和可视位置', async () => {

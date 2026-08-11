@@ -80,6 +80,12 @@ function seconds(value: string | number | null | undefined): UTCTimestamp | null
   return ms === null ? null : Math.floor(ms / 1000) as UTCTimestamp
 }
 
+function triggerCandleSeconds(value: string | number | null | undefined): UTCTimestamp | null {
+  const ms = timestampMs(value)
+  // 回测以 1 秒 K 线收齐时作为 fill_time；图表 K 线以开盘时刻为坐标。
+  return ms === null ? null : Math.floor((ms - 1_000) / 1_000) as UTCTimestamp
+}
+
 function formatChartTime(value: number, includeSeconds = true): string {
   const date = new Date(value)
   const pad = (part: number) => String(part).padStart(2, '0')
@@ -273,6 +279,10 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     }
     return matched as UTCTimestamp
   }
+  const fillMarkerTime = (value: string | number | null | undefined): UTCTimestamp | null => {
+    const triggerTime = triggerCandleSeconds(value)
+    return triggerTime === null ? null : markerTime(triggerTime * 1_000)
+  }
 
   const addLine = (price: number | null | undefined, title: string, color: string, style = 2) => {
     if (price === null || price === undefined || !Number.isFinite(price)) return
@@ -399,25 +409,25 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   if (signalTime) markers.push({ time: signalTime, position: entryPosition, color: '#e0a526', shape: 'circle', text: '信号' })
   const fills = props.trade.fills || []
   for (const fill of fills) {
-    const time = markerTime(fill.time)
+    const time = fillMarkerTime(fill.time)
     if (time) markers.push({ time, position: entryPosition, color: '#1677ff', shape: entryShape, text: `成交${fill.tier ? ` T${fill.tier}` : ''}` })
   }
   const firstFill = fills[0]
-  const entryTime = markerTime(firstFill?.time ?? props.trade.entry_time)
+  const entryTime = fillMarkerTime(firstFill?.time ?? props.trade.entry_time)
   if (entryTime && !markers.some((marker) => Number(marker.time) === Number(entryTime))) markers.push({ time: entryTime, position: entryPosition, color: '#1677ff', shape: entryShape, text: '首单' })
-  const exitTime = markerTime(props.trade.exit_time)
+  const exitTime = fillMarkerTime(props.trade.exit_time)
   if (exitTime) markers.push({ time: exitTime, position: exitPosition, color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: exitShape, text: '退出' })
   createSeriesMarkers(series, [...markers, ...overlayMarkers].sort((a, b) => Number(a.time) - Number(b.time)))
   const eventPrices = new Map<number, Array<{ label: string; price: number }>>()
-  const addEventPrice = (label: string, value: string | number | null | undefined, price: number | null | undefined) => {
-    const time = markerTime(value)
+  const addEventPrice = (label: string, value: string | number | null | undefined, price: number | null | undefined, isFill = false) => {
+    const time = isFill ? fillMarkerTime(value) : markerTime(value)
     if (time === null || typeof price !== 'number') return
     eventPrices.set(Number(time), [...(eventPrices.get(Number(time)) || []), { label, price }])
   }
   addEventPrice('信号价格', props.trade.signal_time, props.trade.signal_price)
-  fills.forEach((fill, index) => addEventPrice(fill.tier ? `第${fill.tier}档成交` : `成交 ${index + 1}`, fill.time, fill.price))
-  addEventPrice('开仓均价', props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price)
-  addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price)
+  fills.forEach((fill, index) => addEventPrice(fill.tier ? `第${fill.tier}档成交` : `成交 ${index + 1}`, fill.time, fill.price, true))
+  addEventPrice('开仓均价', props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price, true)
+  addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price, true)
   const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toFixed(pricePrecision)
   const formatIndicatorValue = (value: number, format?: 'volume' | 'oscillator') => {
     if (format === 'volume') return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(value)
@@ -466,7 +476,11 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
       return values.length ? [{ key: group.key, top: paneTop == null ? 7 : paneTop - hostTop + 7, values }] : []
     })
   }
-  const initialFocusTime = Number(seconds(props.focusTime ?? firstFill?.time ?? props.trade.entry_time ?? props.trade.signal_time) ?? renderedBarTimes[Math.floor(renderedBarTimes.length / 2)])
+  const initialFocusTime = Number(
+    props.focusTime == null
+      ? triggerCandleSeconds(firstFill?.time ?? props.trade.entry_time) ?? seconds(props.trade.signal_time)
+      : seconds(props.focusTime) ?? renderedBarTimes[Math.floor(renderedBarTimes.length / 2)]
+  )
   let focusIndex = renderedBarTimes.findIndex((time) => time >= initialFocusTime)
   if (focusIndex < 0) focusIndex = renderedBarTimes.length - 1
   const timeScale = chart.timeScale()
@@ -507,7 +521,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
 }
 
 function focusEvent(value: string | number | null | undefined) {
-  const time = seconds(value)
+  const time = triggerCandleSeconds(value)
   if (!time || !chart || !props.candles.length) return
   const data = props.candles.map((bar) => Number(seconds(bar.time) || 0)).sort((a, b) => a - b)
   if (Number(time) < data[0] || Number(time) > data[data.length - 1]) return
@@ -546,7 +560,12 @@ async function updateChartData() {
   const nextData = normalizeCandles(props.candles)
   const visibleRange = chart.timeScale().getVisibleRange()
   const focusArrived = !containsTime(renderedCandles, props.focusTime) && containsTime(nextData, props.focusTime)
-  const eventTimes = [props.trade.signal_time, props.trade.entry_time, props.trade.exit_time, ...(props.trade.fills || []).map((fill) => fill.time)]
+  const eventTimes = [
+    props.trade.signal_time,
+    triggerCandleSeconds(props.trade.entry_time),
+    triggerCandleSeconds(props.trade.exit_time),
+    ...(props.trade.fills || []).map((fill) => triggerCandleSeconds(fill.time))
+  ]
   const markerArrived = eventTimes.some((time) => !containsTime(renderedCandles, time) && containsTime(nextData, time))
   if (focusArrived || markerArrived) {
     await renderChart(focusArrived ? null : visibleRange)
