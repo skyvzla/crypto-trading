@@ -4,7 +4,7 @@ import App from '@/App.vue'
 import { router } from '@/router'
 
 describe('App navigation', () => {
-  it('使用 Ant 默认深色侧栏与空白 Header，并正确渲染菜单链接', async () => {
+  it('使用深色侧栏、主题切换，并正确渲染菜单链接', async () => {
     await router.push('/overview')
     await router.isReady()
     const wrapper = mount(App)
@@ -15,8 +15,11 @@ describe('App navigation', () => {
     expect(wrapper.text()).not.toContain('=>')
     expect(wrapper.find('.app-header').exists()).toBe(true)
     expect(wrapper.find('.app-body').exists()).toBe(true)
-    expect(wrapper.get('.app-header').text()).toBe('')
-    expect(wrapper.find('.header-menu').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="切换深色模式"]').exists()).toBe(true)
+    await wrapper.get('button[aria-label="切换深色模式"]').trigger('click')
+    expect(document.documentElement.dataset.theme).toBe('dark')
+    expect(localStorage.getItem('trade-ledger-theme')).toBe('dark')
+    expect(wrapper.find('button[aria-label="切换浅色模式"]').exists()).toBe(true)
     expect(wrapper.find('.app-sider.ant-layout-sider-dark').exists()).toBe(true)
     expect(wrapper.find('.side-menu.ant-menu-dark').exists()).toBe(true)
     expect(wrapper.find('.side-menu.ant-menu-inline').exists()).toBe(true)

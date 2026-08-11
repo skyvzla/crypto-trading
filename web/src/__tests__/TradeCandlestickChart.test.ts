@@ -76,9 +76,9 @@ describe('TradeCandlestickChart', () => {
       grid: { vertLines: { color: string }; horzLines: { color: string } }
     }
     expect(chartOptions.layout.background.color).toBe('#ffffff')
-    expect(chartOptions.layout.textColor).toBe('#595959')
-    expect(chartOptions.grid.vertLines.color).toBe('#f0f0f0')
-    expect(chartOptions.grid.horzLines.color).toBe('#f0f0f0')
+    expect(chartOptions.layout.textColor).toBe('#334155')
+    expect(chartOptions.grid.vertLines.color).toBe('#e2e8f0')
+    expect(chartOptions.grid.horzLines.color).toBe('#e2e8f0')
     expect(setData).toHaveBeenCalledOnce()
     expect(createPriceLine).toHaveBeenCalledTimes(5)
     expect(observe).toHaveBeenCalledOnce()
@@ -132,9 +132,11 @@ describe('TradeCandlestickChart', () => {
           id: 't-fill-candle', symbol: 'AKEUSDT', strategy_id: 'spike-short', side: 'SHORT',
           entry_time: (start + 40) * 1000, entry_price: 1.1,
           exit_time: (start + 50) * 1000, exit_price: 1, net_pnl: 1,
+          tier_prices: [1.1, 1.15, 1.2],
           fills: [
-            { id: 'f-1', time: (start + 40) * 1000, price: 1.1, tier: 1 },
-            { id: 'f-2', time: (start + 41) * 1000, price: 1.15, tier: 2 }
+            { id: 'f-1', time: (start + 40) * 1000, price: 1.1, tier: 1, side: 'SELL' },
+            { id: 'f-2', time: (start + 41) * 1000, price: 1.15, tier: 2, side: 'SELL' },
+            { id: 'f-exit', time: (start + 50) * 1000, price: 1.2, side: 'BUY' }
           ]
         }
       }
@@ -142,10 +144,12 @@ describe('TradeCandlestickChart', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     const markers = createSeriesMarkers.mock.calls.at(-1)?.[1] as Array<{ time: number; text: string }>
     expect(markers).toEqual(expect.arrayContaining([
-      expect.objectContaining({ time: start + 39, text: '成交 T1' }),
-      expect.objectContaining({ time: start + 40, text: '成交 T2' }),
+      expect.objectContaining({ time: start + 39, text: '卖1' }),
+      expect.objectContaining({ time: start + 40, text: '卖2' }),
       expect.objectContaining({ time: start + 49, text: '退出' })
     ]))
+    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖1', lineWidth: 3 }))
+    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖2', lineWidth: 3 }))
   })
 
   it('追加K线时更新现有series并保留缩放和可视位置', async () => {

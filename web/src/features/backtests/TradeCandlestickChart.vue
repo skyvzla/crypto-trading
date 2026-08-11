@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch, type ComputedRef } from 'vue'
 import { GripHorizontal } from 'lucide-vue-next'
 import {
   CandlestickSeries,
@@ -34,6 +34,7 @@ const props = defineProps<{
   }
 }>()
 const emit = defineEmits<{ 'request-more': [direction: 'before' | 'after'] }>()
+const isDarkTheme = inject<ComputedRef<boolean>>('isDarkTheme', computed(() => false))
 
 const host = ref<HTMLElement | null>(null)
 let chart: IChartApi | null = null
@@ -229,17 +230,20 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   const pricePrecision = chartPricePrecision(data)
   const priceFormat = { type: 'price' as const, precision: pricePrecision, minMove: 10 ** -pricePrecision }
   const candleSpacing = data.length > 1 ? Number(data[1].time) - Number(data[0].time) : 60
+  const palette = isDarkTheme.value
+    ? { background: '#111827', text: '#d7e0ee', grid: '#263243', border: '#41536b', up: '#34d399', down: '#fb7185', signal: '#fbbf24', filled: '#fb923c', pending: '#60a5fa', average: '#e2e8f0', invalid: '#f87171' }
+    : { background: '#ffffff', text: '#334155', grid: '#e2e8f0', border: '#cbd5e1', up: '#059669', down: '#e11d48', signal: '#b45309', filled: '#ea580c', pending: '#2563eb', average: '#1e293b', invalid: '#dc2626' }
   chart = createChart(host.value, {
     width: host.value.clientWidth,
     height: Math.max(420, host.value.clientHeight),
     layout: {
-      background: { type: ColorType.Solid, color: '#ffffff' }, textColor: '#595959', attributionLogo: true,
-      panes: { enableResize: true, separatorColor: '#f0f0f0', separatorHoverColor: '#d9d9d9' }
+      background: { type: ColorType.Solid, color: palette.background }, textColor: palette.text, attributionLogo: true,
+      panes: { enableResize: true, separatorColor: palette.grid, separatorHoverColor: palette.border }
     },
-    grid: { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
-    rightPriceScale: { borderColor: '#d9d9d9' },
-    timeScale: { borderColor: '#d9d9d9', timeVisible: true, secondsVisible: candleSpacing < 60 },
-    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#8c8c8c' }, horzLine: { color: '#8c8c8c' } },
+    grid: { vertLines: { color: palette.grid }, horzLines: { color: palette.grid } },
+    rightPriceScale: { borderColor: palette.border },
+    timeScale: { borderColor: palette.border, timeVisible: true, secondsVisible: candleSpacing < 60 },
+    crosshair: { mode: CrosshairMode.Normal, vertLine: { color: palette.border }, horzLine: { color: palette.border } },
     localization: {
       locale: 'zh-CN',
       timeFormatter: (time: Time) => {
@@ -250,8 +254,8 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     }
   })
   const series = chart.addSeries(CandlestickSeries, {
-    upColor: '#2ebd85', downColor: '#f05252', borderVisible: false,
-    wickUpColor: '#2ebd85', wickDownColor: '#f05252', priceFormat
+    upColor: palette.up, downColor: palette.down, borderVisible: false,
+    wickUpColor: palette.up, wickDownColor: palette.down, priceFormat
   })
   renderedCandles = data
   renderedBarTimes = data.map((bar) => Number(bar.time))
@@ -284,15 +288,28 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     return triggerTime === null ? null : markerTime(triggerTime * 1_000)
   }
 
-  const addLine = (price: number | null | undefined, title: string, color: string, style = 2) => {
-    if (price === null || price === undefined || !Number.isFinite(price)) return
-    series.createPriceLine({ price, title, color, lineWidth: 1, lineStyle: style, axisLabelVisible: true })
+  const isShort = String(props.trade.side || '').toLowerCase().includes('short') || String(props.trade.side || '').toLowerCase() === 'sell'
+  const entrySideLabel = isShort ? '卖' : '买'
+  const entryOrderSide = isShort ? 'sell' : 'buy'
+  const fills = (props.trade.fills || []).filter((fill) => fill.side?.toLowerCase() === entryOrderSide)
+  const tierPrices = (props.trade.tier_prices || props.trade.orders?.map((item) => item.price) || []).slice(0, 3)
+  const samePrice = (left: number, right: number) => Math.abs(left - right) <= Math.max(1e-12, Math.max(Math.abs(left), Math.abs(right)) * 1e-9)
+  const tierIsFilled = (price: number, index: number) => fills.some((fill) => fill.tier === index + 1 || samePrice(fill.price, price))
+  const tierForFill = (price: number, fallbackIndex: number) => {
+    const index = tierPrices.findIndex((tierPrice) => samePrice(tierPrice, price))
+    return index >= 0 ? index + 1 : fallbackIndex + 1
   }
-  addLine(props.trade.signal_price, '信号', '#e0a526')
-  ;(props.trade.tier_prices || props.trade.orders?.map((item) => item.price) || []).slice(0, 3)
-    .forEach((price, index) => addLine(price, `挂单 ${index + 1}`, ['#65a7c9', '#a58bd4', '#d98b5f'][index]))
-  addLine(props.trade.average_entry_price ?? props.trade.entry_price, '开仓均价', '#262626', 0)
-  addLine(props.trade.invalid_price, '失效价', '#f05252', 0)
+  const addLine = (price: number | null | undefined, title: string, color: string, style = LineStyle.Dashed, lineWidth: 1 | 2 | 3 | 4 = 2) => {
+    if (price === null || price === undefined || !Number.isFinite(price)) return
+    series.createPriceLine({ price, title, color, lineWidth, lineStyle: style, axisLabelVisible: true })
+  }
+  addLine(props.trade.signal_price, '信号', palette.signal, LineStyle.Dashed, 2)
+  tierPrices.forEach((price, index) => {
+    const filled = tierIsFilled(price, index)
+    addLine(price, filled ? `${entrySideLabel}${index + 1}` : `挂单 ${index + 1}`, filled ? palette.filled : palette.pending, filled ? LineStyle.Solid : LineStyle.Dashed, filled ? 3 : 2)
+  })
+  addLine(props.trade.average_entry_price ?? props.trade.entry_price, '开仓均价', palette.average, LineStyle.Solid, 2)
+  addLine(props.trade.invalid_price, '失效价', palette.invalid, LineStyle.Dotted, 2)
 
   const indicatorSettings = props.indicators || {}
   if (indicatorSettings.ema) {
@@ -401,16 +418,14 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
 
   const markers: SeriesMarker<UTCTimestamp>[] = []
   const signalTime = markerTime(props.trade.signal_time)
-  const isShort = String(props.trade.side || '').toLowerCase().includes('short') || String(props.trade.side || '').toLowerCase() === 'sell'
   const entryPosition = isShort ? 'aboveBar' : 'belowBar'
   const exitPosition = isShort ? 'belowBar' : 'aboveBar'
   const entryShape = isShort ? 'arrowDown' : 'arrowUp'
   const exitShape = isShort ? 'arrowUp' : 'arrowDown'
-  if (signalTime) markers.push({ time: signalTime, position: entryPosition, color: '#e0a526', shape: 'circle', text: '信号' })
-  const fills = props.trade.fills || []
-  for (const fill of fills) {
+  if (signalTime) markers.push({ time: signalTime, position: entryPosition, color: palette.signal, shape: 'circle', text: '信号' })
+  for (const [index, fill] of fills.entries()) {
     const time = fillMarkerTime(fill.time)
-    if (time) markers.push({ time, position: entryPosition, color: '#1677ff', shape: entryShape, text: `成交${fill.tier ? ` T${fill.tier}` : ''}` })
+    if (time) markers.push({ time, position: entryPosition, color: palette.filled, shape: entryShape, text: `${entrySideLabel}${tierForFill(fill.price, index)}` })
   }
   const firstFill = fills[0]
   const entryTime = fillMarkerTime(firstFill?.time ?? props.trade.entry_time)
@@ -425,7 +440,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     eventPrices.set(Number(time), [...(eventPrices.get(Number(time)) || []), { label, price }])
   }
   addEventPrice('信号价格', props.trade.signal_time, props.trade.signal_price)
-  fills.forEach((fill, index) => addEventPrice(fill.tier ? `第${fill.tier}档成交` : `成交 ${index + 1}`, fill.time, fill.price, true))
+  fills.forEach((fill, index) => addEventPrice(`${entrySideLabel}${tierForFill(fill.price, index)}`, fill.time, fill.price, true))
   addEventPrice('开仓均价', props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price, true)
   addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price, true)
   const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toFixed(pricePrecision)
@@ -583,6 +598,7 @@ async function updateChartData() {
 
 watch(() => props.candles, updateChartData, { deep: true })
 watch(() => [props.trade, props.overlays, props.indicators, props.focusTime], () => renderChart(), { immediate: true, deep: true })
+watch(isDarkTheme, () => renderChart())
 onBeforeUnmount(() => {
   stopHeightResize?.()
   document.body.style.userSelect = ''
@@ -615,16 +631,16 @@ onBeforeUnmount(() => {
   width: 194px;
   max-width: calc(100% - 16px);
   padding: 6px 9px;
-  border: 1px solid #d9d9d9;
+  border: 1px solid var(--chart-border);
   border-radius: 4px;
-  background: rgba(255, 255, 255, .96);
-  color: #262626;
+  background: var(--chart-overlay);
+  color: var(--text);
   font: 11px/1.45 "JetBrains Mono", monospace;
   pointer-events: none;
 }
 .hover-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 19px; white-space: nowrap; }
-.hover-row span { color: #8c8c8c; }
-.hover-row strong { color: #262626; font-weight: 500; }
+.hover-row span { color: var(--muted); }
+.hover-row strong { color: var(--text); font-weight: 500; }
 .indicator-hover-label {
   position: absolute;
   z-index: 2;
@@ -634,8 +650,8 @@ onBeforeUnmount(() => {
   gap: 10px;
   padding: 3px 6px;
   border-radius: 3px;
-  border: 1px solid #f0f0f0;
-  background: rgba(255, 255, 255, .9);
+  border: 1px solid var(--chart-grid);
+  background: var(--chart-overlay);
   font: 11px/1.3 "JetBrains Mono", monospace;
   pointer-events: none;
 }
@@ -649,13 +665,13 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   height: 8px;
-  color: #8c8c8c;
-  background: #fafafa;
+  color: var(--muted);
+  background: var(--surface-hover);
   cursor: ns-resize;
   touch-action: none;
 }
 .chart-height-resizer:hover {
-  color: #595959;
-  background: #f0f0f0;
+  color: var(--text);
+  background: var(--surface-raised);
 }
 </style>

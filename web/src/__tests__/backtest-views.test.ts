@@ -55,6 +55,8 @@ describe('回测关键视图', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('盈亏金额分组')
     expect(wrapper.text()).toContain('盈亏区间')
+    expect(wrapper.text()).toContain('bucket')
+    expect(wrapper.text()).toContain('trade_count')
     expect(wrapper.text()).toContain('盈利大于10U')
   })
 
@@ -89,7 +91,11 @@ describe('回测关键视图', () => {
     vi.mocked(backtestApi.trade).mockResolvedValue({
       id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000,
       entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10,
-      fills: [{ id: 'f-1', time: 1_750_000_000_000, price: 1.1 }]
+      side: 'SHORT', tier_prices: [1.1, 1.2, 1.3],
+      fills: [
+        { id: 'f-1', time: 1_750_000_000_000, price: 1.1, side: 'SELL' },
+        { id: 'f-exit', time: 1_750_001_800_000, price: 1.2, side: 'BUY' }
+      ]
     })
     vi.mocked(backtestApi.events).mockResolvedValue({
       items: [{ id: 1, time: 1_750_000_000_000, type: 'entry_plan_created', title: 'entry_plan_created', description: null, price: null, data: { tier_prices: ['1.1', '1.2', '1.3'] } }]
@@ -107,6 +113,9 @@ describe('回测关键视图', () => {
     expect(wrapper.find('.event-heading').text()).toContain('entry_plan_created')
     expect(wrapper.find('.event-heading time').text()).not.toBe('')
     expect(wrapper.find('.event-content').text()).toContain('tier_prices')
+    expect(wrapper.text()).toContain('已成交 1 / 3 档')
+    expect(wrapper.text()).toContain('卖1')
+    expect(wrapper.text()).toContain('挂单 2')
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({

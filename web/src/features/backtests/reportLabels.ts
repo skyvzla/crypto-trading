@@ -22,10 +22,31 @@ const labels: Record<string, string> = {
   holding_seconds: '持仓秒数', collision_status: '交易竞争状态'
 }
 
+const tokens: Record<string, string> = {
+  atr: 'ATR', avg: '平均', entry: '开仓', exit: '退出', notional: '名义金额', box: '箱体', high: '高点', low: '低点', valid: '有效', days: '天数',
+  bucket: '分组', campaign: '批次', chunk: '分块', hours: '小时', hour: '小时', minutes: '分钟', minute: '分钟', seconds: '秒数', second: '秒',
+  collision: '竞争', conservative: '保守', independent: '独立', pnl: '盈亏', net: '净', gross: '毛', commission: '手续费',
+  data: '数据', incomplete: '不完整', database: '数据库', allowed: '允许', details: '详情', estimate: '估算', estimated: '预计', materialized: '物化', stream: '流', peak: '峰值',
+  end: '结束', start: '开始', time: '时间', action: '动作', fill: '成交', filled: '已成交', count: '数量', pattern: '形态', price: '价格', quantity: '数量',
+  policy: '策略', protected: '保护', reason: '原因', rise: '上涨', drop: '下跌', return: '收益率', trade: '交易', trades: '交易数',
+  final: '最终', total: '总计', first: '首个', last: '最后', ms: '毫秒', usdt: 'USDT', giveback: '回撤',
+  has: '具备', archive: '归档', hit: '触及', stop: '止损', holding: '持仓', invalid: '失效', loss: '亏损', path: '路径', category: '分类',
+  adverse: '不利', favorable: '有利', max: '最大', min: '最小', median: '中位数', volume: '成交量', duration: '持续时间',
+  month: '月份', baseline: '基线', original: '原始', parameters: '参数', position: '位置', prior: '前期', lookback: '回看', profit: '盈利', factor: '因子',
+  pullback: '回撤', qty: '数量', rows: '行数', run: '运行', runs: '运行数', scaled: '缩放后', selected: '已选择', side: '方向',
+  signal: '信号', cooldown: '冷却', simultaneous: '同时', spike: '尖峰', definition: '定义', strategy: '策略', symbol: '交易对', symbols: '交易对数',
+  threshold: '阈值', triggered: '已触发', trigger: '触发', window: '窗口', winner: '是否盈利', wins: '盈利数', win: '盈利',
+  tier: '档位', tier1: '第一档', tier2: '第二档', tier3: '第三档', '1s': '1秒', '1m': '1分钟', '5m': '5分钟', '15m': '15分钟',
+  '3d': '3天', '7d': '7天', '4h': '4小时', '6h': '6小时', '8h': '8小时', '12h': '12小时', '24h': '24小时',
+  origin: '起涨点', order: '订单', ttl: '有效期', weight: '权重', status: '状态', event: '事件', strategy_id: '策略 ID', run_id: '运行 ID'
+}
+
 export function reportLabel(key: string): string {
-  return labels[key] || key.replaceAll('_', ' ')
+  if (labels[key]) return labels[key]
+  const translated = key.split('_').map((part) => tokens[part.toLowerCase()] || part)
+  return translated.some((part, index) => part !== key.split('_')[index]) ? translated.join('') : '字段'
 }
 
 export function hasReportLabel(key: string): boolean {
-  return key in labels
+  return reportLabel(key) !== '字段'
 }

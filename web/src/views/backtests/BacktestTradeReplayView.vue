@@ -116,6 +116,29 @@ watch(() => [tradeId.value, interval.value, source.value], () => {
 })
 watch(tradeId, () => { focusTimeMs.value = null })
 const allAttributes = computed(() => ({ ...(tradeQuery.data.value?.parameters || {}), ...(tradeQuery.data.value?.strategy_data || {}), ...(tradeQuery.data.value?.metrics || {}), ...(tradeQuery.data.value?.attributes || {}) }))
+const entrySideLabel = computed(() => {
+  const side = String(tradeQuery.data.value?.side || '').toLowerCase()
+  return side.includes('short') || side === 'sell' ? '卖' : '买'
+})
+const entryFills = computed(() => {
+  const trade = tradeQuery.data.value
+  if (!trade) return []
+  const expectedSide = entrySideLabel.value === '卖' ? 'sell' : 'buy'
+  return (trade.fills || []).filter((fill) => fill.side?.toLowerCase() === expectedSide)
+})
+function samePrice(left: number, right: number): boolean {
+  return Math.abs(left - right) <= Math.max(1e-12, Math.max(Math.abs(left), Math.abs(right)) * 1e-9)
+}
+const tierDetails = computed(() => {
+  const trade = tradeQuery.data.value
+  if (!trade) return []
+  const prices = trade.tier_prices?.length ? trade.tier_prices : (trade.orders || []).map((order) => order.price)
+  return prices.map((price, index) => {
+    const fill = entryFills.value.find((item) => samePrice(item.price, price))
+    return { index: index + 1, price: fill?.price ?? price, filled: Boolean(fill) }
+  })
+})
+const filledTierCount = computed(() => tierDetails.value.filter((item) => item.filled).length)
 function eventContent(event: { data?: Record<string, unknown>; description?: string | null; price?: number | null }): string {
   if (event.description) return event.description
   if (event.price != null) return `价格 ${formatNumber(event.price, 8)}`
@@ -138,6 +161,7 @@ const backTo = computed(() => tradeQuery.data.value
           <div><span>退出时间</span><strong>{{ formatTime(tradeQuery.data.value.exit_time) }}</strong></div>
           <div><span>净盈亏</span><strong :class="pnlClass(tradeQuery.data.value.net_pnl)">{{ formatNumber(tradeQuery.data.value.net_pnl) }} U</strong></div>
           <div><span>收益率</span><strong>{{ formatPercent(tradeQuery.data.value.net_return) }}</strong></div>
+          <div class="fill-status"><span>成交档位</span><strong>{{ `已成交 ${filledTierCount} / ${tierDetails.length} 档` }}</strong></div>
           <div><span>退出原因</span><strong>{{ tradeQuery.data.value.exit_reason || '-' }}</strong></div>
         </div>
 
@@ -167,7 +191,15 @@ const backTo = computed(() => tradeQuery.data.value
           <QueryPanel v-else :error="loadedCandles.length ? null : candlesQuery.error.value" :empty="loadedCandles.length === 0" @retry="candlesQuery.refetch()">
             <TradeCandlestickChart ref="chartRef" :candles="loadedCandles" :trade="tradeQuery.data.value" :overlays="schemaQuery.data.value?.chart_overlays" :indicators="indicators" :focus-time="focusTimeMs" @request-more="requestMore" />
           </QueryPanel>
-          <div class="chart-legend"><a-tag color="blue">{{ candlesQuery.data.value?.source || source }}</a-tag><span>信号</span><span>三档挂单</span><span>实际成交</span><span>开仓均价</span><span>失效价</span><span>退出</span></div>
+          <div class="chart-legend">
+            <a-tag color="blue">{{ candlesQuery.data.value?.source || source }}</a-tag>
+            <span class="legend-item signal"><i />信号</span>
+            <span class="legend-item pending"><i />未成交挂单</span>
+            <span class="legend-item filled"><i />实际成交</span>
+            <span class="legend-item average"><i />开仓均价</span>
+            <span class="legend-item invalid"><i />失效价</span>
+            <span class="legend-item exit"><i />退出</span>
+          </div>
         </section>
 
         <div class="replay-details">
@@ -177,7 +209,10 @@ const backTo = computed(() => tradeQuery.data.value
               <a-descriptions-item label="信号时间">{{ formatTime(tradeQuery.data.value.signal_time) }}</a-descriptions-item>
               <a-descriptions-item label="信号价格">{{ formatNumber(tradeQuery.data.value.signal_price, 8) }}</a-descriptions-item>
               <a-descriptions-item label="失效价格">{{ formatNumber(tradeQuery.data.value.invalid_price, 8) }}</a-descriptions-item>
-              <a-descriptions-item v-for="(price, index) in tradeQuery.data.value.tier_prices || []" :key="index" :label="`挂单 ${index + 1}`">{{ formatNumber(price, 8) }}</a-descriptions-item>
+              <a-descriptions-item v-for="tier in tierDetails" :key="tier.index" :label="tier.filled ? `${entrySideLabel}${tier.index}` : `挂单 ${tier.index}`">
+                <span class="tier-price">{{ formatNumber(tier.price, 8) }}</span>
+                <a-tag :color="tier.filled ? 'success' : 'default'" class="tier-status">{{ tier.filled ? '已成交' : '未成交' }}</a-tag>
+              </a-descriptions-item>
             </a-descriptions>
           </section>
           <section class="detail-section timeline-section">

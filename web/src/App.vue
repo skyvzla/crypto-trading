@@ -1,12 +1,19 @@
 <script setup lang="ts">
-import { computed, h, onMounted } from 'vue'
-import { ArrowLeftRight, CalendarDays, ChartNoAxesCombined, Coins, FlaskConical, LayoutDashboard, ListChecks, Tags, WalletCards } from 'lucide-vue-next'
+import { computed, h, onMounted, provide, ref } from 'vue'
+import { ArrowLeftRight, CalendarDays, ChartNoAxesCombined, Coins, FlaskConical, LayoutDashboard, ListChecks, Moon, Sun, Tags, WalletCards } from 'lucide-vue-next'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import type { MenuProps } from 'ant-design-vue'
+import { theme as antdTheme, type MenuProps } from 'ant-design-vue'
 import { useHealthStore } from '@/stores/health'
 
 const route = useRoute()
 const health = useHealthStore()
+const themeMode = ref<'light' | 'dark'>('light')
+const isDarkTheme = computed(() => themeMode.value === 'dark')
+const providerTheme = computed(() => ({
+  algorithm: isDarkTheme.value ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+  token: { colorPrimary: '#3b82f6', borderRadius: 6, fontFamily: '"IBM Plex Sans", "Noto Sans SC", sans-serif' }
+}))
+provide('isDarkTheme', isDarkTheme)
 
 const sideMenuOptions: MenuProps['items'] = [
   { key: 'overview', label: '运行总览', to: '/overview', icon: LayoutDashboard },
@@ -34,11 +41,29 @@ const healthLabel = computed(
     })[health.status]
 )
 
-onMounted(health.check)
+function applyTheme(mode: 'light' | 'dark') {
+  themeMode.value = mode
+  document.documentElement.dataset.theme = mode
+  try {
+    localStorage.setItem('trade-ledger-theme', mode)
+  } catch {
+    // 浏览器禁用本地存储时，仍保留本次会话的主题选择。
+  }
+}
+function toggleTheme() { applyTheme(isDarkTheme.value ? 'light' : 'dark') }
+onMounted(() => {
+  try {
+    applyTheme(localStorage.getItem('trade-ledger-theme') === 'dark' ? 'dark' : 'light')
+  } catch {
+    applyTheme('light')
+  }
+  health.check()
+})
 </script>
 
 <template>
-  <a-layout has-sider class="app-layout">
+  <a-config-provider :theme="providerTheme">
+    <a-layout has-sider class="app-layout">
       <a-layout-sider collapsible breakpoint="md" class="app-sider">
         <div class="brand">
           <span class="brand-mark">TL</span>
@@ -51,7 +76,15 @@ onMounted(health.check)
         </div>
       </a-layout-sider>
       <a-layout class="app-body">
-        <a-layout-header class="app-header" />
+        <a-layout-header class="app-header">
+          <div class="header-actions">
+            <a-tooltip :title="isDarkTheme ? '切换浅色模式' : '切换深色模式'">
+              <a-button type="text" shape="circle" class="theme-toggle" :aria-label="isDarkTheme ? '切换浅色模式' : '切换深色模式'" @click="toggleTheme">
+                <template #icon><Sun v-if="isDarkTheme" :size="17" /><Moon v-else :size="17" /></template>
+              </a-button>
+            </a-tooltip>
+          </div>
+        </a-layout-header>
         <a-layout-content class="workspace">
           <RouterView v-slot="{ Component }">
             <KeepAlive :max="12">
@@ -60,7 +93,8 @@ onMounted(health.check)
           </RouterView>
         </a-layout-content>
       </a-layout>
-  </a-layout>
+    </a-layout>
+  </a-config-provider>
 </template>
 
 <style scoped lang="scss">
@@ -76,7 +110,7 @@ onMounted(health.check)
   padding: 0 16px;
   border-bottom: 1px solid var(--sider-border-color);
 }
-.app-layout { height: 100%; }
+.app-layout { height: 100%; background: var(--app-bg); }
 .app-body { min-width: 0; min-height: 0; }
 .app-sider :deep(.ant-layout-sider-children) { display: flex; flex-direction: column; min-height: 0; }
 .brand-mark {
@@ -111,9 +145,11 @@ onMounted(health.check)
 }
 .app-header {
   padding: 0;
-  background: #fff;
+  background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
+.header-actions { display: flex; height: 100%; align-items: center; justify-content: flex-end; padding-inline: 20px; }
+.theme-toggle { color: var(--text); }
 .workspace {
   flex: 1;
   min-height: 0;
