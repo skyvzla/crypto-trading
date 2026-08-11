@@ -36,7 +36,6 @@ const props = defineProps<{
 const emit = defineEmits<{ 'request-more': [direction: 'before' | 'after'] }>()
 
 const host = ref<HTMLElement | null>(null)
-const chartHeight = ref<number | null>(null)
 let chart: IChartApi | null = null
 let observer: ResizeObserver | null = null
 let unsubscribeRange: (() => void) | null = null
@@ -59,6 +58,22 @@ let indicatorGroups: IndicatorGroup[] = []
 let suppressEdgeRequestsUntil = 0
 let stopHeightResize: (() => void) | null = null
 const PANE_STRETCH_KEY = 'backtest-replay-indicator-pane-stretch-v1'
+const CHART_HEIGHT_KEY = 'backtest-replay-chart-height-v1'
+
+function clampChartHeight(value: number): number {
+  return Math.max(360, Math.min(Math.max(360, window.innerHeight - 80), value))
+}
+
+function storedChartHeight(): number | null {
+  try {
+    const value = Number(localStorage.getItem(CHART_HEIGHT_KEY))
+    return Number.isFinite(value) && value > 0 ? clampChartHeight(value) : null
+  } catch {
+    return null
+  }
+}
+
+const chartHeight = ref<number | null>(storedChartHeight())
 
 function seconds(value: string | number | null | undefined): UTCTimestamp | null {
   const ms = timestampMs(value)
@@ -166,6 +181,13 @@ function beginHeightResize(event: PointerEvent) {
     window.removeEventListener('pointerup', stop)
     document.body.style.userSelect = ''
     stopHeightResize = null
+    if (chartHeight.value !== null) {
+      try {
+        localStorage.setItem(CHART_HEIGHT_KEY, String(chartHeight.value))
+      } catch {
+        // 浏览器禁用本地存储时仍保留本次会话的拖拽结果。
+      }
+    }
   }
   stopHeightResize?.()
   stopHeightResize = stop
@@ -497,7 +519,18 @@ function focusEvent(value: string | number | null | undefined) {
 
 function focusEntry() { focusEvent((props.trade.fills || [])[0]?.time ?? props.trade.entry_time) }
 function focusExit() { focusEvent(props.trade.exit_time) }
-defineExpose({ focusEntry, focusExit })
+async function resetSize() {
+  const visibleRange = chart?.timeScale().getVisibleRange() ?? null
+  chartHeight.value = null
+  try {
+    localStorage.removeItem(CHART_HEIGHT_KEY)
+    localStorage.removeItem(PANE_STRETCH_KEY)
+  } catch {
+    // 浏览器禁用本地存储时仍可恢复本次会话的默认尺寸。
+  }
+  await renderChart(visibleRange)
+}
+defineExpose({ focusEntry, focusExit, resetSize })
 
 function containsTime(data: ChartCandle[], value: string | number | null | undefined): boolean {
   const time = seconds(value)

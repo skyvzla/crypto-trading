@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
+import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 
 // 骨架阶段所有视图都指向同一个占位组件；接口定稿后逐个替换 component。
 const Placeholder = () => import('@/views/PlaceholderView.vue')
@@ -100,6 +100,6 @@ const routes: RouteRecordRaw[] = [
 ]
 
 export const router = createRouter({
-  history: createWebHistory('/ui/'),
+  history: createWebHashHistory(),
   routes
 })

@@ -2,10 +2,8 @@ import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
-// 产物由 FastAPI 挂载在 /ui 下，构建时必须写死同名 base，
-// 否则 index.html 里的 asset 引用会退回根路径 404。
 export default defineConfig({
-  base: '/ui/',
+  base: '/',
   plugins: [vue()],
   resolve: {
     alias: {

@@ -9,7 +9,6 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from starlette.exceptions import HTTPException as StarletteHTTPException
 import uvicorn
 
 from trading_platform.ledger.db.models import LedgerDB, create_connection_pool
@@ -102,25 +101,13 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(backtest_router)
 
-class SpaStaticFiles(StaticFiles):
-    """为 history 模式路由回退 index.html，静态资源缺失仍返回 404。"""
-
-    async def get_response(self, path: str, scope):
-        try:
-            return await super().get_response(path, scope)
-        except StarletteHTTPException as exc:
-            if exc.status_code != 404 or "." in Path(path).name:
-                raise
-            return await super().get_response("index.html", scope)
-
-
 # Vite 产物目录，相对进程工作目录解析（容器内为 /app）。
 # 未构建时跳过挂载，保证 API 与 dev server 模式下服务仍可启动。
 web_dist = Path(load_config()["ledger"]["web_dist"])
 if (web_dist / "index.html").is_file():
     app.mount(
-        "/ui",
-        SpaStaticFiles(directory=web_dist, html=True),
+        "/",
+        StaticFiles(directory=web_dist, html=True),
         name="ledger-ui",
     )
 else:
@@ -129,19 +116,6 @@ else:
         "or use the Vite dev server",
         web_dist.resolve(),
     )
-
-
-# 根路径
-@app.get("/")
-async def root():
-    """根路径"""
-    return {
-        "service": "Trading Platform Ledger API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/api/v1/health"
-    }
-
 
 def main():
     """主函数"""

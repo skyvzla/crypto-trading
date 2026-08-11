@@ -73,6 +73,9 @@ $surface: #fff;
 .chart-toolbar .ant-radio-button-wrapper-checked { color: #d9ecff; border-color: #3b82f6; background: #1d4f85; }
 .chart-toolbar .ant-divider { border-color: #354352; }
 .chart-tool-button:hover { color: #fff !important; background: #243342; }
+.chart-toolbar .chart-icon-button { color: #b8c4d0; background: transparent; }
+.chart-toolbar .chart-icon-button:hover, .chart-toolbar .chart-icon-button:focus-visible { color: #fff !important; background: #243342 !important; }
+.chart-toolbar .chart-icon-button svg { stroke: currentColor; }
 .source-tools { display: flex; align-items: center; gap: 5px; white-space: nowrap; svg { vertical-align: -2px; } }
 .chart-shell { width: 100%; height: min(60vh, 620px); min-height: 420px; }
 .chart-section:fullscreen { display: flex; flex-direction: column; width: 100vw; height: 100vh; border: 0; border-radius: 0; }

@@ -42,6 +42,7 @@ describe('router', () => {
   })
 
   it('resolves deep links correctly', () => {
+    expect(router.resolve('/backtests').href).toBe('#/backtests')
     expect(router.resolve('/positions').name).toBe('positions')
     expect(router.resolve('/stats').name).toBe('stats')
     expect(router.resolve('/backtests').name).toBe('backtests')

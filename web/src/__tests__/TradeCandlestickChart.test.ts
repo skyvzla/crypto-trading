@@ -191,8 +191,9 @@ describe('TradeCandlestickChart', () => {
     seriesOptions.slice(0, 6).forEach((options) => expect(options.priceFormat).toEqual(expected))
   })
 
-  it('恢复并保存指标窗格高度，整体图表高度只在当前页面调整', async () => {
+  it('恢复并保存整体图高与指标窗格，并可重置为默认尺寸', async () => {
     localStorage.setItem('backtest-replay-indicator-pane-stretch-v1', JSON.stringify({ volume: 1.46 }))
+    localStorage.setItem('backtest-replay-chart-height-v1', '520')
     const wrapper = mount(TradeCandlestickChart, {
       props: {
         candles: [{ time: 1_754_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }],
@@ -201,6 +202,7 @@ describe('TradeCandlestickChart', () => {
       }
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(wrapper.get('.chart-shell').attributes('style')).toContain('height: 520px')
     expect(paneSetStretchFactor).toHaveBeenCalledWith(1.46)
     await wrapper.get('.candlestick-host').trigger('pointerdown')
     window.dispatchEvent(new Event('pointerup'))
@@ -212,5 +214,12 @@ describe('TradeCandlestickChart', () => {
     window.dispatchEvent(new Event('pointerup'))
     await wrapper.vm.$nextTick()
     expect(wrapper.get('.chart-shell').attributes('style')).toContain('height: 360px')
+    expect(localStorage.getItem('backtest-replay-chart-height-v1')).toBe('360')
+
+    await (wrapper.vm as unknown as { resetSize: () => Promise<void> }).resetSize()
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.chart-shell').attributes('style')).toBeUndefined()
+    expect(localStorage.getItem('backtest-replay-chart-height-v1')).toBeNull()
+    expect(localStorage.getItem('backtest-replay-indicator-pane-stretch-v1')).toBeNull()
   })
 })

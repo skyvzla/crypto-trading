@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, Maximize2, Minimize2, RefreshCw } from 'lucide-vue-next'
+import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, Maximize2, Minimize2, RefreshCw, RotateCcw } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import type { BacktestCandle } from '@/api/types'
@@ -98,6 +98,9 @@ async function toggleFullscreen() {
 function syncFullscreenState() {
   isFullscreen.value = document.fullscreenElement === chartSection.value
 }
+function resetChartSize() {
+  chartRef.value?.resetSize()
+}
 onMounted(() => document.addEventListener('fullscreenchange', syncFullscreenState))
 onBeforeUnmount(() => document.removeEventListener('fullscreenchange', syncFullscreenState))
 watch(() => candlesQuery.data.value, (response) => {
@@ -155,8 +158,9 @@ const backTo = computed(() => tradeQuery.data.value
               <a-tooltip title="跳转到第一笔成交"><a-button type="text" class="chart-tool-button" @click="focusTradeEvent('entry')"><template #icon><ArrowUpToLine :size="15" /></template>首笔成交</a-button></a-tooltip>
               <a-tooltip title="跳转到退出成交"><a-button type="text" class="chart-tool-button" @click="focusTradeEvent('exit')"><template #icon><ArrowDownToLine :size="15" /></template>退出成交</a-button></a-tooltip>
               <a-spin v-if="candlesQuery.isFetching.value" size="small" />
-              <a-tooltip title="刷新 K 线"><a-button type="text" shape="circle" aria-label="刷新K线" @click="candlesQuery.refetch()"><template #icon><RefreshCw :size="16" /></template></a-button></a-tooltip>
-              <a-tooltip :title="isFullscreen ? '退出全屏' : '全屏查看'"><a-button type="text" shape="circle" :aria-label="isFullscreen ? '退出全屏' : '全屏查看'" @click="toggleFullscreen"><template #icon><Minimize2 v-if="isFullscreen" :size="16" /><Maximize2 v-else :size="16" /></template></a-button></a-tooltip>
+              <a-tooltip title="刷新 K 线"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="刷新K线" @click="candlesQuery.refetch()"><template #icon><RefreshCw :size="16" /></template></a-button></a-tooltip>
+              <a-tooltip title="恢复默认尺寸"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="恢复默认尺寸" @click="resetChartSize"><template #icon><RotateCcw :size="16" /></template></a-button></a-tooltip>
+              <a-tooltip :title="isFullscreen ? '退出全屏' : '全屏查看'"><a-button type="text" shape="circle" class="chart-icon-button" :aria-label="isFullscreen ? '退出全屏' : '全屏查看'" @click="toggleFullscreen"><template #icon><Minimize2 v-if="isFullscreen" :size="16" /><Maximize2 v-else :size="16" /></template></a-button></a-tooltip>
             </div>
           </div>
           <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading"><a-spin /><span>加载 {{ source === 'binance' ? 'Binance' : '本地归档' }} K线</span></div>
