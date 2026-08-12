@@ -115,14 +115,15 @@ describe('回测关键视图', () => {
     expect(wrapper.find('.event-content').text()).toContain('tier_prices')
     expect(wrapper.text()).toContain('已成交 1 / 3 档')
     expect(wrapper.text()).toContain('卖1')
-    expect(wrapper.text()).toContain('挂单 2')
+    expect(wrapper.text()).toContain('限卖2')
     expect(wrapper.text()).toContain('触发 K线')
     expect(wrapper.text()).toContain('确认')
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
       start_ms: 1_749_775_000_000,
-      end_ms: 1_750_225_000_000
+      end_ms: 1_750_225_000_000,
+      source: 'binance'
     }))
     await wrapper.get('.chart-tool-button:nth-of-type(2)').trigger('click')
     await flushPromises()
@@ -130,6 +131,9 @@ describe('回测关键视图', () => {
       start_ms: 1_749_776_800_000,
       end_ms: 1_750_226_800_000
     }))
+    await wrapper.get('input[value="1s"]').trigger('change')
+    await flushPromises()
+    expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'archive', interval: '1s' }))
     await wrapper.get('button[aria-label="返回"]').trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.path).toBe('/backtests/r-1/symbols/AKEUSDT/trades')

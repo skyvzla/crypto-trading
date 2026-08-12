@@ -80,7 +80,7 @@ describe('TradeCandlestickChart', () => {
     expect(chartOptions.grid.vertLines.color).toBe('#e2e8f0')
     expect(chartOptions.grid.horzLines.color).toBe('#e2e8f0')
     expect(setData).toHaveBeenCalledOnce()
-    expect(createPriceLine).toHaveBeenCalledTimes(5)
+    expect(createPriceLine).toHaveBeenCalledTimes(4)
     expect(observe).toHaveBeenCalledOnce()
     wrapper.unmount()
     expect(disconnect).toHaveBeenCalled()
@@ -150,6 +150,41 @@ describe('TradeCandlestickChart', () => {
     ]))
     expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖1', lineWidth: 3 }))
     expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖2', lineWidth: 3 }))
+  })
+
+  it('成交价优先于同价限价，并以统一名称绘制未成交档位和极值标签', async () => {
+    const start = 1_754_000_000
+    mount(TradeCandlestickChart, {
+      props: {
+        candles: [
+          { time: start, open: 1, high: 1.3, low: 0.9, close: 1.1, volume: 10 },
+          { time: start + 1, open: 1.1, high: 1.2, low: 0.8, close: 1, volume: 12 }
+        ],
+        trade: {
+          id: 't-prices', symbol: 'AKEUSDT', strategy_id: 'spike-short', side: 'SHORT',
+          entry_time: (start + 1) * 1000, entry_price: 1.1, invalid_price: 1.4,
+          tier_prices: [1.1, 1.2, 1.3], net_pnl: 1,
+          fills: [{ id: 'f-1', time: (start + 1) * 1000, price: 1.1, tier: 1, side: 'SELL' }]
+        },
+        overlays: [
+          { key: 'invalid_price', label: '失效价', kind: 'price_line' },
+          { key: 'spike_high', label: '尖峰高点', kind: 'price_line' }
+        ]
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖1', price: 1.1 }))
+    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '限卖2', price: 1.2 }))
+    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '限卖3', price: 1.3 }))
+    expect(createPriceLine).not.toHaveBeenCalledWith(expect.objectContaining({ title: '失效价', price: 1.4, color: undefined }))
+    expect(createPriceLine.mock.calls.filter(([line]) => (line as { title: string }).title === '失效价')).toHaveLength(1)
+    expect(createPriceLine.mock.calls.some(([line]) => (line as { title: string }).title === '尖峰高点')).toBe(false)
+    const markers = createSeriesMarkers.mock.calls.at(-1)?.[1] as Array<{ time: number; position: string; text: string }>
+    expect(markers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ time: start, position: 'aboveBar', text: '最高' }),
+      expect.objectContaining({ time: start + 1, position: 'belowBar', text: '最低' }),
+      expect.objectContaining({ time: start, text: '卖1' })
+    ]))
   })
 
   it('追加K线时更新现有series并保留缩放和可视位置', async () => {

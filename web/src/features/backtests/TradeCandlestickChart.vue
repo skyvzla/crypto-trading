@@ -299,17 +299,22 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     const index = tierPrices.findIndex((tierPrice) => samePrice(tierPrice, price))
     return index >= 0 ? index + 1 : fallbackIndex + 1
   }
-  const addLine = (price: number | null | undefined, title: string, color: string, style = LineStyle.Dashed, lineWidth: 1 | 2 | 3 | 4 = 2) => {
+  type PriceLine = { price: number; title: string; color: string; style: LineStyle; lineWidth: 1 | 2 | 3 | 4; priority: number }
+  const priceLines: PriceLine[] = []
+  const addLine = (price: number | null | undefined, title: string, color: string, style = LineStyle.Dashed, lineWidth: 1 | 2 | 3 | 4 = 2, priority = 0) => {
     if (price === null || price === undefined || !Number.isFinite(price)) return
-    series.createPriceLine({ price, title, color, lineWidth, lineStyle: style, axisLabelVisible: true })
+    const duplicate = priceLines.findIndex((line) => samePrice(line.price, price))
+    const next = { price, title, color, style, lineWidth, priority }
+    if (duplicate === -1) priceLines.push(next)
+    else if (priceLines[duplicate].priority < priority) priceLines[duplicate] = next
   }
-  addLine(props.trade.signal_price, '信号', palette.signal, LineStyle.Dashed, 2)
+  addLine(props.trade.signal_price, '信号', palette.signal, LineStyle.Dashed, 2, 10)
   tierPrices.forEach((price, index) => {
     const filled = tierIsFilled(price, index)
-    addLine(price, filled ? `${entrySideLabel}${index + 1}` : `挂单 ${index + 1}`, filled ? palette.filled : palette.pending, filled ? LineStyle.Solid : LineStyle.Dashed, filled ? 3 : 2)
+    addLine(price, filled ? `${entrySideLabel}${index + 1}` : `限${entrySideLabel}${index + 1}`, filled ? palette.filled : palette.pending, filled ? LineStyle.Solid : LineStyle.Dashed, filled ? 3 : 2, filled ? 50 : 40)
   })
-  addLine(props.trade.average_entry_price ?? props.trade.entry_price, '开仓均价', palette.average, LineStyle.Solid, 2)
-  addLine(props.trade.invalid_price, '失效价', palette.invalid, LineStyle.Dotted, 2)
+  addLine(props.trade.average_entry_price ?? props.trade.entry_price, '开仓均价', palette.average, LineStyle.Solid, 2, 30)
+  addLine(props.trade.invalid_price, '失效价', palette.invalid, LineStyle.Dotted, 2, 60)
 
   const indicatorSettings = props.indicators || {}
   if (indicatorSettings.ema) {
@@ -398,7 +403,9 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   }
 
   const overlayMarkers: SeriesMarker<UTCTimestamp>[] = []
+  const handledOverlayKeys = new Set(['spike_high', 'invalid_price', 'tier1_price', 'tier2_price', 'tier3_price'])
   for (const overlay of props.overlays || []) {
+    if (handledOverlayKeys.has(overlay.key)) continue
     const values = [props.trade.strategy_data?.[overlay.key], props.trade.attributes?.[overlay.key], props.trade.metrics?.[overlay.key], props.trade.parameters?.[overlay.key]]
     const value = values.find((item) => typeof item === 'number')
     if (overlay.kind !== 'marker' && typeof value === 'number') {
@@ -422,6 +429,10 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   const exitPosition = isShort ? 'belowBar' : 'aboveBar'
   const entryShape = isShort ? 'arrowDown' : 'arrowUp'
   const exitShape = isShort ? 'arrowUp' : 'arrowDown'
+  const highestIndex = data.reduce((best, candle, index) => candle.high > data[best].high ? index : best, 0)
+  const lowestIndex = data.reduce((best, candle, index) => candle.low < data[best].low ? index : best, 0)
+  markers.push({ time: data[highestIndex].time, position: 'aboveBar', color: palette.signal, shape: 'circle', text: '最高' })
+  markers.push({ time: data[lowestIndex].time, position: 'belowBar', color: palette.signal, shape: 'circle', text: '最低' })
   if (signalTime) markers.push({ time: signalTime, position: entryPosition, color: palette.signal, shape: 'circle', text: '信号' })
   for (const [index, fill] of fills.entries()) {
     const time = fillMarkerTime(fill.time)
@@ -432,17 +443,25 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   if (entryTime && !markers.some((marker) => Number(marker.time) === Number(entryTime))) markers.push({ time: entryTime, position: entryPosition, color: '#1677ff', shape: entryShape, text: '首单' })
   const exitTime = fillMarkerTime(props.trade.exit_time)
   if (exitTime) markers.push({ time: exitTime, position: exitPosition, color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: exitShape, text: '退出' })
+  priceLines.forEach(({ price, title, color, style, lineWidth }) => {
+    series.createPriceLine({ price, title, color, lineWidth, lineStyle: style, axisLabelVisible: true })
+  })
   createSeriesMarkers(series, [...markers, ...overlayMarkers].sort((a, b) => Number(a.time) - Number(b.time)))
-  const eventPrices = new Map<number, Array<{ label: string; price: number }>>()
-  const addEventPrice = (label: string, value: string | number | null | undefined, price: number | null | undefined, isFill = false) => {
+  type EventPrice = { label: string; price: number; priority: number }
+  const eventPrices = new Map<number, EventPrice[]>()
+  const addEventPrice = (label: string, value: string | number | null | undefined, price: number | null | undefined, isFill = false, priority = 0) => {
     const time = isFill ? fillMarkerTime(value) : markerTime(value)
     if (time === null || typeof price !== 'number') return
-    eventPrices.set(Number(time), [...(eventPrices.get(Number(time)) || []), { label, price }])
+    const current = eventPrices.get(Number(time)) || []
+    const samePriceIndex = current.findIndex((item) => samePrice(item.price, price))
+    if (samePriceIndex === -1) current.push({ label, price, priority })
+    else if (current[samePriceIndex].priority < priority) current[samePriceIndex] = { label, price, priority }
+    eventPrices.set(Number(time), current)
   }
-  addEventPrice('信号价格', props.trade.signal_time, props.trade.signal_price)
-  fills.forEach((fill, index) => addEventPrice(`${entrySideLabel}${tierForFill(fill.price, index)}`, fill.time, fill.price, true))
-  addEventPrice('开仓均价', props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price, true)
-  addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price, true)
+  addEventPrice('信号价格', props.trade.signal_time, props.trade.signal_price, false, 10)
+  fills.forEach((fill, index) => addEventPrice(`${entrySideLabel}${tierForFill(fill.price, index)}`, fill.time, fill.price, true, 50))
+  addEventPrice('开仓均价', props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price, true, 30)
+  addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price, true, 50)
   const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toFixed(pricePrecision)
   const formatIndicatorValue = (value: number, format?: 'volume' | 'oscillator') => {
     if (format === 'volume') return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(value)

@@ -28,7 +28,8 @@ const route = useRoute()
 const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
 const tradeId = computed(() => typeof route.params.tradeId === 'string' ? route.params.tradeId : '')
 const interval = ref('5m')
-const source = ref<'binance' | 'archive'>('binance')
+const source = computed<'binance' | 'archive'>(() => interval.value === '1s' ? 'archive' : 'binance')
+const sourceLabel = computed(() => source.value === 'archive' ? '本地归档' : 'Binance')
 const windowShiftBars = ref(0)
 const chartRef = ref<InstanceType<typeof TradeCandlestickChart> | null>(null)
 const chartSection = ref<HTMLElement | null>(null)
@@ -72,7 +73,6 @@ const candlesQuery = useQuery({
 function selectInterval(value: string) {
   interval.value = value
   windowShiftBars.value = 0
-  if (value === '1s') source.value = 'archive'
 }
 async function focusTradeEvent(kind: 'entry' | 'exit') {
   const trade = tradeQuery.data.value
@@ -180,10 +180,7 @@ const backTo = computed(() => tradeQuery.data.value
           <div class="chart-toolbar">
             <a-radio-group :value="interval" size="small" @change="(event: { target: { value: string } }) => selectInterval(event.target.value)"><a-radio-button v-for="item in intervals" :key="item" :value="item">{{ item }}</a-radio-button></a-radio-group>
             <div class="source-tools">
-              <a-radio-group v-model:value="source" size="small">
-                <a-radio-button value="binance"><Globe2 :size="14" /> Binance</a-radio-button>
-                <a-radio-button value="archive"><Database :size="14" /> 本地归档</a-radio-button>
-              </a-radio-group>
+              <a-tag color="blue"><Database v-if="source === 'archive'" :size="14" /> <Globe2 v-else :size="14" /> {{ sourceLabel }}</a-tag>
               <a-divider type="vertical" />
               <a-checkbox v-model:checked="indicators.volume">VOL</a-checkbox>
               <a-checkbox v-model:checked="indicators.macd">MACD</a-checkbox>
@@ -198,12 +195,12 @@ const backTo = computed(() => tradeQuery.data.value
               <a-tooltip :title="isFullscreen ? '退出全屏' : '全屏查看'"><a-button type="text" shape="circle" class="chart-icon-button" :aria-label="isFullscreen ? '退出全屏' : '全屏查看'" @click="toggleFullscreen"><template #icon><Minimize2 v-if="isFullscreen" :size="16" /><Maximize2 v-else :size="16" /></template></a-button></a-tooltip>
             </div>
           </div>
-          <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading"><a-spin /><span>加载 {{ source === 'binance' ? 'Binance' : '本地归档' }} K线</span></div>
+          <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading"><a-spin /><span>加载 {{ sourceLabel }} K线</span></div>
           <QueryPanel v-else :error="loadedCandles.length ? null : candlesQuery.error.value" :empty="loadedCandles.length === 0" @retry="candlesQuery.refetch()">
             <TradeCandlestickChart ref="chartRef" :candles="loadedCandles" :trade="tradeQuery.data.value" :overlays="schemaQuery.data.value?.chart_overlays" :indicators="indicators" :focus-time="focusTimeMs" @request-more="requestMore" />
           </QueryPanel>
           <div class="chart-legend">
-            <a-tag color="blue">{{ candlesQuery.data.value?.source || source }}</a-tag>
+            <a-tag color="blue">{{ candlesQuery.data.value?.source === 'archive' ? '本地归档' : 'Binance' }}</a-tag>
             <span class="legend-item signal"><i />信号</span>
             <span class="legend-item pending"><i />未成交挂单</span>
             <span class="legend-item filled"><i />实际成交</span>
@@ -220,7 +217,7 @@ const backTo = computed(() => tradeQuery.data.value
               <a-descriptions-item label="信号时间">{{ formatTime(tradeQuery.data.value.signal_time) }}</a-descriptions-item>
               <a-descriptions-item label="信号价格">{{ formatNumber(tradeQuery.data.value.signal_price, 8) }}</a-descriptions-item>
               <a-descriptions-item label="失效价格">{{ formatNumber(tradeQuery.data.value.invalid_price, 8) }}</a-descriptions-item>
-              <a-descriptions-item v-for="tier in tierDetails" :key="tier.index" :label="tier.filled ? `${entrySideLabel}${tier.index}` : `挂单 ${tier.index}`">
+              <a-descriptions-item v-for="tier in tierDetails" :key="tier.index" :label="tier.filled ? `${entrySideLabel}${tier.index}` : `限${entrySideLabel}${tier.index}`">
                 <span class="tier-price">{{ formatNumber(tier.price, 8) }}</span>
                 <a-tag :color="tier.filled ? 'success' : 'default'" class="tier-status">{{ tier.filled ? '已成交' : '未成交' }}</a-tag>
                 <span v-if="tier.filled" class="tier-times">
