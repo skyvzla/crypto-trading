@@ -106,8 +106,35 @@ def test_metrics_parser_rejects_conflicting_same_snapshot_rows():
         parse_metrics_archive(content, "BTCUSDT", date(2026, 8, 10))
 
 
+def test_metrics_parser_accepts_next_day_midnight_source_boundary():
+    content = _archive_bytes("2026-08-10", [
+        _row("2026-08-10 23:55:00"),
+        _row("2026-08-11 00:00:00"),
+    ])
+
+    snapshots = parse_metrics_archive(content, "BTCUSDT", "2026-08-10")
+
+    assert [item.snapshot_time for item in snapshots] == [
+        datetime(2026, 8, 10, 23, 55, tzinfo=UTC),
+        datetime(2026, 8, 11, 0, 0, tzinfo=UTC),
+    ]
+
+
+def test_metrics_archive_rejects_source_partition_beyond_next_day_midnight(tmp_path):
+    snapshots = parse_metrics_archive(
+        _archive_bytes("2026-08-10", [_row("2026-08-11 00:00:00")]),
+        "BTCUSDT",
+        "2026-08-10",
+    )
+
+    with MetricsArchive(tmp_path / "metrics") as archive:
+        with pytest.raises(ValueError, match="outside their source-day partition"):
+            archive.upsert(snapshots, partition_day=date(2026, 8, 9))
+
+
 @pytest.mark.parametrize("row", [
     _row("2026-08-10 00:01:00"),
+    _row("2026-08-11 00:05:00"),
     "2026-08-10 00:00:00,ETHUSDT,100,1000,1.1,1.2,1.3,1.4",
 ])
 def test_metrics_parser_rejects_invalid_grid_or_symbol(row):
@@ -122,6 +149,7 @@ def test_metrics_downloader_writes_daily_parquet_skips_existing_and_catalog_is_r
     content = _archive_bytes("2026-08-10", [
         _row("2026-08-10 00:05:00"),
         _row("2026-08-10 00:00:00"),
+        _row("2026-08-11 00:00:00"),
     ])
 
     def fetch(url: str) -> bytes:
@@ -140,9 +168,15 @@ def test_metrics_downloader_writes_daily_parquet_skips_existing_and_catalog_is_r
 
     partition = root / "usdm/BTCUSDT/2026/08/10/metrics.parquet"
     assert partition.is_file()
-    assert results[0].rows == 2
+    assert results[0].rows == 3
     assert requested == [metrics_archive_url("BTCUSDT", "2026-08-10")]
     assert pq.read_table(partition).column_names == [field.name for field in pq.ParquetFile(partition).schema_arrow]
+    assert [item.as_py() for item in pq.read_table(partition)["snapshot_time"]] == [
+        datetime(2026, 8, 10, 0, 0, tzinfo=UTC),
+        datetime(2026, 8, 10, 0, 5, tzinfo=UTC),
+        datetime(2026, 8, 11, 0, 0, tzinfo=UTC),
+    ]
+    assert not (root / "usdm/BTCUSDT/2026/08/11/metrics.parquet").exists()
     assert load_metrics_index(root, verify_files=True).num_rows == 1
 
     with MetricsArchive(root, index_workers=1) as archive:
@@ -167,6 +201,7 @@ def test_metrics_downloader_writes_daily_parquet_skips_existing_and_catalog_is_r
     assert rows == [
         ("BTCUSDT", "5m", 1786320000000, "complete"),
         ("BTCUSDT", "5m", 1786320300000, "complete"),
+        ("BTCUSDT", "5m", 1786406400000, "complete"),
     ]
 
 

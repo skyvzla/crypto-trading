@@ -184,17 +184,36 @@ class MetricsArchive:
             return None
         return pq.ParquetFile(target).metadata.num_rows
 
-    def upsert(self, snapshots: Sequence[MetricsSnapshot]) -> int:
+    def upsert(
+        self,
+        snapshots: Sequence[MetricsSnapshot],
+        *,
+        partition_day: date | None = None,
+    ) -> int:
+        """Store one source-day metrics package in its named daily partition."""
+
         if not snapshots:
             return 0
-        keys = {
-            (snapshot.symbol, snapshot.snapshot_time.date()) for snapshot in snapshots
-        }
-        if len(keys) != 1:
+        symbols = {snapshot.symbol for snapshot in snapshots}
+        if len(symbols) != 1:
             raise ValueError(
-                "one metrics Parquet write must contain exactly one daily partition"
+                "one metrics Parquet write must contain exactly one symbol"
             )
-        symbol, partition_day = keys.pop()
+        symbol = symbols.pop()
+        if partition_day is None:
+            snapshot_days = {snapshot.snapshot_time.date() for snapshot in snapshots}
+            if len(snapshot_days) != 1:
+                raise ValueError(
+                    "cross-day metrics snapshots require an explicit source partition"
+                )
+            partition_day = snapshot_days.pop()
+        elif not all(
+            _belongs_to_source_partition(snapshot.snapshot_time, partition_day)
+            for snapshot in snapshots
+        ):
+            raise ValueError(
+                "metrics snapshots fall outside their source-day partition"
+            )
         table = pa.table({
             "symbol": pa.array([symbol] * len(snapshots), type=pa.string()),
             "period": pa.array([METRICS_PERIOD] * len(snapshots), type=pa.string()),
@@ -331,8 +350,10 @@ def _parse_metrics_row(
         )
     except ValueError as error:
         raise ValueError(f"{member} has invalid create_time: {raw_timestamp!r}") from error
-    if snapshot_time.date() != expected_day:
-        raise ValueError(f"{member} has a row outside its daily partition")
+    if not _belongs_to_source_partition(snapshot_time, expected_day):
+        raise ValueError(
+            f"{member} has a row outside its source-day boundary"
+        )
     source_symbol = (row["symbol"] or "").strip().upper()
     if source_symbol != expected_symbol:
         raise ValueError(f"{member} has an unexpected symbol: {source_symbol!r}")
@@ -354,6 +375,15 @@ def _parse_metrics_row(
             row["sum_taker_long_short_vol_ratio"], member
         ),
     )
+
+
+def _belongs_to_source_partition(snapshot_time: datetime, partition_day: date) -> bool:
+    next_day_boundary = datetime.combine(
+        partition_day + timedelta(days=1),
+        datetime.min.time(),
+        UTC,
+    )
+    return snapshot_time.date() == partition_day or snapshot_time == next_day_boundary
 
 
 def _optional_float(value: str | None, member: str) -> float | None:
@@ -442,7 +472,11 @@ def download_metrics_history(
                 snapshots = parse_metrics_archive(content, symbol, partition_day)
                 if storage_check is not None:
                     storage_check()
-                rows = archive.upsert(snapshots)
+                # Binance metrics source-day ZIPs can end with the following
+                # UTC midnight snapshot. Keep the whole verified source package
+                # in the partition named by its ZIP, rather than losing it or
+                # overwriting a neighboring source package.
+                rows = archive.upsert(snapshots, partition_day=partition_day)
                 processing_seconds = time.monotonic() - processing_started
         except ArchiveNotFoundError:
             _notify(
