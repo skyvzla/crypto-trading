@@ -197,7 +197,7 @@ def test_metrics_downloader_writes_daily_parquet_skips_existing_and_catalog_is_r
             end=datetime(2026, 8, 11, tzinfo=UTC),
         )
 
-    partition = root / "usdm/BTCUSDT/2026/08/10/metrics.parquet"
+    partition = root / "BTCUSDT/2026/08/10/metrics.parquet"
     assert partition.is_file()
     assert results[0].rows == 3
     assert requested == [metrics_archive_url("BTCUSDT", "2026-08-10")]
@@ -207,7 +207,7 @@ def test_metrics_downloader_writes_daily_parquet_skips_existing_and_catalog_is_r
         datetime(2026, 8, 10, 0, 5, tzinfo=UTC),
         datetime(2026, 8, 11, 0, 0, tzinfo=UTC),
     ]
-    assert not (root / "usdm/BTCUSDT/2026/08/11/metrics.parquet").exists()
+    assert not (root / "BTCUSDT/2026/08/11/metrics.parquet").exists()
     assert load_metrics_index(root, verify_files=True).num_rows == 1
 
     with MetricsArchive(root, index_workers=1) as archive:
@@ -268,7 +268,7 @@ def test_metrics_index_rejects_modified_partition(tmp_path):
     with MetricsArchive(root, rebuild_index_on_close=False) as archive:
         archive.upsert(snapshots)
     build_metrics_index(root)
-    partition = root / "usdm/BTCUSDT/2026/08/10/metrics.parquet"
+    partition = root / "BTCUSDT/2026/08/10/metrics.parquet"
     table = pq.read_table(partition)
     pq.write_table(table, partition)
 
@@ -294,8 +294,8 @@ def test_metrics_archives_write_independent_daily_partitions(tmp_path):
             assert first.upsert(first_day) == 1
             assert second.upsert(second_day) == 1
 
-    assert (root / "usdm/BTCUSDT/2026/08/10/metrics.parquet").is_file()
-    assert (root / "usdm/BTCUSDT/2026/08/11/metrics.parquet").is_file()
+    assert (root / "BTCUSDT/2026/08/10/metrics.parquet").is_file()
+    assert (root / "BTCUSDT/2026/08/11/metrics.parquet").is_file()
 
 
 def test_metrics_archive_publish_refreshes_index_and_catalog_once(tmp_path, monkeypatch):
@@ -325,6 +325,76 @@ def test_metrics_archive_publish_refreshes_index_and_catalog_once(tmp_path, monk
     assert index.is_file()
     assert catalog.is_file()
     assert load_metrics_index(root, verify_files=True).num_rows == 1
+
+
+def test_metrics_archive_uses_index_without_reading_partition_footer(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "metrics"
+    snapshots = parse_metrics_archive(
+        _archive_bytes("2026-08-10", [_row("2026-08-10 00:00:00")]),
+        "BTCUSDT",
+        "2026-08-10",
+    )
+    with MetricsArchive(root, index_workers=1) as archive:
+        archive.upsert(snapshots)
+    archive = MetricsArchive(root, rebuild_index_on_close=False)
+    monkeypatch.setattr(
+        "trading_platform.market.archive.metrics.pq.ParquetFile",
+        lambda *_args, **_kwargs: pytest.fail("partition footer was read"),
+    )
+
+    assert archive.partition_rows("BTCUSDT", date(2026, 8, 10)) == 1
+
+
+def test_metrics_publish_incrementally_updates_index_without_full_builder(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "metrics"
+    first = parse_metrics_archive(
+        _archive_bytes("2026-08-10", [_row("2026-08-10 00:00:00")]),
+        "BTCUSDT",
+        "2026-08-10",
+    )
+    second = parse_metrics_archive(
+        _archive_bytes("2026-08-11", [_row("2026-08-11 00:00:00")]),
+        "BTCUSDT",
+        "2026-08-11",
+    )
+    with MetricsArchive(root, index_workers=1) as archive:
+        archive.upsert(first)
+    monkeypatch.setattr(
+        "trading_platform.market.archive.metrics._build_metrics_index",
+        lambda *_args, **_kwargs: pytest.fail("metrics archive was fully scanned"),
+    )
+
+    with MetricsArchive(root, index_workers=1) as archive:
+        archive.upsert(second)
+        archive.publish(root / "metrics.duckdb")
+
+    rows = load_metrics_index(root).to_pylist()
+    assert [row["day"] for row in rows] == [10, 11]
+
+
+def test_metrics_catalog_refreshes_when_empty_archive_gains_first_partition(tmp_path):
+    root = tmp_path / "metrics"
+    build_metrics_index(root)
+    catalog = create_metrics_catalog(root, root / "metrics.duckdb")
+    snapshots = parse_metrics_archive(
+        _archive_bytes("2026-08-10", [_row("2026-08-10 00:00:00")]),
+        "BTCUSDT",
+        "2026-08-10",
+    )
+
+    with MetricsArchive(root, index_workers=1) as archive:
+        archive.upsert(snapshots)
+        archive.publish(catalog)
+
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        assert connection.execute("SELECT count(*) FROM metrics").fetchone() == (1,)
+    finally:
+        connection.close()
 
 
 def test_metrics_archive_publish_lock_blocks_new_partition_write(tmp_path, monkeypatch):
@@ -426,7 +496,7 @@ def test_market_archive_downloads_metrics_by_default_to_sibling_metrics_director
     )
     monkeypatch.setattr(
         archive_cli,
-        "create_duckdb_catalog",
+        "ensure_duckdb_catalog",
         lambda _archive, catalog: catalog,
     )
     monkeypatch.setattr(
@@ -485,7 +555,7 @@ def test_market_archive_starts_candles_and_metrics_concurrently_with_split_worke
     )
     monkeypatch.setattr(
         archive_cli,
-        "create_duckdb_catalog",
+        "ensure_duckdb_catalog",
         lambda _archive, catalog: catalog,
     )
     monkeypatch.setattr(
@@ -558,7 +628,7 @@ def test_market_archive_without_metrics_does_not_start_metrics_download(
     )
     monkeypatch.setattr(
         archive_cli,
-        "create_duckdb_catalog",
+        "ensure_duckdb_catalog",
         lambda _archive, catalog: catalog,
     )
 

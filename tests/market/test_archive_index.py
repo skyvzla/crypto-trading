@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
@@ -10,6 +11,7 @@ from trading_platform.market.archive.index import (
     ArchiveIndexError,
     build_archive_index,
     load_archive_index,
+    update_archive_index,
 )
 from trading_platform.market.archive import index as archive_index
 from trading_platform.market.archive.metrics import MetricsArchive, MetricsSnapshot
@@ -17,6 +19,7 @@ from trading_platform.market.archive.parquet import (
     ParquetCandleArchive,
     archive_root_from_catalog,
     create_duckdb_catalog,
+    ensure_duckdb_catalog,
 )
 from trading_platform.market.archive import index_cli
 from trading_platform.backtest.loader import BacktestDataLoader
@@ -111,6 +114,51 @@ def test_archive_close_atomically_refreshes_index(tmp_path: Path):
     assert frame.iloc[0]["symbol"] == "BANKUSDT"
 
 
+def test_archive_uses_index_for_existing_partition_without_reading_footer(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "history"
+    with ParquetCandleArchive(root, index_workers=1) as archive:
+        archive.upsert_table(
+            _table("BANKUSDT", "1s", datetime(2026, 7, 2, tzinfo=UTC), 1),
+            symbol="BANKUSDT", timeframe="1s", year=2026, month=7, day=2,
+        )
+    archive = ParquetCandleArchive(root, rebuild_index_on_close=False)
+    monkeypatch.setattr(
+        "trading_platform.market.archive.parquet.pq.ParquetFile",
+        lambda *_args, **_kwargs: pytest.fail("partition footer was read"),
+    )
+
+    assert archive.partition_rows("BANKUSDT", "1s", 2026, 7, 2) == 1
+
+
+def test_incremental_archive_index_merges_changed_partition_without_glob(
+    tmp_path: Path, monkeypatch
+):
+    root = tmp_path / "history"
+    with ParquetCandleArchive(root, index_workers=1) as archive:
+        archive.upsert_table(
+            _table("AKEUSDT", "1s", datetime(2026, 7, 1, tzinfo=UTC), 1),
+            symbol="AKEUSDT", timeframe="1s", year=2026, month=7, day=1,
+        )
+    with ParquetCandleArchive(root, rebuild_index_on_close=False) as archive:
+        archive.upsert_table(
+            _table("AKEUSDT", "1s", datetime(2026, 7, 2, tzinfo=UTC), 2),
+            symbol="AKEUSDT", timeframe="1s", year=2026, month=7, day=2,
+        )
+    changed = root / "AKEUSDT/1s/2026/07/02/candles.parquet"
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda *_args, **_kwargs: pytest.fail("archive was fully scanned"),
+    )
+
+    update_archive_index(root, [changed])
+
+    frame = load_archive_index(root)
+    assert sorted(frame["row_count"].tolist()) == [1, 2]
+
+
 def test_archive_index_rejects_changed_partition(tmp_path: Path):
     root = tmp_path / "history"
     with ParquetCandleArchive(root, index_workers=1) as archive:
@@ -143,6 +191,39 @@ def test_catalog_records_archive_root_and_index(tmp_path: Path):
     catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
 
     assert archive_root_from_catalog(catalog) == root.resolve()
+
+
+def test_normal_download_reuses_matching_catalog(tmp_path: Path, monkeypatch):
+    root = tmp_path / "history"
+    root.mkdir()
+    build_archive_index(root, workers=1)
+    catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
+    monkeypatch.setattr(
+        "trading_platform.market.archive.parquet.create_duckdb_catalog",
+        lambda *_args, **_kwargs: pytest.fail("catalog was rebuilt"),
+    )
+
+    assert ensure_duckdb_catalog(root, catalog) == catalog.resolve()
+
+
+def test_catalog_refreshes_when_empty_archive_gains_first_partition(tmp_path: Path):
+    root = tmp_path / "history"
+    root.mkdir()
+    build_archive_index(root, workers=1)
+    catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
+    with ParquetCandleArchive(root, index_workers=1) as archive:
+        archive.upsert_table(
+            _table("AKEUSDT", "1s", datetime(2026, 7, 1, tzinfo=UTC), 1),
+            symbol="AKEUSDT", timeframe="1s", year=2026, month=7, day=1,
+        )
+
+    ensure_duckdb_catalog(root, catalog)
+
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        assert connection.execute("SELECT count(*) FROM candles").fetchone() == (1,)
+    finally:
+        connection.close()
 
 
 def test_indexed_loader_validates_required_datasets_without_catalog_scan(

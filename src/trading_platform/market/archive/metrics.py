@@ -36,7 +36,7 @@ METRICS_PERIOD = "5m"
 METRICS_INTERVAL = timedelta(minutes=5)
 METRICS_INDEX_FILENAME = "metrics_index.parquet"
 METRICS_INDEX_META_FILENAME = "metrics_index.meta.json"
-METRICS_INDEX_SCHEMA_VERSION = 1
+METRICS_INDEX_SCHEMA_VERSION = 2
 METRICS_SCHEMA_VERSION = 1
 METRICS_HEADER = (
     "create_time",
@@ -149,6 +149,19 @@ class MetricsArchive:
         self.rebuild_index_on_close = rebuild_index_on_close
         self._dirty = False
         self._closed = False
+        self._state_lock = Lock()
+        self._changed_paths: set[Path] = set()
+        self._indexed_rows: dict[tuple[str, date], int] | None = None
+        index_path = self.root / METRICS_INDEX_FILENAME
+        if index_path.is_file():
+            table = load_metrics_index(index_path)
+            self._indexed_rows = {
+                (
+                    str(row["symbol"]),
+                    date(int(row["year"]), int(row["month"]), int(row["day"])),
+                ): int(row["row_count"])
+                for row in table.to_pylist()
+            }
 
     def __enter__(self) -> "MetricsArchive":
         return self
@@ -161,22 +174,36 @@ class MetricsArchive:
             return
         self._closed = True
         if self._dirty and self.rebuild_index_on_close:
-            build_metrics_index(self.root, workers=self.index_workers)
+            if self._indexed_rows is None:
+                build_metrics_index(self.root, workers=self.index_workers)
+            else:
+                update_metrics_index(self.root, self._changed_paths)
 
     def publish(self, catalog_path: str | Path) -> tuple[Path, Path]:
         """Publish this archive's index and DuckDB catalog as one generation."""
 
         if self._closed:
             raise RuntimeError("cannot publish a closed metrics archive")
-        published = publish_metrics_archive(
-            self.root,
-            catalog_path,
-            workers=self.index_workers,
-        )
+        if self._indexed_rows is None:
+            published = publish_metrics_archive(
+                self.root,
+                catalog_path,
+                workers=self.index_workers,
+            )
+        else:
+            published = publish_metrics_archive_incremental(
+                self.root,
+                catalog_path,
+                self._changed_paths,
+            )
         self._dirty = False
         return published
 
     def partition_rows(self, symbol: str, partition_day: date) -> int | None:
+        if self._indexed_rows is not None:
+            indexed = self._indexed_rows.get((symbol.strip().upper(), partition_day))
+            if indexed is not None:
+                return indexed
         target = self._partition_path(symbol, partition_day)
         if not target.is_file():
             return None
@@ -280,7 +307,11 @@ class MetricsArchive:
             try:
                 pq.write_table(table, temporary, compression="zstd")
                 os.replace(temporary, target)
-                self._dirty = True
+                with self._state_lock:
+                    self._dirty = True
+                    self._changed_paths.add(target)
+                    if self._indexed_rows is not None:
+                        self._indexed_rows[(symbol.upper(), partition_day)] = table.num_rows
             finally:
                 temporary.unlink(missing_ok=True)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -290,7 +321,6 @@ class MetricsArchive:
     def _partition_path(self, symbol: str, partition_day: date) -> Path:
         return (
             self.root
-            / "usdm"
             / symbol.strip().upper()
             / f"{partition_day.year:04d}"
             / f"{partition_day.month:02d}"
@@ -568,12 +598,73 @@ def publish_metrics_archive(
     return index, catalog
 
 
+def update_metrics_index(
+    root: str | Path,
+    changed_paths: Sequence[Path],
+) -> Path:
+    """Merge changed metrics partitions without scanning unchanged files."""
+
+    archive_root = Path(root).resolve()
+    with _metrics_publish_lock(archive_root, exclusive=True):
+        return _update_metrics_index(archive_root, changed_paths)
+
+
+def publish_metrics_archive_incremental(
+    root: str | Path,
+    catalog_path: str | Path,
+    changed_paths: Sequence[Path],
+) -> tuple[Path, Path]:
+    archive_root = Path(root).resolve()
+    with _metrics_publish_lock(archive_root, exclusive=True):
+        index = _update_metrics_index(archive_root, changed_paths)
+        catalog = _ensure_metrics_catalog(archive_root, catalog_path)
+    return index, catalog
+
+
+def _update_metrics_index(
+    archive_root: Path,
+    changed_paths: Sequence[Path],
+) -> Path:
+    records: dict[str, dict[str, object]] = {}
+    index_path = archive_root / METRICS_INDEX_FILENAME
+    if not changed_paths and index_path.is_file():
+        return index_path
+    if index_path.is_file():
+        records = {
+            str(row["relative_path"]): row
+            for row in load_metrics_index(index_path).to_pylist()
+        }
+    for path in changed_paths:
+        record = _inspect_metrics_partition(archive_root, Path(path).resolve())
+        records[str(record["relative_path"])] = record
+    return _write_metrics_index(
+        archive_root,
+        [records[key] for key in sorted(records)],
+    )
+
+
 def _build_metrics_index(archive_root: Path, *, workers: int) -> Path:
     """Build the metrics index while the caller owns the publication lock."""
 
     if workers <= 0:
         raise ValueError("index workers must be positive")
     archive_root.mkdir(parents=True, exist_ok=True)
+    paths = sorted(archive_root.glob("*/*/*/*/metrics.parquet"))
+    if workers == 1 or len(paths) < 2:
+        records = [_inspect_metrics_partition(archive_root, path) for path in paths]
+    else:
+        with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as executor:
+            records = list(executor.map(
+                lambda path: _inspect_metrics_partition(archive_root, path),
+                paths,
+            ))
+    return _write_metrics_index(archive_root, records)
+
+
+def _write_metrics_index(
+    archive_root: Path,
+    records: Sequence[dict[str, object]],
+) -> Path:
     generation = uuid4().hex
     schema = METRICS_INDEX_SCHEMA.with_metadata({
         b"metrics_index_schema_version": str(METRICS_INDEX_SCHEMA_VERSION).encode(),
@@ -585,18 +676,9 @@ def _build_metrics_index(archive_root: Path, *, workers: int) -> Path:
     temporary_index = archive_root / f".{METRICS_INDEX_FILENAME}.{generation}.tmp"
     temporary_meta = archive_root / f".{METRICS_INDEX_META_FILENAME}.{generation}.tmp"
     try:
-        paths = sorted(archive_root.glob("usdm/*/*/*/*/metrics.parquet"))
-        if workers == 1 or len(paths) < 2:
-            records = [_inspect_metrics_partition(archive_root, path) for path in paths]
-        else:
-            with ThreadPoolExecutor(max_workers=min(workers, len(paths))) as executor:
-                records = list(executor.map(
-                    lambda path: _inspect_metrics_partition(archive_root, path),
-                    paths,
-                ))
         with pq.ParquetWriter(temporary_index, schema, compression="zstd") as writer:
             if records:
-                writer.write_table(pa.Table.from_pylist(records, schema=schema))
+                writer.write_table(pa.Table.from_pylist(list(records), schema=schema))
         temporary_meta.write_text(json.dumps({
             "schema_version": METRICS_INDEX_SCHEMA_VERSION,
             "generation": generation,
@@ -614,9 +696,9 @@ def _build_metrics_index(archive_root: Path, *, workers: int) -> Path:
 def _inspect_metrics_partition(root: Path, path: Path) -> dict[str, object]:
     relative = path.relative_to(root)
     parts = relative.parts
-    if len(parts) != 6 or parts[0] != "usdm" or parts[-1] != "metrics.parquet":
+    if len(parts) != 5 or parts[-1] != "metrics.parquet":
         raise MetricsArchiveIndexError(f"invalid metrics partition path: {relative}")
-    market, symbol, year, month, day, _ = parts
+    symbol, year, month, day, _ = parts
     parquet = pq.ParquetFile(path)
     if parquet.metadata.num_rows <= 0:
         raise MetricsArchiveIndexError(f"empty metrics partition: {relative}")
@@ -624,7 +706,7 @@ def _inspect_metrics_partition(root: Path, path: Path) -> dict[str, object]:
     last_snapshot_ms = _footer_timestamp_ms(parquet, "snapshot_time", minimum=False)
     stat = path.stat()
     return {
-        "market": market,
+        "market": "usdm",
         "dataset": "metrics",
         "symbol": symbol,
         "period": METRICS_PERIOD,
@@ -716,15 +798,51 @@ def create_metrics_catalog(root: str | Path, catalog_path: str | Path) -> Path:
         return _create_metrics_catalog(archive_root, catalog_path)
 
 
+def _ensure_metrics_catalog(
+    archive_root: Path, catalog_path: str | Path
+) -> Path:
+    catalog = Path(catalog_path).resolve()
+    if not catalog.is_file():
+        return _create_metrics_catalog(archive_root, catalog)
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        row = connection.execute(
+            "SELECT value FROM metrics_catalog_metadata WHERE key = 'metrics_root'"
+        ).fetchone()
+    except duckdb.Error as error:
+        raise RuntimeError(
+            "metrics catalog metadata is invalid; run market-archive-index"
+        ) from error
+    finally:
+        connection.close()
+    if row is None or Path(str(row[0])).resolve() != archive_root:
+        raise RuntimeError(
+            "metrics catalog points to another archive root; "
+            "run market-archive-index to rebuild it"
+        )
+    has_indexed_partitions = load_metrics_index(archive_root).num_rows > 0
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        row = connection.execute(
+            "SELECT sql FROM duckdb_views() WHERE view_name = 'metrics'"
+        ).fetchone()
+    finally:
+        connection.close()
+    has_parquet_view = row is not None and "read_parquet" in str(row[0]).lower()
+    if has_indexed_partitions != has_parquet_view:
+        return _create_metrics_catalog(archive_root, catalog)
+    return catalog
+
+
 def _create_metrics_catalog(archive_root: Path, catalog_path: str | Path) -> Path:
     catalog = Path(catalog_path).resolve()
     catalog.parent.mkdir(parents=True, exist_ok=True)
     temporary = catalog.with_name(f".{catalog.name}.{uuid4().hex}.tmp")
     has_files = next(
-        archive_root.glob("usdm/*/*/*/*/metrics.parquet"), None
+        archive_root.glob("*/*/*/*/metrics.parquet"), None
     ) is not None
     glob = _sql_literal(
-        str(archive_root / "usdm" / "*" / "*" / "*" / "*" / "metrics.parquet")
+        str(archive_root / "*" / "*" / "*" / "*" / "metrics.parquet")
     )
     connection = duckdb.connect(str(temporary))
     try:

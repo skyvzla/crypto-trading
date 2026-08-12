@@ -171,7 +171,7 @@ data/market/
     archive_index.parquet
     candles.duckdb
   metrics/
-    usdm/BTCUSDT/2026/08/10/metrics.parquet
+    BTCUSDT/2026/08/10/metrics.parquet
     metrics_index.parquet
     metrics_index.meta.json
     metrics.duckdb
@@ -192,6 +192,24 @@ data/market/
 指标 catalog 的 `metrics` view 与 K 线 `candles.duckdb` 分开维护。读者以只读方式打开
 各自 catalog；本期不处理 REST 实时补齐、爆仓、强平事件或策略事件流。
 
+普通下载启动时会加载 candles 与 metrics 的 sidecar index，并用内存清单跳过已有分区；下载
+结束后只读取本次新增或替换分区的 footer，增量合并 index，不再扫描全部历史 Parquet。需要
+全量检查或修复 index 时，显式运行 `market-archive-index`；文件完整性校验继续使用
+`verify_market_history.py`。普通下载信任 index，不主动发现被外部删除或修改的历史文件；这是
+避免每次全量扫描的明确取舍。
+
 旧的 `history-parquet/` 与 `history.duckdb` 不会自动迁移或删除。改用新目录时，移动或重新
 下载 K 线 Parquet 后，运行 `market-archive-index data/market/candles --catalog
 data/market/candles/candles.duckdb` 重建索引和绝对路径 catalog。
+
+旧 metrics 目录若包含 `metrics/usdm/SYMBOL/...`，先自行移动 `usdm/` 下的币种目录到
+`metrics/` 根目录，再运行上述 `market-archive-index`。建议先停止下载器并备份
+`metrics_index.*` 与 `metrics.duckdb`，确认 `metrics/` 根目录没有同名币种目录后执行：
+
+```bash
+mv data/market/metrics/usdm/* data/market/metrics/
+uv run market-archive-index data/market/candles \
+  --catalog data/market/candles/candles.duckdb
+```
+
+普通下载不会自动移动或删除已有数据，也不会同时兼容两套 metrics 目录格式。

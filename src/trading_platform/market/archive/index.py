@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import multiprocessing
 import os
@@ -116,6 +117,11 @@ def build_archive_index(
     worker_count = workers if workers is not None else min(8, os.cpu_count() or 1)
     if worker_count <= 0:
         raise ValueError("index workers must be positive")
+    with _index_lock(archive_root):
+        return _build_archive_index(archive_root, worker_count)
+
+
+def _build_archive_index(archive_root: Path, worker_count: int) -> Path:
     root_text = str(archive_root)
     generation = uuid4().hex
     metadata = {
@@ -172,6 +178,76 @@ def build_archive_index(
         temporary_index.unlink(missing_ok=True)
         temporary_meta.unlink(missing_ok=True)
     return index_path
+
+
+def update_archive_index(
+    root: str | Path,
+    changed_paths: Iterator[Path] | list[Path] | set[Path] | tuple[Path, ...],
+) -> Path:
+    """Merge changed partitions without scanning unchanged archive files."""
+
+    archive_root = Path(root).resolve()
+    paths = tuple(Path(path).resolve() for path in changed_paths)
+    with _index_lock(archive_root):
+        index_path = archive_root / ARCHIVE_INDEX_FILENAME
+        records: dict[str, dict[str, Any]] = {}
+        if index_path.is_file():
+            frame = load_archive_index(index_path)
+            records = {
+                str(row["relative_path"]): row
+                for row in frame.to_dict(orient="records")
+            }
+        for path in paths:
+            record = _inspect_partition(str(archive_root), str(path))
+            records[str(record["relative_path"])] = record
+        return _write_archive_index_records(
+            archive_root,
+            (records[key] for key in sorted(records)),
+        )
+
+
+def _write_archive_index_records(
+    archive_root: Path,
+    records: Iterator[dict[str, Any]],
+) -> Path:
+    generation = uuid4().hex
+    schema = INDEX_SCHEMA.with_metadata({
+        b"archive_index_schema_version": str(ARCHIVE_INDEX_SCHEMA_VERSION).encode(),
+        b"archive_index_generation": generation.encode(),
+        b"archive_root": str(archive_root).encode(),
+    })
+    index_path = archive_root / ARCHIVE_INDEX_FILENAME
+    meta_path = archive_root / ARCHIVE_INDEX_META_FILENAME
+    temporary_index = archive_root / f".{ARCHIVE_INDEX_FILENAME}.{generation}.tmp"
+    temporary_meta = archive_root / f".{ARCHIVE_INDEX_META_FILENAME}.{generation}.tmp"
+    try:
+        with pq.ParquetWriter(temporary_index, schema, compression="zstd") as writer:
+            partition_count = _write_index_rows(writer, records, schema=schema)
+        temporary_meta.write_text(json.dumps({
+            "schema_version": ARCHIVE_INDEX_SCHEMA_VERSION,
+            "generation": generation,
+            "completed": True,
+            "partition_count": partition_count,
+        }, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary_index, index_path)
+        os.replace(temporary_meta, meta_path)
+    finally:
+        temporary_index.unlink(missing_ok=True)
+        temporary_meta.unlink(missing_ok=True)
+    return index_path
+
+
+class _index_lock:
+    def __init__(self, root: Path) -> None:
+        root.mkdir(parents=True, exist_ok=True)
+        self._file = (root / ".index.lock").open("a+")
+
+    def __enter__(self) -> None:
+        fcntl.flock(self._file.fileno(), fcntl.LOCK_EX)
+
+    def __exit__(self, *_exc: object) -> None:
+        fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
+        self._file.close()
 
 
 def load_archive_index(

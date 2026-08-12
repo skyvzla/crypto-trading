@@ -21,11 +21,13 @@ from trading_platform.shared.symbol_universe_query import (
 )
 
 from .metrics import (
+    METRICS_INDEX_FILENAME,
     METRICS_PERIOD,
     MetricsArchive,
     download_metrics_history,
 )
-from .parquet import ParquetCandleArchive, create_duckdb_catalog
+from .index import ARCHIVE_INDEX_FILENAME
+from .parquet import ParquetCandleArchive, ensure_duckdb_catalog
 from .vision import (
     BinanceFuturesMetadataFetcher,
     BinanceVisionHTTPFetcher,
@@ -178,6 +180,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         candle_storage_guard = _DiskSpaceGuard(args.archive, args.min_free_gb)
         candle_storage_guard()
+        _require_index_for_existing_archive(
+            args.archive,
+            ARCHIVE_INDEX_FILENAME,
+            dataset_label="candles",
+        )
         metrics_archive_path = None
         metrics_storage_guard = None
         if not args.without_metrics:
@@ -189,6 +196,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 metrics_archive_path, args.min_free_gb
             )
             metrics_storage_guard()
+            _require_index_for_existing_archive(
+                metrics_archive_path,
+                METRICS_INDEX_FILENAME,
+                dataset_label="metrics",
+            )
         with ExitStack() as stack:
             if proxies:
                 metadata_client = stack.enter_context(
@@ -335,7 +347,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     metrics_catalog_path = metrics_archive_path / "metrics.duckdb"
                     metrics_archive.publish(metrics_catalog_path)
         catalog_path = args.catalog or args.archive / "candles.duckdb"
-        create_duckdb_catalog(args.archive, catalog_path)
+        ensure_duckdb_catalog(args.archive, catalog_path)
     except KeyboardInterrupt:
         print(f"{main_worker} Cancelled; downloader exiting.", file=sys.stderr)
         return 130
@@ -369,6 +381,22 @@ def _split_download_workers(workers: int) -> tuple[int, int]:
         return 1, 1
     candle_workers = (workers + 1) // 2
     return candle_workers, workers - candle_workers
+
+
+def _require_index_for_existing_archive(
+    root: Path,
+    index_filename: str,
+    *,
+    dataset_label: str,
+) -> None:
+    archive_root = root.resolve()
+    if (archive_root / index_filename).is_file() or not archive_root.is_dir():
+        return
+    if any(entry.is_dir() for entry in archive_root.iterdir()):
+        raise RuntimeError(
+            f"{dataset_label} archive has data but no index; "
+            "run market-archive-index before downloading"
+        )
 
 
 def _validate_distinct_archive_roots(

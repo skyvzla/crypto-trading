@@ -36,6 +36,7 @@ from trading_platform.market.archive.cli import (
     _ProgressReporter,
     _load_allowed_symbols,
     _print_result,
+    _require_index_for_existing_archive,
 )
 
 
@@ -55,6 +56,30 @@ def test_archive_urls_default_to_binance_s3_origin():
     assert monthly_aggtrade_archive_url("akeusdt", "2026-07") == (
         f"{expected_root}/monthly/aggTrades/AKEUSDT/"
         "AKEUSDT-aggTrades-2026-07.zip"
+    )
+
+
+def test_existing_archive_requires_index_before_normal_download(tmp_path):
+    root = tmp_path / "candles"
+    (root / "BTCUSDT").mkdir(parents=True)
+
+    with pytest.raises(RuntimeError, match="run market-archive-index"):
+        _require_index_for_existing_archive(
+            root, "archive_index.parquet", dataset_label="candles"
+        )
+
+    (root / "archive_index.parquet").touch()
+    _require_index_for_existing_archive(
+        root, "archive_index.parquet", dataset_label="candles"
+    )
+
+
+def test_empty_archive_does_not_require_index(tmp_path):
+    root = tmp_path / "candles"
+    root.mkdir()
+
+    _require_index_for_existing_archive(
+        root, "archive_index.parquet", dataset_label="candles"
     )
 
 
@@ -1069,7 +1094,7 @@ def test_cli_without_symbols_loads_all_tradable_symbols(
     monkeypatch.setattr(archive_cli, "download_history", fake_download)
     monkeypatch.setattr(
         archive_cli,
-        "create_duckdb_catalog",
+        "ensure_duckdb_catalog",
         lambda _archive, catalog: catalog,
     )
 
@@ -1129,7 +1154,7 @@ def test_cli_uses_failover_proxy_pool(
     monkeypatch.setattr(archive_cli, "download_history", fake_download)
     monkeypatch.setattr(
         archive_cli,
-        "create_duckdb_catalog",
+        "ensure_duckdb_catalog",
         lambda _archive, catalog: catalog,
     )
 
@@ -1191,7 +1216,7 @@ def test_cli_accepts_socks5_proxy(tmp_path, monkeypatch):
     monkeypatch.setattr(archive_cli, "download_history", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         archive_cli,
-        "create_duckdb_catalog",
+        "ensure_duckdb_catalog",
         lambda _archive, catalog: catalog,
     )
 
