@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 import json
 import os
@@ -286,16 +285,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                         on_worker_exit=candle_reporter.worker_exit,
                     )
             else:
-                candle_workers, metrics_workers = _split_download_workers(workers)
-                candle_reporter = _ProgressReporter(candle_workers)
-                metrics_reporter = _ProgressReporter(metrics_workers)
+                metrics_reporter = _ProgressReporter(workers)
                 with (
                     ParquetCandleArchive(
-                        args.archive, index_workers=min(candle_workers, 8)
+                        args.archive, index_workers=min(workers, 8)
                     ) as archive,
                     MetricsArchive(
                         metrics_archive_path,
-                        index_workers=min(metrics_workers, 8),
+                        index_workers=min(workers, 8),
                     ) as metrics_archive,
                 ):
                     candle_kwargs = {
@@ -305,7 +302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "start": start,
                         "end": end,
                         "on_progress": candle_reporter,
-                        "max_workers": candle_workers,
+                        "max_workers": workers,
                         "overwrite": args.overwrite,
                         "symbol_availability": symbol_availability,
                         "storage_check": candle_storage_guard,
@@ -317,33 +314,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "start": start,
                         "end": end,
                         "on_progress": metrics_reporter,
-                        "max_workers": metrics_workers,
+                        "max_workers": workers,
                         "overwrite": args.overwrite,
                         "symbol_availability": symbol_availability,
                         "storage_check": metrics_storage_guard,
                         "on_worker_exit": metrics_reporter.worker_exit,
                     }
-                    if workers == 1:
-                        candle_results = download_history(archive, **candle_kwargs)
-                        metrics_results = download_metrics_history(
-                            metrics_archive,
-                            **metrics_kwargs,
-                        )
-                    else:
-                        with ThreadPoolExecutor(
-                            max_workers=2,
-                            thread_name_prefix="market-archive-dataset",
-                        ) as executor:
-                            candle_future = executor.submit(
-                                download_history, archive, **candle_kwargs
-                            )
-                            metrics_future = executor.submit(
-                                download_metrics_history,
-                                metrics_archive,
-                                **metrics_kwargs,
-                            )
-                            candle_results = candle_future.result()
-                            metrics_results = metrics_future.result()
+                    candle_results = download_history(archive, **candle_kwargs)
+                    metrics_results = download_metrics_history(
+                        metrics_archive,
+                        **metrics_kwargs,
+                    )
                     metrics_catalog_path = metrics_archive_path / "metrics.duckdb"
                     metrics_archive.publish(metrics_catalog_path)
         catalog_path = args.catalog or args.archive / "candles.duckdb"
@@ -370,17 +351,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         as_json=args.json,
     )
     return 0
-
-
-def _split_download_workers(workers: int) -> tuple[int, int]:
-    """Split a total worker budget across candle and metrics downloaders."""
-
-    if workers < 1:
-        raise ValueError("workers must be positive")
-    if workers == 1:
-        return 1, 1
-    candle_workers = (workers + 1) // 2
-    return candle_workers, workers - candle_workers
 
 
 def _require_index_for_existing_archive(

@@ -522,24 +522,21 @@ def test_market_archive_downloads_metrics_by_default_to_sibling_metrics_director
     assert captured["metrics_archive"] == (tmp_path / "metrics").resolve()
 
 
-def test_market_archive_starts_candles_and_metrics_concurrently_with_split_worker_budget(
+def test_market_archive_runs_candles_then_metrics_with_full_worker_budget(
     tmp_path, monkeypatch
 ):
-    both_started = Barrier(2)
-    candle_started = Event()
-    metrics_started = Event()
-    captured: dict[str, int] = {}
+    captured: dict[str, object] = {}
 
     def fake_candle_download(_archive, **kwargs):
         captured["candle_workers"] = kwargs["max_workers"]
-        candle_started.set()
-        both_started.wait(timeout=1)
+        captured["candle_finished"] = True
         return []
 
     def fake_metrics_download(_archive, **kwargs):
         captured["metrics_workers"] = kwargs["max_workers"]
-        metrics_started.set()
-        both_started.wait(timeout=1)
+        captured["metrics_started_after_candles"] = captured.get(
+            "candle_finished", False
+        )
         return []
 
     monkeypatch.setattr(
@@ -574,17 +571,12 @@ def test_market_archive_starts_candles_and_metrics_concurrently_with_split_worke
         "--workers", "4",
     ]) == 0
 
-    assert candle_started.is_set()
-    assert metrics_started.is_set()
-    assert captured == {"candle_workers": 2, "metrics_workers": 2}
-
-
-@pytest.mark.parametrize(
-    ("workers", "expected"),
-    [(1, (1, 1)), (2, (1, 1)), (3, (2, 1)), (4, (2, 2)), (5, (3, 2))],
-)
-def test_market_archive_splits_total_download_worker_budget(workers, expected):
-    assert archive_cli._split_download_workers(workers) == expected
+    assert captured == {
+        "candle_workers": 4,
+        "candle_finished": True,
+        "metrics_workers": 4,
+        "metrics_started_after_candles": True,
+    }
 
 
 @pytest.mark.parametrize(
