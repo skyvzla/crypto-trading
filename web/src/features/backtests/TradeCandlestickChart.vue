@@ -574,8 +574,10 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     updateExtremaPoints()
     refreshExtremaLabels()
     if (!range || Date.now() < suppressEdgeRequestsUntil) return
-    const nearStart = range.from < 80
-    const nearEnd = range.to > renderedBarTimes.length - 80
+    const visibleBars = Math.max(1, range.to - range.from)
+    const prefetchBars = Math.max(20, Math.ceil(visibleBars * 3))
+    const nearStart = range.from <= prefetchBars
+    const nearEnd = range.to >= renderedBarTimes.length - 1 - prefetchBars
     const edge = nearStart ? 'before' : nearEnd ? 'after' : null
     if (edge && edge !== requestedEdge) {
       requestedEdge = edge
@@ -597,6 +599,10 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   restorePaneHeights()
   updateExtremaPoints()
   refreshExtremaLabels()
+  requestAnimationFrame(() => {
+    updateExtremaPoints()
+    refreshExtremaLabels()
+  })
 
   observer = new ResizeObserver((entries) => {
     const { width, height } = entries[0]?.contentRect || {}
@@ -667,9 +673,9 @@ async function updateChartData() {
   updateExtremaPoints()
   refreshExtremaLabels()
   if (visibleRange) {
-    suppressEdgeRequestsUntil = Date.now() + 500
     chart.timeScale().setVisibleRange(visibleRange)
   }
+  requestedEdge = null
 }
 
 watch(() => props.candles, updateChartData, { deep: true })
@@ -702,7 +708,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .chart-shell { position: relative; }
 .candlestick-host { position: relative; width: 100%; height: calc(100% - 8px); }
-.extrema-price-label { position: absolute; z-index: 1; font: 11px/1.2 "JetBrains Mono", monospace; pointer-events: none; transform: translateX(-50%); white-space: nowrap; }
+.extrema-price-label { position: absolute; z-index: 5; font: 11px/1.2 "JetBrains Mono", monospace; pointer-events: none; transform: translateX(-50%); white-space: nowrap; }
 .chart-hover-label {
   position: absolute;
   z-index: 2;

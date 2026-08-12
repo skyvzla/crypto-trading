@@ -190,13 +190,15 @@ const backTo = computed(() => tradeQuery.data.value
               <a-dropdown :trigger="['click']">
                 <a-tooltip title="标线显示"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="标线显示"><template #icon><SlidersHorizontal :size="16" /></template></a-button></a-tooltip>
                 <template #overlay>
-                  <a-menu class="line-visibility-menu" @click.stop>
-                    <a-menu-item key="signal"><a-checkbox v-model:checked="lineVisibility.signal">信号价</a-checkbox></a-menu-item>
-                    <a-menu-item key="tiers"><a-checkbox v-model:checked="lineVisibility.tiers">限价与成交档位</a-checkbox></a-menu-item>
-                    <a-menu-item key="average"><a-checkbox v-model:checked="lineVisibility.average">开仓均价</a-checkbox></a-menu-item>
-                    <a-menu-item key="invalid"><a-checkbox v-model:checked="lineVisibility.invalid">失效价</a-checkbox></a-menu-item>
-                    <a-menu-item key="extensions"><a-checkbox v-model:checked="lineVisibility.extensions">策略扩展价位</a-checkbox></a-menu-item>
-                  </a-menu>
+                  <a-card size="small" :bordered="false" @click.stop>
+                    <a-space direction="vertical" :size="8">
+                      <a-checkbox v-model:checked="lineVisibility.signal">信号价</a-checkbox>
+                      <a-checkbox v-model:checked="lineVisibility.tiers">限价与成交档位</a-checkbox>
+                      <a-checkbox v-model:checked="lineVisibility.average">开仓均价</a-checkbox>
+                      <a-checkbox v-model:checked="lineVisibility.invalid">失效价</a-checkbox>
+                      <a-checkbox v-model:checked="lineVisibility.extensions">策略扩展价位</a-checkbox>
+                    </a-space>
+                  </a-card>
                 </template>
               </a-dropdown>
               <a-divider type="vertical" />

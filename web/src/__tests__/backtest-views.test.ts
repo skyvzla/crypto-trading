@@ -119,6 +119,7 @@ describe('回测关键视图', () => {
     expect(wrapper.text()).toContain('触发 K线')
     expect(wrapper.text()).toContain('确认')
     expect(wrapper.find('button[aria-label="标线显示"]').exists()).toBe(true)
+    expect(wrapper.find('.line-visibility-menu').exists()).toBe(false)
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
