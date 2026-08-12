@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import duckdb
 
-DB='data/market/history.duckdb'; SYMBOL=os.environ.get('SYMBOL','AKEUSDT'); OUT=Path(os.environ.get('OUT','reports/ake_dynamic_trigger_orders_20260706_20260802.csv'))
+DB=os.environ.get('DUCKDB_PATH','data/market/candles/candles.duckdb'); SYMBOL=os.environ.get('SYMBOL','AKEUSDT'); OUT=Path(os.environ.get('OUT','reports/ake_dynamic_trigger_orders_20260706_20260802.csv'))
 TIER_WEIGHTS=(.30,.40,.30); RETEST_ATR=.75; SPREAD_ATR=.40; ORIGIN_MIN_RISE=.10
 START=datetime.fromisoformat(os.environ.get('START','2026-07-06T00:00:00+00:00')); END=datetime.fromisoformat(os.environ.get('END','2026-08-03T00:00:00+00:00'))
 

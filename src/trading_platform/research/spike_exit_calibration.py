@@ -612,7 +612,7 @@ def _markdown_report(
         "",
         "```bash",
         "PYTHONPATH=src python scripts/calibrate_spike_exits.py \\",
-        "  --duckdb-path /data/projects/quant/crypto/data/market/history.duckdb \\",
+        "  --duckdb-path data/market/candles/candles.duckdb \\",
         "  --replay-report reports/akeusdt_2026_07_legacy_replay_aligned \\",
         "  --bar1s-time-shift-hours 8 \\",
         "  --output reports/akeusdt_2026_07_exit_calibration_aligned \\",

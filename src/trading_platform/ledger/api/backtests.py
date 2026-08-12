@@ -20,6 +20,9 @@ from trading_platform.ledger.db.backtest_repository import BacktestRepository
 
 
 router = APIRouter(prefix="/api/v1", tags=["backtest-research"])
+DEFAULT_BACKTEST_ARCHIVE_INDEX_PATH = Path(
+    "data/market/candles/archive_index.parquet"
+)
 
 
 async def get_repository(request: Request) -> BacktestRepository:
@@ -31,6 +34,21 @@ async def get_repository(request: Request) -> BacktestRepository:
 
 def _page(items: list[dict[str, Any]], total: int, limit: int, offset: int) -> dict:
     return {"items": items, "total": total, "limit": limit, "offset": offset}
+
+
+def _resolve_archive_index_path(
+    stored_path: str | Path | None,
+) -> Path | None:
+    """Prefer a recorded archive, then fall back after archive directory migrations."""
+    candidates = [stored_path, os.getenv("BACKTEST_ARCHIVE_INDEX_PATH")]
+    candidates.append(DEFAULT_BACKTEST_ARCHIVE_INDEX_PATH)
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        path = Path(candidate)
+        if path.is_file():
+            return path
+    return None
 
 
 @router.get("/backtest-researches")
@@ -212,18 +230,15 @@ async def get_backtest_candles(
                 source_metadata.get("archive_index_path")
                 or config.get("archive_index_path")
             )
-            if index_path and not Path(str(index_path)).is_file():
-                index_path = os.getenv("BACKTEST_ARCHIVE_INDEX_PATH", index_path)
-            if not index_path:
-                index_path = os.getenv("BACKTEST_ARCHIVE_INDEX_PATH")
-            if not index_path:
+            resolved_index_path = _resolve_archive_index_path(index_path)
+            if resolved_index_path is None:
                 raise HTTPException(
                     status_code=409,
-                    detail="research has no archive index reference",
+                    detail="no readable archive index is available",
                 )
             candles = await run_in_threadpool(
                 load_archive_candles,
-                index_path,
+                resolved_index_path,
                 normalized_symbol,
                 interval,
                 start_ms,

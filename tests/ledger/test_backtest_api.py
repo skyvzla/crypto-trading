@@ -1,9 +1,11 @@
 from uuid import UUID, uuid4
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 from fastapi import FastAPI
 
+from trading_platform.ledger.api import backtests
 from trading_platform.ledger.api.backtests import get_repository, router
 
 
@@ -105,3 +107,44 @@ async def test_missing_backtest_resources_are_404(api_app):
     assert missing_report.status_code == 404
     assert missing_trade.status_code == 404
     assert missing_schema.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_archive_candles_fall_back_from_legacy_research_path(
+    api_app, tmp_path, monkeypatch
+):
+    app, repository = api_app
+    legacy_index = tmp_path / "history-parquet" / "archive_index.parquet"
+    current_index = tmp_path / "candles" / "archive_index.parquet"
+    current_index.parent.mkdir(parents=True)
+    current_index.touch()
+    repository.get_research = AsyncMock(return_value={
+        "id": repository.research_id,
+        "config": {"archive_index_path": str(legacy_index)},
+        "source_metadata": {},
+    })
+    monkeypatch.setenv("BACKTEST_ARCHIVE_INDEX_PATH", str(legacy_index))
+    monkeypatch.setattr(backtests, "DEFAULT_BACKTEST_ARCHIVE_INDEX_PATH", current_index)
+    captured = {}
+
+    def load_archive(index_path, symbol, interval, start_ms, end_ms):
+        captured["index_path"] = index_path
+        return []
+
+    monkeypatch.setattr(backtests, "load_archive_candles", load_archive)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/v1/backtest-candles",
+            params={
+                "research_id": repository.research_id,
+                "symbol": "AKEUSDT",
+                "interval": "5m",
+                "start_ms": 0,
+                "end_ms": 300_000,
+                "source": "archive",
+            },
+        )
+
+    assert response.status_code == 200
+    assert captured["index_path"] == current_index

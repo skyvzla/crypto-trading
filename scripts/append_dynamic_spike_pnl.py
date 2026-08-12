@@ -3,7 +3,7 @@ import os
 from datetime import datetime,timedelta,timezone
 import duckdb
 
-CSV=os.environ.get('CSV','reports/ake_dynamic_trigger_orders_20260706_20260802.csv'); DB='data/market/history.duckdb'; SYMBOL=os.environ.get('SYMBOL','AKEUSDT'); FEE=.0008
+CSV=os.environ.get('CSV','reports/ake_dynamic_trigger_orders_20260706_20260802.csv'); DB=os.environ.get('DUCKDB_PATH','data/market/candles/candles.duckdb'); SYMBOL=os.environ.get('SYMBOL','AKEUSDT'); FEE=.0008
 rows=list(csv.DictReader(open(CSV,encoding='utf-8-sig')))
 con=duckdb.connect(DB,read_only=True)
 start=datetime.fromisoformat(os.environ.get('START','2026-07-06T00:00:00+00:00')); end=datetime.fromisoformat(os.environ.get('END','2026-08-03T00:00:00+00:00'))
