@@ -55,11 +55,11 @@ const columns: TableColumnsType<BacktestSymbolSummary> = [
 
 <template>
   <BacktestPage title="交易对数据" :eyebrow="researchId" :back-to="rootTo" :crumbs="[{ label: '回测复盘', to: rootTo }, { label: '交易对数据' }]">
+    <div class="symbol-table-tools">
+      <a-input-search v-model:value="symbolInput" allow-clear placeholder="筛选交易对，例如 AKE 或 USDT" enter-button="筛选" @search="onSearch" />
+      <a-button v-if="symbolFilter" type="link" @click="symbolInput = ''; onSearch('')">清除筛选</a-button>
+    </div>
     <QueryPanel :pending="query.isPending.value" :error="query.error.value" :empty="query.data.value?.items.length === 0" empty-text="本次研究没有产生交易" @retry="query.refetch()">
-      <div class="symbol-table-tools">
-        <a-input-search v-model:value="symbolInput" allow-clear placeholder="筛选交易对，例如 AKE 或 USDT" enter-button="筛选" @search="onSearch" />
-        <a-button v-if="symbolFilter" type="link" @click="symbolInput = ''; onSearch('')">清除筛选</a-button>
-      </div>
       <div class="table-frame"><a-table :columns="columns" :data-source="query.data.value?.items || []" row-key="symbol" :scroll="{ x: 1050 }" :pagination="false" size="middle" @change="onTableChange" /><div class="pagination-bar"><span>共 {{ query.data.value?.total || 0 }} 个交易对</span><a-pagination v-model:current="page" v-model:page-size="pageSize" :total="query.data.value?.total || 0" show-size-changer :page-size-options="['25', '50', '100']" /></div></div>
     </QueryPanel>
   </BacktestPage>

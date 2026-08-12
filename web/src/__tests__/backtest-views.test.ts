@@ -72,6 +72,28 @@ describe('回测关键视图', () => {
     expect(wrapper.findAll('.ant-table-column-sorters').length).toBeGreaterThanOrEqual(8)
   })
 
+  it('交易对筛选无结果时仍可清除条件并恢复列表', async () => {
+    vi.mocked(backtestApi.symbols).mockImplementation(async (_researchId, limit, offset, filter) => ({
+      items: filter === 'NO_MATCH' ? [] : [{ symbol: 'AKEUSDT', trade_count: 2, win_rate: 0.5, net_pnl: -10 }],
+      total: filter === 'NO_MATCH' ? 0 : 1,
+      limit,
+      offset
+    }))
+    const { list } = await plugins('/backtests/r-1/symbols?symbol_filter=NO_MATCH')
+    const wrapper = mount(BacktestSymbolListView, { global: { plugins: list as never } })
+    await flushPromises()
+
+    expect(wrapper.find('.query-empty').exists()).toBe(true)
+    const clearButton = wrapper.findAll('button').find((button) => button.text() === '清除筛选')
+    expect(clearButton).toBeDefined()
+    await clearButton!.trigger('click')
+    await flushPromises()
+
+    expect(backtestApi.symbols).toHaveBeenLastCalledWith('r-1', 25, 0, '', 'net_pnl', 'desc')
+    expect(router.currentRoute.value.query.symbol_filter).toBeUndefined()
+    expect(wrapper.text()).toContain('AKEUSDT')
+  })
+
   it('交易明细从 URL 恢复筛选并提供主要字段排序', async () => {
     vi.mocked(backtestApi.trades).mockResolvedValue({
       items: [{ id: 't-1', symbol: 'AKEUSDT', entry_time: 1_750_000_000_000, entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10, net_return: -0.1, winner: false }],
