@@ -106,8 +106,6 @@ class MetricsSnapshot:
         if self.snapshot_time.tzinfo is None or self.snapshot_time.utcoffset() is None:
             raise ValueError("metrics snapshot timestamp must include a timezone")
         timestamp = self.snapshot_time.astimezone(UTC)
-        if timestamp.second or timestamp.microsecond or timestamp.minute % 5:
-            raise ValueError("metrics snapshot timestamp must align to a UTC 5m boundary")
         object.__setattr__(self, "snapshot_time", timestamp)
         available = self.available_time or timestamp + METRICS_INTERVAL
         if available.tzinfo is None or available.utcoffset() is None:
@@ -324,8 +322,16 @@ def parse_metrics_archive(
             rows = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8-sig"))
             if tuple(rows.fieldnames or ()) != METRICS_HEADER:
                 raise ValueError(f"{member} has incompatible columns")
-            for row in rows:
-                snapshot = _parse_metrics_row(row, normalized_symbol, expected_day, member)
+            for line_number, row in enumerate(rows, start=2):
+                try:
+                    snapshot = _parse_metrics_row(
+                        row, normalized_symbol, expected_day, member
+                    )
+                except (KeyError, ValueError) as error:
+                    raw_timestamp = (row.get("create_time") or "").strip()
+                    raise ValueError(
+                        f"{member}:{line_number} create_time={raw_timestamp!r}: {error}"
+                    ) from error
                 previous = snapshots.get(snapshot.snapshot_time)
                 if previous is None:
                     snapshots[snapshot.snapshot_time] = snapshot
@@ -383,7 +389,10 @@ def _belongs_to_source_partition(snapshot_time: datetime, partition_day: date) -
         datetime.min.time(),
         UTC,
     )
-    return snapshot_time.date() == partition_day or snapshot_time == next_day_boundary
+    return (
+        snapshot_time.date() == partition_day
+        or next_day_boundary <= snapshot_time < next_day_boundary + timedelta(minutes=1)
+    )
 
 
 def _optional_float(value: str | None, member: str) -> float | None:

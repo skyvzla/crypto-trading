@@ -48,6 +48,7 @@ def _archive_bytes(day: str, rows: list[str], *, symbol: str = "BTCUSDT") -> byt
 def _row(
     timestamp: str,
     *,
+    symbol: str = "BTCUSDT",
     oi: str = "100",
     oi_value: str = "1000",
     top_account: str = "1.1",
@@ -57,7 +58,7 @@ def _row(
 ) -> str:
     return ",".join([
         timestamp,
-        "BTCUSDT",
+        symbol,
         oi,
         oi_value,
         top_account,
@@ -109,15 +110,45 @@ def test_metrics_parser_rejects_conflicting_same_snapshot_rows():
 def test_metrics_parser_accepts_next_day_midnight_source_boundary():
     content = _archive_bytes("2026-08-10", [
         _row("2026-08-10 23:55:00"),
-        _row("2026-08-11 00:00:00"),
+        _row("2026-08-11 00:00:02"),
     ])
 
     snapshots = parse_metrics_archive(content, "BTCUSDT", "2026-08-10")
 
     assert [item.snapshot_time for item in snapshots] == [
         datetime(2026, 8, 10, 23, 55, tzinfo=UTC),
-        datetime(2026, 8, 11, 0, 0, tzinfo=UTC),
+        datetime(2026, 8, 11, 0, 0, 2, tzinfo=UTC),
     ]
+
+
+def test_metrics_parser_preserves_source_timestamp_with_collection_delay():
+    content = _archive_bytes("2026-02-20", [
+        _row("2026-02-20 21:40:02", symbol="0GUSDT"),
+    ], symbol="0GUSDT")
+
+    snapshots = parse_metrics_archive(content, "0GUSDT", "2026-02-20")
+
+    assert snapshots[0].snapshot_time == datetime(
+        2026, 2, 20, 21, 40, 2, tzinfo=UTC
+    )
+    assert snapshots[0].available_time == datetime(
+        2026, 2, 20, 21, 45, 2, tzinfo=UTC
+    )
+
+
+def test_metrics_parser_error_identifies_source_row_and_timestamp():
+    content = _archive_bytes("2026-08-10", [
+        _row("not-a-timestamp"),
+    ])
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"BTCUSDT-metrics-2026-08-10\.csv:2 "
+            r"create_time='not-a-timestamp'"
+        ),
+    ):
+        parse_metrics_archive(content, "BTCUSDT", "2026-08-10")
 
 
 def test_metrics_archive_rejects_source_partition_beyond_next_day_midnight(tmp_path):
@@ -133,11 +164,11 @@ def test_metrics_archive_rejects_source_partition_beyond_next_day_midnight(tmp_p
 
 
 @pytest.mark.parametrize("row", [
-    _row("2026-08-10 00:01:00"),
+    _row("not-a-timestamp"),
     _row("2026-08-11 00:05:00"),
     "2026-08-10 00:00:00,ETHUSDT,100,1000,1.1,1.2,1.3,1.4",
 ])
-def test_metrics_parser_rejects_invalid_grid_or_symbol(row):
+def test_metrics_parser_rejects_invalid_timestamp_partition_or_symbol(row):
     content = _archive_bytes("2026-08-10", [row])
 
     with pytest.raises(ValueError):
