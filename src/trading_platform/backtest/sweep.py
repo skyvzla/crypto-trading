@@ -1270,7 +1270,9 @@ def _main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     config = tomllib.loads(args.config.read_text())
-    config["duckdb_path"] = str(config.get("duckdb_path", "data/market/history.duckdb"))
+    config["duckdb_path"] = str(
+        config.get("duckdb_path", "data/market/candles/candles.duckdb")
+    )
     execution = config.setdefault("execution", {})
     if "workers" in execution:
         raise ValueError("worker 数请通过 --workers 传递，不要放在配置文件中")

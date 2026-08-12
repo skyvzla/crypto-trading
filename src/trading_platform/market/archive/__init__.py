@@ -11,6 +11,20 @@ from .parquet import (
     archive_root_from_catalog,
     create_duckdb_catalog,
 )
+from .metrics import (
+    METRICS_INDEX_FILENAME,
+    METRICS_PERIOD,
+    MetricsArchive,
+    MetricsArchiveIndexError,
+    MetricsSnapshot,
+    build_metrics_index,
+    create_metrics_catalog,
+    download_metrics_history,
+    load_metrics_index,
+    metrics_archive_url,
+    parse_metrics_archive,
+    publish_metrics_archive,
+)
 from .vision import (
     ArchiveNotFoundError,
     BinanceFuturesMetadataFetcher,
@@ -49,5 +63,17 @@ __all__ = [
     "build_archive_index",
     "create_duckdb_catalog",
     "load_archive_index",
+    "METRICS_INDEX_FILENAME",
+    "METRICS_PERIOD",
+    "MetricsArchive",
+    "MetricsArchiveIndexError",
+    "MetricsSnapshot",
+    "build_metrics_index",
+    "create_metrics_catalog",
+    "download_metrics_history",
+    "load_metrics_index",
+    "metrics_archive_url",
+    "parse_metrics_archive",
+    "publish_metrics_archive",
     "verify_archive_index_files",
 ]

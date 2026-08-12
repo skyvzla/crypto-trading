@@ -89,7 +89,7 @@ services:
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
       DB_DATABASE: ${DB_DATABASE:-trading_platform}
-      BACKTEST_ARCHIVE_INDEX_PATH: ${BACKTEST_ARCHIVE_INDEX_PATH:-/app/data/market/history-parquet/archive_index.parquet}
+      BACKTEST_ARCHIVE_INDEX_PATH: ${BACKTEST_ARCHIVE_INDEX_PATH:-/app/data/market/candles/archive_index.parquet}
       LEDGER_HOST: 0.0.0.0
       LEDGER_PORT: 8001
     ports:

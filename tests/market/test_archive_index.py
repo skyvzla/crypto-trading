@@ -12,6 +12,7 @@ from trading_platform.market.archive.index import (
     load_archive_index,
 )
 from trading_platform.market.archive import index as archive_index
+from trading_platform.market.archive.metrics import MetricsArchive, MetricsSnapshot
 from trading_platform.market.archive.parquet import (
     ParquetCandleArchive,
     archive_root_from_catalog,
@@ -194,3 +195,39 @@ def test_index_cli_rebuilds_catalog_metadata(tmp_path: Path, capsys):
 
     assert archive_root_from_catalog(catalog) == root.resolve()
     assert "分区=0" in capsys.readouterr().out
+
+
+def test_index_cli_rebuilds_sibling_metrics_index_and_catalog(tmp_path: Path, capsys):
+    candles_root = tmp_path / "candles"
+    metrics_root = tmp_path / "metrics"
+    with MetricsArchive(metrics_root, rebuild_index_on_close=False) as archive:
+        archive.upsert(
+            [
+                MetricsSnapshot(
+                    symbol="BTCUSDT",
+                    snapshot_time=datetime(2026, 8, 10, tzinfo=UTC),
+                    sum_open_interest=1.0,
+                    sum_open_interest_value=2.0,
+                    count_toptrader_long_short_ratio=1.1,
+                    sum_toptrader_long_short_ratio=1.2,
+                    count_long_short_ratio=1.3,
+                    sum_taker_long_short_vol_ratio=1.4,
+                )
+            ]
+        )
+
+    assert index_cli.main([str(candles_root), "--workers", "1"]) == 0
+
+    assert (metrics_root / "metrics_index.parquet").is_file()
+    assert (metrics_root / "metrics.duckdb").is_file()
+    assert "metrics 索引已更新：分区=1" in capsys.readouterr().out
+
+
+def test_index_cli_rejects_non_distinct_metrics_root(tmp_path: Path):
+    candles_root = tmp_path / "candles"
+
+    with pytest.raises(ValueError, match="separate"):
+        index_cli.main([
+            str(candles_root),
+            "--metrics-archive", str(candles_root),
+        ])

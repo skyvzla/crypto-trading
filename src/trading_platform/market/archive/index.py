@@ -185,7 +185,7 @@ def load_archive_index(
     meta_path = index_path.with_name(ARCHIVE_INDEX_META_FILENAME)
     if not index_path.is_file() or not meta_path.is_file():
         raise ArchiveIndexError(
-            "archive index is missing; run market-history-index first"
+            "archive index is missing; run market-archive-index first"
         )
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))

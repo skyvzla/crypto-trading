@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
       --symbols BTCUSDT \\
       --start 2026-06-01 \\
       --end 2026-06-02 \\
-      --duckdb-path data/market/history.duckdb \\
+      --duckdb-path data/market/candles/candles.duckdb \\
       --output reports/test_run
 
   # 回测多币种

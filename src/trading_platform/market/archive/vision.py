@@ -300,7 +300,7 @@ class BinanceVisionWorkerPoolFetcher:
                 self._release(index)
                 raise
             last_label = label
-            source_context = _open_fetched_archive(fetcher, url)
+            source_context = open_fetched_archive(fetcher, url)
             try:
                 source = source_context.__enter__()
             except ArchiveNotFoundError:
@@ -877,7 +877,7 @@ def download_history(
         download_seconds = 0.0
         processing_seconds = 0.0
         try:
-            with _open_fetched_archive(fetch, url) as content:
+            with open_fetched_archive(fetch, url) as content:
                 download_seconds = time.monotonic() - started
                 _notify(
                     on_progress,
@@ -1037,7 +1037,7 @@ def download_history(
 
 
 @contextmanager
-def _open_fetched_archive(
+def open_fetched_archive(
     fetch: Callable[[str], bytes], url: str
 ) -> Iterator[bytes | BinaryIO]:
     streaming_fetch = getattr(type(fetch), "open_archive", None)

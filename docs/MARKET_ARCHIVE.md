@@ -1,6 +1,6 @@
-# 历史行情归档
+# 市场数据归档
 
-`market-history` 是一次性维护命令，不属于常驻行情进程，也不属于回测执行路径。
+`market-archive` 是一次性维护命令，不属于常驻行情进程，也不属于回测执行路径。
 下载得到的 Binance Vision 文件按不可变分区写入 Parquet，DuckDB 只生成查询 catalog。
 CLI 会显示总文件数、当前文件、平均下载速度、解析状态和写入行数。
 每批归档完成后会并行读取 Parquet footer，并原子更新根目录下的
@@ -15,8 +15,8 @@ USD-M 永续币种；也可以显式传 `--all-symbols` 表达相同意图。筛
 交易所生命周期和交易对全局开关。
 
 ```bash
-uv run market-history data/market/history-parquet \
-  --catalog data/market/history.duckdb \
+uv run market-archive data/market/candles \
+  --catalog data/market/candles/candles.duckdb \
   --symbols AKEUSDT BANKUSDT \
   --timeframes 1s 1m 5m 15m \
   --start 2026-07-01T00:00:00Z \
@@ -26,27 +26,28 @@ uv run market-history data/market/history-parquet \
 下载全部可交易币种：
 
 ```bash
-uv run market-history data/market/history-parquet \
+uv run market-archive data/market/candles \
   --all-symbols \
   --timeframes 1s 1m 5m 15m \
   --start 2026-05-01T00:00:00Z \
   --end 2026-08-01T00:00:00Z
 ```
 
-CLI 默认使用 4 个下载/解析 worker；可用 `--workers 1` 切回串行，或按网络和 CPU
-调整。不同分区可以并行写入，同一分区仍由独立锁保护。
+CLI 默认使用 4 个下载/解析 worker；启用默认的 metrics 下载时，该总预算会在 candles 与
+metrics 两条下载链路间拆分并并行执行，例如 `--workers 4` 分配为各 2 个 worker。可用
+`--workers 1` 切回串行，或按网络和 CPU 调整。不同分区可以并行写入，同一分区仍由独立锁保护。
 
-首次启用索引，或曾经绕过 `market-history` 手工移动 Parquet 文件时，运行：
+首次启用索引，或曾经绕过 `market-archive` 手工移动 Parquet 文件时，运行：
 
 ```bash
-uv run market-history-index data/market/history-parquet \
-  --catalog data/market/history.duckdb \
+uv run market-archive-index data/market/candles \
+  --catalog data/market/candles/candles.duckdb \
   --workers 6
 ```
 
-该命令只读取 Parquet footer，不读取 OHLCV 正文。`--workers` 控制并行 footer reader；
-索引缺失、生成未完成或文件大小/修改时间不一致时，参数回测会明确拒绝并要求重建，
-不会退回昂贵的全量扫描。
+该命令只读取 Parquet footer，不读取 OHLCV 正文，默认同时重建同级 `metrics/` 的索引和
+catalog；只重建 K 线时传 `--without-metrics`。`--workers` 控制并行 footer reader；索引缺失、
+生成未完成或文件大小/修改时间不一致时，参数回测会明确拒绝并要求重建，不会退回昂贵的全量扫描。
 
 如果单个代理有带宽上限，可以重复传入 `--proxy` 配置代理池。连接重置、超时等网络异常会释放
 当前代理，并切换到另一个未占用且本任务尚未失败过的代理；没有空闲代理时立即回退直连，不等待
@@ -55,7 +56,7 @@ uv run market-history-index data/market/history-parquet \
 也可以用逗号或换行分隔的 `MARKET_HISTORY_PROXIES` 配置：
 
 ```bash
-uv run market-history data/market/history-parquet \
+uv run market-archive data/market/candles \
   --symbols BTCUSDT ETHUSDT \
   --timeframes 1s 1m \
   --start 2025-01-01T00:00:00Z \
@@ -136,12 +137,58 @@ export HTTP_PROXY=http://127.0.0.1:7890
 验证现有 catalog 或 Parquet 生成的 catalog：
 
 ```bash
-uv run python scripts/verify_market_history.py data/market/history.duckdb \
+uv run python scripts/verify_market_history.py data/market/candles/candles.duckdb \
   --symbols AKEUSDT BANKUSDT ROBOUSDT 1000RATSUSDT \
   --start 2026-07-01T00:00:00Z \
   --end 2026-08-01T00:00:00Z \
   --official-samples 5
 ```
 
-回测仍只读 DuckDB catalog，不联网、不写 Parquet。旧的历史 DuckDB 若包含已知偏移数据，
+回测仍只读 DuckDB catalog，不联网、不写 Parquet。旧 DuckDB 若包含已知偏移数据，
 必须显式使用现有回测补偿参数或重新生成 Parquet catalog，不能让新下载模块自动猜测并平移。
+
+## USD-M 衍生品指标
+
+`market-archive` 默认同时并行导入 K 线与 USD-M 官方 `metrics` 日包，复用同一套 Binance
+Vision 校验、重试、代理和币种生命周期筛选。它不是常驻行情进程，也不会保存下载的 ZIP、CSV
+或其他 raw 文件：校验通过后直接规范化写入 ZSTD Parquet。仅需 K 线时传
+`--without-metrics`；`--metrics-archive` 可覆盖指标根目录。
+
+```bash
+uv run market-archive data/market/candles \
+  --symbols BTCUSDT ETHUSDT \
+  --timeframes 1s 1m 5m 15m \
+  --start 2021-01-01T00:00:00Z \
+  --end 2026-08-01T00:00:00Z
+```
+
+两个数据集以具象目录名分开管理，避免污染 `candles` schema 和 K 线索引：
+
+```text
+data/market/
+  candles/
+    BTCUSDT/5m/2026/08/10/candles.parquet
+    archive_index.parquet
+    candles.duckdb
+  metrics/
+    usdm/BTCUSDT/2026/08/10/metrics.parquet
+    metrics_index.parquet
+    metrics_index.meta.json
+    metrics.duckdb
+```
+
+每个 `metrics.parquet` 是一个完整 UTC 日分区，原始周期固定为 `5m`。字段包括未平仓量与
+价值、大户账户数/持仓量多空比、全市场账户数多空比和主动买卖量比。官方文件可能乱序、含
+完全重复行，且部分比率可能为空；导入器会按时间排序、去除完全重复行、保留空值。相同时间
+出现冲突数值时会拒绝该日分区，不会静默覆盖或把缺失值补为零。
+
+每条指标记录保存 `snapshot_time` 与 `available_time`。历史 Vision 文件无法提供真实发布
+时刻，当前保守约定为 `available_time = snapshot_time + 5m`；未来回测接入指标时必须按
+`available_time` 做 as-of 读取，不能直接将事后下载数据注入同一根 K 线。
+
+指标 catalog 的 `metrics` view 与 K 线 `candles.duckdb` 分开维护。读者以只读方式打开
+各自 catalog；本期不处理 REST 实时补齐、爆仓、强平事件或策略事件流。
+
+旧的 `history-parquet/` 与 `history.duckdb` 不会自动迁移或删除。改用新目录时，移动或重新
+下载 K 线 Parquet 后，运行 `market-archive-index data/market/candles --catalog
+data/market/candles/candles.duckdb` 重建索引和绝对路径 catalog。

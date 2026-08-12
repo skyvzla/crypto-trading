@@ -1086,6 +1086,7 @@ def test_cli_without_symbols_loads_all_tradable_symbols(
             "2026-08-01T00:00:00Z",
             "--min-free-gb",
             "0",
+            "--without-metrics",
         ]
     )
 
@@ -1145,6 +1146,7 @@ def test_cli_uses_failover_proxy_pool(
             "2026-08-01T00:00:00Z",
             "--min-free-gb",
             "0",
+            "--without-metrics",
             "--proxy",
             "http://proxy-a:8080",
             "--proxy",
@@ -1201,6 +1203,7 @@ def test_cli_accepts_socks5_proxy(tmp_path, monkeypatch):
             "--start", "2026-07-01T00:00:00Z",
             "--end", "2026-08-01T00:00:00Z",
             "--min-free-gb", "0",
+            "--without-metrics",
             "--proxy", "socks5://proxy-a:1080",
         ]
     ) == 0
@@ -1258,6 +1261,7 @@ def test_cli_handles_keyboard_interrupt_without_traceback(
             "2026-07-01T00:00:00Z",
             "--end",
             "2026-07-02T00:00:00Z",
+            "--without-metrics",
         ]
     )
 

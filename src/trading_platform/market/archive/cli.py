@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 import json
 import os
@@ -19,6 +20,11 @@ from trading_platform.shared.symbol_universe_query import (
     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
 )
 
+from .metrics import (
+    METRICS_PERIOD,
+    MetricsArchive,
+    download_metrics_history,
+)
 from .parquet import ParquetCandleArchive, create_duckdb_catalog
 from .vision import (
     BinanceFuturesMetadataFetcher,
@@ -33,14 +39,14 @@ from .vision import (
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Download verified Binance USD-M history into Parquet."
+        description="Download verified Binance USD-M candles and metrics into Parquet."
     )
-    parser.add_argument("archive", type=Path, help="Parquet archive root")
+    parser.add_argument("archive", type=Path, help="candles Parquet archive root")
     parser.add_argument(
         "--catalog",
         type=Path,
         default=None,
-        help="DuckDB query catalog path (default: <archive>/history.duckdb)",
+        help="DuckDB query catalog path (default: <archive>/candles.duckdb)",
     )
     symbol_source = parser.add_mutually_exclusive_group()
     symbol_source.add_argument(
@@ -74,6 +80,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="stop when archive filesystem free space reaches this value; 0 disables",
     )
     parser.add_argument("--timeframes", nargs="+", required=True)
+    parser.add_argument(
+        "--metrics-archive",
+        type=Path,
+        default=None,
+        help="metrics Parquet archive root (default: sibling metrics/ directory)",
+    )
+    parser.add_argument(
+        "--without-metrics",
+        action="store_true",
+        help="skip the default USD-M metrics download",
+    )
     parser.add_argument("--start", required=True, help="ISO 8601 inclusive UTC time")
     parser.add_argument("--end", required=True, help="ISO 8601 exclusive UTC time")
     parser.add_argument("--attempts", type=int, default=5)
@@ -125,9 +142,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--delisting-freeze-days must be non-negative")
     if args.min_free_gb < 0:
         parser.error("--min-free-gb must be non-negative")
-    reporter = _ProgressReporter(workers)
     main_worker = "worker=main"
     try:
+        candle_reporter = _ProgressReporter(workers)
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
         symbols = args.symbols or _load_allowed_symbols(
@@ -159,8 +176,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
                 flush=True,
             )
-        storage_guard = _DiskSpaceGuard(args.archive, args.min_free_gb)
-        storage_guard()
+        candle_storage_guard = _DiskSpaceGuard(args.archive, args.min_free_gb)
+        candle_storage_guard()
+        metrics_archive_path = None
+        metrics_storage_guard = None
+        if not args.without_metrics:
+            metrics_archive_path = (
+                args.metrics_archive or args.archive.resolve().parent / "metrics"
+            )
+            _validate_distinct_archive_roots(args.archive, metrics_archive_path)
+            metrics_storage_guard = _DiskSpaceGuard(
+                metrics_archive_path, args.min_free_gb
+            )
+            metrics_storage_guard()
         with ExitStack() as stack:
             if proxies:
                 metadata_client = stack.enter_context(
@@ -195,10 +223,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 symbol_availability = BinanceFuturesMetadataFetcher(
                     metadata_client,
                     attempts=args.attempts,
-                    on_retry=reporter.retry,
+                    on_retry=candle_reporter.retry,
                 )(symbols)
             except Exception as error:
-                reporter.metadata_fallback(error)
+                candle_reporter.metadata_fallback(error)
                 symbol_availability = {}
             if proxies:
                 worker_fetchers = [
@@ -216,33 +244,97 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     attempts=args.attempts,
                     labels=[_proxy_label(proxy) for proxy in proxies],
-                    on_retry=reporter.retry,
-                    on_route=reporter.route,
+                    on_retry=candle_reporter.retry,
+                    on_route=candle_reporter.route,
                 )
             else:
                 fetch = BinanceVisionHTTPFetcher(
                     clients[0],
                     attempts=args.attempts,
-                    on_retry=reporter.retry,
+                    on_retry=candle_reporter.retry,
                 )
-            with ParquetCandleArchive(
-                args.archive, index_workers=min(workers, 8)
-            ) as archive:
-                results = download_history(
-                    archive,
-                    fetch=fetch,
-                    symbols=symbols,
-                    timeframes=args.timeframes,
-                    start=start,
-                    end=end,
-                    on_progress=reporter,
-                    max_workers=workers,
-                    overwrite=args.overwrite,
-                    symbol_availability=symbol_availability,
-                    storage_check=storage_guard,
-                    on_worker_exit=reporter.worker_exit,
-                )
-        catalog_path = args.catalog or args.archive / "history.duckdb"
+            metrics_results: list[DownloadResult] = []
+            metrics_catalog_path = None
+            if metrics_archive_path is None:
+                with ParquetCandleArchive(
+                    args.archive, index_workers=min(workers, 8)
+                ) as archive:
+                    candle_results = download_history(
+                        archive,
+                        fetch=fetch,
+                        symbols=symbols,
+                        timeframes=args.timeframes,
+                        start=start,
+                        end=end,
+                        on_progress=candle_reporter,
+                        max_workers=workers,
+                        overwrite=args.overwrite,
+                        symbol_availability=symbol_availability,
+                        storage_check=candle_storage_guard,
+                        on_worker_exit=candle_reporter.worker_exit,
+                    )
+            else:
+                candle_workers, metrics_workers = _split_download_workers(workers)
+                candle_reporter = _ProgressReporter(candle_workers)
+                metrics_reporter = _ProgressReporter(metrics_workers)
+                with (
+                    ParquetCandleArchive(
+                        args.archive, index_workers=min(candle_workers, 8)
+                    ) as archive,
+                    MetricsArchive(
+                        metrics_archive_path,
+                        index_workers=min(metrics_workers, 8),
+                    ) as metrics_archive,
+                ):
+                    candle_kwargs = {
+                        "fetch": fetch,
+                        "symbols": symbols,
+                        "timeframes": args.timeframes,
+                        "start": start,
+                        "end": end,
+                        "on_progress": candle_reporter,
+                        "max_workers": candle_workers,
+                        "overwrite": args.overwrite,
+                        "symbol_availability": symbol_availability,
+                        "storage_check": candle_storage_guard,
+                        "on_worker_exit": candle_reporter.worker_exit,
+                    }
+                    metrics_kwargs = {
+                        "fetch": fetch,
+                        "symbols": symbols,
+                        "start": start,
+                        "end": end,
+                        "on_progress": metrics_reporter,
+                        "max_workers": metrics_workers,
+                        "overwrite": args.overwrite,
+                        "symbol_availability": symbol_availability,
+                        "storage_check": metrics_storage_guard,
+                        "on_worker_exit": metrics_reporter.worker_exit,
+                    }
+                    if workers == 1:
+                        candle_results = download_history(archive, **candle_kwargs)
+                        metrics_results = download_metrics_history(
+                            metrics_archive,
+                            **metrics_kwargs,
+                        )
+                    else:
+                        with ThreadPoolExecutor(
+                            max_workers=2,
+                            thread_name_prefix="market-archive-dataset",
+                        ) as executor:
+                            candle_future = executor.submit(
+                                download_history, archive, **candle_kwargs
+                            )
+                            metrics_future = executor.submit(
+                                download_metrics_history,
+                                metrics_archive,
+                                **metrics_kwargs,
+                            )
+                            candle_results = candle_future.result()
+                            metrics_results = metrics_future.result()
+                    metrics_catalog_path = metrics_archive_path / "metrics.duckdb"
+                    metrics_archive.publish(metrics_catalog_path)
+        catalog_path = args.catalog or args.archive / "candles.duckdb"
         create_duckdb_catalog(args.archive, catalog_path)
     except KeyboardInterrupt:
         print(f"{main_worker} Cancelled; downloader exiting.", file=sys.stderr)
@@ -256,8 +348,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
         return 1
-    _print_result(results, args.archive, catalog_path, as_json=args.json)
+    _print_result(
+        candle_results,
+        args.archive,
+        catalog_path,
+        metrics_results=metrics_results,
+        metrics_archive_path=metrics_archive_path,
+        metrics_catalog_path=metrics_catalog_path,
+        as_json=args.json,
+    )
     return 0
+
+
+def _split_download_workers(workers: int) -> tuple[int, int]:
+    """Split a total worker budget across candle and metrics downloaders."""
+
+    if workers < 1:
+        raise ValueError("workers must be positive")
+    if workers == 1:
+        return 1, 1
+    candle_workers = (workers + 1) // 2
+    return candle_workers, workers - candle_workers
+
+
+def _validate_distinct_archive_roots(
+    candles_archive: Path, metrics_archive: Path
+) -> None:
+    candles_root = candles_archive.resolve()
+    metrics_root = metrics_archive.resolve()
+    if candles_root == metrics_root:
+        raise ValueError("metrics archive must be separate from the candles archive")
+    try:
+        metrics_root.relative_to(candles_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("metrics archive cannot be nested under the candles archive")
+    try:
+        candles_root.relative_to(metrics_root)
+    except ValueError:
+        return
+    raise ValueError("candles archive cannot be nested under the metrics archive")
 
 
 def _parse_proxy_environment(value: str) -> list[str]:
@@ -477,11 +608,15 @@ def _print_result(
     archive_path: Path,
     catalog_path: Path,
     *,
+    metrics_results: Sequence[DownloadResult] = (),
+    metrics_archive_path: Path | None = None,
+    metrics_catalog_path: Path | None = None,
     as_json: bool,
 ) -> None:
-    rows = sum(item.rows for item in results)
-    skipped = sum(item.skipped for item in results)
-    unavailable = sum(item.unavailable for item in results)
+    all_results = [*results, *metrics_results]
+    rows = sum(item.rows for item in all_results)
+    skipped = sum(item.skipped for item in all_results)
+    unavailable = sum(item.unavailable for item in all_results)
     if as_json:
         print(
             json.dumps(
@@ -489,6 +624,16 @@ def _print_result(
                     "status": "complete",
                     "archive": str(archive_path),
                     "catalog": str(catalog_path),
+                    "metrics_archive": (
+                        str(metrics_archive_path)
+                        if metrics_archive_path is not None
+                        else None
+                    ),
+                    "metrics_catalog": (
+                        str(metrics_catalog_path)
+                        if metrics_catalog_path is not None
+                        else None
+                    ),
                     "rows": rows,
                     "imports": [
                         {
@@ -500,19 +645,33 @@ def _print_result(
                             "unavailable": item.unavailable,
                         }
                         for item in results
+                    ] + [
+                        {
+                            "symbol": item.symbol,
+                            "dataset": "metrics",
+                            "period": METRICS_PERIOD,
+                            "partition_date": item.period,
+                            "rows": item.rows,
+                            "skipped": item.skipped,
+                            "unavailable": item.unavailable,
+                        }
+                        for item in metrics_results
                     ],
                 },
                 sort_keys=True,
             )
         )
         return
-    downloaded = len(results) - skipped - unavailable
+    downloaded = len(all_results) - skipped - unavailable
     print(
         f"Complete: {downloaded} downloaded, {skipped} existing, "
         f"{unavailable} unavailable, {rows} rows."
     )
     print(f"Archive: {archive_path}")
     print(f"Catalog: {catalog_path}")
+    if metrics_archive_path is not None and metrics_catalog_path is not None:
+        print(f"Metrics archive: {metrics_archive_path}")
+        print(f"Metrics catalog: {metrics_catalog_path}")
 
 
 def _format_bytes(value: float) -> str:

@@ -70,7 +70,7 @@ Spike replay 示例（使用只读 DuckDB candles 归档）：
 uv run --extra dev python -m trading_platform.backtest.runner \
   --strategy spike --symbols BTCUSDT \
   --start 2026-06-01 --end 2026-06-02 \
-  --duckdb-path data/market/history.duckdb --total-notional 1000
+  --duckdb-path data/market/candles/candles.duckdb --total-notional 1000
 ```
 
 已验证的 AKEUSDT 2026 年 7 月只读 DuckDB replay：
@@ -79,7 +79,7 @@ uv run --extra dev python -m trading_platform.backtest.runner \
 uv run --extra dev python -m trading_platform.backtest.runner \
   --strategy spike --symbols AKEUSDT \
   --start 2026-07-01 --end 2026-08-01 \
-  --duckdb-path /data/projects/quant/crypto/data/market/history.duckdb \
+  --duckdb-path /data/projects/quant/crypto/data/market/candles/candles.duckdb \
   --output reports/akeusdt_2026_07_replay \
   --total-notional 1000
 ```
