@@ -118,6 +118,7 @@ describe('回测关键视图', () => {
     expect(wrapper.text()).toContain('限卖2')
     expect(wrapper.text()).toContain('触发 K线')
     expect(wrapper.text()).toContain('确认')
+    expect(wrapper.find('button[aria-label="标线显示"]').exists()).toBe(true)
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -125,7 +126,7 @@ describe('回测关键视图', () => {
       end_ms: 1_750_225_000_000,
       source: 'binance'
     }))
-    await wrapper.get('.chart-tool-button:nth-of-type(2)').trigger('click')
+    await wrapper.get('button[aria-label="跳转到退出成交"]').trigger('click')
     await flushPromises()
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
       start_ms: 1_749_776_800_000,

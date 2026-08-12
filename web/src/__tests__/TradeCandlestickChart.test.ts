@@ -32,12 +32,12 @@ vi.mock('lightweight-charts', () => ({
   createSeriesMarkers: (...args: unknown[]) => createSeriesMarkers(...args),
   createChart: vi.fn(() => ({
     addSeries: (_definition: unknown, options: Record<string, unknown> = {}) => {
-      const api = { setData, createPriceLine }
+      const api = { setData, createPriceLine, priceToCoordinate: vi.fn((price: number) => price * 100) }
       seriesApis.push(api)
       seriesOptions.push(options)
       return api
     },
-    timeScale: () => ({ fitContent: vi.fn(), getVisibleRange: vi.fn(() => ({ from: 1_754_000_030, to: 1_754_000_060 })), setVisibleRange, setVisibleLogicalRange, subscribeVisibleLogicalRangeChange: vi.fn(), unsubscribeVisibleLogicalRangeChange: vi.fn() }),
+    timeScale: () => ({ fitContent: vi.fn(), getVisibleRange: vi.fn(() => ({ from: 1_754_000_030, to: 1_754_000_060 })), getVisibleLogicalRange: vi.fn(() => ({ from: 0, to: 100 })), setVisibleRange, setVisibleLogicalRange, timeToCoordinate: vi.fn(() => 100), subscribeVisibleLogicalRangeChange: vi.fn(), unsubscribeVisibleLogicalRangeChange: vi.fn() }),
     priceScale: () => ({ applyOptions: vi.fn() }),
     panes: () => paneMocks,
     subscribeCrosshairMove: (handler: unknown) => subscribeCrosshairMove(handler),
@@ -148,8 +148,8 @@ describe('TradeCandlestickChart', () => {
       expect.objectContaining({ time: start + 40, text: '卖2' }),
       expect.objectContaining({ time: start + 49, text: '退出' })
     ]))
-    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖1', lineWidth: 3 }))
-    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖2', lineWidth: 3 }))
+    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖1', lineWidth: 1 }))
+    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖2', lineWidth: 1 }))
   })
 
   it('成交价优先于同价限价，并以统一名称绘制未成交档位和极值标签', async () => {
@@ -181,10 +181,32 @@ describe('TradeCandlestickChart', () => {
     expect(createPriceLine.mock.calls.some(([line]) => (line as { title: string }).title === '尖峰高点')).toBe(false)
     const markers = createSeriesMarkers.mock.calls.at(-1)?.[1] as Array<{ time: number; position: string; text: string }>
     expect(markers).toEqual(expect.arrayContaining([
-      expect.objectContaining({ time: start, position: 'aboveBar', text: '最高' }),
-      expect.objectContaining({ time: start + 1, position: 'belowBar', text: '最低' }),
       expect.objectContaining({ time: start, text: '卖1' })
     ]))
+    expect(markers.some((marker) => marker.text === '最高' || marker.text === '最低')).toBe(false)
+  })
+
+  it('极值显示为主题适配的价格文本，且可独立隐藏各类标线', async () => {
+    const start = 1_754_000_000
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles: [
+          { time: start, open: 1, high: 1.345, low: 0.9, close: 1.1, volume: 10 },
+          { time: start + 1, open: 1.1, high: 1.2, low: 0.789, close: 1, volume: 12 }
+        ],
+        trade: {
+          id: 't-lines', symbol: 'AKEUSDT', strategy_id: 'spike-short', side: 'SHORT', entry_time: start * 1000,
+          entry_price: 1.1, invalid_price: 1.4, tier_prices: [1.1, 1.2, 1.3], net_pnl: 1
+        },
+        lineVisibility: { tiers: false }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(createPriceLine.mock.calls.some(([line]) => /^限卖|^卖/.test((line as { title: string }).title))).toBe(false)
+    expect(createPriceLine.mock.calls.every(([line]) => (line as { lineWidth: number }).lineWidth === 1)).toBe(true)
+    const labels = wrapper.findAll('.extrema-price-label')
+    expect(labels.map((label) => label.text())).toEqual(expect.arrayContaining(['1.345', '0.789']))
+    expect(labels.every((label) => label.attributes('style')?.includes('rgb(51, 65, 85)'))).toBe(true)
   })
 
   it('追加K线时更新现有series并保留缩放和可视位置', async () => {

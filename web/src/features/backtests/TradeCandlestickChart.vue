@@ -21,6 +21,14 @@ import {
 import type { BacktestCandle, BacktestTradeDetail, ChartOverlay } from '@/api/types'
 import { timestampMs } from './format'
 
+interface PriceLineVisibility {
+  signal?: boolean
+  tiers?: boolean
+  average?: boolean
+  invalid?: boolean
+  extensions?: boolean
+}
+
 const props = defineProps<{
   candles: BacktestCandle[]
   trade: BacktestTradeDetail
@@ -32,6 +40,7 @@ const props = defineProps<{
     ema?: boolean
     kdj?: boolean
   }
+  lineVisibility?: PriceLineVisibility
 }>()
 const emit = defineEmits<{ 'request-more': [direction: 'before' | 'after'] }>()
 const isDarkTheme = inject<ComputedRef<boolean>>('isDarkTheme', computed(() => false))
@@ -44,6 +53,7 @@ let unsubscribeCrosshair: (() => void) | null = null
 let requestedEdge: 'before' | 'after' | null = null
 const hoverLabel = ref<{ left: number; top: number; lines: Array<{ label: string; value: string }> } | null>(null)
 const indicatorLabels = ref<Array<{ key: string; top: number; values: Array<{ label: string; value: string; color: string }> }>>([])
+const extremaLabels = ref<Array<{ left: number; top: number; text: string; color: string }>>([])
 type ChartCandle = Omit<BacktestCandle, 'time'> & { time: UTCTimestamp }
 type IndicatorApi = ISeriesApi<'Line'> | ISeriesApi<'Histogram'>
 interface IndicatorGroup {
@@ -58,6 +68,10 @@ let dataUpdaters: Array<(data: ChartCandle[]) => void> = []
 let indicatorGroups: IndicatorGroup[] = []
 let suppressEdgeRequestsUntil = 0
 let stopHeightResize: (() => void) | null = null
+let candleSeries: ISeriesApi<'Candlestick'> | null = null
+let extremaPoints: Array<{ time: UTCTimestamp; price: number; position: 'above' | 'below'; text: string; color: string }> = []
+let extremaPricePrecision = 2
+let extremaTextColor = '#334155'
 const PANE_STRETCH_KEY = 'backtest-replay-indicator-pane-stretch-v1'
 const CHART_HEIGHT_KEY = 'backtest-replay-chart-height-v1'
 
@@ -175,6 +189,37 @@ function refreshIndicatorPositions() {
   })
 }
 
+function refreshExtremaLabels() {
+  if (!chart || !candleSeries || !host.value) return
+  extremaLabels.value = extremaPoints.flatMap((point) => {
+    const left = chart!.timeScale().timeToCoordinate(point.time)
+    const priceY = candleSeries!.priceToCoordinate(point.price)
+    if (left === null || priceY === null) return []
+    return [{
+      left: Math.min(Math.max(4, left), host.value!.clientWidth - 4),
+      top: point.position === 'above' ? Math.max(2, priceY - 18) : priceY + 4,
+      text: point.text,
+      color: point.color
+    }]
+  })
+}
+
+function updateExtremaPoints() {
+  if (!renderedCandles.length) return
+  const visibleRange = chart?.timeScale().getVisibleLogicalRange()
+  const first = visibleRange ? Math.max(0, Math.floor(visibleRange.from)) : 0
+  const last = visibleRange ? Math.min(renderedCandles.length - 1, Math.ceil(visibleRange.to)) : renderedCandles.length - 1
+  const visibleCandles = renderedCandles.slice(first, last + 1)
+  if (!visibleCandles.length) return
+  const highest = visibleCandles.reduce((best, candle) => candle.high > best.high ? candle : best)
+  const lowest = visibleCandles.reduce((best, candle) => candle.low < best.low ? candle : best)
+  const format = (value: number) => value.toFixed(extremaPricePrecision)
+  extremaPoints = [
+    { time: highest.time, price: highest.high, position: 'above', text: format(highest.high), color: extremaTextColor },
+    { time: lowest.time, price: lowest.low, position: 'below', text: format(lowest.low), color: extremaTextColor }
+  ]
+}
+
 function beginHeightResize(event: PointerEvent) {
   if (event.button !== 0 || !host.value) return
   event.preventDefault()
@@ -212,12 +257,16 @@ function destroy() {
   unsubscribeCrosshair = null
   hoverLabel.value = null
   indicatorLabels.value = []
+  extremaLabels.value = []
   requestedEdge = null
   renderedCandles = []
   renderedBarTimes = []
   renderedCandleByTime = new Map()
   dataUpdaters = []
   indicatorGroups = []
+  candleSeries = null
+  extremaPoints = []
+  extremaPricePrecision = 2
   chart?.remove()
   chart = null
 }
@@ -257,6 +306,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     upColor: palette.up, downColor: palette.down, borderVisible: false,
     wickUpColor: palette.up, wickDownColor: palette.down, priceFormat
   })
+  candleSeries = series
   renderedCandles = data
   renderedBarTimes = data.map((bar) => Number(bar.time))
   renderedCandleByTime = new Map(data.map((bar) => [Number(bar.time), bar]))
@@ -294,6 +344,8 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   const fills = (props.trade.fills || []).filter((fill) => fill.side?.toLowerCase() === entryOrderSide)
   const tierPrices = (props.trade.tier_prices || props.trade.orders?.map((item) => item.price) || []).slice(0, 3)
   const samePrice = (left: number, right: number) => Math.abs(left - right) <= Math.max(1e-12, Math.max(Math.abs(left), Math.abs(right)) * 1e-9)
+  const lineVisibility = props.lineVisibility || {}
+  const isLineVisible = (key: keyof PriceLineVisibility) => lineVisibility[key] !== false
   const tierIsFilled = (price: number, index: number) => fills.some((fill) => fill.tier === index + 1 || samePrice(fill.price, price))
   const tierForFill = (price: number, fallbackIndex: number) => {
     const index = tierPrices.findIndex((tierPrice) => samePrice(tierPrice, price))
@@ -308,13 +360,13 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     if (duplicate === -1) priceLines.push(next)
     else if (priceLines[duplicate].priority < priority) priceLines[duplicate] = next
   }
-  addLine(props.trade.signal_price, '信号', palette.signal, LineStyle.Dashed, 2, 10)
-  tierPrices.forEach((price, index) => {
+  if (isLineVisible('signal')) addLine(props.trade.signal_price, '信号', palette.signal, LineStyle.Dashed, 1, 10)
+  if (isLineVisible('tiers')) tierPrices.forEach((price, index) => {
     const filled = tierIsFilled(price, index)
-    addLine(price, filled ? `${entrySideLabel}${index + 1}` : `限${entrySideLabel}${index + 1}`, filled ? palette.filled : palette.pending, filled ? LineStyle.Solid : LineStyle.Dashed, filled ? 3 : 2, filled ? 50 : 40)
+    addLine(price, filled ? `${entrySideLabel}${index + 1}` : `限${entrySideLabel}${index + 1}`, filled ? palette.filled : palette.pending, filled ? LineStyle.Solid : LineStyle.Dashed, 1, filled ? 50 : 40)
   })
-  addLine(props.trade.average_entry_price ?? props.trade.entry_price, '开仓均价', palette.average, LineStyle.Solid, 2, 30)
-  addLine(props.trade.invalid_price, '失效价', palette.invalid, LineStyle.Dotted, 2, 60)
+  if (isLineVisible('average')) addLine(props.trade.average_entry_price ?? props.trade.entry_price, '开仓均价', palette.average, LineStyle.Solid, 1, 30)
+  if (isLineVisible('invalid')) addLine(props.trade.invalid_price, '失效价', palette.invalid, LineStyle.Dotted, 1, 60)
 
   const indicatorSettings = props.indicators || {}
   if (indicatorSettings.ema) {
@@ -408,7 +460,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     if (handledOverlayKeys.has(overlay.key)) continue
     const values = [props.trade.strategy_data?.[overlay.key], props.trade.attributes?.[overlay.key], props.trade.metrics?.[overlay.key], props.trade.parameters?.[overlay.key]]
     const value = values.find((item) => typeof item === 'number')
-    if (overlay.kind !== 'marker' && typeof value === 'number') {
+    if (isLineVisible('extensions') && overlay.kind !== 'marker' && typeof value === 'number') {
       const styles = { solid: LineStyle.Solid, dashed: LineStyle.Dashed, dotted: LineStyle.Dotted }
       const style = typeof overlay.line_style === 'number' ? overlay.line_style : styles[overlay.line_style || 'dashed']
       addLine(value, overlay.label || overlay.key, overlay.color || '#8b949e', style)
@@ -429,10 +481,9 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   const exitPosition = isShort ? 'belowBar' : 'aboveBar'
   const entryShape = isShort ? 'arrowDown' : 'arrowUp'
   const exitShape = isShort ? 'arrowUp' : 'arrowDown'
-  const highestIndex = data.reduce((best, candle, index) => candle.high > data[best].high ? index : best, 0)
-  const lowestIndex = data.reduce((best, candle, index) => candle.low < data[best].low ? index : best, 0)
-  markers.push({ time: data[highestIndex].time, position: 'aboveBar', color: palette.signal, shape: 'circle', text: '最高' })
-  markers.push({ time: data[lowestIndex].time, position: 'belowBar', color: palette.signal, shape: 'circle', text: '最低' })
+  const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toFixed(pricePrecision)
+  extremaPricePrecision = pricePrecision
+  extremaTextColor = palette.text
   if (signalTime) markers.push({ time: signalTime, position: entryPosition, color: palette.signal, shape: 'circle', text: '信号' })
   for (const [index, fill] of fills.entries()) {
     const time = fillMarkerTime(fill.time)
@@ -462,7 +513,6 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   fills.forEach((fill, index) => addEventPrice(`${entrySideLabel}${tierForFill(fill.price, index)}`, fill.time, fill.price, true, 50))
   addEventPrice('开仓均价', props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price, true, 30)
   addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price, true, 50)
-  const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toFixed(pricePrecision)
   const formatIndicatorValue = (value: number, format?: 'volume' | 'oscillator') => {
     if (format === 'volume') return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(value)
     if (format === 'oscillator') return Number(value).toFixed(4)
@@ -521,6 +571,8 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   chart.subscribeCrosshairMove(handleCrosshair)
   unsubscribeCrosshair = () => chart?.unsubscribeCrosshairMove(handleCrosshair)
   const requestMore = (range: { from: number; to: number } | null) => {
+    updateExtremaPoints()
+    refreshExtremaLabels()
     if (!range || Date.now() < suppressEdgeRequestsUntil) return
     const nearStart = range.from < 80
     const nearEnd = range.to > renderedBarTimes.length - 80
@@ -543,12 +595,15 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
 
   await nextTick()
   restorePaneHeights()
+  updateExtremaPoints()
+  refreshExtremaLabels()
 
   observer = new ResizeObserver((entries) => {
     const { width, height } = entries[0]?.contentRect || {}
     if (width && height && chart) {
       chart.applyOptions({ width, height })
       refreshIndicatorPositions()
+      refreshExtremaLabels()
     }
   })
   observer.observe(host.value)
@@ -609,6 +664,8 @@ async function updateChartData() {
   renderedBarTimes = nextData.map((bar) => Number(bar.time))
   renderedCandleByTime = new Map(nextData.map((bar) => [Number(bar.time), bar]))
   dataUpdaters.forEach((update) => update(nextData))
+  updateExtremaPoints()
+  refreshExtremaLabels()
   if (visibleRange) {
     suppressEdgeRequestsUntil = Date.now() + 500
     chart.timeScale().setVisibleRange(visibleRange)
@@ -616,7 +673,7 @@ async function updateChartData() {
 }
 
 watch(() => props.candles, updateChartData, { deep: true })
-watch(() => [props.trade, props.overlays, props.indicators, props.focusTime], () => renderChart(), { immediate: true, deep: true })
+watch(() => [props.trade, props.overlays, props.indicators, props.lineVisibility, props.focusTime], () => renderChart(), { immediate: true, deep: true })
 watch(isDarkTheme, () => renderChart())
 onBeforeUnmount(() => {
   stopHeightResize?.()
@@ -628,6 +685,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="chart-shell" :style="chartHeight ? { height: `${chartHeight}px` } : undefined">
     <div ref="host" class="candlestick-host" @pointerdown.capture="capturePaneResize">
+      <span v-for="label in extremaLabels" :key="`${label.left}-${label.top}-${label.text}`" class="extrema-price-label" :style="{ left: `${label.left}px`, top: `${label.top}px`, color: label.color }">{{ label.text }}</span>
       <div v-if="hoverLabel" class="chart-hover-label" :style="{ left: `${hoverLabel.left}px`, top: `${hoverLabel.top}px` }">
         <div v-for="line in hoverLabel.lines" :key="line.label" class="hover-row"><span>{{ line.label }}</span><strong>{{ line.value }}</strong></div>
       </div>
@@ -644,6 +702,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .chart-shell { position: relative; }
 .candlestick-host { position: relative; width: 100%; height: calc(100% - 8px); }
+.extrema-price-label { position: absolute; z-index: 1; font: 11px/1.2 "JetBrains Mono", monospace; pointer-events: none; transform: translateX(-50%); white-space: nowrap; }
 .chart-hover-label {
   position: absolute;
   z-index: 2;

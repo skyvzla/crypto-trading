@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, Maximize2, Minimize2, RefreshCw, RotateCcw } from 'lucide-vue-next'
+import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, Maximize2, Minimize2, RefreshCw, RotateCcw, SlidersHorizontal } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import type { BacktestCandle } from '@/api/types'
@@ -35,6 +35,7 @@ const chartRef = ref<InstanceType<typeof TradeCandlestickChart> | null>(null)
 const chartSection = ref<HTMLElement | null>(null)
 const isFullscreen = ref(false)
 const indicators = ref({ volume: true, macd: false, ema: false, kdj: false })
+const lineVisibility = ref({ signal: true, tiers: true, average: true, invalid: true, extensions: true })
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
 
@@ -186,9 +187,21 @@ const backTo = computed(() => tradeQuery.data.value
               <a-checkbox v-model:checked="indicators.macd">MACD</a-checkbox>
               <a-checkbox v-model:checked="indicators.ema">EMA</a-checkbox>
               <a-checkbox v-model:checked="indicators.kdj">KDJ</a-checkbox>
+              <a-dropdown :trigger="['click']">
+                <a-tooltip title="标线显示"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="标线显示"><template #icon><SlidersHorizontal :size="16" /></template></a-button></a-tooltip>
+                <template #overlay>
+                  <a-menu class="line-visibility-menu" @click.stop>
+                    <a-menu-item key="signal"><a-checkbox v-model:checked="lineVisibility.signal">信号价</a-checkbox></a-menu-item>
+                    <a-menu-item key="tiers"><a-checkbox v-model:checked="lineVisibility.tiers">限价与成交档位</a-checkbox></a-menu-item>
+                    <a-menu-item key="average"><a-checkbox v-model:checked="lineVisibility.average">开仓均价</a-checkbox></a-menu-item>
+                    <a-menu-item key="invalid"><a-checkbox v-model:checked="lineVisibility.invalid">失效价</a-checkbox></a-menu-item>
+                    <a-menu-item key="extensions"><a-checkbox v-model:checked="lineVisibility.extensions">策略扩展价位</a-checkbox></a-menu-item>
+                  </a-menu>
+                </template>
+              </a-dropdown>
               <a-divider type="vertical" />
-              <a-tooltip title="跳转到第一笔成交"><a-button type="text" class="chart-tool-button" @click="focusTradeEvent('entry')"><template #icon><ArrowUpToLine :size="15" /></template>首笔成交</a-button></a-tooltip>
-              <a-tooltip title="跳转到退出成交"><a-button type="text" class="chart-tool-button" @click="focusTradeEvent('exit')"><template #icon><ArrowDownToLine :size="15" /></template>退出成交</a-button></a-tooltip>
+              <a-tooltip title="跳转到第一笔成交"><a-button type="text" class="chart-tool-button" aria-label="跳转到第一笔成交" @click="focusTradeEvent('entry')"><template #icon><ArrowUpToLine :size="15" /></template>首笔成交</a-button></a-tooltip>
+              <a-tooltip title="跳转到退出成交"><a-button type="text" class="chart-tool-button" aria-label="跳转到退出成交" @click="focusTradeEvent('exit')"><template #icon><ArrowDownToLine :size="15" /></template>退出成交</a-button></a-tooltip>
               <a-spin v-if="candlesQuery.isFetching.value" size="small" />
               <a-tooltip title="刷新 K 线"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="刷新K线" @click="candlesQuery.refetch()"><template #icon><RefreshCw :size="16" /></template></a-button></a-tooltip>
               <a-tooltip title="恢复默认尺寸"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="恢复默认尺寸" @click="resetChartSize"><template #icon><RotateCcw :size="16" /></template></a-button></a-tooltip>
@@ -197,7 +210,7 @@ const backTo = computed(() => tradeQuery.data.value
           </div>
           <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading"><a-spin /><span>加载 {{ sourceLabel }} K线</span></div>
           <QueryPanel v-else :error="loadedCandles.length ? null : candlesQuery.error.value" :empty="loadedCandles.length === 0" @retry="candlesQuery.refetch()">
-            <TradeCandlestickChart ref="chartRef" :candles="loadedCandles" :trade="tradeQuery.data.value" :overlays="schemaQuery.data.value?.chart_overlays" :indicators="indicators" :focus-time="focusTimeMs" @request-more="requestMore" />
+            <TradeCandlestickChart ref="chartRef" :candles="loadedCandles" :trade="tradeQuery.data.value" :overlays="schemaQuery.data.value?.chart_overlays" :indicators="indicators" :line-visibility="lineVisibility" :focus-time="focusTimeMs" @request-more="requestMore" />
           </QueryPanel>
           <div class="chart-legend">
             <a-tag color="blue">{{ candlesQuery.data.value?.source === 'archive' ? '本地归档' : 'Binance' }}</a-tag>
