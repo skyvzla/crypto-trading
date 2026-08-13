@@ -1280,6 +1280,7 @@ def _write_report(
         "## 复核文件", "",
         "- `parameter_summary.csv`：参数组合总体结果。",
         "- `comparison.csv`：参数组合按币种的执行结果。",
+        "- `all_signals.csv`：所有确认信号（含未成交），可用于后续复测选币。",
         "- `all_trades.csv`：逐笔买卖点、盈亏及冲突标记。",
         "- `collisions.csv`：多币种同时或重叠交易组。",
         "- `signal_collisions.csv`：同一秒附近触发的多币种信号组。",
