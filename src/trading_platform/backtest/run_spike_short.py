@@ -524,6 +524,11 @@ def main() -> None:
     print(f"Orders: {summary['orders']['total']}")
     print(f"Filled orders: {summary['orders']['filled']}")
     print(f"Positions: {summary['positions']['total']}")
+    print(
+        f"Full-position liquidation risk: "
+        f"{summary['liquidation_risk']['total']} "
+        f"({summary['liquidation_risk']['rate']:.2%})"
+    )
     print(f"Net PnL: {summary['pnl']['net_pnl']:.2f} USDT")
     print(f"Results saved to: {settings.output_path}")
 

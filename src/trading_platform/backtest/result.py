@@ -43,7 +43,11 @@ TRADE_COLUMNS = [
     'tier1_avg_fill_price', 'tier2_avg_fill_price', 'tier3_avg_fill_price',
     'invalid_price', 'entry_action', 'entry_time',
     'entry_time_iso', 'entry_price', 'entry_quantity', 'entry_notional',
-    'entry_fill_count', 'exit_action', 'exit_time', 'exit_time_iso',
+    'entry_fill_count', 'max_adverse_price', 'max_adverse_return',
+    'max_unrealized_loss', 'liquidation_position_ratio',
+    'full_position_liquidation', 'full_position_liquidation_time',
+    'full_position_liquidation_time_iso', 'exit_action',
+    'exit_time', 'exit_time_iso',
     'exit_price', 'exit_quantity', 'exit_fill_count', 'exit_reason',
     'status', 'gross_pnl', 'commission', 'net_pnl', 'net_return', 'winner',
 ]
@@ -126,6 +130,20 @@ class BacktestResult:
                 'opened_at': pos.opened_at,
                 'closed_at': pos.closed_at,
                 'status': pos.status,
+                'max_adverse_price': (
+                    float(pos.max_adverse_price)
+                    if pos.max_adverse_price is not None else None
+                ),
+                'max_adverse_return': float(pos.max_adverse_return),
+                'max_unrealized_loss': float(pos.max_unrealized_loss),
+                'liquidation_position_ratio': (
+                    float(pos.liquidation_position_ratio)
+                    if pos.liquidation_position_ratio is not None else None
+                ),
+                'full_position_liquidation': pos.full_position_liquidation,
+                'full_position_liquidation_time': (
+                    pos.full_position_liquidation_time
+                ),
             })
 
         audit_data = []
@@ -157,7 +175,9 @@ class BacktestResult:
             'positions': pd.DataFrame(positions_data, columns=[
                 'symbol', 'side', 'entry_price', 'quantity', 'total_commission',
                 'unrealized_pnl', 'realized_pnl', 'opened_at', 'closed_at',
-                'status',
+                'status', 'max_adverse_price', 'max_adverse_return',
+                'max_unrealized_loss', 'liquidation_position_ratio',
+                'full_position_liquidation', 'full_position_liquidation_time',
             ]),
             'audit_events': pd.DataFrame(audit_data, columns=[
                 'event_time', 'event_type', 'symbol', 'strategy_id',
@@ -205,6 +225,7 @@ class ResultAnalyzer:
             'orders': self._analyze_orders(),
             'positions': self._analyze_positions(),
             'trades': self._analyze_trades(),
+            'liquidation_risk': self._analyze_liquidation_risk(),
             'pnl': self._analyze_pnl(),
         }
 
@@ -513,6 +534,19 @@ class ResultAnalyzer:
                 'entry_quantity': entry_quantity,
                 'entry_notional': entry_notional,
                 'entry_fill_count': int(len(entries)),
+                'max_adverse_price': position.max_adverse_price,
+                'max_adverse_return': position.max_adverse_return,
+                'max_unrealized_loss': position.max_unrealized_loss,
+                'liquidation_position_ratio': position.liquidation_position_ratio,
+                'full_position_liquidation': bool(
+                    position.full_position_liquidation
+                ),
+                'full_position_liquidation_time': (
+                    position.full_position_liquidation_time
+                ),
+                'full_position_liquidation_time_iso': self._timestamp_iso(
+                    position.full_position_liquidation_time
+                ),
                 'exit_action': 'BUY' if position.side == 'SHORT' else 'SELL',
                 'exit_time': exit_time,
                 'exit_time_iso': self._timestamp_iso(exit_time),
@@ -635,6 +669,24 @@ class ResultAnalyzer:
             'loss': loss,
             'win_rate': profitable / closed if closed > 0 else 0.0,
             'by_symbol': positions_df.groupby('symbol').size().to_dict()
+        }
+
+    def _analyze_liquidation_risk(self) -> dict[str, Any]:
+        """汇总满仓理论爆仓风险，不改变回测原始收益。"""
+        trades = self.dfs['trades']
+        if trades.empty:
+            return {
+                'total': 0,
+                'rate': 0.0,
+                'final_net_pnl': 0.0,
+            }
+        liquidated = trades[
+            trades['full_position_liquidation'].fillna(False).astype(bool)
+        ]
+        return {
+            'total': int(len(liquidated)),
+            'rate': float(len(liquidated) / len(trades)),
+            'final_net_pnl': float(liquidated['net_pnl'].sum()),
         }
 
     def _analyze_pnl(self) -> dict[str, Any]:

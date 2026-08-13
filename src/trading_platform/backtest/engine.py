@@ -185,8 +185,11 @@ class BacktestEngine:
         ):
             self.last_prices[event.symbol] = event.close
 
+        self._update_position_risk(event)
         # 成交判断必须先于策略事件处理，保持单引擎回测的既有语义。
         self._check_fills(event)
+        # 同一 Bar 内无法还原穿价先后，成交后按保守口径记录该 Bar 的最不利价。
+        self._update_position_risk(event)
         order_intents: list[OrderIntent] | None = None
         if isinstance(event, Bar1s):
             order_intents = self.strategy.on_bar1s(event)
@@ -204,6 +207,7 @@ class BacktestEngine:
                     self.fill_records.append(fill)
                     if self._on_fill is not None:
                         self._on_fill(fill)
+            self._update_position_risk(event)
         self._collect_strategy_audit_events()
 
     def finish(self) -> BacktestResult:
@@ -481,6 +485,43 @@ class BacktestEngine:
                     f"qty {old_qty}->{pos.quantity}, "
                     f"entry {old_price:.2f}->{pos.entry_price:.2f}"
                 )
+
+    def _update_position_risk(self, event: Event) -> None:
+        """记录价格路径风险，不改变订单、持仓或策略退出结果。"""
+        event_timeframe = '1s' if isinstance(event, Bar1s) else event.interval
+        if event_timeframe != self.execution_timeframe:
+            return
+        position = self.positions.get(event.symbol)
+        if position is None:
+            return
+
+        adverse_price = event.high if position.side == 'SHORT' else event.low
+        unrealized = (
+            (position.entry_price - adverse_price) * position.quantity
+            if position.side == 'SHORT'
+            else (adverse_price - position.entry_price) * position.quantity
+        )
+        if (
+            position.max_adverse_price is None
+            or (position.side == 'SHORT' and adverse_price > position.max_adverse_price)
+            or (position.side == 'LONG' and adverse_price < position.max_adverse_price)
+        ):
+            position.max_adverse_price = adverse_price
+        if unrealized < position.max_unrealized_loss:
+            position.max_unrealized_loss = unrealized
+            position.max_adverse_return = (
+                unrealized / (position.entry_price * position.quantity)
+            )
+            position.liquidation_position_ratio = (
+                Decimal('1') / abs(position.max_adverse_return)
+                if position.max_adverse_return else None
+            )
+            if (
+                position.max_adverse_return <= Decimal('-1')
+                and not position.full_position_liquidation
+            ):
+                position.full_position_liquidation = True
+                position.full_position_liquidation_time = self.virtual_time_ms
 
     def _generate_result(self) -> BacktestResult:
         """

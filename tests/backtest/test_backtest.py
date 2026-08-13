@@ -87,6 +87,74 @@ class TestBacktestEngine(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "finished"):
             engine.process_event(events[-1])
 
+    def test_full_position_liquidation_risk_does_not_change_later_recovery(self):
+        class OpenShortOnce(MockStrategy):
+            def on_bar1s(self, bar):
+                self.bars_received.append(bar)
+                if len(self.bars_received) == 1:
+                    return [OrderIntent(
+                        symbol=bar.symbol,
+                        side='SELL',
+                        price=Decimal('100'),
+                        quantity=Decimal('10'),
+                        client_order_id='short-entry',
+                        order_type='MARKET',
+                        campaign_id='spike_short:BTCUSDT:1000',
+                    )]
+                if len(self.bars_received) == 3:
+                    return [OrderIntent(
+                        symbol=bar.symbol,
+                        side='BUY',
+                        price=Decimal('50'),
+                        quantity=Decimal('10'),
+                        client_order_id='short-exit',
+                        order_type='MARKET',
+                        reduce_only=True,
+                        campaign_id='spike_short:BTCUSDT:1000',
+                    )]
+                return []
+
+        bars = [
+            Bar1s(
+                symbol='BTCUSDT', timestamp=0, available_time=1_000,
+                open=Decimal('100'), high=Decimal('101'), low=Decimal('99'),
+                close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+                vwap=Decimal('100'),
+            ),
+            Bar1s(
+                symbol='BTCUSDT', timestamp=1_000, available_time=2_000,
+                open=Decimal('100'), high=Decimal('210'), low=Decimal('95'),
+                close=Decimal('200'), volume=Decimal('1'), trade_count=1,
+                vwap=Decimal('150'),
+            ),
+            Bar1s(
+                symbol='BTCUSDT', timestamp=2_000, available_time=3_000,
+                open=Decimal('200'), high=Decimal('200'), low=Decimal('50'),
+                close=Decimal('50'), volume=Decimal('1'), trade_count=1,
+                vwap=Decimal('100'),
+            ),
+        ]
+        result = BacktestEngine(
+            OpenShortOnce(),
+            bars,
+            BacktestConfig(),
+        ).run()
+
+        position = result.positions[0]
+        self.assertTrue(position.full_position_liquidation)
+        self.assertEqual(position.status, 'CLOSED')
+        self.assertEqual(position.closed_at, 3_000)
+        self.assertEqual(position.full_position_liquidation_time, 2_000)
+        self.assertEqual(position.max_adverse_price, Decimal('210'))
+        self.assertEqual(position.max_adverse_return, Decimal('-1.1'))
+        self.assertEqual(position.liquidation_position_ratio, Decimal('10') / Decimal('11'))
+
+        analyzer = ResultAnalyzer(result)
+        trade = analyzer.dfs['trades'].iloc[0]
+        self.assertTrue(trade['full_position_liquidation'])
+        self.assertGreater(trade['net_pnl'], 0)
+        self.assertEqual(analyzer.analyze()['liquidation_risk']['total'], 1)
+
     def test_strategy_is_bound_to_engine(self):
         """支持回测适配能力的策略会在引擎初始化时完成绑定。"""
         class BindableStrategy(MockStrategy):

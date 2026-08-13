@@ -240,6 +240,12 @@ class Position:
     opened_at: int  # 毫秒时间戳
     closed_at: int | None = None
     status: Literal['OPEN', 'CLOSED'] = 'OPEN'
+    max_adverse_price: Decimal | None = None
+    max_adverse_return: Decimal = Decimal('0')
+    max_unrealized_loss: Decimal = Decimal('0')
+    full_position_liquidation: bool = False
+    full_position_liquidation_time: int | None = None
+    liquidation_position_ratio: Decimal | None = None
 
 
 @dataclass(frozen=True)
