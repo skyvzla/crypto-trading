@@ -813,6 +813,7 @@ class ResultAnalyzer:
                 'prior_high_lookback_minutes': (
                     self.result.config.prior_high_lookback_minutes
                 ),
+                'strategy_path': self.result.config.strategy_path,
                 'spike_strategy_version': self.result.config.spike_strategy_version,
                 'spike_entry_tier_mode': self.result.config.spike_entry_tier_mode,
                 'spike_rise_low_lookback_minutes': (

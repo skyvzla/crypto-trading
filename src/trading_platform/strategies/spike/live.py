@@ -49,6 +49,7 @@ class SpikeLiveSettings(BaseSettings):
     )
 
     mode: Literal["testnet", "live"] = "testnet"
+    strategy_path: str = "trading_platform.strategies.spike.v1:V1"
     exit_policy: Literal["execution-test-d007", "candidate-v1"] = "candidate-v1"
     live_confirmation: str = ""
     account_id: str

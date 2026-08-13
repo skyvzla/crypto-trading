@@ -1,6 +1,27 @@
 # Spike 策略版本说明
 
-本文记录 Spike 做空策略的可复现版本基线。版本名称描述一组实际生效的入场、挂单和退出参数；回测报告中的 `parameters` 字段是最终事实来源。
+本文记录 Spike 做空策略的可复现版本基线。策略实现通过模块路径注入，版本名称只是展示标签；回测报告中的 `strategy_path`、完整参数和 Git 提交共同构成复现事实。
+
+## 策略模块装配
+
+回测入口接受 `module:attribute` 形式的完整策略声明，例如：
+
+```bash
+uv run spike-backtest --strategy \
+  trading_platform.strategies.spike.v2_1:V21 ...
+```
+
+策略声明包含完整生命周期：入场、挂单、持仓管理、止盈止损和退出；共享的事件回放、订单撮合、费用和报告仍由 base/engine 提供。策略还声明 `market_timeframes`、`execution_timeframe` 和指标需求。引擎只读取并投递声明的数据，因此纯 `1m/5m` 策略不需要加载 1s 行情。
+
+当前模块：
+
+| 声明 | 用途 |
+|---|---|
+| `trading_platform.strategies.spike.v1:V1` | v1 三档、4h 前高、无 OI/连阳过滤 |
+| `trading_platform.strategies.spike.v2:V2` | 改动前冻结的 v2，7天低点上涨24h、第三档全仓、无 OI/连阳过滤 |
+| `trading_platform.strategies.spike.v2_1:V21` | 当前保存的 v2.1，在 v2 基础上增加连阳/OI/多空比规则 |
+
+新增策略只需新增声明模块并实现生命周期方法，不修改旧策略模块；报告中的 `strategy_path` 用于恢复对应实现。
 
 ## 共用基础逻辑
 
@@ -12,7 +33,7 @@ v1 和 v2 均使用 `DynamicSpikeShortStrategy` 的同一套基础信号：
 - 最低档必须高于指定窗口内的前高、起涨点下限和触发价。
 - `candidate-v1` 退出策略。
 
-`strategy_version` 主要用于选择 CLI 默认参数和在报告中标记版本；它本身不切换另一套基础信号实现。
+`strategy_version` 仅保留为报告展示字段，实际策略切换使用 `strategy_path`，不再依赖公共类中的版本分支。
 
 ## 已完成基线
 

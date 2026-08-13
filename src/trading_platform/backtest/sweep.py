@@ -44,7 +44,7 @@ from trading_platform.market.archive.parquet import archive_root_from_catalog
 logger = logging.getLogger(__name__)
 
 PARAMETER_FLAGS = {
-    "strategy_version": "--strategy-version",
+    "strategy": "--strategy",
     "total_notional": "--total-notional",
     "exit_policy": "--exit-policy",
     "prior_high_lookback_hours": "--prior-high-lookback-hours",

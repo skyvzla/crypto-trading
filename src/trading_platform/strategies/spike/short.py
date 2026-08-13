@@ -178,6 +178,7 @@ class DynamicSpikeShortStrategy:
 
     # 触发判定需要的 1s Bar 数量：索引 i-60 .. i
     BAR_BUFFER = 61
+    strategy_name = "dynamic-base"
 
     def __init__(
         self,
@@ -191,7 +192,6 @@ class DynamicSpikeShortStrategy:
         rise_low_lookback_minutes: int = 0,
         min_rise_duration_minutes: int = 0,
         early_profit_unlock_ratio: Decimal | None = None,
-        strategy_version: Literal["v1", "v2"] = "v1",
     ):
         """
         Args:
@@ -208,9 +208,6 @@ class DynamicSpikeShortStrategy:
         self.total_notional = Decimal(total_notional)
         self.account_id = account_id
         self.exit_policy = exit_policy
-        if strategy_version not in {"v1", "v2"}:
-            raise ValueError("strategy_version must be v1 or v2")
-        self.strategy_version = strategy_version
         if entry_tier_mode not in {"three-tier", "tier3-only"}:
             raise ValueError("entry_tier_mode must be three-tier or tier3-only")
         self.entry_tier_mode = entry_tier_mode
@@ -571,7 +568,7 @@ class DynamicSpikeShortStrategy:
                         "signal_cooldown_seconds": self.SIGNAL_COOLDOWN,
                         "order_ttl_seconds": self.ORDER_TTL,
                         "exit_policy": self.exit_policy,
-                        "strategy_version": self.strategy_version,
+                        "strategy_version": self.strategy_name,
                         "early_profit_unlock_ratio": (
                             str(self.early_profit_unlock_ratio)
                             if self.early_profit_unlock_ratio is not None
@@ -1118,6 +1115,9 @@ class DynamicSpikeShortStrategy:
         if current.close / low_12h - Decimal("1") < self.RISE_FROM_12H_LOW:
             return None
 
+        if not self._entry_filters_pass(current.timestamp):
+            return None
+
         rise_low = None
         rise_low_time = None
         rise_low_age_minutes = None
@@ -1223,6 +1223,10 @@ class DynamicSpikeShortStrategy:
     # ------------------------------------------------------------------
     # 指标计算
     # ------------------------------------------------------------------
+
+    def _entry_filters_pass(self, event_ms: int) -> bool:
+        """版本策略可覆盖的入场过滤扩展点。"""
+        return True
 
     def _min_low_1m(self, minute_start: int, minutes: int) -> Optional[Decimal]:
         """已完成 1m K 线在 [minute_start - minutes, minute_start) 内的最低价"""
@@ -1378,10 +1382,11 @@ class DynamicSpikeBacktestStrategy:
         rise_low_lookback_minutes: int = 0,
         min_rise_duration_minutes: int = 0,
         early_profit_unlock_ratio: Decimal | None = None,
-        strategy_version: Literal["v1", "v2"] = "v1",
+        strategy_class: type[DynamicSpikeShortStrategy] = DynamicSpikeShortStrategy,
+        strategy_parameters: dict[str, object] | None = None,
     ):
         self.strategies = {
-            symbol: DynamicSpikeShortStrategy(
+            symbol: strategy_class(
                 symbol,
                 total_notional=total_notional,
                 account=account,
@@ -1391,7 +1396,7 @@ class DynamicSpikeBacktestStrategy:
                 rise_low_lookback_minutes=rise_low_lookback_minutes,
                 min_rise_duration_minutes=min_rise_duration_minutes,
                 early_profit_unlock_ratio=early_profit_unlock_ratio,
-                strategy_version=strategy_version,
+                **(strategy_parameters or {}),
             )
             for symbol in symbols
         }

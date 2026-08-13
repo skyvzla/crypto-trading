@@ -21,75 +21,45 @@ from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
 )
+from trading_platform.strategies.spike.definition import (
+    SpikeStrategyDefinition,
+    load_strategy_definition,
+)
 
 
-class NoPriorHighDynamicSpikeShortStrategy(DynamicSpikeShortStrategy):
-    """回测实验用适配器：保留信号逻辑，但不施加前高价格约束。"""
-
-    def __init__(self, *args, **kwargs):
-        # 父类要求 lookback 为正；实际比较在 _prior_high_point 中被禁用。
-        kwargs["prior_high_lookback_minutes"] = 1
-        super().__init__(*args, **kwargs)
-        self.prior_high_lookback_minutes = 0
-
-    def _prior_high_point(self, minute_start: int):
-        # 返回正价格下永远不会拦截入场的哨兵值，避免改动生产策略。
-        return Decimal("0"), minute_start
-
-    def _detect_signal(self, bar):
-        signal = super()._detect_signal(bar)
-        if signal is not None:
-            signal.prior_high = None
-            signal.prior_high_time = None
-        return signal
+DEFAULT_STRATEGY = "trading_platform.strategies.spike.v1:V1"
 
 
-class NoPriorHighDynamicSpikeBacktestStrategy(DynamicSpikeBacktestStrategy):
-    """多币种适配器的无前高过滤实验版本。"""
+def no_prior_high_strategy_class(
+    strategy_class: type[DynamicSpikeShortStrategy],
+) -> type[DynamicSpikeShortStrategy]:
+    """给任意 Spike 策略实现增加“禁用前高”的实验适配。"""
 
-    def __init__(
-        self,
-        symbols,
-        total_notional,
-        account=None,
-        exit_policy="execution-test-d007",
-        entry_tier_mode="three-tier",
-        rise_low_lookback_minutes=0,
-        min_rise_duration_minutes=0,
-        early_profit_unlock_ratio=None,
-        max_consecutive_up_minutes=0,
-        max_oi_change_pct=0.0,
-        max_ls_ratio=0.0,
-        metrics_series=None,
-        strategy_version="v1",
-    ):
-        self.strategies = {
-            symbol: NoPriorHighDynamicSpikeShortStrategy(
-                symbol,
-                total_notional=total_notional,
-                account=account,
-                exit_policy=exit_policy,
-                entry_tier_mode=entry_tier_mode,
-                rise_low_lookback_minutes=rise_low_lookback_minutes,
-                min_rise_duration_minutes=min_rise_duration_minutes,
-                early_profit_unlock_ratio=early_profit_unlock_ratio,
-                max_consecutive_up_minutes=max_consecutive_up_minutes,
-                max_oi_change_pct=max_oi_change_pct,
-                max_ls_ratio=max_ls_ratio,
-                metrics_series=(metrics_series or {}).get(symbol),
-                strategy_version=strategy_version,
-            )
-            for symbol in symbols
-        }
-        self._account = account
-        self._entry_enabled = True
-        self._blocked_entry_symbols = frozenset()
-        self.active_symbol = None
+    class NoPriorHighStrategy(strategy_class):
+        def __init__(self, *args, **kwargs):
+            kwargs["prior_high_lookback_minutes"] = 1
+            super().__init__(*args, **kwargs)
+            self.prior_high_lookback_minutes = 0
+
+        def _prior_high_point(self, minute_start: int):
+            return Decimal("0"), minute_start
+
+        def _detect_signal(self, bar):
+            signal = super()._detect_signal(bar)
+            if signal is not None:
+                signal.prior_high = None
+                signal.prior_high_time = None
+            return signal
+
+    NoPriorHighStrategy.__name__ = f"NoPriorHigh{strategy_class.__name__}"
+    return NoPriorHighStrategy
 
 
 @dataclass(frozen=True)
 class SpikeBacktestSettings:
+    strategy_path: str
     strategy_version: str
+    strategy_definition: SpikeStrategyDefinition
     start_ms: int
     end_ms: int
     load_start_ms: int
@@ -103,6 +73,8 @@ class SpikeBacktestSettings:
     max_oi_change_pct: float
     max_ls_ratio: float
     required_kline_intervals: tuple[str, ...]
+    requires_bar1s: bool
+    execution_timeframe: str
     duckdb_path: str
     output_path: Path
 
@@ -161,7 +133,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--exit-policy",
         choices=("confirmed", "candidate-v1", "legacy-script"),
         default=None,
-        help="Exit policy; v2默认candidate-v1，v1默认confirmed",
+        help="退出策略；未传时使用策略声明中的默认值",
     )
     parser.add_argument(
         "--limit-fill-fraction",
@@ -176,40 +148,39 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="显式修正历史 1s 数据时间偏移；默认 0，不自动推断",
     )
     parser.add_argument(
-        "--strategy-version",
-        choices=("v1", "v2"),
-        default="v1",
-        help="策略版本；v2 默认使用6h前高、7天低点上涨24h、第三档全仓和1.5%%盈利解锁",
+        "--strategy",
+        default=DEFAULT_STRATEGY,
+        help="策略声明路径，格式为 module:attribute",
     )
     parser.add_argument(
         "--prior-high-lookback-hours",
         type=int,
         default=None,
-        help="前高过滤回看周期（小时），0 表示禁用；默认由策略版本决定",
+        help="前高过滤回看周期（小时），0 表示禁用；默认由策略声明决定",
     )
     parser.add_argument(
         "--rise-low-lookback-hours",
         type=int,
         default=None,
-        help="上涨起点最低价的回看窗口（小时）；v2默认168，v1默认禁用",
+        help="上涨起点最低价的回看窗口（小时）；默认由策略声明决定",
     )
     parser.add_argument(
         "--min-rise-duration-hours",
         type=int,
         default=None,
-        help="窗口最低点距信号的最短小时数；v2默认24，v1默认禁用",
+        help="窗口最低点距信号的最短小时数；默认由策略声明决定",
     )
     parser.add_argument(
         "--entry-tier-mode",
         choices=("three-tier", "tier3-only"),
         default=None,
-        help="入场挂单模式；v2默认只挂第三档全仓，v1默认三档",
+        help="入场挂单模式；默认由策略声明决定",
     )
     parser.add_argument(
         "--profit-unlock-percent",
         type=Decimal,
         default=None,
-        help="持仓价格盈利超过该百分比后永久解除前90秒风险保护；v2默认1.5",
+        help="持仓价格盈利超过该百分比后永久解除前90秒风险保护",
     )
     parser.add_argument(
         "--max-consecutive-up-minutes",
@@ -282,24 +253,40 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         raise ValueError("--start must be earlier than --end")
     if args.warmup_hours < 0:
         raise ValueError("--warmup-hours must not be negative")
-    is_v2 = args.strategy_version == "v2"
+    definition = load_strategy_definition(args.strategy)
+    defaults = definition.defaults
     if args.exit_policy is None:
-        args.exit_policy = "candidate-v1" if is_v2 else "confirmed"
+        args.exit_policy = defaults.exit_policy
     prior_high_lookback_hours = args.prior_high_lookback_hours
     if prior_high_lookback_hours is None:
-        prior_high_lookback_hours = 6 if is_v2 else 4
+        prior_high_lookback_hours = defaults.prior_high_lookback_hours
     rise_low_lookback_hours = args.rise_low_lookback_hours
     if rise_low_lookback_hours is None:
-        rise_low_lookback_hours = 7 * 24 if is_v2 else 0
+        rise_low_lookback_hours = defaults.rise_low_lookback_hours
     min_rise_duration_hours = args.min_rise_duration_hours
     if min_rise_duration_hours is None:
-        min_rise_duration_hours = 24 if is_v2 else 0
-    entry_tier_mode = args.entry_tier_mode or (
-        "tier3-only" if is_v2 else "three-tier"
-    )
+        min_rise_duration_hours = defaults.min_rise_duration_hours
+    entry_tier_mode = args.entry_tier_mode or defaults.entry_tier_mode
     profit_unlock_percent = args.profit_unlock_percent
-    if profit_unlock_percent is None and is_v2:
-        profit_unlock_percent = Decimal("1.5")
+    if profit_unlock_percent is None and defaults.profit_unlock_percent is not None:
+        profit_unlock_percent = Decimal(str(defaults.profit_unlock_percent))
+
+    optional_parameters = {
+        "max_consecutive_up_minutes": args.max_consecutive_up_minutes,
+        "max_oi_change_pct": args.max_oi_change_pct,
+        "max_ls_ratio": args.max_ls_ratio,
+    }
+    unsupported = sorted(
+        key
+        for key, value in optional_parameters.items()
+        if value and key not in definition.supported_parameters
+    )
+    if unsupported:
+        raise ValueError(
+            f"strategy {definition.name} does not support: {', '.join(unsupported)}"
+        )
+    if definition.data_requirements.metrics_5m and args.metrics_root is None:
+        raise ValueError(f"strategy {definition.name} requires --metrics-root")
 
     if prior_high_lookback_hours < 0:
         raise ValueError("--prior-high-lookback-hours must not be negative")
@@ -325,7 +312,9 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         args.bar1s_time_shift_hours * Decimal("3600000")
     )
     return SpikeBacktestSettings(
-        strategy_version=args.strategy_version,
+        strategy_path=args.strategy,
+        strategy_version=definition.name,
+        strategy_definition=definition,
         start_ms=start_ms,
         end_ms=end_ms,
         load_start_ms=start_ms - int(warmup_hours * 3_600_000),
@@ -342,11 +331,21 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         max_consecutive_up_minutes=args.max_consecutive_up_minutes,
         max_oi_change_pct=args.max_oi_change_pct,
         max_ls_ratio=args.max_ls_ratio,
-        required_kline_intervals=(
-            ("1m", "5m", "15m")
+        required_kline_intervals=tuple(
+            dict.fromkeys(
+                timeframe
+                for timeframe in definition.data_requirements.market_timeframes
+                if timeframe != "1s"
+            )
+        )
+        + (
+            ("15m",)
             if args.exit_policy == "candidate-v1"
-            else ("1m", "5m")
+            and "15m" not in definition.data_requirements.market_timeframes
+            else ()
         ),
+        requires_bar1s="1s" in definition.data_requirements.market_timeframes,
+        execution_timeframe=definition.data_requirements.execution_timeframe,
         duckdb_path=args.duckdb_path,
         output_path=Path(args.output),
     )
@@ -366,6 +365,7 @@ def create_spike_engine(
         prior_high_lookback_minutes=(
             settings.prior_high_lookback_minutes or 1
         ),
+        strategy_path=settings.strategy_path,
         spike_strategy_version=settings.strategy_version,
         spike_entry_tier_mode=settings.entry_tier_mode,
         spike_rise_low_lookback_minutes=settings.rise_low_lookback_minutes,
@@ -379,36 +379,21 @@ def create_spike_engine(
     if settings.prior_high_lookback_minutes == 0:
         config.prior_high_lookback_minutes = 0
     metrics_series = None
-    if args.metrics_root is not None and (
-        settings.max_oi_change_pct > 0 or settings.max_ls_ratio > 0
-    ):
+    if settings.strategy_definition.data_requirements.metrics_5m:
         series = load_metrics_series(args.metrics_root, args.symbol)
-        if series:
-            metrics_series = {args.symbol: series}
+        if not series:
+            raise ValueError(
+                f"strategy {settings.strategy_version} requires metrics for {args.symbol}"
+            )
+        metrics_series = {args.symbol: series}
     if args.exit_policy == "legacy-script":
         strategy = LegacyScriptExitSpikeBacktestStrategy(
             symbols=[args.symbol], total_notional=args.total_notional
         )
-    elif settings.prior_high_lookback_minutes == 0:
-        strategy = NoPriorHighDynamicSpikeBacktestStrategy(
-            symbols=[args.symbol],
-            total_notional=args.total_notional,
-            exit_policy=(
-                "candidate-v1"
-                if args.exit_policy == "candidate-v1"
-                else "execution-test-d007"
-            ),
-            entry_tier_mode=settings.entry_tier_mode,
-            rise_low_lookback_minutes=settings.rise_low_lookback_minutes,
-            min_rise_duration_minutes=settings.min_rise_duration_minutes,
-            early_profit_unlock_ratio=settings.early_profit_unlock_ratio,
-            max_consecutive_up_minutes=settings.max_consecutive_up_minutes,
-            max_oi_change_pct=settings.max_oi_change_pct,
-            max_ls_ratio=settings.max_ls_ratio,
-            metrics_series=metrics_series,
-            strategy_version=settings.strategy_version,
-        )
     else:
+        strategy_class = settings.strategy_definition.strategy_class
+        if settings.prior_high_lookback_minutes == 0:
+            strategy_class = no_prior_high_strategy_class(strategy_class)
         strategy = DynamicSpikeBacktestStrategy(
             symbols=[args.symbol],
             total_notional=args.total_notional,
@@ -417,22 +402,36 @@ def create_spike_engine(
                 if args.exit_policy == "candidate-v1"
                 else "execution-test-d007"
             ),
-            prior_high_lookback_minutes=settings.prior_high_lookback_minutes,
+            prior_high_lookback_minutes=(
+                settings.prior_high_lookback_minutes or 1
+            ),
             entry_tier_mode=settings.entry_tier_mode,
             rise_low_lookback_minutes=settings.rise_low_lookback_minutes,
             min_rise_duration_minutes=settings.min_rise_duration_minutes,
             early_profit_unlock_ratio=settings.early_profit_unlock_ratio,
-            max_consecutive_up_minutes=settings.max_consecutive_up_minutes,
-            max_oi_change_pct=settings.max_oi_change_pct,
-            max_ls_ratio=settings.max_ls_ratio,
-            metrics_series=metrics_series,
-            strategy_version=settings.strategy_version,
+            strategy_class=strategy_class,
+            strategy_parameters={
+                key: value
+                for key, value in {
+                    "max_consecutive_up_minutes": settings.max_consecutive_up_minutes,
+                    "max_oi_change_pct": settings.max_oi_change_pct,
+                    "max_ls_ratio": settings.max_ls_ratio,
+                    "metrics_series": (
+                        metrics_series or {}
+                    ).get(args.symbol),
+                }.items()
+                if key in (
+                    settings.strategy_definition.supported_parameters
+                    | settings.strategy_definition.internal_parameters
+                )
+            },
         )
     return BacktestEngine(
         events=events,
         strategy=strategy,
         config=config,
         symbol_rules=load_symbol_rules(args.exchange_info, [args.symbol]),
+        execution_timeframe=settings.execution_timeframe,
     )
 
 
@@ -471,7 +470,7 @@ def main() -> None:
         symbols=[args.symbol],
         start_ms=settings.load_start_ms,
         end_ms=settings.end_ms,
-        require_aggtrades=True,
+        require_aggtrades=settings.requires_bar1s,
         required_kline_intervals=list(settings.required_kline_intervals),
         archive_index_path=args.archive_index,
         bar1s_time_shift_ms=settings.bar1s_time_shift_ms,

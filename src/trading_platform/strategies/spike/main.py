@@ -56,6 +56,7 @@ from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
 )
+from trading_platform.strategies.spike.definition import load_strategy_definition
 from trading_platform.ledger.exchange_symbols import fetch_exchange_info_with_retry
 from trading_platform.strategies.universe import (
     UNIVERSE_SCAN_INTERVAL_SECONDS,
@@ -115,6 +116,18 @@ class SpikeLiveProcess:
         self.database = database
         self.redis_config = redis_config
         self.strategy_config = strategy_config
+        self.strategy_definition = load_strategy_definition(settings.strategy_path)
+        requirements = self.strategy_definition.data_requirements
+        if requirements.metrics_5m:
+            raise ValueError(
+                "live Spike runtime does not provide metrics_5m yet: "
+                f"{settings.strategy_path}"
+            )
+        if "1s" not in requirements.market_timeframes:
+            raise ValueError(
+                "live Spike runtime currently requires a 1s-driven strategy: "
+                f"{settings.strategy_path}"
+            )
         self._stop = asyncio.Event()
         self._stack = AsyncExitStack()
         self._tasks: list[asyncio.Task] = []
@@ -359,6 +372,23 @@ class SpikeLiveProcess:
             self.settings.total_notional,
             account=account,
             exit_policy=self.settings.exit_policy,
+            prior_high_lookback_minutes=(
+                self.strategy_definition.defaults.prior_high_lookback_hours * 60
+            ),
+            entry_tier_mode=self.strategy_definition.defaults.entry_tier_mode,
+            rise_low_lookback_minutes=(
+                self.strategy_definition.defaults.rise_low_lookback_hours * 60
+            ),
+            min_rise_duration_minutes=(
+                self.strategy_definition.defaults.min_rise_duration_hours * 60
+            ),
+            early_profit_unlock_ratio=(
+                Decimal(str(self.strategy_definition.defaults.profit_unlock_percent))
+                / Decimal("100")
+                if self.strategy_definition.defaults.profit_unlock_percent is not None
+                else None
+            ),
+            strategy_class=self.strategy_definition.strategy_class,
         )
         executor = BinanceOrderExecutor(
             rest,
@@ -558,7 +588,7 @@ class SpikeLiveProcess:
             f"/subscriptions/{self._consumer_id}",
             json={
                 "symbols": list(self._market_symbols()),
-                "types": ["bar1s", "kline:1m", "kline:5m", "kline:15m"],
+                "types": self._market_subscription_types(),
             },
         )
         response.raise_for_status()
@@ -571,6 +601,15 @@ class SpikeLiveProcess:
         except Exception:
             logger.exception("failed to unregister market subscription")
 
+    def _market_subscription_types(self) -> list[str]:
+        timeframes = list(self.strategy_definition.data_requirements.market_timeframes)
+        if self.settings.exit_policy == "candidate-v1" and "15m" not in timeframes:
+            timeframes.append("15m")
+        return [
+            "bar1s" if timeframe == "1s" else f"kline:{timeframe}"
+            for timeframe in timeframes
+        ]
+
     async def _warm_strategy_history(self) -> None:
         assert self.coordinator is not None
         rest = self.coordinator.account.rest_client
@@ -578,11 +617,17 @@ class SpikeLiveProcess:
         strategy = self.coordinator.strategy
         strategy.set_trading_enabled(False)
         for symbol in self._market_symbols():
-            for interval, limit, minimum in (
-                ("1m", 1000, 960),
-                ("5m", 100, 15),
-                ("15m", 100, 10),
-            ):
+            warmup_requirements = {
+                "1m": (1000, 960),
+                "5m": (100, 15),
+                "15m": (100, 10),
+            }
+            for interval in self._required_kline_intervals():
+                if interval not in warmup_requirements:
+                    raise RuntimeError(
+                        f"missing live warmup policy for {interval}"
+                    )
+                limit, minimum = warmup_requirements[interval]
                 rows = await rest.get_klines(
                     symbol, interval, limit=limit, end_time=now_ms
                 )
@@ -687,7 +732,7 @@ class SpikeLiveProcess:
         assert self.coordinator is not None
         while True:
             for symbol in self._market_symbols():
-                for interval in ("1m", "5m", "15m"):
+                for interval in self._required_kline_intervals():
                     raw = await self.redis.hget(f"kline:{symbol}:{interval}", "latest")
                     if not raw:
                         continue
@@ -698,6 +743,16 @@ class SpikeLiveProcess:
                     await self.coordinator.on_kline(kline)
                     self._last_kline[key] = kline.close_time
             await asyncio.sleep(1)
+
+    def _required_kline_intervals(self) -> tuple[str, ...]:
+        intervals = [
+            timeframe
+            for timeframe in self.strategy_definition.data_requirements.market_timeframes
+            if timeframe != "1s"
+        ]
+        if self.settings.exit_policy == "candidate-v1" and "15m" not in intervals:
+            intervals.append("15m")
+        return tuple(intervals)
 
     async def _safety_scan_loop(self) -> None:
         assert self.admission is not None

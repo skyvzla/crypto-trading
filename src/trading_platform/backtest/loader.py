@@ -104,6 +104,8 @@ class BacktestDataLoader:
         self.end_ms = end_ms
         self.require_aggtrades = require_aggtrades
         self.required_kline_intervals = set(required_kline_intervals or [])
+        if "1s" in self.required_kline_intervals:
+            raise ValueError("use require_aggtrades for 1s market data")
         self.duckdb_path = Path(duckdb_path)
         self.archive_index_path = (
             Path(archive_index_path) if archive_index_path else None
@@ -183,11 +185,18 @@ class BacktestDataLoader:
             return
         connection = self._require_duckdb_connection()
         placeholders = ", ".join("?" for _ in self.symbols)
+        required_timeframes = sorted(
+            ({"1s"} if self.require_aggtrades else set())
+            | self.required_kline_intervals
+        )
+        if not required_timeframes:
+            return
+        timeframe_placeholders = ", ".join("?" for _ in required_timeframes)
         rows = connection.execute(
             "SELECT symbol, timeframe, count(*) "
             "FROM main.candles "
             f"WHERE symbol IN ({placeholders}) "
-            "AND timeframe IN ('1s', '1m', '5m', '15m') "
+            f"AND timeframe IN ({timeframe_placeholders}) "
             "AND ((timeframe = '1s' AND epoch_ms(open_time) >= ? "
             "AND epoch_ms(open_time) < ?) "
             "OR (timeframe <> '1s' AND epoch_ms(close_time) >= ? "
@@ -195,6 +204,7 @@ class BacktestDataLoader:
             "GROUP BY symbol, timeframe",
             [
                 *self.symbols,
+                *required_timeframes,
                 self.start_ms - self.bar1s_time_shift_ms,
                 self.end_ms - self.bar1s_time_shift_ms,
                 self.start_ms,
@@ -216,7 +226,10 @@ class BacktestDataLoader:
         raw_start = self.start_ms - self.bar1s_time_shift_ms
         raw_end = self.end_ms - self.bar1s_time_shift_ms
         selected_parts = []
-        required = {"1s", *self.required_kline_intervals}
+        required = (
+            ({"1s"} if self.require_aggtrades else set())
+            | self.required_kline_intervals
+        )
         for symbol in self.symbols:
             for timeframe in required:
                 start_ms = raw_start if timeframe == "1s" else self.start_ms
@@ -243,6 +256,13 @@ class BacktestDataLoader:
     ) -> duckdb.DuckDBPyConnection | None:
         connection = self._require_duckdb_connection()
         placeholders = ", ".join("?" for _ in self.symbols)
+        required_timeframes = sorted(
+            ({"1s"} if self.require_aggtrades else set())
+            | self.required_kline_intervals
+        )
+        if not required_timeframes:
+            return None
+        timeframe_placeholders = ", ".join("?" for _ in required_timeframes)
         source_sql = "main.candles"
         source_parameters: list[object] = []
         if self._source_index is not None:
@@ -267,7 +287,7 @@ class BacktestDataLoader:
             f"{available_time_sql} AS available_time "
             f"FROM {source_sql} "
             f"WHERE symbol IN ({placeholders}) "
-            "AND timeframe IN ('1s', '1m', '5m', '15m') "
+            f"AND timeframe IN ({timeframe_placeholders}) "
             "AND ((timeframe = '1s' AND epoch_ms(open_time) >= ? "
             "AND epoch_ms(open_time) < ?) "
             "OR (timeframe <> '1s' AND epoch_ms(close_time) >= ? "
@@ -285,6 +305,7 @@ class BacktestDataLoader:
                 shift,
                 *source_parameters,
                 *self.symbols,
+                *required_timeframes,
                 self.start_ms - shift,
                 self.end_ms - shift,
                 self.start_ms,

@@ -98,6 +98,28 @@ def test_duckdb_stream_matches_materialized_event_order(tmp_path):
     assert streamed == first
 
 
+def test_duckdb_loader_can_run_without_one_second_data(tmp_path):
+    archive = tmp_path / "kline-only.duckdb"
+    connection = duckdb.connect(str(archive))
+    try:
+        connection.execute(
+            """
+            CREATE TABLE candles AS SELECT * FROM (VALUES
+                ('AKEUSDT', '1m', to_timestamp(1000 / 1000.0), 10.0, 12.0, 9.0, 11.0, 3.0, to_timestamp(60999 / 1000.0)),
+                ('AKEUSDT', '5m', to_timestamp(1000 / 1000.0), 10.0, 14.0, 7.0, 13.0, 5.0, to_timestamp(300999 / 1000.0))
+            ) AS t(symbol, timeframe, open_time, open, high, low, close, volume, close_time)
+            """
+        )
+    finally:
+        connection.close()
+
+    events = list(BacktestDataLoader(
+        duckdb_path=str(archive), symbols=["AKEUSDT"], start_ms=0,
+        end_ms=400_000, required_kline_intervals=["1m", "5m"]
+    ).iter_all())
+    assert all(isinstance(event, Kline) for event in events)
+
+
 def test_duckdb_stream_rejects_missing_required_dataset_before_yield(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
@@ -121,6 +143,7 @@ def test_duckdb_loader_applies_explicit_one_second_time_shift(tmp_path):
         symbols=["AKEUSDT"],
         start_ms=0,
         end_ms=100_000,
+        require_aggtrades=True,
         bar1s_time_shift_ms=8_000,
     )
 

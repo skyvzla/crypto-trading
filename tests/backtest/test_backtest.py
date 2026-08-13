@@ -619,6 +619,42 @@ class TestBacktestEngine(unittest.TestCase):
         order = result.orders[0]
         self.assertEqual(order.status, 'EXPIRED')
 
+    def test_kline_execution_timeframe_can_fill_without_1s_events(self):
+        class KlineStrategy:
+            def __init__(self):
+                self.sent = False
+
+            def on_bar1s(self, bar):
+                return None
+
+            def on_kline(self, kline):
+                if not self.sent:
+                    self.sent = True
+                    return [OrderIntent(
+                        symbol=kline.symbol, side="SELL", price=Decimal("110"),
+                        quantity=Decimal("1"), client_order_id="kline-order",
+                        strategy_id="test", trigger_reason="test",
+                    )]
+                return None
+
+            def on_fill(self, fill):
+                pass
+
+        def make_kline(open_time, high):
+            return Kline(
+                symbol="BTCUSDT", interval="1m", open_time=open_time,
+                close_time=open_time + 59_999, available_time=open_time + 60_000,
+                open=Decimal("100"), high=Decimal(str(high)), low=Decimal("99"),
+                close=Decimal("100"), volume=Decimal("1"),
+            )
+
+        engine = BacktestEngine(
+            KlineStrategy(), [make_kline(0, 101), make_kline(60_000, 111)],
+            BacktestConfig(), execution_timeframe="1m",
+        )
+        result = engine.run()
+        self.assertEqual(len(result.fills), 1)
+
     def test_position_management(self):
         """测试持仓管理"""
         # 创建事件：开仓 -> 平仓

@@ -32,7 +32,10 @@ class SymbolRunPlan:
 
 def _event_matches_plan(event: Event, plan: SymbolRunPlan) -> bool:
     if isinstance(event, Bar1s):
-        return event.timestamp >= plan.settings.load_start_ms
+        return (
+            plan.settings.requires_bar1s
+            and event.timestamp >= plan.settings.load_start_ms
+        )
     return (
         event.close_time >= plan.settings.load_start_ms
         and event.interval in plan.settings.required_kline_intervals
@@ -49,12 +52,13 @@ def _run_shift_group(plans: list[SymbolRunPlan]) -> set[str]:
         for plan in plans
         for interval in plan.settings.required_kline_intervals
     })
+    requires_bar1s = any(plan.settings.requires_bar1s for plan in plans)
     loader = BacktestDataLoader(
         duckdb_path=settings.duckdb_path,
         symbols=[args.symbol],
         start_ms=load_start_ms,
         end_ms=settings.end_ms,
-        require_aggtrades=True,
+        require_aggtrades=requires_bar1s,
         required_kline_intervals=required_intervals,
         archive_index_path=args.archive_index,
         bar1s_time_shift_ms=settings.bar1s_time_shift_ms,

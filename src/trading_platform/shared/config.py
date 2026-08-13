@@ -95,6 +95,7 @@ class BacktestConfig(BaseSettings):
     limit_fill_fraction_per_bar: float = Field(default=1.0, gt=0, le=1)
     bar1s_time_shift_ms: int = 0  # 历史源已证实存在偏移时才显式设置
     prior_high_lookback_minutes: int = Field(default=240, gt=0)
+    strategy_path: str | None = None
     spike_strategy_version: str = "v1"
     spike_entry_tier_mode: str = "three-tier"
     spike_rise_low_lookback_minutes: int = 0

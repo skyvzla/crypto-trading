@@ -25,7 +25,7 @@ def test_v2_resolves_confirmed_defaults_and_seven_day_warmup():
         "--end", "2026-07-02T00:00:00+00:00",
         "--duckdb-path", "history.duckdb",
         "--total-notional", "1000",
-        "--strategy-version", "v2",
+        "--strategy", "trading_platform.strategies.spike.v2:V2",
     ])
 
     settings = run_spike_short.resolve_settings(args)

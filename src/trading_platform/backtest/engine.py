@@ -74,6 +74,7 @@ class BacktestEngine:
         config: BacktestConfig,
         account_id: str = 'backtest',
         symbol_rules: BinanceSymbolRuleBook | None = None,
+        execution_timeframe: str = "1s",
     ):
         """
         Args:
@@ -90,6 +91,7 @@ class BacktestEngine:
         self._finished_result: BacktestResult | None = None
         self.config = config
         self.account_id = account_id
+        self.execution_timeframe = execution_timeframe
 
         # 虚拟时钟（使用 available_time，避免未来信息）
         self.virtual_time_ms = (
@@ -178,7 +180,9 @@ class BacktestEngine:
             self._trading_enabled = trading_enabled
             self._set_strategy_trading_enabled(trading_enabled)
 
-        if isinstance(event, Bar1s):
+        if isinstance(event, Bar1s) or (
+            isinstance(event, Kline) and event.interval == self.execution_timeframe
+        ):
             self.last_prices[event.symbol] = event.close
 
         # 成交判断必须先于策略事件处理，保持单引擎回测的既有语义。
@@ -238,7 +242,7 @@ class BacktestEngine:
         检查当前事件是否触发挂单成交
 
         简化触价模型：
-        1. 只有 1s Bar 才能判断成交
+        1. 只有策略声明的执行周期才能判断成交
         2. TTL 检查在价格检查之前
         3. 做空限价单：bar.high > order.price（严格穿透）
         4. 做多限价单：bar.low < order.price（严格穿透）
@@ -248,8 +252,9 @@ class BacktestEngine:
         Args:
             event: 当前事件
         """
-        if not isinstance(event, Bar1s):
-            return  # 只有1s Bar才能判断成交
+        event_timeframe = "1s" if isinstance(event, Bar1s) else event.interval
+        if event_timeframe != self.execution_timeframe:
+            return
 
         symbol = event.symbol
 
@@ -286,7 +291,7 @@ class BacktestEngine:
                     self._on_fill(fill)
                     self._collect_strategy_audit_events()
 
-    def _execute_fill(self, order: Order, event: Bar1s) -> Fill | None:
+    def _execute_fill(self, order: Order, event: Event) -> Fill | None:
         """
         执行成交，采用保守假设
 

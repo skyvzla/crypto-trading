@@ -9,6 +9,7 @@ from trading_platform.strategies.spike.short import (
     DynamicSpikeShortStrategy,
     SpikeSignal,
 )
+from trading_platform.strategies.spike.v2_1 import SpikeV21Strategy
 
 
 class TestDynamicSpikeShortStrategy:
@@ -138,6 +139,186 @@ class TestDynamicSpikeShortStrategy:
         )
         assert custom.prior_high_lookback_minutes == 8 * 60
         assert len(DynamicSpikeShortStrategy.TIER_WEIGHTS) == 3
+
+    def test_consecutive_up_minutes_counter(self):
+        """测试连续上涨根数倒推计数：close > open 计 1，否则中断。"""
+        minute = 60_000
+        strategy = SpikeV21Strategy(
+            "BTCUSDT", total_notional=Decimal("1000")
+        )
+        strategy.klines_1m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=index * minute,
+                close_time=(index + 1) * minute - 1,
+                available_time=(index + 1) * minute,
+                open=Decimal("100"),
+                high=Decimal("120"),
+                low=Decimal("90"),
+                close=Decimal("103" if index < 2 else "99"),
+                volume=Decimal("1"),
+            )
+            for index in range(4)
+        ]
+        assert strategy._consecutive_up_minutes() == 0
+
+        strategy.klines_1m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=index * minute,
+                close_time=(index + 1) * minute - 1,
+                available_time=(index + 1) * minute,
+                open=Decimal("100"),
+                high=Decimal("120"),
+                low=Decimal("90"),
+                close=Decimal("101"),
+                volume=Decimal("1"),
+            )
+            for index in range(4)
+        ]
+        assert strategy._consecutive_up_minutes() == 4
+
+    def test_consecutive_up_filter_rejects_long_streaks(self):
+        """max_consecutive_up_minutes 设置后，连续上涨超过上限的信号被拒绝。"""
+        minute = 60_000
+        lookback_minutes = 7 * 24 * 60
+        minute_start = lookback_minutes * minute
+        low_open_time = minute_start - lookback_minutes * minute
+
+        def build_strategy(max_consecutive: int) -> SpikeV21Strategy:
+            strategy = SpikeV21Strategy(
+                "BTCUSDT",
+                total_notional=Decimal("1000"),
+                prior_high_lookback_minutes=6 * 60,
+                rise_low_lookback_minutes=lookback_minutes,
+                min_rise_duration_minutes=24 * 60,
+                max_consecutive_up_minutes=max_consecutive,
+            )
+            strategy.klines_1m = [
+                Kline(
+                    symbol="BTCUSDT",
+                    interval="1m",
+                    open_time=index * minute,
+                    close_time=(index + 1) * minute - 1,
+                    available_time=(index + 1) * minute,
+                    open=Decimal("100"),
+                    high=Decimal("102"),
+                    low=Decimal("80")
+                    if index * minute == low_open_time
+                    else Decimal("85"),
+                    close=Decimal("101"),  # 全部收阳，连续上涨
+                    volume=Decimal("1"),
+                )
+                for index in range(lookback_minutes)
+            ]
+            strategy.klines_5m = [
+                Kline(
+                    symbol="BTCUSDT",
+                    interval="5m",
+                    open_time=minute_start - (15 - index) * 5 * minute,
+                    close_time=minute_start - (14 - index) * 5 * minute - 1,
+                    available_time=minute_start - (14 - index) * 5 * minute,
+                    open=Decimal("100"),
+                    high=Decimal("102"),
+                    low=Decimal("98"),
+                    close=Decimal("100"),
+                    volume=Decimal("1"),
+                )
+                for index in range(15)
+            ]
+            closes = [Decimal("100")] * 56 + [
+                Decimal("100"), Decimal("101"), Decimal("102"),
+                Decimal("104"), Decimal("106"),
+            ]
+            strategy.bars_1s = [
+                Bar1s(
+                    symbol="BTCUSDT",
+                    timestamp=minute_start - (60 - index) * 1_000,
+                    available_time=minute_start - (59 - index) * 1_000,
+                    open=close,
+                    high=Decimal("120") if index == 60 else close,
+                    low=close,
+                    close=close,
+                    volume=Decimal("4") if index >= 56 else Decimal("1"),
+                    trade_count=1,
+                    vwap=close,
+                )
+                for index, close in enumerate(closes)
+            ]
+            return strategy
+
+        filtered = build_strategy(max_consecutive=3)
+        assert filtered._consecutive_up_minutes() > 3
+        assert filtered._detect_signal(filtered.bars_1s[-1]) is None
+
+        unfiltered = build_strategy(max_consecutive=0)
+        assert unfiltered._consecutive_up_minutes() > 3
+        assert unfiltered._detect_signal(unfiltered.bars_1s[-1]) is not None
+
+    def test_consecutive_up_parameter_validation(self):
+        with pytest.raises(ValueError):
+            SpikeV21Strategy(
+                "BTCUSDT",
+                total_notional=Decimal("1000"),
+                max_consecutive_up_minutes=-1,
+            )
+
+    def test_metrics_snapshot_alignment(self):
+        """指标快照按事件时间对齐：取不晚于事件时刻的最近 5m 桶。"""
+        series = [
+            (1_000_000, 100.0, 1.2),
+            (1_300_000, 110.0, 1.1),
+            (1_600_000, 120.0, 0.9),
+        ]
+        strategy = SpikeV21Strategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            metrics_series=series,
+        )
+        assert strategy._metrics_snapshot_at(1_250_000) == (100.0, 100.0, 1.2)
+        assert strategy._metrics_snapshot_at(1_350_000) == (110.0, 100.0, 1.1)
+        assert strategy._metrics_snapshot_at(1_750_000) == (120.0, 110.0, 0.9)
+
+        fresh = SpikeV21Strategy(
+            "BTCUSDT", total_notional=Decimal("1000"), metrics_series=series
+        )
+        assert fresh._metrics_snapshot_at(1_000_000 - 1) is None  # 早于首个快照
+
+    def test_metrics_blocked_by_oi_change(self):
+        """OI 5m 变化超过上限时拦截信号。"""
+        series = [
+            (1_000_000, 100.0, 1.0),
+            (1_300_000, 130.0, 1.0),  # +30%
+        ]
+        strategy = SpikeV21Strategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            metrics_series=series,
+            max_oi_change_pct=15.0,
+        )
+        assert strategy._metrics_blocked(1_350_000) is True   # +30% > 15%
+        strategy.max_oi_change_pct = 50.0
+        assert strategy._metrics_blocked(1_350_000) is False  # +30% < 50%
+        strategy.max_oi_change_pct = 0.0
+        assert strategy._metrics_blocked(1_350_000) is False  # 禁用
+
+    def test_metrics_blocked_by_ls_ratio(self):
+        """多空比超过上限时拦截信号。"""
+        series = [
+            (1_000_000, 100.0, 1.8),
+            (1_300_000, 100.0, 1.8),
+        ]
+        strategy = SpikeV21Strategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            metrics_series=series,
+            max_ls_ratio=1.5,
+        )
+        assert strategy._metrics_blocked(1_350_000) is True   # 1.8 > 1.5
+        strategy.max_ls_ratio = 2.0
+        assert strategy._metrics_blocked(1_350_000) is False  # 1.8 < 2.0
         assert sum(DynamicSpikeShortStrategy.TIER_WEIGHTS) == Decimal("1.0")
 
     def test_prior_high_uses_configured_lookback_window(self):
