@@ -9,6 +9,7 @@
 3. [项目完整实施计划](PROJECT_IMPLEMENTATION_PLAN.md)：功能状态、阶段、依赖、验收和风险门禁。
 4. [项目功能盘点](PROJECT_GAP_ANALYSIS.md)：当前源码与测试对应的实现快照。
 5. [AKEUSDT 2026 年 7 月对齐 Replay](AKEUSDT_2026_07_ALIGNED_REPLAY.md)：当前有效的逐笔结果与已定位问题。
+6. [Spike 策略版本说明](SPIKE_STRATEGY_VERSIONS.md)：v1、v2 基线与可选实验参数的差异。
 
 ## 文档规则
 
