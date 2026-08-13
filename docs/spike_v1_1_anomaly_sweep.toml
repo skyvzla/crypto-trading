@@ -15,9 +15,11 @@ coverage_tolerance_hours = 24
 exclude_symbols = ["ZECUSDT"]
 
 [execution]
-memory_limit_enabled = false
-chunk_hours = 2160
+memory_limit_enabled = true
+chunk_hours = 4320
 fetch_batch_size = 10000
+worker_memory_budget = "2GB"
+memory_budget_percent = 95
 duckdb_threads = 1
 resume = true
 

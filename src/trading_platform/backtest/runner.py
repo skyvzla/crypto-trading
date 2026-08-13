@@ -184,7 +184,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help='可选 Binance exchangeInfo JSON 快照；提供后 replay 按真实 tick/step 量化',
     )
-    parser.add_argument('--chunk-hours', type=float, default=24.0 * 90)
+    parser.add_argument('--chunk-hours', type=float, default=24.0 * 180)
     parser.add_argument('--fetch-batch-size', type=int, default=10_000)
     parser.add_argument('--duckdb-memory-limit', default=None)
     parser.add_argument('--duckdb-threads', type=int, default=1)

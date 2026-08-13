@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 from trading_platform.backtest.engine import BacktestEngine, Event
 from trading_platform.backtest.loader import BacktestDataLoader
+from trading_platform.backtest.loader import DEFAULT_CHUNK_HOURS
 from trading_platform.backtest.loader import MetricsDataLoader
 from trading_platform.backtest.result import ResultAnalyzer
 from trading_platform.backtest.runner import load_symbol_rules
@@ -219,8 +220,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--chunk-hours",
         type=float,
-        default=24.0 * 90,
-        help="DuckDB 流式回测的时间窗口（小时）",
+        default=DEFAULT_CHUNK_HOURS,
+        help="DuckDB 流式回测的时间窗口（小时，默认 180 天）",
     )
     parser.add_argument(
         "--fetch-batch-size",
@@ -231,7 +232,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--duckdb-memory-limit",
         default=None,
-        help="单个 DuckDB worker 的内存上限，例如 4GB",
+        help="单个 DuckDB worker 的内存上限，例如 1GB",
     )
     parser.add_argument(
         "--duckdb-threads",

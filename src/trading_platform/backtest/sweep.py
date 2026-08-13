@@ -40,6 +40,7 @@ from trading_platform.market.archive.index import (
     verify_archive_index_files,
 )
 from trading_platform.market.archive.parquet import archive_root_from_catalog
+from trading_platform.backtest.loader import DEFAULT_CHUNK_HOURS
 
 logger = logging.getLogger(__name__)
 
@@ -69,8 +70,9 @@ EXECUTION_FLAGS = {
     "duckdb_threads": "--duckdb-threads",
 }
 ESTIMATED_PYTHON_EVENT_BYTES = 1_024
-ESTIMATED_DUCKDB_ROW_BYTES = 160
+ESTIMATED_DUCKDB_ROW_BYTES = 96
 WORKER_NON_DUCKDB_RESERVE_BYTES = 1024**3
+MIN_WORKER_MEMORY_BYTES = 2 * 1024**3
 
 
 @dataclass(frozen=True)
@@ -249,7 +251,7 @@ def _estimate_monthly_memory(
         event_rows = int(group["row_count"].sum())
         rows_1s = int(group.loc[group["timeframe"] == "1s", "row_count"].sum())
         chunk_fraction = max(float(chunk_hours) / (24 * 30), 1 / (24 * 30))
-        chunk_rows = max(1, math.ceil(event_rows * chunk_fraction))
+        chunk_rows = min(event_rows, max(1, math.ceil(event_rows * chunk_fraction)))
         materialized = event_rows * ESTIMATED_PYTHON_EVENT_BYTES
         stream_peak = (
             chunk_rows * ESTIMATED_DUCKDB_ROW_BYTES
@@ -262,7 +264,7 @@ def _estimate_monthly_memory(
             "estimated_materialized_gb": materialized / 1024**3,
             "estimated_stream_peak_gb": stream_peak / 1024**3,
             "chunk_hours": float(chunk_hours),
-            "estimate_note": "1KiB/Python event; 160B/DuckDB row; +1GiB non-DuckDB reserve",
+            "estimate_note": "96B/stream event estimate calibrated against annual 1s replay; +1GiB non-DuckDB reserve",
         })
     return pd.DataFrame(records)
 
@@ -412,8 +414,8 @@ def _worker_memory_plan(
     if not 1 <= budget_percent <= 95:
         raise ValueError("execution.memory_budget_percent must be 1..95")
     per_worker_budget = _memory_bytes(worker_memory_budget)
-    if per_worker_budget < 4 * 1024**3:
-        raise ValueError("execution.worker_memory_budget must be at least 4GB")
+    if per_worker_budget < MIN_WORKER_MEMORY_BYTES:
+        raise ValueError("execution.worker_memory_budget must be at least 2GB")
     available = available_memory_bytes
     if available is None:
         available = _available_memory_bytes()
@@ -424,7 +426,7 @@ def _worker_memory_plan(
     max_workers = budget // per_worker_budget
     if max_workers < 1:
         raise RuntimeError(
-            "available memory cannot provide the minimum 4GB worker budget"
+            "available memory cannot provide the minimum 2GB worker budget"
         )
     if requested is not None and requested > max_workers:
         required_gib = requested * per_worker_budget / 1024**3
@@ -487,12 +489,12 @@ def _symbol_worker_resources(
             raise ValueError("--workers must be positive")
         return min(requested, symbol_count), None, None
 
-    worker_memory_budget = str(execution.get("worker_memory_budget", "4GB"))
+    worker_memory_budget = str(execution.get("worker_memory_budget", "2GB"))
     workers, duckdb_memory_limit = _symbol_worker_memory_plan(
         requested,
         symbol_count,
         worker_memory_budget,
-        int(execution.get("memory_budget_percent", 80)),
+        int(execution.get("memory_budget_percent", 95)),
         available_memory_bytes=available_memory_bytes,
     )
     return workers, worker_memory_budget, duckdb_memory_limit
@@ -1368,7 +1370,7 @@ def _main(argv: list[str] | None = None) -> int:
         symbols=symbols,
         start_ms=_timestamp_ms(config["start"]),
         end_ms=_timestamp_ms(config["end"]),
-        chunk_hours=float(execution.get("chunk_hours", 24 * 90)),
+        chunk_hours=float(execution.get("chunk_hours", DEFAULT_CHUNK_HOURS)),
         fetch_batch_size=int(execution.get("fetch_batch_size", 10_000)),
     )
     memory_estimate.to_csv(output_root / "memory_estimate.csv", index=False)

@@ -18,6 +18,7 @@ from trading_platform.market.archive.parquet import archive_root_from_catalog
 from trading_platform.shared.events import Bar1s, Kline
 
 Event = Union[Bar1s, Kline]
+DEFAULT_CHUNK_HOURS = 24.0 * 180
 
 
 class MetricsDataLoader:
@@ -129,7 +130,7 @@ class BacktestDataLoader:
     def iter_all(
         self,
         *,
-        chunk_hours: float = 24.0 * 90,
+        chunk_hours: float = DEFAULT_CHUNK_HOURS,
         fetch_batch_size: int = 10_000,
         duckdb_memory_limit: str | None = None,
         duckdb_threads: int = 1,

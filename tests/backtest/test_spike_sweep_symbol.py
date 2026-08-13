@@ -15,7 +15,7 @@ def test_symbol_runner_keeps_the_ninety_day_default_read_window():
         "--total-notional", "1000",
     ])
 
-    assert args.chunk_hours == 24 * 90
+    assert args.chunk_hours == 24 * 180
 
 
 def test_v2_resolves_confirmed_defaults_and_seven_day_warmup():

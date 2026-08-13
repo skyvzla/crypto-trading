@@ -147,9 +147,9 @@ def test_expand_specs_is_deterministic_and_period_sensitive():
     )
 
 
-def test_worker_memory_budget_rejects_less_than_four_gb():
-    with pytest.raises(ValueError, match="at least 4GB"):
-        _worker_memory_plan(4, "3GB", 70)
+def test_worker_memory_budget_rejects_less_than_two_gb():
+    with pytest.raises(ValueError, match="at least 2GB"):
+        _worker_memory_plan(4, "1GB", 70)
 
 
 def test_worker_memory_budget_does_not_expand_duckdb_limit():
@@ -212,6 +212,18 @@ def test_eight_workers_fit_four_gb_budget_at_ninety_percent():
 
     assert workers == 8
     assert memory_limit == "3072MB"
+
+
+def test_twelve_workers_fit_two_gb_budget_at_ninety_five_percent():
+    workers, memory_limit = _worker_memory_plan(
+        12,
+        "2GB",
+        95,
+        available_memory_bytes=26 * 1024**3,
+    )
+
+    assert workers == 12
+    assert memory_limit == "1024MB"
 
 
 def test_memory_limit_switch_disables_budget_and_duckdb_cap():
