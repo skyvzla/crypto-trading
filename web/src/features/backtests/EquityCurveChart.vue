@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
-import { AreaSeries, ColorType, createChart, createSeriesMarkers, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts'
+import { AreaSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts'
 import type { EquityPoint, EquityReplayRow } from './equityReplay'
 import { formatNumber, formatPercent, formatTime } from './format'
 
@@ -34,15 +34,6 @@ function render() {
     crosshairMarkerVisible: true, crosshairMarkerRadius: 5, priceLineVisible: false
   })
   series.setData(props.points.map((point) => ({ time: Math.floor(point.time / 1000) as UTCTimestamp, value: point.value })))
-  const executed = props.points.filter((point) => point.row)
-  if (executed.length) {
-    createSeriesMarkers(series, executed.map((point) => ({
-      time: Math.floor(point.time / 1000) as UTCTimestamp,
-      position: point.row!.replayPnl >= 0 ? 'belowBar' : 'aboveBar',
-      color: point.row!.replayPnl >= 0 ? '#16a34a' : '#dc2626',
-      shape: 'circle', text: point.row!.replayPnl >= 0 ? '+' : '-'
-    })))
-  }
   chart.subscribeCrosshairMove((param) => {
     if (!param.time) { hovered.value = null; return }
     hovered.value = pointRows.value.get(Number(param.time as Time)) ?? null
