@@ -24,6 +24,37 @@ from .loader import BacktestDataLoader
 from .engine import BacktestEngine
 from .result import ResultAnalyzer
 
+_STRATEGY_FACTORIES = {}
+_DEFAULTS_REGISTERED = False
+
+
+def register_strategy(name: str, factory) -> None:
+    """注册策略构造器；实验版本可在不修改核心入口的情况下接入。"""
+    normalized = name.strip().lower()
+    if not normalized:
+        raise ValueError("strategy name must not be empty")
+    _STRATEGY_FACTORIES[normalized] = factory
+
+
+def _default_strategy_factories() -> None:
+    global _DEFAULTS_REGISTERED
+    if _DEFAULTS_REGISTERED:
+        return
+    from .example_strategies import DemoStrategy, MinimalStrategy
+    register_strategy("demo", lambda account_id, **_: DemoStrategy(account_id=account_id))
+    register_strategy("minimal", lambda account_id, **_: MinimalStrategy(account_id=account_id))
+    register_strategy("spike", _build_spike_strategy)
+    _DEFAULTS_REGISTERED = True
+
+
+def _build_spike_strategy(account_id, *, symbols=None, total_notional=None, **_):
+    if not symbols:
+        raise ValueError("Spike strategy requires at least one symbol")
+    if total_notional is None or total_notional <= 0:
+        raise ValueError("Spike strategy requires a positive --total-notional")
+    from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
+    return DynamicSpikeBacktestStrategy(symbols=symbols, total_notional=total_notional)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
@@ -211,39 +242,11 @@ def load_strategy(
     Raises:
         ImportError: 策略未找到
     """
-    # 尝试导入策略
-    try:
-        if strategy_name == 'demo':
-            # 导入演示策略
-            from .example_strategies import DemoStrategy
-            return DemoStrategy(account_id=account_id)
-
-        elif strategy_name == 'minimal':
-            # 导入最小化策略
-            from .example_strategies import MinimalStrategy
-            return MinimalStrategy(account_id=account_id)
-
-        elif strategy_name == 'spike':
-            if not symbols:
-                raise ValueError("Spike strategy requires at least one symbol")
-            if total_notional is None or total_notional <= 0:
-                raise ValueError(
-                    "Spike strategy requires a positive --total-notional"
-                )
-
-            from trading_platform.strategies.spike.short import (
-                DynamicSpikeBacktestStrategy,
-            )
-            return DynamicSpikeBacktestStrategy(
-                symbols=symbols,
-                total_notional=total_notional,
-            )
-        else:
-            raise ImportError(f"Unknown strategy: {strategy_name}")
-
-    except ImportError as e:
-        logger.error(f"Failed to load strategy '{strategy_name}': {e}")
-        raise
+    _default_strategy_factories()
+    factory = _STRATEGY_FACTORIES.get(strategy_name.strip().lower())
+    if factory is None:
+        raise ImportError(f"Unknown strategy: {strategy_name}")
+    return factory(account_id, symbols=symbols, total_notional=total_notional)
 
 
 def main():

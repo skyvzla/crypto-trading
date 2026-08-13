@@ -52,6 +52,9 @@ PARAMETER_FLAGS = {
     "min_rise_duration_hours": "--min-rise-duration-hours",
     "entry_tier_mode": "--entry-tier-mode",
     "profit_unlock_percent": "--profit-unlock-percent",
+    "max_consecutive_up_minutes": "--max-consecutive-up-minutes",
+    "max_oi_change_pct": "--max-oi-change-pct",
+    "max_ls_ratio": "--max-ls-ratio",
     "limit_fill_fraction": "--limit-fill-fraction",
     "warmup_hours": "--warmup-hours",
     "bar1s_time_shift_hours": "--bar1s-time-shift-hours",
@@ -507,6 +510,9 @@ def _run_arguments(
     archive_index_path = config.get("archive_index_path")
     if archive_index_path:
         arguments.extend(["--archive-index", str(archive_index_path)])
+    metrics_root = config.get("metrics_root")
+    if metrics_root:
+        arguments.extend(["--metrics-root", str(metrics_root)])
     params = {**spec.params, **config.get("execution", {})}
     for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
         if key in params:

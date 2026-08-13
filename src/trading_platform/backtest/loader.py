@@ -13,10 +13,62 @@ from trading_platform.market.archive.index import (
     load_archive_index,
     verify_archive_index_files,
 )
+from trading_platform.market.archive.metrics import load_metrics_index
 from trading_platform.market.archive.parquet import archive_root_from_catalog
 from trading_platform.shared.events import Bar1s, Kline
 
 Event = Union[Bar1s, Kline]
+
+
+class MetricsDataLoader:
+    """按 metrics sidecar index 读取指定窗口的指标快照。"""
+
+    def __init__(self, root: str | Path, *, symbol: str, start_ms: int | None = None,
+                 end_ms: int | None = None, period: str = "5m") -> None:
+        self.root = Path(root).resolve()
+        self.symbol = symbol.strip().upper()
+        self.start_ms = start_ms
+        self.end_ms = end_ms
+        self.period = period
+        if not self.symbol:
+            raise ValueError("symbol must not be empty")
+
+    def load(self) -> list[tuple[int, float, float]]:
+        """返回 ``(snapshot_ms, open_interest, long_short_ratio)`` 序列。"""
+        table = load_metrics_index(self.root, verify_files=True)
+        frame = table.to_pandas()
+        selected = frame[
+            (frame["symbol"] == self.symbol) & (frame["period"] == self.period)
+        ]
+        if self.start_ms is not None:
+            selected = selected[selected["last_snapshot_ms"] >= self.start_ms]
+        if self.end_ms is not None:
+            selected = selected[selected["first_snapshot_ms"] < self.end_ms]
+        paths = [str(self.root / path) for path in selected["relative_path"].drop_duplicates()]
+        if not paths:
+            return []
+        connection = duckdb.connect()
+        try:
+            rows = connection.execute(
+                """
+                SELECT extract(epoch from snapshot_time AT TIME ZONE 'UTC') * 1000,
+                       sum_open_interest, count_long_short_ratio
+                FROM read_parquet(?)
+                WHERE symbol = ? AND period = ?
+                  AND (? IS NULL OR snapshot_time >= to_timestamp(? / 1000.0))
+                  AND (? IS NULL OR snapshot_time < to_timestamp(? / 1000.0))
+                ORDER BY snapshot_time
+                """,
+                [paths, self.symbol, self.period, self.start_ms, self.start_ms,
+                 self.end_ms, self.end_ms],
+            ).fetchall()
+        finally:
+            connection.close()
+        return [
+            (int(ms), float(oi), float(ls))
+            for ms, oi, ls in rows
+            if oi is not None and ls is not None
+        ]
 
 
 def _decimal_value(value: object) -> Decimal:

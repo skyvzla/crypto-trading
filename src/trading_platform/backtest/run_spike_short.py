@@ -8,9 +8,9 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-
 from trading_platform.backtest.engine import BacktestEngine, Event
 from trading_platform.backtest.loader import BacktestDataLoader
+from trading_platform.backtest.loader import MetricsDataLoader
 from trading_platform.backtest.result import ResultAnalyzer
 from trading_platform.backtest.runner import load_symbol_rules
 from trading_platform.shared.config import BacktestConfig
@@ -57,6 +57,10 @@ class NoPriorHighDynamicSpikeBacktestStrategy(DynamicSpikeBacktestStrategy):
         rise_low_lookback_minutes=0,
         min_rise_duration_minutes=0,
         early_profit_unlock_ratio=None,
+        max_consecutive_up_minutes=0,
+        max_oi_change_pct=0.0,
+        max_ls_ratio=0.0,
+        metrics_series=None,
         strategy_version="v1",
     ):
         self.strategies = {
@@ -69,6 +73,10 @@ class NoPriorHighDynamicSpikeBacktestStrategy(DynamicSpikeBacktestStrategy):
                 rise_low_lookback_minutes=rise_low_lookback_minutes,
                 min_rise_duration_minutes=min_rise_duration_minutes,
                 early_profit_unlock_ratio=early_profit_unlock_ratio,
+                max_consecutive_up_minutes=max_consecutive_up_minutes,
+                max_oi_change_pct=max_oi_change_pct,
+                max_ls_ratio=max_ls_ratio,
+                metrics_series=(metrics_series or {}).get(symbol),
                 strategy_version=strategy_version,
             )
             for symbol in symbols
@@ -91,9 +99,26 @@ class SpikeBacktestSettings:
     min_rise_duration_minutes: int
     entry_tier_mode: str
     early_profit_unlock_ratio: Decimal | None
+    max_consecutive_up_minutes: int
+    max_oi_change_pct: float
+    max_ls_ratio: float
     required_kline_intervals: tuple[str, ...]
     duckdb_path: str
     output_path: Path
+
+
+def load_metrics_series(
+    metrics_root: str | Path,
+    symbol: str,
+) -> list[tuple[int, float, float]]:
+    """从 metrics parquet 归档加载单币 5m 指标序列。
+
+    返回按快照时间升序的 [(snapshot_ms, oi, ls_ratio)]；归档缺失或为空时返回空列表。
+    """
+    try:
+        return MetricsDataLoader(metrics_root, symbol=symbol).load()
+    except (FileNotFoundError, RuntimeError, ValueError):
+        return []
 
 
 def _timestamp_ms(value: str) -> int:
@@ -187,6 +212,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="持仓价格盈利超过该百分比后永久解除前90秒风险保护；v2默认1.5",
     )
     parser.add_argument(
+        "--max-consecutive-up-minutes",
+        type=int,
+        default=0,
+        help="信号前连续上涨1m K线根数上限；0 表示不限制",
+    )
+    parser.add_argument(
+        "--max-oi-change-pct",
+        type=float,
+        default=0.0,
+        help="信号时刻 OI 相对上一 5m 快照的变化上限（%）；0 表示不限制",
+    )
+    parser.add_argument(
+        "--max-ls-ratio",
+        type=float,
+        default=0.0,
+        help="信号时刻全市场多空比上限；0 表示不限制",
+    )
+    parser.add_argument(
         "--exchange-info",
         type=Path,
         default=None,
@@ -220,6 +263,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help="归档 sidecar 索引；参数矩阵回测用它跳过重复全区间扫描",
+    )
+    parser.add_argument(
+        "--metrics-root",
+        type=Path,
+        default=None,
+        help="可选 5m OI/多空比 metrics 归档根目录；启用 --max-oi-change-pct/--max-ls-ratio 时需要",
     )
     return parser.parse_args(argv)
 
@@ -290,6 +339,9 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
             if profit_unlock_percent is not None
             else None
         ),
+        max_consecutive_up_minutes=args.max_consecutive_up_minutes,
+        max_oi_change_pct=args.max_oi_change_pct,
+        max_ls_ratio=args.max_ls_ratio,
         required_kline_intervals=(
             ("1m", "5m", "15m")
             if args.exit_policy == "candidate-v1"
@@ -326,6 +378,13 @@ def create_spike_engine(
     )
     if settings.prior_high_lookback_minutes == 0:
         config.prior_high_lookback_minutes = 0
+    metrics_series = None
+    if args.metrics_root is not None and (
+        settings.max_oi_change_pct > 0 or settings.max_ls_ratio > 0
+    ):
+        series = load_metrics_series(args.metrics_root, args.symbol)
+        if series:
+            metrics_series = {args.symbol: series}
     if args.exit_policy == "legacy-script":
         strategy = LegacyScriptExitSpikeBacktestStrategy(
             symbols=[args.symbol], total_notional=args.total_notional
@@ -343,6 +402,10 @@ def create_spike_engine(
             rise_low_lookback_minutes=settings.rise_low_lookback_minutes,
             min_rise_duration_minutes=settings.min_rise_duration_minutes,
             early_profit_unlock_ratio=settings.early_profit_unlock_ratio,
+            max_consecutive_up_minutes=settings.max_consecutive_up_minutes,
+            max_oi_change_pct=settings.max_oi_change_pct,
+            max_ls_ratio=settings.max_ls_ratio,
+            metrics_series=metrics_series,
             strategy_version=settings.strategy_version,
         )
     else:
@@ -359,6 +422,10 @@ def create_spike_engine(
             rise_low_lookback_minutes=settings.rise_low_lookback_minutes,
             min_rise_duration_minutes=settings.min_rise_duration_minutes,
             early_profit_unlock_ratio=settings.early_profit_unlock_ratio,
+            max_consecutive_up_minutes=settings.max_consecutive_up_minutes,
+            max_oi_change_pct=settings.max_oi_change_pct,
+            max_ls_ratio=settings.max_ls_ratio,
+            metrics_series=metrics_series,
             strategy_version=settings.strategy_version,
         )
     return BacktestEngine(
