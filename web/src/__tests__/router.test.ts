@@ -23,6 +23,7 @@ describe('router', () => {
         'backtest-report-detail',
         'backtest-symbols',
         'backtest-symbol-trades',
+        'backtest-equity-replay',
         'backtest-trade-replay'
       ])
     )
@@ -50,6 +51,7 @@ describe('router', () => {
     expect(router.resolve('/backtests/r-1/reports/pnl_bucket').name).toBe('backtest-report-detail')
     expect(router.resolve('/backtests/r-1/symbols').name).toBe('backtest-symbols')
     expect(router.resolve('/backtests/r-1/symbols/AKEUSDT/trades').name).toBe('backtest-symbol-trades')
+    expect(router.resolve('/backtests/r-1/equity').name).toBe('backtest-equity-replay')
     expect(router.resolve('/backtests/r-1/trades/t-1').name).toBe('backtest-trade-replay')
   })
 })

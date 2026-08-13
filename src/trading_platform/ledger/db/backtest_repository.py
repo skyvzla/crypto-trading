@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 
@@ -260,6 +261,38 @@ class BacktestRepository:
             (research_id, *values),
         )
         return rows, int(count["count"] if count else 0)
+
+    async def list_replay_parameter_sets(
+        self, research_id: UUID
+    ) -> list[dict[str, Any]]:
+        return await self._fetchall(
+            "SELECT r.parameters, COUNT(t.id)::BIGINT AS trade_count, "
+            "COALESCE(SUM(t.net_pnl), 0) AS net_pnl "
+            "FROM backtest_runs r LEFT JOIN backtest_trades t "
+            "ON t.research_id = r.research_id AND t.run_id = r.run_id "
+            "WHERE r.research_id = %s GROUP BY r.parameters "
+            "ORDER BY net_pnl DESC, r.parameters::TEXT",
+            (research_id,),
+        )
+
+    async def list_replay_trades(
+        self, research_id: UUID, parameters: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        return await self._fetchall(
+            "SELECT t.id, t.run_id, t.trade_id, t.symbol, t.side, "
+            "t.signal_time, t.entry_time, t.exit_time, t.entry_price, "
+            "t.exit_price, t.entry_notional, t.gross_pnl, t.commission, "
+            "t.net_pnl, t.net_return, "
+            "CASE WHEN t.entry_notional <> 0 "
+            "THEN t.gross_pnl / t.entry_notional END AS gross_return, "
+            "t.winner, t.status, t.exit_reason, t.parameters "
+            "FROM backtest_trades t JOIN backtest_runs r "
+            "ON r.research_id = t.research_id AND r.run_id = t.run_id "
+            "WHERE t.research_id = %s AND r.parameters = %s::JSONB "
+            "ORDER BY COALESCE(t.signal_time, t.entry_time) ASC NULLS LAST, "
+            "t.entry_time ASC NULLS LAST, t.symbol, t.trade_id, t.run_id",
+            (research_id, Jsonb(parameters)),
+        )
 
     async def get_trade(
         self, research_id: UUID, trade_id: UUID

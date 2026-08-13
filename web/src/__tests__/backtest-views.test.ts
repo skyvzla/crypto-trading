@@ -42,6 +42,7 @@ describe('回测关键视图', () => {
     const links = wrapper.findAll('a').map((item) => item.attributes('href'))
     expect(links.some((href) => href?.endsWith('/backtests/r-1/reports'))).toBe(true)
     expect(links.some((href) => href?.endsWith('/backtests/r-1/symbols'))).toBe(true)
+    expect(links.some((href) => href?.endsWith('/backtests/r-1/equity'))).toBe(true)
   })
 
   it('报表详情按后端 columns 动态生成表头和数据', async () => {

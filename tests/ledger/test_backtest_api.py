@@ -14,6 +14,7 @@ class FakeBacktestRepository:
         self.research_id = uuid4()
         self.trade_id = uuid4()
         self.last_trade_filters = {}
+        self.last_replay_parameters = None
 
     async def list_researches(self, *, limit, offset):
         return ([{"id": self.research_id, "name": "July", "strategy_id": "spike_short"}], 1)
@@ -45,6 +46,24 @@ class FakeBacktestRepository:
         if trade_id != self.trade_id:
             return None
         return {"id": trade_id, "symbol": "AKEUSDT", "strategy_data": {"invalid_price": 1.2}}
+
+    async def list_replay_parameter_sets(self, research_id):
+        return [{"parameters": {"lookback": 6}, "trade_count": 2, "net_pnl": 10}]
+
+    async def list_replay_trades(self, research_id, parameters):
+        self.last_replay_parameters = parameters
+        return [{
+            "id": self.trade_id,
+            "run_id": "ake-lookback-6",
+            "symbol": "AKEUSDT",
+            "entry_time": 100,
+            "exit_time": 200,
+            "entry_notional": 1000,
+            "gross_pnl": 12,
+            "commission": 2,
+            "net_return": 0.01,
+            "parameters": parameters,
+        }]
 
     async def list_events(self, research_id, trade_id):
         if trade_id != self.trade_id:
@@ -107,6 +126,43 @@ async def test_missing_backtest_resources_are_404(api_app):
     assert missing_report.status_code == 404
     assert missing_trade.status_code == 404
     assert missing_schema.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_equity_replay_endpoints_return_parameter_set_trade_facts(api_app):
+    app, repository = api_app
+    transport = httpx.ASGITransport(app=app)
+    base = f"/api/v1/backtest-researches/{repository.research_id}"
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        parameter_sets = await client.get(f"{base}/replay-parameter-sets")
+        trades = await client.get(
+            f"{base}/replay-trades", params={"parameters": '{"lookback": 6}'}
+        )
+
+    assert parameter_sets.status_code == 200
+    assert parameter_sets.json()["items"] == [
+        {"parameters": {"lookback": 6}, "trade_count": 2, "net_pnl": 10}
+    ]
+    assert trades.status_code == 200
+    assert trades.json()["items"][0]["gross_pnl"] == 12
+    assert repository.last_replay_parameters == {"lookback": 6}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parameters", ["not-json", "[]", "null"])
+async def test_equity_replay_trades_reject_non_object_parameters(
+    api_app, parameters
+):
+    app, repository = api_app
+    transport = httpx.ASGITransport(app=app)
+    path = (
+        f"/api/v1/backtest-researches/{repository.research_id}"
+        "/replay-trades"
+    )
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(path, params={"parameters": parameters})
+
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

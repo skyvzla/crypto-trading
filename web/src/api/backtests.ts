@@ -4,6 +4,8 @@ import type {
   BacktestEvent,
   BacktestReportPage,
   BacktestResearch,
+  BacktestReplayParameterSet,
+  BacktestReplayTradesResponse,
   BacktestStrategyDescriptor,
   BacktestSymbolSummary,
   BacktestTradeDetail,
@@ -17,6 +19,15 @@ const segment = (value: string) => encodeURIComponent(value)
 export const backtestApi = {
   researches: (limit: number, offset: number) =>
     api.get<Page<BacktestResearch>>('/backtest-researches', { limit, offset }),
+  replayParameterSets: (researchId: string) =>
+    api.get<{ items: BacktestReplayParameterSet[] }>(
+      `/backtest-researches/${segment(researchId)}/replay-parameter-sets`
+    ),
+  replayTrades: (researchId: string, parameters: Record<string, unknown>) =>
+    api.get<BacktestReplayTradesResponse>(
+      `/backtest-researches/${segment(researchId)}/replay-trades`,
+      { parameters: JSON.stringify(parameters) }
+    ),
   reports: (researchId: string) =>
     api.get<{ items: ReportDescriptor[] }>(`/backtest-researches/${segment(researchId)}/reports`),
   report: (researchId: string, type: string, limit: number, offset: number, sortBy?: string, sortOrder?: string) =>

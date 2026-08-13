@@ -141,6 +141,24 @@ export interface BacktestTradeSummary {
   metrics?: JsonObject
 }
 
+export interface BacktestEquityTrade extends BacktestTradeSummary {
+  gross_pnl?: number | null
+  commission?: number | null
+  entry_notional?: number | null
+  gross_return?: number | null
+}
+
+export interface BacktestReplayParameterSet {
+  parameters: JsonObject
+  trade_count: number
+  net_pnl: number
+}
+
+export interface BacktestReplayTradesResponse {
+  parameters: JsonObject
+  items: BacktestEquityTrade[]
+}
+
 export interface BacktestOrder {
   id: string
   tier?: number | null

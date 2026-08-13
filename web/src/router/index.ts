@@ -9,6 +9,7 @@ const BacktestReportDetail = () => import('@/views/backtests/BacktestReportDetai
 const BacktestSymbolList = () => import('@/views/backtests/BacktestSymbolListView.vue')
 const BacktestTradeList = () => import('@/views/backtests/BacktestTradeListView.vue')
 const BacktestTradeReplay = () => import('@/views/backtests/BacktestTradeReplayView.vue')
+const BacktestEquityReplay = () => import('@/views/backtests/BacktestEquityReplayView.vue')
 
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/overview' },
@@ -59,6 +60,12 @@ const routes: RouteRecordRaw[] = [
     name: 'backtests',
     component: BacktestResearchList,
     meta: { title: '回测复盘', ready: true }
+  },
+  {
+    path: '/backtests/:researchId/equity',
+    name: 'backtest-equity-replay',
+    component: BacktestEquityReplay,
+    meta: { title: '账户收益曲线', ready: true }
   },
   {
     path: '/backtests/:researchId/reports',

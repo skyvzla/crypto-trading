@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any, Literal
@@ -152,6 +153,42 @@ async def list_trades(
         offset=offset,
     )
     return _page(items, total, limit, offset)
+
+
+@router.get("/backtest-researches/{research_id}/replay-parameter-sets")
+async def list_replay_parameter_sets(
+    research_id: UUID,
+    repository: BacktestRepository = Depends(get_repository),
+) -> dict:
+    if await repository.get_research(research_id) is None:
+        raise HTTPException(status_code=404, detail="backtest research not found")
+    return {"items": await repository.list_replay_parameter_sets(research_id)}
+
+
+@router.get("/backtest-researches/{research_id}/replay-trades")
+async def list_replay_trades(
+    research_id: UUID,
+    parameters: str = Query(..., min_length=2),
+    repository: BacktestRepository = Depends(get_repository),
+) -> dict:
+    if await repository.get_research(research_id) is None:
+        raise HTTPException(status_code=404, detail="backtest research not found")
+    try:
+        parsed_parameters = json.loads(parameters)
+    except json.JSONDecodeError as error:
+        raise HTTPException(
+            status_code=422, detail="parameters must be a valid JSON object"
+        ) from error
+    if not isinstance(parsed_parameters, dict):
+        raise HTTPException(
+            status_code=422, detail="parameters must be a valid JSON object"
+        )
+    return {
+        "parameters": parsed_parameters,
+        "items": await repository.list_replay_trades(
+            research_id, parsed_parameters
+        ),
+    }
 
 
 @router.get("/backtest-researches/{research_id}/trades/{trade_id}")

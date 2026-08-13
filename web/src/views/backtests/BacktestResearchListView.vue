@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { BarChart3, CandlestickChart } from 'lucide-vue-next'
+import { BarChart3, CandlestickChart, ChartSpline } from 'lucide-vue-next'
 import { Button, Space, Tag, Tooltip, type TableColumnsType } from 'ant-design-vue'
 import { RouterLink } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
@@ -27,10 +27,11 @@ const columns: TableColumnsType<BacktestResearch> = [
   { title: '最佳参数净盈亏', key: 'net_pnl', dataIndex: 'net_pnl', width: 140, customRender: ({ record: row }) => h('span', { class: pnlClass(row.net_pnl) }, formatNumber(row.net_pnl)) },
   { title: '创建时间', key: 'created_at', dataIndex: 'created_at', width: 180, customRender: ({ record: row }) => formatTime(row.created_at) },
   {
-    title: '操作', key: 'actions', width: 118, fixed: 'right',
+    title: '操作', key: 'actions', width: 154, fixed: 'right',
     customRender: ({ record: row }) => h(Space, { size: 4 }, () => [
       h(Tooltip, { title: '查看分析报表' }, () => h(RouterLink, { to: { path: `/backtests/${encodeURIComponent(row.id)}/reports`, query: preservedQuery.value } }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看分析报表' }, () => h(BarChart3, { size: 16 })))),
-      h(Tooltip, { title: '查看交易对' }, () => h(RouterLink, { to: { path: `/backtests/${encodeURIComponent(row.id)}/symbols`, query: preservedQuery.value } }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看交易对' }, () => h(CandlestickChart, { size: 16 }))))
+      h(Tooltip, { title: '查看交易对' }, () => h(RouterLink, { to: { path: `/backtests/${encodeURIComponent(row.id)}/symbols`, query: preservedQuery.value } }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看交易对' }, () => h(CandlestickChart, { size: 16 })))),
+      h(Tooltip, { title: '查看收益曲线' }, () => h(RouterLink, { to: { path: `/backtests/${encodeURIComponent(row.id)}/equity`, query: preservedQuery.value } }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看收益曲线' }, () => h(ChartSpline, { size: 16 }))))
     ])
   }
 ]
