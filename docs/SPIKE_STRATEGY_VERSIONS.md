@@ -65,7 +65,9 @@ v1 和 v2 均使用 `DynamicSpikeShortStrategy` 的同一套基础信号：
 
 ## v1.1 实验配置
 
-`v1.1` 保留 v1 的三档挂单、确认退出、12 小时低点和基础上涨信号，只固定前高窗口为 4h。实验矩阵比较 5 秒涨幅 3%/5%、前高偏差 0%/5%、连阳上限关闭/3 根、OI 上限关闭/15%、多空比上限关闭/1.5，共 32 个组合。
+`v1.1` 保留 v1 的三档挂单、12 小时低点和基础上涨信号，固定前高窗口为 4h，并复用已有 `candidate-v1` 退出状态机。该状态机从 90 秒开始检查动能与时间风险，在 90/300/900 秒节点逐步收严，并在下跌动能衰减或趋势突破时退出。实验矩阵比较 5 秒涨幅 3%/5%、前高偏差 0%/5%、连阳上限关闭/3 根、OI 上限关闭/15%、多空比上限关闭/1.5，共 32 个组合。
+
+`reports/spike-v1-1-anomaly-sweep` 是误用 `exit_policy=confirmed` 生成的历史报告，未经过 `candidate-v1` 退出路径，不得用作 v1.1 最终收益对比；重跑时必须核对报告 `parameters.exit_policy` 为 `candidate-v1`。
 
 可直接使用 [spike_v1_1_anomaly_sweep.toml](/data/projects/quant/trading_platform/docs/spike_v1_1_anomaly_sweep.toml) 运行。universe 先读取 15m 异常上影线报告，再与 PostgreSQL 有效交易对、禁用列表和归档完整性取交集。
 

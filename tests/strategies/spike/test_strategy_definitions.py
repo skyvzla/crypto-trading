@@ -15,7 +15,7 @@ def test_versioned_strategies_are_distinct_complete_implementations():
     assert not v1.data_requirements.metrics_5m
     assert not v2.data_requirements.metrics_5m
     assert v21.data_requirements.metrics_5m
-    assert v11.defaults.exit_policy == "confirmed"
+    assert v11.defaults.exit_policy == "candidate-v1"
     assert v11.defaults.prior_high_lookback_hours == 4
     assert v11.defaults.entry_tier_mode == "three-tier"
     assert v11.data_requirements.metrics_5m

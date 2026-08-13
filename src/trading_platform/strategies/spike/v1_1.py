@@ -7,7 +7,6 @@ from trading_platform.strategies.spike.definition import (
     SpikeStrategyDefaults,
 )
 from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
-from trading_platform.strategies.spike.v1 import V1
 
 
 class SpikeV11Strategy(DynamicSpikeShortStrategy):
@@ -84,7 +83,7 @@ class V11:
         market_timeframes=("1s", "1m", "5m", "15m"), metrics_5m=True
     )
     defaults = SpikeStrategyDefaults(
-        exit_policy=V1.defaults.exit_policy,
+        exit_policy="candidate-v1",
         prior_high_lookback_hours=4,
         rise_low_lookback_hours=0,
         min_rise_duration_hours=0,

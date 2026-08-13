@@ -59,6 +59,24 @@ def test_v1_defaults_remain_unchanged():
     assert settings.start_ms - settings.load_start_ms == 16 * 3_600_000
 
 
+def test_v11_uses_existing_candidate_exit_policy_by_default():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v1_1:V11",
+    ])
+
+    settings = run_spike_short.resolve_settings(args)
+
+    assert settings.strategy_version == "v1.1"
+    assert args.exit_policy == "candidate-v1"
+    assert settings.required_kline_intervals == ("1m", "5m", "15m")
+
+
 def test_symbol_runner_reads_market_data_once_for_multiple_parameters(
     tmp_path: Path, monkeypatch
 ):
