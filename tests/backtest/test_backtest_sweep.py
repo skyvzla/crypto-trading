@@ -95,6 +95,26 @@ def test_explicit_universe_only_scans_requested_symbols(monkeypatch):
     assert captured["symbols"] == {"AKEUSDT"}
 
 
+def test_anomaly_report_universe_intersects_database_and_archive(monkeypatch, tmp_path):
+    report = tmp_path / "anomaly.csv"
+    report.write_text("symbol,upper_wick_percent\nAKEUSDT,30\nZECUSDT,40\n", encoding="utf-8")
+    monkeypatch.setattr(sweep, "_allowed_symbols", lambda *args, **kwargs: {"AKEUSDT", "ZECUSDT"})
+    monkeypatch.setattr(
+        sweep, "_archive_coverage",
+        lambda *args, **kwargs: {
+            "AKEUSDT": {"1s": (0, 9_999_999, 1), "1m": (0, 9_999_999, 1), "5m": (0, 9_999_999, 1), "15m": (0, 9_999_999, 1)},
+            "ZECUSDT": {"1s": (0, 9_999_999, 1), "1m": (0, 9_999_999, 1), "5m": (0, 9_999_999, 1), "15m": (0, 9_999_999, 1)},
+        },
+    )
+    symbols, rows = sweep.resolve_universe({
+        "start": "1970-01-01T00:00:00+00:00", "end": "1970-01-01T00:00:01+00:00",
+        "duckdb_path": "history.duckdb", "database_dsn": "unused",
+        "universe": {"mode": "anomaly-report", "anomaly_report": str(report), "exclude_symbols": ["ZECUSDT"]},
+    })
+    assert symbols == ["AKEUSDT"]
+    assert any(row["symbol"] == "ZECUSDT" and "explicitly_excluded" in row["exclude_reason"] for row in rows)
+
+
 def test_main_handles_duckdb_query_interrupt_without_traceback(
     monkeypatch, capsys
 ):

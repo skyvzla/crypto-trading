@@ -55,6 +55,8 @@ PARAMETER_FLAGS = {
     "max_consecutive_up_minutes": "--max-consecutive-up-minutes",
     "max_oi_change_pct": "--max-oi-change-pct",
     "max_ls_ratio": "--max-ls-ratio",
+    "rise_5s_threshold_percent": "--rise-5s-threshold-percent",
+    "prior_high_tolerance_percent": "--prior-high-tolerance-percent",
     "limit_fill_fraction": "--limit-fill-fraction",
     "warmup_hours": "--warmup-hours",
     "bar1s_time_shift_hours": "--bar1s-time-shift-hours",
@@ -277,8 +279,23 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
         for symbol in universe.get("exclude_symbols", ["ZECUSDT"])
     }
     mode = universe.get("mode", "database")
-    if mode not in {"database", "explicit", "all-archived"}:
-        raise ValueError("universe.mode must be database, explicit, or all-archived")
+    if mode not in {"database", "explicit", "all-archived", "anomaly-report"}:
+        raise ValueError(
+            "universe.mode must be database, explicit, all-archived, or anomaly-report"
+        )
+
+    anomaly_symbols: set[str] = set()
+    if mode == "anomaly-report":
+        report_path = Path(universe.get("anomaly_report", ""))
+        if not report_path.is_file():
+            raise ValueError(f"universe.anomaly_report does not exist: {report_path}")
+        with report_path.open(newline="", encoding="utf-8-sig") as stream:
+            for row in csv.DictReader(stream):
+                symbol = str(row.get("symbol", "")).strip().upper()
+                if symbol:
+                    anomaly_symbols.add(symbol)
+        if not anomaly_symbols:
+            raise ValueError("universe.anomaly_report contains no symbols")
 
     start_ms = _timestamp_ms(config["start"])
     end_ms = _timestamp_ms(config["end"])
@@ -288,7 +305,9 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
         strategy_id=str(universe.get("strategy_id", "spike_short")),
     )
     archive_scan_symbols = (
-        requested if mode == "explicit" else (allowed if mode == "database" else None)
+        requested if mode == "explicit"
+        else anomaly_symbols if mode == "anomaly-report"
+        else allowed if mode == "database" else None
     )
     coverage = _archive_coverage(
         config["duckdb_path"],
@@ -299,13 +318,26 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
     archived = {
         symbol for symbol, timeframes in coverage.items() if "1s" in timeframes
     }
-    candidates = requested if mode == "explicit" else (archived if mode == "all-archived" else allowed)
-    selected = sorted((candidates & allowed & archived) - excluded)
+    tolerance_ms = int(float(universe.get("coverage_tolerance_hours", 24)) * 3_600_000)
+    complete_archived = {
+        symbol
+        for symbol, timeframes in coverage.items()
+        if all(timeframe in timeframes for timeframe in ("1s", "1m", "5m", "15m"))
+        and timeframes["1s"][0] <= start_ms + tolerance_ms
+        and timeframes["1s"][1] >= end_ms - tolerance_ms
+    }
+    candidates = (
+        requested if mode == "explicit"
+        else anomaly_symbols if mode == "anomaly-report"
+        else archived if mode == "all-archived" else allowed
+    )
+    selected = sorted((candidates & allowed & complete_archived) - excluded)
 
     rows = []
-    tolerance_ms = int(float(universe.get("coverage_tolerance_hours", 24)) * 3_600_000)
     report_symbols = candidates | excluded
     if mode == "all-archived":
+        report_symbols |= allowed
+    if mode == "anomaly-report":
         report_symbols |= allowed
     for symbol in sorted(report_symbols):
         timeframes = coverage.get(symbol, {})
@@ -316,6 +348,8 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
             reasons.append("missing_1s_archive")
         if symbol in excluded:
             reasons.append("explicitly_excluded")
+        if mode == "anomaly-report" and symbol not in anomaly_symbols:
+            reasons.append("not_in_anomaly_report")
         one_second = timeframes.get("1s")
         missing_required = [
             timeframe for timeframe in ("1m", "5m", "15m")

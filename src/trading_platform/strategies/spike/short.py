@@ -192,6 +192,8 @@ class DynamicSpikeShortStrategy:
         rise_low_lookback_minutes: int = 0,
         min_rise_duration_minutes: int = 0,
         early_profit_unlock_ratio: Decimal | None = None,
+        rise_5s_threshold: Decimal | None = None,
+        prior_high_tolerance_percent: Decimal = Decimal("0"),
     ):
         """
         Args:
@@ -227,6 +229,14 @@ class DynamicSpikeShortStrategy:
             if not Decimal("0") < early_profit_unlock_ratio < Decimal("1"):
                 raise ValueError("early_profit_unlock_ratio must be between 0 and 1")
         self.early_profit_unlock_ratio = early_profit_unlock_ratio
+        self.rise_5s_threshold = (
+            self.SPIKE_RISE_5S if rise_5s_threshold is None else Decimal(rise_5s_threshold)
+        )
+        if self.rise_5s_threshold < 0:
+            raise ValueError("rise_5s_threshold must not be negative")
+        self.prior_high_tolerance_percent = Decimal(prior_high_tolerance_percent)
+        if not Decimal("0") <= self.prior_high_tolerance_percent <= Decimal("100"):
+            raise ValueError("prior_high_tolerance_percent must be between 0 and 100")
         self.prior_high_lookback_minutes = (
             self.PRIOR_HIGH_LOOKBACK_MINUTES
             if prior_high_lookback_minutes is None
@@ -1095,7 +1105,7 @@ class DynamicSpikeShortStrategy:
 
         # 3. 5 秒涨幅：close[i] / close[i-5] - 1
         rise_5s = current.close / bar_5s_ago.close - Decimal("1")
-        if rise_5s < self.SPIKE_RISE_5S:
+        if rise_5s < self.rise_5s_threshold:
             return None
 
         # 4. 成交量倍数：sum(volume[i-4..i]) / (median(volume[i-60..i-1]) × 5)
@@ -1166,7 +1176,14 @@ class DynamicSpikeShortStrategy:
         lowest_tier = min(tier_prices)
         if lowest_tier < origin_floor or lowest_tier <= current.close:
             return None
-        if lowest_tier <= prior_high:
+        allowed_prior_high = prior_high * (
+            Decimal("1") - self.prior_high_tolerance_percent / Decimal("100")
+        )
+        if (
+            lowest_tier < allowed_prior_high
+            or self.prior_high_tolerance_percent == 0
+            and lowest_tier == allowed_prior_high
+        ):
             return None
 
         prior_high_4h = (

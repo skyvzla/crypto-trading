@@ -72,6 +72,8 @@ class SpikeBacktestSettings:
     max_consecutive_up_minutes: int
     max_oi_change_pct: float
     max_ls_ratio: float
+    rise_5s_threshold: Decimal
+    prior_high_tolerance_percent: Decimal
     required_kline_intervals: tuple[str, ...]
     requires_bar1s: bool
     execution_timeframe: str
@@ -201,6 +203,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="信号时刻全市场多空比上限；0 表示不限制",
     )
     parser.add_argument(
+        "--rise-5s-threshold-percent", type=Decimal, default=None,
+        help="5秒涨幅触发阈值（百分比）；默认使用策略声明值",
+    )
+    parser.add_argument(
+        "--prior-high-tolerance-percent", type=Decimal, default=None,
+        help="允许最低挂单价低于前高的百分比；0表示严格高于前高",
+    )
+    parser.add_argument(
         "--exchange-info",
         type=Path,
         default=None,
@@ -267,6 +277,14 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
     if min_rise_duration_hours is None:
         min_rise_duration_hours = defaults.min_rise_duration_hours
     entry_tier_mode = args.entry_tier_mode or defaults.entry_tier_mode
+    rise_5s_threshold = (
+        Decimal(str(args.rise_5s_threshold_percent)) / Decimal("100")
+        if args.rise_5s_threshold_percent is not None else Decimal("0.05")
+    )
+    prior_high_tolerance_percent = (
+        args.prior_high_tolerance_percent
+        if args.prior_high_tolerance_percent is not None else Decimal("0")
+    )
     profit_unlock_percent = args.profit_unlock_percent
     if profit_unlock_percent is None and defaults.profit_unlock_percent is not None:
         profit_unlock_percent = Decimal(str(defaults.profit_unlock_percent))
@@ -275,6 +293,8 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         "max_consecutive_up_minutes": args.max_consecutive_up_minutes,
         "max_oi_change_pct": args.max_oi_change_pct,
         "max_ls_ratio": args.max_ls_ratio,
+        "rise_5s_threshold_percent": args.rise_5s_threshold_percent,
+        "prior_high_tolerance_percent": args.prior_high_tolerance_percent,
     }
     unsupported = sorted(
         key
@@ -331,6 +351,8 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         max_consecutive_up_minutes=args.max_consecutive_up_minutes,
         max_oi_change_pct=args.max_oi_change_pct,
         max_ls_ratio=args.max_ls_ratio,
+        rise_5s_threshold=rise_5s_threshold,
+        prior_high_tolerance_percent=prior_high_tolerance_percent,
         required_kline_intervals=tuple(
             dict.fromkeys(
                 timeframe
@@ -416,6 +438,8 @@ def create_spike_engine(
                     "max_consecutive_up_minutes": settings.max_consecutive_up_minutes,
                     "max_oi_change_pct": settings.max_oi_change_pct,
                     "max_ls_ratio": settings.max_ls_ratio,
+                    "rise_5s_threshold": settings.rise_5s_threshold,
+                    "prior_high_tolerance_percent": settings.prior_high_tolerance_percent,
                     "metrics_series": (
                         metrics_series or {}
                     ).get(args.symbol),

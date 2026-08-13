@@ -5,8 +5,9 @@ def test_versioned_strategies_are_distinct_complete_implementations():
     v1 = load_strategy_definition("trading_platform.strategies.spike.v1:V1")
     v2 = load_strategy_definition("trading_platform.strategies.spike.v2:V2")
     v21 = load_strategy_definition("trading_platform.strategies.spike.v2_1:V21")
+    v11 = load_strategy_definition("trading_platform.strategies.spike.v1_1:V11")
 
-    assert len({v1.strategy_class, v2.strategy_class, v21.strategy_class}) == 3
+    assert len({v1.strategy_class, v2.strategy_class, v21.strategy_class, v11.strategy_class}) == 4
     assert v1.defaults.exit_policy == "confirmed"
     assert v2.defaults.exit_policy == "candidate-v1"
     assert v2.defaults.profit_unlock_percent == 1.5
@@ -14,6 +15,12 @@ def test_versioned_strategies_are_distinct_complete_implementations():
     assert not v1.data_requirements.metrics_5m
     assert not v2.data_requirements.metrics_5m
     assert v21.data_requirements.metrics_5m
+    assert v11.defaults.exit_policy == "confirmed"
+    assert v11.defaults.prior_high_lookback_hours == 4
+    assert v11.defaults.entry_tier_mode == "three-tier"
+    assert v11.data_requirements.metrics_5m
+    assert "max_oi_change_pct" in v11.supported_parameters
+    assert "prior_high_tolerance_percent" in v11.supported_parameters
     assert not v1.supported_parameters
     assert not v2.supported_parameters
     assert "max_oi_change_pct" in v21.supported_parameters

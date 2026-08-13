@@ -349,6 +349,19 @@ class TestDynamicSpikeShortStrategy:
 
         assert prior_high == Decimal("200")
 
+    def test_v11_entry_threshold_and_prior_high_tolerance_are_configurable(self):
+        from trading_platform.strategies.spike.v1_1 import SpikeV11Strategy
+
+        strategy = SpikeV11Strategy(
+            "AKEUSDT",
+            total_notional=Decimal("1000"),
+            rise_5s_threshold=Decimal("0.03"),
+            prior_high_tolerance_percent=Decimal("5"),
+        )
+
+        assert strategy.rise_5s_threshold == Decimal("0.03")
+        assert strategy.prior_high_tolerance_percent == Decimal("5")
+
     @pytest.mark.parametrize(
         ("low_age_minutes", "signal_expected"),
         [(7 * 24 * 60, True), (60, False)],

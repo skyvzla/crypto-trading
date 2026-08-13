@@ -20,6 +20,7 @@ uv run spike-backtest --strategy \
 | `trading_platform.strategies.spike.v1:V1` | v1 三档、4h 前高、无 OI/连阳过滤 |
 | `trading_platform.strategies.spike.v2:V2` | 改动前冻结的 v2，7天低点上涨24h、第三档全仓、无 OI/连阳过滤 |
 | `trading_platform.strategies.spike.v2_1:V21` | 当前保存的 v2.1，在 v2 基础上增加连阳/OI/多空比规则 |
+| `trading_platform.strategies.spike.v1_1:V11` | v1 实验基线，固定 4h 前高，支持前高偏差、5 秒涨幅、连阳、OI 和多空比组合 |
 
 新增策略只需新增声明模块并实现生命周期方法，不修改旧策略模块；报告中的 `strategy_path` 用于恢复对应实现。
 
@@ -61,6 +62,12 @@ v1 和 v2 均使用 `DynamicSpikeShortStrategy` 的同一套基础信号：
 工作区的 `experiments/spike_sweep_v2.example.toml` 是下一次运行的示例配置，不自动代表既有 v2 或 v2.1 报告的参数。
 
 ## 可选实验维度
+
+## v1.1 实验配置
+
+`v1.1` 保留 v1 的三档挂单、确认退出、12 小时低点和基础上涨信号，只固定前高窗口为 4h。实验矩阵比较 5 秒涨幅 3%/5%、前高偏差 0%/5%、连阳上限关闭/3 根、OI 上限关闭/15%、多空比上限关闭/1.5，共 32 个组合。
+
+可直接使用 [spike_v1_1_anomaly_sweep.toml](/data/projects/quant/trading_platform/docs/spike_v1_1_anomaly_sweep.toml) 运行。universe 先读取 15m 异常上影线报告，再与 PostgreSQL 有效交易对、禁用列表和归档完整性取交集。
 
 以下参数可用于 v1 或 v2，不构成独立策略版本；必须在报告名称和参数中明确记录。
 
