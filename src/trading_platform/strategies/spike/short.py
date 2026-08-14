@@ -303,6 +303,7 @@ class DynamicSpikeShortStrategy:
         # 信号状态
         self.last_signal_time: Optional[int] = None
         self._last_cap_rejection_audit: tuple[int, tuple[str, ...]] | None = None
+        self._last_entry_filter_rejection_audit: tuple[int, tuple[str, ...]] | None = None
         self.active_signals: List[SpikeSignal] = []
         self.first_fill_time: Optional[int] = None
         self._campaign_id_for_timing: str | None = None
@@ -1283,9 +1284,6 @@ class DynamicSpikeShortStrategy:
         if current.close / low_12h - Decimal("1") < self.RISE_FROM_12H_LOW:
             return None
 
-        if not self._entry_filters_pass(current.timestamp):
-            return None
-
         rise_low = None
         rise_low_time = None
         rise_low_age_minutes = None
@@ -1361,6 +1359,19 @@ class DynamicSpikeShortStrategy:
             tier_prices[1] + atr * self.INVALID_PRIMARY_ATR,
         )
 
+        # 仅当核心入场条件已完整满足时，才把版本指标过滤记为可复测信号。
+        # 这不会改变过滤判定，只避免把后续本会失败的半成品候选写入报告。
+        entry_filters_pass, rejection_details = self._entry_filter_decision(
+            current.timestamp
+        )
+        if not entry_filters_pass:
+            if rejection_details is not None:
+                self._record_entry_filter_rejection(
+                    event_time=current.timestamp,
+                    details=rejection_details,
+                )
+            return None
+
         rejection_reasons = tuple(
             reason
             for reason, rejected in (
@@ -1428,6 +1439,33 @@ class DynamicSpikeShortStrategy:
     def _entry_filters_pass(self, event_ms: int) -> bool:
         """版本策略可覆盖的入场过滤扩展点。"""
         return True
+
+    def _entry_filter_decision(
+        self, event_ms: int
+    ) -> tuple[bool, dict[str, object] | None]:
+        """返回入场过滤结果及可写入审计的拒绝详情。"""
+        return self._entry_filters_pass(event_ms), None
+
+    def _record_entry_filter_rejection(
+        self, *, event_time: int, details: dict[str, object]
+    ) -> None:
+        rejection_reasons = tuple(
+            str(reason) for reason in details.get("rejection_reasons", ())
+        )
+        previous = self._last_entry_filter_rejection_audit
+        if (
+            previous is not None
+            and previous[1] == rejection_reasons
+            and event_time - previous[0] < self.SIGNAL_COOLDOWN * MS_PER_SECOND
+        ):
+            return
+        self._last_entry_filter_rejection_audit = (event_time, rejection_reasons)
+        self._record_audit(
+            event_time=event_time,
+            event_type="signal_rejected",
+            campaign_id=self._campaign_id_at(event_time),
+            details=details,
+        )
 
     def _min_low_1m(self, minute_start: int, minutes: int) -> Optional[Decimal]:
         """已完成 1m K 线在 [minute_start - minutes, minute_start) 内的最低价"""

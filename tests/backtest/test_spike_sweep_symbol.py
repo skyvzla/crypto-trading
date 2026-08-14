@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from trading_platform.backtest.strategy_definition import FeatureSpec
 from trading_platform.shared.events import Bar1s, Kline
 from trading_platform.backtest import run_spike_sweep_symbol as symbol_runner
 from trading_platform.backtest import run_spike_short
+from trading_platform.backtest.sweep import RunSpec, _collect_signal_audit_events
 from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
 
 
@@ -189,6 +191,114 @@ def test_cap_rejection_audit_cools_down_same_reason_but_records_changed_reason()
     assert rejections[1].event_time - rejections[0].event_time < (
         strategy.SIGNAL_COOLDOWN * 1_000
     )
+
+
+def test_entry_filter_rejection_audit_cools_down_same_reason_but_records_changed_reason():
+    strategy = DynamicSpikeShortStrategy(
+        symbol="AKEUSDT",
+        total_notional=Decimal("1000"),
+    )
+    start_ms = 1_000_000
+    same_details = {
+        "rejection_stage": "metrics_entry_filters",
+        "rejection_reasons": ["max_ls_ratio"],
+    }
+
+    strategy._record_entry_filter_rejection(
+        event_time=start_ms,
+        details=same_details,
+    )
+    strategy._record_entry_filter_rejection(
+        event_time=start_ms + 1_000,
+        details=same_details,
+    )
+    strategy._record_entry_filter_rejection(
+        event_time=start_ms + 2_000,
+        details=same_details,
+    )
+    strategy._record_entry_filter_rejection(
+        event_time=start_ms + 3_000,
+        details={
+            "rejection_stage": "metrics_entry_filters",
+            "rejection_reasons": ["max_oi_change_pct"],
+        },
+    )
+
+    rejections = [
+        event
+        for event in strategy.drain_audit_events()
+        if event.event_type == "signal_rejected"
+    ]
+
+    assert [event.event_time for event in rejections] == [
+        start_ms,
+        start_ms + 3_000,
+    ]
+    assert [event.details["rejection_reasons"] for event in rejections] == [
+        ["max_ls_ratio"],
+        ["max_oi_change_pct"],
+    ]
+    assert rejections[1].event_time - rejections[0].event_time < (
+        strategy.SIGNAL_COOLDOWN * 1_000
+    )
+
+
+def test_entry_filter_rejection_is_not_recorded_before_full_base_signal_checks(
+    monkeypatch,
+):
+    minute = 60_000
+    current_time = 720 * minute + 30_000
+    minute_start = current_time - (current_time % minute)
+    strategy = DynamicSpikeShortStrategy(
+        symbol="AKEUSDT",
+        total_notional=Decimal("1000"),
+        rise_low_lookback_minutes=60,
+        min_rise_duration_minutes=30,
+    )
+    strategy.klines_1m.extend(
+        Kline(
+            symbol="AKEUSDT",
+            interval="1m",
+            open_time=minute_start - (720 - index) * minute,
+            close_time=minute_start - (719 - index) * minute - 1,
+            available_time=minute_start - (719 - index) * minute,
+            open=Decimal("1"),
+            high=Decimal("2"),
+            low=Decimal("1"),
+            close=Decimal("1"),
+            volume=Decimal("1"),
+        )
+        for index in range(720)
+    )
+    strategy.bars_1s.extend(
+        Bar1s(
+            symbol="AKEUSDT",
+            timestamp=current_time - (60 - index) * 1_000,
+            available_time=current_time - (59 - index) * 1_000,
+            open=Decimal("2"),
+            high=Decimal("2"),
+            low=Decimal("2"),
+            close=Decimal("2") if index >= 56 else Decimal("1"),
+            volume=Decimal("4") if index >= 56 else Decimal("1"),
+            trade_count=1,
+            vwap=Decimal("2"),
+        )
+        for index in range(61)
+    )
+    decisions = []
+
+    def reject_with_metrics(timestamp: int):
+        decisions.append(timestamp)
+        return False, {
+            "rejection_stage": "metrics_entry_filters",
+            "rejection_reasons": ["max_ls_ratio"],
+        }
+
+    monkeypatch.setattr(strategy, "_entry_filter_decision", reject_with_metrics)
+
+    assert strategy._detect_signal(strategy.bars_1s[-1]) is None
+    assert decisions == []
+    assert strategy.drain_audit_events() == []
 
 
 def test_symbol_runner_reads_market_data_once_for_multiple_parameters(
@@ -380,7 +490,7 @@ def test_v11_shared_features_keep_threshold_decisions_per_strategy(
     bar_start = signal_time - minute
     closes = [Decimal("100")] * 56 + [
         Decimal("100"), Decimal("101"), Decimal("102"),
-        Decimal("104"), Decimal("106"),
+        Decimal("104"), Decimal("106"), Decimal("107"), Decimal("108"),
     ]
     events.extend(
         Bar1s(
@@ -562,3 +672,177 @@ def test_v11_shared_features_keep_threshold_decisions_per_strategy(
     assert combined_rejection.details["rejection_reasons"] == [
         "max_rise_5s", "max_volume_multiple_5s"
     ]
+
+
+@pytest.mark.parametrize(
+    ("strategy_path", "strategy_arguments"),
+    [
+        ("trading_platform.strategies.spike.v1_1:V11", []),
+        (
+            "trading_platform.strategies.spike.v2_1:V21",
+            [
+                "--rise-low-lookback-hours", "0",
+                "--min-rise-duration-hours", "0",
+            ],
+        ),
+    ],
+)
+def test_metrics_filter_rejections_reach_all_signals_from_symbol_replay(
+    tmp_path: Path,
+    monkeypatch,
+    strategy_path: str,
+    strategy_arguments: list[str],
+):
+    signal_time = 1_782_864_000_000
+    minute = 60_000
+    history_start = signal_time - 16 * 60 * minute
+    events = [
+        Kline(
+            symbol="AKEUSDT",
+            interval="1m",
+            open_time=history_start + index * minute,
+            close_time=history_start + (index + 1) * minute - 1,
+            available_time=history_start + (index + 1) * minute,
+            open=Decimal("100"),
+            high=Decimal("102"),
+            low=Decimal("80"),
+            close=Decimal("100"),
+            volume=Decimal("10"),
+        )
+        for index in range(16 * 60)
+    ]
+    events.extend(
+        Kline(
+            symbol="AKEUSDT",
+            interval="5m",
+            open_time=signal_time - (15 - index) * 5 * minute,
+            close_time=signal_time - (14 - index) * 5 * minute - 1,
+            available_time=signal_time - (14 - index) * 5 * minute,
+            open=Decimal("100"),
+            high=Decimal("102"),
+            low=Decimal("98"),
+            close=Decimal("100"),
+            volume=Decimal("10"),
+        )
+        for index in range(15)
+    )
+    closes = [Decimal("100")] * 56 + [
+        Decimal("100"), Decimal("101"), Decimal("102"),
+        Decimal("104"), Decimal("106"),
+    ]
+    events.extend(
+        Bar1s(
+            symbol="AKEUSDT",
+            timestamp=signal_time - minute + index * 1_000,
+            available_time=signal_time - minute + (index + 1) * 1_000,
+            open=close,
+            high=Decimal("120") if index == 60 else close,
+            low=close,
+            close=close,
+            volume=Decimal("4") if index >= 56 else Decimal("1"),
+            trade_count=1,
+            vwap=close,
+        )
+        for index, close in enumerate(closes)
+    )
+    events.sort(
+        key=lambda event: (
+            event.available_time,
+            0 if isinstance(event, Kline) else 1,
+        )
+    )
+
+    class FakeLoader:
+        def __init__(self, **kwargs):
+            pass
+
+        def iter_all(self, **kwargs):
+            return iter(events)
+
+    def fake_load_metrics(metrics_root, symbol):
+        assert Path(metrics_root) == tmp_path / "metrics"
+        assert symbol == "AKEUSDT"
+        return [
+            (history_start, 100.0, 1.0),
+            (signal_time, 130.0, 1.8),
+            (signal_time + 1, 999.0, 9.0),
+        ]
+
+    monkeypatch.setattr(symbol_runner, "BacktestDataLoader", FakeLoader)
+    monkeypatch.setattr(symbol_runner, "load_metrics_series", fake_load_metrics)
+
+    output_root = tmp_path / "report"
+    common = [
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-01T00:01:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", str(tmp_path / "metrics"),
+        "--total-notional", "1000",
+        "--strategy", strategy_path,
+        *strategy_arguments,
+    ]
+    filters = {
+        "base": [],
+        "oi": ["--max-oi-change-pct", "15"],
+        "ls": ["--max-ls-ratio", "1.5"],
+        "both": ["--max-oi-change-pct", "15", "--max-ls-ratio", "1.5"],
+    }
+    task = {
+        "runs": [
+            {
+                "run_id": run_id,
+                "arguments": [
+                    *common,
+                    "--output", str(output_root / "runs" / run_id),
+                    *filter_arguments,
+                ],
+            }
+            for run_id, filter_arguments in filters.items()
+        ]
+    }
+
+    assert symbol_runner.run_symbol_task(task) == 0
+
+    signals = _collect_signal_audit_events(
+        output_root,
+        [
+            RunSpec(run_id=run_id, symbol="AKEUSDT", params={})
+            for run_id in filters
+        ],
+    )
+    assert len(signals) == len(filters)
+    event_types_by_run = {
+        row.run_id: row.event_type
+        for row in signals.itertuples(index=False)
+    }
+    assert event_types_by_run == {
+        "base": "signal_triggered",
+        "oi": "signal_rejected",
+        "ls": "signal_rejected",
+        "both": "signal_rejected",
+    }
+    details_by_run = {
+        row.run_id: json.loads(row.details)
+        for row in signals.itertuples(index=False)
+        if row.event_type == "signal_rejected"
+    }
+    assert details_by_run["oi"]["rejection_reasons"] == ["max_oi_change_pct"]
+    assert details_by_run["ls"]["rejection_reasons"] == ["max_ls_ratio"]
+    assert details_by_run["both"]["rejection_reasons"] == [
+        "max_oi_change_pct", "max_ls_ratio"
+    ]
+    expected_thresholds = {
+        "oi": (15.0, 0.0),
+        "ls": (0.0, 1.5),
+        "both": (15.0, 1.5),
+    }
+    for run_id, details in details_by_run.items():
+        assert details["rejection_stage"] == "metrics_entry_filters"
+        assert details["oi"] == 130.0
+        assert details["previous_oi"] == 100.0
+        assert details["oi_change_pct"] == 30.0
+        assert details["ls_ratio"] == 1.8
+        assert details["metrics_available_time"] == signal_time
+        assert details["max_oi_change_pct"] == expected_thresholds[run_id][0]
+        assert details["max_ls_ratio"] == expected_thresholds[run_id][1]

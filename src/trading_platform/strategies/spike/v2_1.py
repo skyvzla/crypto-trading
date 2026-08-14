@@ -32,12 +32,41 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
         self._metrics_idx = 0
 
     def _entry_filters_pass(self, event_ms: int) -> bool:
-        if (
-            self.max_consecutive_up_minutes > 0
-            and self._consecutive_up_minutes() > self.max_consecutive_up_minutes
-        ):
-            return False
-        return not self._metrics_blocked(event_ms)
+        return self._entry_filter_decision(event_ms)[0]
+
+    def _entry_filter_decision(
+        self, event_ms: int
+    ) -> tuple[bool, dict[str, object] | None]:
+        consecutive_rejection = None
+        if self.max_consecutive_up_minutes > 0:
+            consecutive_up_minutes = self._consecutive_up_minutes()
+            if consecutive_up_minutes > self.max_consecutive_up_minutes:
+                consecutive_rejection = {
+                    "rejection_stage": "consecutive_up_entry_filter",
+                    "rejection_reasons": ["max_consecutive_up_minutes"],
+                    "consecutive_up_minutes": consecutive_up_minutes,
+                    "max_consecutive_up_minutes": self.max_consecutive_up_minutes,
+                }
+        # 同一候选只读取一次指标快照，审计复用该决策以免推进游标两次。
+        metrics_rejection = self._metrics_rejection_details(event_ms)
+        if consecutive_rejection is None:
+            return metrics_rejection is None, metrics_rejection
+        if metrics_rejection is None:
+            return False, consecutive_rejection
+        return False, {
+            **metrics_rejection,
+            "rejection_stage": "combined_entry_filters",
+            "rejection_reasons": [
+                *consecutive_rejection["rejection_reasons"],
+                *metrics_rejection["rejection_reasons"],
+            ],
+            "consecutive_up_minutes": consecutive_rejection[
+                "consecutive_up_minutes"
+            ],
+            "max_consecutive_up_minutes": consecutive_rejection[
+                "max_consecutive_up_minutes"
+            ],
+        }
 
     def _consecutive_up_minutes(self) -> int:
         count = 0
@@ -50,6 +79,15 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
     def _metrics_snapshot_at(
         self, event_ms: int
     ) -> tuple[float, float, float] | None:
+        snapshot = self._metrics_snapshot_with_available_time(event_ms)
+        if snapshot is None:
+            return None
+        _, oi, previous_oi, long_short_ratio = snapshot
+        return oi, previous_oi, long_short_ratio
+
+    def _metrics_snapshot_with_available_time(
+        self, event_ms: int
+    ) -> tuple[int, float, float, float] | None:
         if not self.metrics_series:
             return None
         while (
@@ -62,19 +100,49 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
             return None
         current = self.metrics_series[idx]
         previous_oi = self.metrics_series[idx - 1][1] if idx >= 1 else current[1]
-        return current[1], previous_oi, current[2]
+        return current[0], current[1], previous_oi, current[2]
 
     def _metrics_blocked(self, event_ms: int) -> bool:
+        return self._metrics_rejection_details(event_ms) is not None
+
+    def _metrics_rejection_details(
+        self, event_ms: int
+    ) -> dict[str, object] | None:
         if self.max_oi_change_pct <= 0 and self.max_ls_ratio <= 0:
-            return False
-        snapshot = self._metrics_snapshot_at(event_ms)
+            return None
+        snapshot = self._metrics_snapshot_with_available_time(event_ms)
         if snapshot is None:
-            return False
-        oi, previous_oi, long_short_ratio = snapshot
-        if self.max_ls_ratio > 0 and long_short_ratio > self.max_ls_ratio:
-            return True
+            return None
+        metrics_available_time, oi, previous_oi, long_short_ratio = snapshot
         oi_change = (oi - previous_oi) / previous_oi * 100 if previous_oi else 0.0
-        return self.max_oi_change_pct > 0 and oi_change > self.max_oi_change_pct
+        rejection_reasons = [
+            reason
+            for reason, rejected in (
+                (
+                    "max_oi_change_pct",
+                    self.max_oi_change_pct > 0
+                    and oi_change > self.max_oi_change_pct,
+                ),
+                (
+                    "max_ls_ratio",
+                    self.max_ls_ratio > 0 and long_short_ratio > self.max_ls_ratio,
+                ),
+            )
+            if rejected
+        ]
+        if not rejection_reasons:
+            return None
+        return {
+            "rejection_stage": "metrics_entry_filters",
+            "rejection_reasons": rejection_reasons,
+            "oi": oi,
+            "previous_oi": previous_oi,
+            "oi_change_pct": oi_change,
+            "ls_ratio": long_short_ratio,
+            "metrics_available_time": metrics_available_time,
+            "max_oi_change_pct": self.max_oi_change_pct,
+            "max_ls_ratio": self.max_ls_ratio,
+        }
 
 
 class V21:

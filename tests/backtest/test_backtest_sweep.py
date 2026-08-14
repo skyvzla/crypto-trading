@@ -178,6 +178,9 @@ def test_universe_includes_in_period_listing_but_rejects_old_symbol_data_gap(
     assert symbols == ["NEWUSDT"]
     by_symbol = {row["symbol"]: row for row in rows}
     assert by_symbol["NEWUSDT"]["listed_during_period"] is True
+    assert by_symbol["NEWUSDT"]["onboard_age_days_at_period_start"] is None
+    assert by_symbol["NEWUSDT"]["new_at_period_start"] is False
+    assert by_symbol["NEWUSDT"]["period_new_listing"] is True
     assert by_symbol["NEWUSDT"]["effective_start_ms"] == listing_ms
     assert by_symbol["NEWUSDT"]["effective_start"] == (
         "1970-01-21T00:00:00+00:00"
@@ -191,6 +194,83 @@ def test_universe_includes_in_period_listing_but_rejects_old_symbol_data_gap(
     assert by_symbol["OLDUSDT"]["listed_during_period"] is False
     assert by_symbol["OLDUSDT"]["data_incomplete"] is True
     assert "archive_starts_after_required_start" in by_symbol["OLDUSDT"]["exclude_reason"]
+
+
+@pytest.mark.parametrize(
+    ("new_listing_mark_days", "expected_new"),
+    [(None, True), (4, False)],
+)
+def test_universe_marks_listing_shortly_before_period_start_without_changing_coverage(
+    monkeypatch,
+    new_listing_mark_days,
+    expected_new,
+):
+    day_ms = 86_400_000
+    start_ms = 10 * day_ms
+    end_ms = 40 * day_ms
+    bir_onboard_ms = start_ms - 5 * day_ms
+    monkeypatch.setattr(
+        sweep, "_allowed_symbols", lambda *args, **kwargs: {"BIRUSDT"}
+    )
+    monkeypatch.setattr(
+        sweep,
+        "_symbol_onboard_times_ms",
+        lambda *args, **kwargs: {"BIRUSDT": bir_onboard_ms},
+    )
+    monkeypatch.setattr(
+        sweep,
+        "_archive_coverage",
+        lambda *args, **kwargs: {
+            "BIRUSDT": {
+                timeframe: (bir_onboard_ms, end_ms, 1)
+                for timeframe in ("1s", "1m", "5m", "15m")
+            }
+        },
+    )
+    universe = {
+        "mode": "explicit",
+        "symbols": ["BIRUSDT"],
+        "exclude_symbols": [],
+        "coverage_tolerance_hours": 1,
+    }
+    if new_listing_mark_days is not None:
+        universe["new_listing_mark_days"] = new_listing_mark_days
+
+    symbols, rows = sweep.resolve_universe({
+        "start": "1970-01-11T00:00:00+00:00",
+        "end": "1970-02-10T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "database_dsn": "unused",
+        "universe": universe,
+    })
+
+    assert symbols == ["BIRUSDT"]
+    row = rows[0]
+    assert row["listed_during_period"] is False
+    assert row["effective_start_ms"] == start_ms
+    assert row["onboard_age_days_at_period_start"] == 5
+    assert row["new_at_period_start"] is expected_new
+    assert row["period_new_listing"] is expected_new
+
+
+def test_universe_rejects_negative_new_listing_mark_days(monkeypatch):
+    monkeypatch.setattr(
+        sweep, "_allowed_symbols", lambda *args, **kwargs: {"BIRUSDT"}
+    )
+
+    with pytest.raises(ValueError, match="new_listing_mark_days"):
+        sweep.resolve_universe({
+            "start": "1970-01-11T00:00:00+00:00",
+            "end": "1970-02-10T00:00:00+00:00",
+            "duckdb_path": "history.duckdb",
+            "database_dsn": "unused",
+            "universe": {
+                "mode": "explicit",
+                "symbols": ["BIRUSDT"],
+                "exclude_symbols": [],
+                "new_listing_mark_days": -1,
+            },
+        })
 
 
 def test_main_handles_duckdb_query_interrupt_without_traceback(

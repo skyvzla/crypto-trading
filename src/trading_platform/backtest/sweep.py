@@ -332,6 +332,9 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
 
     start_ms = _timestamp_ms(config["start"])
     end_ms = _timestamp_ms(config["end"])
+    new_listing_mark_days = float(universe.get("new_listing_mark_days", 30))
+    if new_listing_mark_days < 0:
+        raise ValueError("universe.new_listing_mark_days must be non-negative")
     allowed = _allowed_symbols(
         config.get("database_dsn") or _dsn_from_environment(),
         freeze_days=int(universe.get("freeze_days", 15)),
@@ -405,6 +408,17 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
             if timeframe not in timeframes
         ]
         complete, listed_during_period, effective_start_ms = coverage_status(symbol)
+        onboard_ms = onboard_times_ms.get(symbol)
+        onboard_age_days_at_period_start = (
+            None
+            if onboard_ms is None or onboard_ms > start_ms
+            else (start_ms - onboard_ms) / 86_400_000
+        )
+        new_at_period_start = (
+            onboard_age_days_at_period_start is not None
+            and onboard_age_days_at_period_start <= new_listing_mark_days
+        )
+        period_new_listing = listed_during_period or new_at_period_start
         starts_late = any(
             timeframe in timeframes
             and timeframes[timeframe][0] > effective_start_ms + tolerance_ms
@@ -433,13 +447,16 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
             "has_15m": "15m" in timeframes,
             "first_1s_ms": None if one_second is None else one_second[0],
             "last_1s_ms": None if one_second is None else one_second[1],
-            "onboard_ms": onboard_times_ms.get(symbol),
+            "onboard_ms": onboard_ms,
             "onboard_at": (
                 None
-                if onboard_times_ms.get(symbol) is None
-                else _timestamp_iso(onboard_times_ms[symbol])
+                if onboard_ms is None
+                else _timestamp_iso(onboard_ms)
             ),
             "listed_during_period": listed_during_period,
+            "onboard_age_days_at_period_start": onboard_age_days_at_period_start,
+            "new_at_period_start": new_at_period_start,
+            "period_new_listing": period_new_listing,
             "effective_start_ms": effective_start_ms,
             "effective_start": _timestamp_iso(effective_start_ms),
             "data_incomplete": data_incomplete,
@@ -889,7 +906,7 @@ def _find_simultaneous_signals(
 def _collect_signal_audit_events(
     output_root: Path, specs: Collection[RunSpec]
 ) -> pd.DataFrame:
-    """收集可复测的候选信号，保留已触发与入口上限拒绝两种决策。"""
+    """收集可复测的候选信号及通过核心条件后的入口过滤拒绝。"""
     all_signals = []
     for spec in specs:
         audit_path = output_root / "runs" / spec.run_id / "audit_events.parquet"
@@ -1392,7 +1409,7 @@ def _write_report(
         "## 复核文件", "",
         "- `parameter_summary.csv`：参数组合总体结果。",
         "- `comparison.csv`：参数组合按币种的执行结果。",
-        "- `all_signals.csv`：完整原策略入场检查通过后的信号决策，含已触发和入口上限拒绝；同一拒绝原因在信号冷却窗口内合并，可用于后续复测选币。",
+        "- `all_signals.csv`：完整核心入场检查通过后的信号决策，含已触发和扩展入口过滤拒绝（连阳、OI、LS、涨幅/成交量上限）；同一拒绝原因在信号冷却窗口内合并，可用于后续复测选币。",
         "- `all_trades.csv`：逐笔买卖点、盈亏及冲突标记。",
         "- `collisions.csv`：多币种同时或重叠交易组。",
         "- `signal_collisions.csv`：同一秒附近触发的多币种信号组。",

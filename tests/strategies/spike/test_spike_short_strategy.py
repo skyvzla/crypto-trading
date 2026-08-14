@@ -11,6 +11,7 @@ from trading_platform.strategies.spike.short import (
     DynamicSpikeShortStrategy,
     SpikeSignal,
 )
+from trading_platform.strategies.spike.v1_1 import SpikeV11Strategy
 from trading_platform.strategies.spike.v2_1 import SpikeV21Strategy
 
 
@@ -265,6 +266,90 @@ class TestDynamicSpikeShortStrategy:
             for index in range(4)
         ]
         assert strategy._consecutive_up_minutes() == 4
+
+    @pytest.mark.parametrize("strategy_class", [SpikeV11Strategy, SpikeV21Strategy])
+    def test_consecutive_up_filter_exposes_auditable_rejection(self, strategy_class):
+        strategy = strategy_class(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            max_consecutive_up_minutes=3,
+        )
+        strategy.klines_1m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=index * 60_000,
+                close_time=(index + 1) * 60_000 - 1,
+                available_time=(index + 1) * 60_000,
+                open=Decimal("1"),
+                high=Decimal("2"),
+                low=Decimal("1"),
+                close=Decimal("2"),
+                volume=Decimal("1"),
+            )
+            for index in range(4)
+        ]
+
+        passed, details = strategy._entry_filter_decision(4 * 60_000)
+
+        assert passed is False
+        assert details == {
+            "rejection_stage": "consecutive_up_entry_filter",
+            "rejection_reasons": ["max_consecutive_up_minutes"],
+            "consecutive_up_minutes": 4,
+            "max_consecutive_up_minutes": 3,
+        }
+
+    @pytest.mark.parametrize("strategy_class", [SpikeV11Strategy, SpikeV21Strategy])
+    def test_combined_entry_filters_preserve_all_rejection_details(
+        self, strategy_class
+    ):
+        event_time = 4 * 60_000
+        strategy = strategy_class(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            max_consecutive_up_minutes=3,
+            max_ls_ratio=1.5,
+            metrics_series=[
+                (0, 100.0, 1.0),
+                (event_time, 130.0, 1.8),
+            ],
+        )
+        strategy.klines_1m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=index * 60_000,
+                close_time=(index + 1) * 60_000 - 1,
+                available_time=(index + 1) * 60_000,
+                open=Decimal("1"),
+                high=Decimal("2"),
+                low=Decimal("1"),
+                close=Decimal("2"),
+                volume=Decimal("1"),
+            )
+            for index in range(4)
+        ]
+
+        passed, details = strategy._entry_filter_decision(event_time)
+
+        assert passed is False
+        assert details == {
+            "rejection_stage": "combined_entry_filters",
+            "rejection_reasons": [
+                "max_consecutive_up_minutes",
+                "max_ls_ratio",
+            ],
+            "consecutive_up_minutes": 4,
+            "max_consecutive_up_minutes": 3,
+            "oi": 130.0,
+            "previous_oi": 100.0,
+            "oi_change_pct": 30.0,
+            "ls_ratio": 1.8,
+            "metrics_available_time": event_time,
+            "max_oi_change_pct": 0.0,
+            "max_ls_ratio": 1.5,
+        }
 
     def test_consecutive_up_filter_rejects_long_streaks(self):
         """max_consecutive_up_minutes 设置后，连续上涨超过上限的信号被拒绝。"""

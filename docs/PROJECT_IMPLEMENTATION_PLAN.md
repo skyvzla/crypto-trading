@@ -338,8 +338,10 @@ Phase 0 ─┬─> Phase 1 ───────────────┐
 每批变更至少执行：
 
 ```bash
-uv run --extra dev python -m pytest -q
-python -m compileall -q src scripts tests
+docker compose -f compose.test.yaml build test
+# test 服务默认执行 pytest -q -n 13
+docker compose -f compose.test.yaml run --rm test
+docker compose -f compose.test.yaml run --rm test python -m compileall -q src scripts tests
 docker compose config -q
 docker compose -f compose.test.yaml config -q
 git diff --check
@@ -348,8 +350,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前宿主机全量基线为 `431 passed, 33 skipped, 1 warning`；Compose 真实 PostgreSQL/Redis
-基线为 `460 passed, 1 skipped, 1 warning`。
+当前隔离 Compose 全量基线为 `800 passed, 1 skipped, 13 warnings`（13 个 pytest worker）。
 
 ## 8. 风险与停止条件
 

@@ -61,6 +61,10 @@ v1 和 v2 均使用 `DynamicSpikeShortStrategy` 的同一套基础信号：
 
 工作区的 `experiments/spike_sweep_v2.example.toml` 是下一次运行的示例配置，不自动代表既有 v2 或 v2.1 报告的参数。
 
+### V2 指标研究候选
+
+OI / 多空比矩阵已完成全周期与时间切分复核。`max_ls_ratio=1.5` 仅保留为 v2 的离线研究候选，`max_oi_change_pct=15` 未通过时间切分的有效性检查，不纳入候选。候选依赖完整的 `profit_unlock_percent=1.5` 研究基线，不能改写 `V21` 的默认值或线上配置；详细证据、限制和升级门禁见 [Spike V2 指标过滤研究候选](research/SPIKE_V2_METRICS_LS_1_5_CANDIDATE.md)。
+
 ## 可选实验维度
 
 ## v1.1 实验配置
@@ -76,8 +80,8 @@ v1 和 v2 均使用 `DynamicSpikeShortStrategy` 的同一套基础信号：
 | 参数 | 含义 | 当前状态 |
 |---|---|---|
 | `max_consecutive_up_minutes` | 信号前已完成的 1m K 线连续收阳根数上限；0 表示关闭 | v2 专项 sweep 已完成；不应直接迁移为 v1 结论 |
-| `max_oi_change_pct` | 信号时刻 OI 相较上一 5m 快照的涨幅上限；0 表示关闭 | 指标 sweep 进行中 |
-| `max_ls_ratio` | 信号时刻全市场多空比上限；0 表示关闭 | 指标 sweep 进行中 |
+| `max_oi_change_pct` | 信号时刻 OI 相较上一 5m 快照的涨幅上限；0 表示关闭 | 15% 未通过时间切分有效性检查，不作为候选 |
+| `max_ls_ratio` | 信号时刻全市场多空比上限；0 表示关闭 | 1.5 仅保留为离线研究候选，见上节门禁 |
 | `entry_tier_mode` | `three-tier` 或 `tier3-only` | v1 / v2 的核心差异之一 |
 | `prior_high_lookback_hours` | 入场前高窗口 | v1 参数扫描已覆盖 0/4/6/8/12/24h |
 | `rise_low_lookback_hours` 与 `min_rise_duration_hours` | 近期低点窗口及距信号最短时间 | v2 固定为 168h / 24h |
