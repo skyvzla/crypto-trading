@@ -279,6 +279,7 @@ def test_sweep_closes_dashboard_when_worker_submission_fails(
 
     assert pool.shutdown_calls == [{"wait": True, "cancel_futures": True}]
     assert dashboard.kwargs["total"] == 1
+    assert dashboard.kwargs["workers"] == 1
     assert dashboard.started["detail"].startswith("pairs=1 runs=2 ")
     assert dashboard.closed == [("failed", None)]
 

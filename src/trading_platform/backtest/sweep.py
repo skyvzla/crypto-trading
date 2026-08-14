@@ -1494,6 +1494,7 @@ def _main(argv: list[str] | None = None) -> int:
     dashboard = TaskDashboard(
         title="backtest",
         total=len(specs_by_symbol),
+        workers=workers,
         stream=sys.stdout,
     )
     dashboard.start(

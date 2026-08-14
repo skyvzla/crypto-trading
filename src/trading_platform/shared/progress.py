@@ -58,6 +58,7 @@ class TaskDashboard:
         total: 总单元数；None 表示未知（只显示 Elapsed，不显示进度/ETA）。
         stream: 输出流，默认 sys.stdout；isatty() 决定 rich/plain 模式。
         min_eta_samples: ETA 所需最少有效样本数。
+        workers: 并行处理单元数，用于换算 ETA；默认 1。
         max_completed: Completed 列表保留条数。
         quiet: 非 TTY 下抑制 progress 行（仅 start/complete）。
         progress_step: 非 TTY 下进度行输出百分比步长（0-100）。
@@ -70,6 +71,7 @@ class TaskDashboard:
         total: int | None = None,
         stream: TextIO | None = None,
         min_eta_samples: int = 5,
+        workers: int = 1,
         max_completed: int = 3,
         quiet: bool = False,
         progress_step: int = 10,
@@ -79,6 +81,7 @@ class TaskDashboard:
         self._done = 0
         self._stream = stream or sys.stdout
         self._min_eta_samples = max(1, min_eta_samples)
+        self._workers = max(1, workers)
         self._max_completed = max(1, max_completed)
         self._quiet = quiet
         self._progress_step = max(1, min(100, progress_step))
@@ -305,7 +308,7 @@ class TaskDashboard:
         remaining = total - done
         if remaining <= 0:
             return 0.0
-        estimate = sum(samples) / len(samples) * remaining
+        estimate = sum(samples) / len(samples) * remaining / self._workers
         if self._eta_estimated_at is None:
             return estimate
         return max(0.0, estimate - (now - self._eta_estimated_at))

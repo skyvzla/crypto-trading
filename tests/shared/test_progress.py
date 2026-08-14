@@ -68,23 +68,23 @@ def test_eta_counts_down_and_estimated_total_stays_stable(monkeypatch):
     clock = [0.0]
     monkeypatch.setattr(progress.time, "monotonic", lambda: clock[0])
     dashboard = TaskDashboard(
-        title="t", total=100, stream=StringIO(), min_eta_samples=1
+        title="t", total=5, stream=StringIO(), min_eta_samples=1, workers=2
     )
     dashboard.start()
     dashboard.task_start("batch")
 
     clock[0] = 10.0
-    dashboard.task_done("batch", increment=10)
+    dashboard.task_done("batch")
 
-    assert dashboard.eta_s == 90.0
+    assert dashboard.eta_s == 20.0
 
     clock[0] = 20.0
 
-    assert dashboard.eta_s == 80.0
+    assert dashboard.eta_s == 10.0
     rendered = StringIO()
     Console(file=rendered, force_terminal=False, width=120).print(dashboard._render())
-    assert "ETA 00:01:20" in rendered.getvalue()
-    assert "Est. total 00:01:40" in rendered.getvalue()
+    assert "ETA 00:00:10" in rendered.getvalue()
+    assert "Est. total 00:00:30" in rendered.getvalue()
 
 
 def test_failed_tasks_not_eta_samples():
