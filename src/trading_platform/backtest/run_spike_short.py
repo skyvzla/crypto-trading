@@ -90,7 +90,7 @@ def load_metrics_series(
 ) -> list[tuple[int, float, float]]:
     """从 metrics parquet 归档加载单币 5m 指标序列。
 
-    返回按快照时间升序的 [(snapshot_ms, oi, ls_ratio)]；归档缺失或为空时返回空列表。
+    返回按策略可见时间升序的 [(available_ms, oi, ls_ratio)]；归档缺失或为空时返回空列表。
     """
     try:
         return MetricsDataLoader(metrics_root, symbol=symbol).load()

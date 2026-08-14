@@ -1,9 +1,11 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import duckdb
 import pytest
 
-from trading_platform.backtest.loader import BacktestDataLoader
+from trading_platform.backtest.loader import BacktestDataLoader, MetricsDataLoader
+from trading_platform.market.archive.metrics import MetricsArchive, MetricsSnapshot
 from trading_platform.shared.events import Bar1s, Kline
 
 
@@ -73,6 +75,37 @@ def test_duckdb_loader_reads_candles_without_mutating_archive(tmp_path):
         assert check.execute("SELECT count(*) FROM candles").fetchone()[0] == 3
     finally:
         check.close()
+
+
+def test_metrics_loader_uses_available_time_for_strategy_visibility(tmp_path):
+    metrics_root = tmp_path / "metrics"
+    snapshot_time = datetime(2026, 8, 10, tzinfo=UTC)
+    available_time = snapshot_time + timedelta(minutes=5)
+    with MetricsArchive(metrics_root, index_workers=1) as archive:
+        archive.upsert([
+            MetricsSnapshot(
+                symbol="AKEUSDT",
+                snapshot_time=snapshot_time,
+                available_time=available_time,
+                sum_open_interest=100.0,
+                sum_open_interest_value=100.0,
+                count_toptrader_long_short_ratio=1.0,
+                sum_toptrader_long_short_ratio=1.0,
+                count_long_short_ratio=1.2,
+                sum_taker_long_short_vol_ratio=1.0,
+            )
+        ])
+
+    available_ms = int(available_time.timestamp() * 1_000)
+    assert MetricsDataLoader(metrics_root, symbol="AKEUSDT").load() == [
+        (available_ms, 100.0, 1.2)
+    ]
+    assert MetricsDataLoader(
+        metrics_root, symbol="AKEUSDT", start_ms=available_ms
+    ).load() == [(available_ms, 100.0, 1.2)]
+    assert MetricsDataLoader(
+        metrics_root, symbol="AKEUSDT", end_ms=available_ms
+    ).load() == []
 
 
 def test_duckdb_stream_matches_materialized_event_order(tmp_path):

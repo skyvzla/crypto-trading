@@ -23,7 +23,7 @@ DEFAULT_CHUNK_HOURS = 4320.0
 
 
 class MetricsDataLoader:
-    """按 metrics sidecar index 读取指定窗口的指标快照。"""
+    """按 metrics sidecar index 读取指定窗口内策略可见的指标快照。"""
 
     def __init__(self, root: str | Path, *, symbol: str, start_ms: int | None = None,
                  end_ms: int | None = None, period: str = "5m") -> None:
@@ -36,14 +36,12 @@ class MetricsDataLoader:
             raise ValueError("symbol must not be empty")
 
     def load(self) -> list[tuple[int, float, float]]:
-        """返回 ``(snapshot_ms, open_interest, long_short_ratio)`` 序列。"""
+        """返回 ``(available_ms, open_interest, long_short_ratio)`` 序列。"""
         table = load_metrics_index(self.root, verify_files=True)
         frame = table.to_pandas()
         selected = frame[
             (frame["symbol"] == self.symbol) & (frame["period"] == self.period)
         ]
-        if self.start_ms is not None:
-            selected = selected[selected["last_snapshot_ms"] >= self.start_ms]
         if self.end_ms is not None:
             selected = selected[selected["first_snapshot_ms"] < self.end_ms]
         paths = [str(self.root / path) for path in selected["relative_path"].drop_duplicates()]
@@ -53,13 +51,14 @@ class MetricsDataLoader:
         try:
             rows = connection.execute(
                 """
-                SELECT extract(epoch from snapshot_time AT TIME ZONE 'UTC') * 1000,
+                SELECT extract(epoch from available_time AT TIME ZONE 'UTC') * 1000,
                        sum_open_interest, count_long_short_ratio
                 FROM read_parquet(?)
                 WHERE symbol = ? AND period = ?
-                  AND (? IS NULL OR snapshot_time >= to_timestamp(? / 1000.0))
-                  AND (? IS NULL OR snapshot_time < to_timestamp(? / 1000.0))
-                ORDER BY snapshot_time
+                  AND available_time IS NOT NULL
+                  AND (? IS NULL OR available_time >= to_timestamp(? / 1000.0))
+                  AND (? IS NULL OR available_time < to_timestamp(? / 1000.0))
+                ORDER BY available_time, snapshot_time
                 """,
                 [paths, self.symbol, self.period, self.start_ms, self.start_ms,
                  self.end_ms, self.end_ms],
