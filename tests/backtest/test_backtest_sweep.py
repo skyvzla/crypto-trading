@@ -67,6 +67,9 @@ def test_explicit_universe_only_scans_requested_symbols(monkeypatch):
     monkeypatch.setattr(sweep, "_allowed_symbols", lambda *args, **kwargs: {
         "AKEUSDT", "BANKUSDT", "BTCUSDT"
     })
+    monkeypatch.setattr(
+        sweep, "_symbol_onboard_times_ms", lambda *args, **kwargs: {"AKEUSDT": 0}
+    )
 
     def fake_coverage(*args, **kwargs):
         captured.update(kwargs)
@@ -100,6 +103,11 @@ def test_anomaly_report_universe_intersects_database_and_archive(monkeypatch, tm
     report.write_text("symbol,upper_wick_percent\nAKEUSDT,30\nZECUSDT,40\n", encoding="utf-8")
     monkeypatch.setattr(sweep, "_allowed_symbols", lambda *args, **kwargs: {"AKEUSDT", "ZECUSDT"})
     monkeypatch.setattr(
+        sweep,
+        "_symbol_onboard_times_ms",
+        lambda *args, **kwargs: {"AKEUSDT": 0, "ZECUSDT": 0},
+    )
+    monkeypatch.setattr(
         sweep, "_archive_coverage",
         lambda *args, **kwargs: {
             "AKEUSDT": {"1s": (0, 9_999_999, 1), "1m": (0, 9_999_999, 1), "5m": (0, 9_999_999, 1), "15m": (0, 9_999_999, 1)},
@@ -113,6 +121,75 @@ def test_anomaly_report_universe_intersects_database_and_archive(monkeypatch, tm
     })
     assert symbols == ["AKEUSDT"]
     assert any(row["symbol"] == "ZECUSDT" and "explicitly_excluded" in row["exclude_reason"] for row in rows)
+
+
+def test_universe_includes_in_period_listing_but_rejects_old_symbol_data_gap(
+    monkeypatch,
+):
+    day_ms = 86_400_000
+    start_ms = 10 * day_ms
+    end_ms = 40 * day_ms
+    listing_ms = 20 * day_ms
+    monkeypatch.setattr(
+        sweep,
+        "_allowed_symbols",
+        lambda *args, **kwargs: {"NEWUSDT", "BROKENNEWUSDT", "OLDUSDT"},
+    )
+    monkeypatch.setattr(
+        sweep,
+        "_symbol_onboard_times_ms",
+        lambda *args, **kwargs: {
+            "NEWUSDT": listing_ms,
+            "BROKENNEWUSDT": listing_ms,
+            "OLDUSDT": 0,
+        },
+    )
+    complete_after_listing = {
+        timeframe: (listing_ms + 1_000, end_ms, 1)
+        for timeframe in ("1s", "1m", "5m", "15m")
+    }
+    monkeypatch.setattr(
+        sweep,
+        "_archive_coverage",
+        lambda *args, **kwargs: {
+            "NEWUSDT": complete_after_listing,
+            "BROKENNEWUSDT": {
+                timeframe: (listing_ms + 2 * day_ms, end_ms, 1)
+                for timeframe in ("1s", "1m", "5m", "15m")
+            },
+            "OLDUSDT": complete_after_listing,
+        },
+    )
+
+    symbols, rows = sweep.resolve_universe({
+        "start": "1970-01-11T00:00:00+00:00",
+        "end": "1970-02-10T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "database_dsn": "unused",
+        "universe": {
+            "mode": "explicit",
+            "symbols": ["NEWUSDT", "BROKENNEWUSDT", "OLDUSDT"],
+            "exclude_symbols": [],
+            "coverage_tolerance_hours": 1,
+        },
+    })
+
+    assert symbols == ["NEWUSDT"]
+    by_symbol = {row["symbol"]: row for row in rows}
+    assert by_symbol["NEWUSDT"]["listed_during_period"] is True
+    assert by_symbol["NEWUSDT"]["effective_start_ms"] == listing_ms
+    assert by_symbol["NEWUSDT"]["effective_start"] == (
+        "1970-01-21T00:00:00+00:00"
+    )
+    assert by_symbol["NEWUSDT"]["data_incomplete"] is False
+    assert by_symbol["BROKENNEWUSDT"]["listed_during_period"] is True
+    assert by_symbol["BROKENNEWUSDT"]["data_incomplete"] is True
+    assert "archive_starts_after_required_start" in (
+        by_symbol["BROKENNEWUSDT"]["exclude_reason"]
+    )
+    assert by_symbol["OLDUSDT"]["listed_during_period"] is False
+    assert by_symbol["OLDUSDT"]["data_incomplete"] is True
+    assert "archive_starts_after_required_start" in by_symbol["OLDUSDT"]["exclude_reason"]
 
 
 def test_main_handles_duckdb_query_interrupt_without_traceback(
@@ -144,6 +221,24 @@ def test_expand_specs_is_deterministic_and_period_sensitive():
     assert len(first) == 2
     assert {item.run_id for item in first}.isdisjoint(
         {item.run_id for item in changed}
+    )
+
+
+def test_run_arguments_use_symbol_effective_start(tmp_path: Path):
+    spec = sweep.RunSpec("run-new", "NEWUSDT", {"total_notional": 1000})
+    config = {
+        "start": "2025-08-01T00:00:00+00:00",
+        "end": "2026-08-01T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "symbol_start_times": {
+            "NEWUSDT": "2025-09-26T12:30:00+00:00",
+        },
+    }
+
+    arguments = sweep._run_arguments(spec, config, tmp_path)
+
+    assert arguments[arguments.index("--start") + 1] == (
+        "2025-09-26T12:30:00+00:00"
     )
 
 

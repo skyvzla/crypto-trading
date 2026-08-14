@@ -23,7 +23,7 @@ import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Collection
 
@@ -144,8 +144,6 @@ class ChildProcessRegistry:
 
 
 def _timestamp_ms(value: str) -> int:
-    from datetime import datetime, timezone
-
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -176,6 +174,35 @@ def _allowed_symbols(dsn: str, *, freeze_days: int, strategy_id: str) -> set[str
             "无法连接 PostgreSQL 主库；请检查 DB_HOST、DB_PORT、DB_USER、"
             "DB_PASSWORD、DB_DATABASE，以及 postgres 服务是否已启动"
         ) from error
+
+
+def _symbol_onboard_times_ms(
+    dsn: str, symbols: Collection[str]
+) -> dict[str, int]:
+    normalized = sorted({str(symbol).strip().upper() for symbol in symbols})
+    if not normalized:
+        return {}
+    try:
+        with psycopg.connect(dsn, connect_timeout=5) as connection:
+            connection.execute("SET TRANSACTION READ ONLY")
+            rows = connection.execute(
+                "SELECT symbol, onboard_date FROM exchange_symbols "
+                "WHERE symbol = ANY(%s)",
+                (normalized,),
+            ).fetchall()
+    except psycopg.OperationalError as error:
+        raise RuntimeError(
+            "无法读取 PostgreSQL 交易对上市时间；请检查数据库连接"
+        ) from error
+    return {
+        str(symbol).strip().upper(): int(onboard_date.timestamp() * 1000)
+        for symbol, onboard_date in rows
+        if onboard_date is not None
+    }
+
+
+def _timestamp_iso(value_ms: int) -> str:
+    return datetime.fromtimestamp(value_ms / 1000, tz=timezone.utc).isoformat()
 
 
 def _configure_duckdb_connection(
@@ -321,18 +348,34 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
         symbol for symbol, timeframes in coverage.items() if "1s" in timeframes
     }
     tolerance_ms = int(float(universe.get("coverage_tolerance_hours", 24)) * 3_600_000)
-    complete_archived = {
-        symbol
-        for symbol, timeframes in coverage.items()
-        if all(timeframe in timeframes for timeframe in ("1s", "1m", "5m", "15m"))
-        and timeframes["1s"][0] <= start_ms + tolerance_ms
-        and timeframes["1s"][1] >= end_ms - tolerance_ms
-    }
     candidates = (
         requested if mode == "explicit"
         else anomaly_symbols if mode == "anomaly-report"
         else archived if mode == "all-archived" else allowed
     )
+    onboard_times_ms = _symbol_onboard_times_ms(
+        config.get("database_dsn") or _dsn_from_environment(), candidates
+    )
+    required_timeframes = ("1s", "1m", "5m", "15m")
+
+    def coverage_status(symbol: str) -> tuple[bool, bool, int]:
+        timeframes = coverage.get(symbol, {})
+        onboard_ms = onboard_times_ms.get(symbol)
+        listed_during_period = (
+            onboard_ms is not None and start_ms < onboard_ms < end_ms
+        )
+        required_start_ms = onboard_ms if listed_during_period else start_ms
+        complete = all(
+            timeframe in timeframes
+            and timeframes[timeframe][0] <= required_start_ms + tolerance_ms
+            and timeframes[timeframe][1] >= end_ms - tolerance_ms
+            for timeframe in required_timeframes
+        )
+        return complete, listed_during_period, required_start_ms
+
+    complete_archived = {
+        symbol for symbol in coverage if coverage_status(symbol)[0]
+    }
     selected = sorted((candidates & allowed & complete_archived) - excluded)
 
     rows = []
@@ -354,15 +397,27 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
             reasons.append("not_in_anomaly_report")
         one_second = timeframes.get("1s")
         missing_required = [
-            timeframe for timeframe in ("1m", "5m", "15m")
+            timeframe for timeframe in required_timeframes
             if timeframe not in timeframes
         ]
-        data_incomplete = (
-            one_second is None
-            or bool(missing_required)
-            or one_second[0] > start_ms + tolerance_ms
-            or one_second[1] < end_ms - tolerance_ms
+        complete, listed_during_period, effective_start_ms = coverage_status(symbol)
+        starts_late = any(
+            timeframe in timeframes
+            and timeframes[timeframe][0] > effective_start_ms + tolerance_ms
+            for timeframe in required_timeframes
         )
+        ends_early = any(
+            timeframe in timeframes
+            and timeframes[timeframe][1] < end_ms - tolerance_ms
+            for timeframe in required_timeframes
+        )
+        if missing_required:
+            reasons.append("missing_required_timeframes")
+        if starts_late:
+            reasons.append("archive_starts_after_required_start")
+        if ends_early:
+            reasons.append("archive_ends_before_period_end")
+        data_incomplete = not complete
         rows.append({
             "symbol": symbol,
             "database_allowed": symbol in allowed,
@@ -374,6 +429,15 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
             "has_15m": "15m" in timeframes,
             "first_1s_ms": None if one_second is None else one_second[0],
             "last_1s_ms": None if one_second is None else one_second[1],
+            "onboard_ms": onboard_times_ms.get(symbol),
+            "onboard_at": (
+                None
+                if onboard_times_ms.get(symbol) is None
+                else _timestamp_iso(onboard_times_ms[symbol])
+            ),
+            "listed_during_period": listed_during_period,
+            "effective_start_ms": effective_start_ms,
+            "effective_start": _timestamp_iso(effective_start_ms),
             "data_incomplete": data_incomplete,
         })
     if not selected:
@@ -522,7 +586,9 @@ def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
         identity = json.dumps({
             "symbol": symbol,
             "params": params,
-            "start": config.get("start"),
+            "start": config.get("symbol_start_times", {}).get(
+                symbol, config.get("start")
+            ),
             "end": config.get("end"),
             "duckdb_path": config.get("duckdb_path"),
         }, sort_keys=True, default=str)
@@ -536,9 +602,12 @@ def _run_arguments(
     config: dict[str, Any],
     run_dir: Path,
 ) -> list[str]:
+    effective_start = config.get("symbol_start_times", {}).get(
+        spec.symbol, config["start"]
+    )
     arguments = [
         "--symbol", spec.symbol,
-        "--start", config["start"],
+        "--start", effective_start,
         "--end", config["end"],
         "--duckdb-path", config["duckdb_path"],
         "--output", str(run_dir),
@@ -1325,6 +1394,11 @@ def _main(argv: list[str] | None = None) -> int:
     output_root = Path(config.get("output", f"reports/{config.get('name', 'spike_sweep')}"))
     print("正在筛选交易对并检查历史归档覆盖...", flush=True)
     symbols, universe_rows = resolve_universe(config)
+    config["symbol_start_times"] = {
+        row["symbol"]: row["effective_start"]
+        for row in universe_rows
+        if row["selected"]
+    }
     config["archive_index_path"] = str(
         archive_root_from_catalog(config["duckdb_path"]) / ARCHIVE_INDEX_FILENAME
     )
@@ -1340,6 +1414,7 @@ def _main(argv: list[str] | None = None) -> int:
             "start": config["start"],
             "end": config["end"],
             "selected_symbols": symbols,
+            "symbol_start_times": config["symbol_start_times"],
         }, indent=2, ensure_ascii=False)
     )
     if "duckdb_memory_limit" in execution:
