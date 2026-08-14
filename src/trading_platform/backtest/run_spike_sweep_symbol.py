@@ -12,9 +12,11 @@ from typing import Any, Sequence
 
 from trading_platform.backtest.engine import BacktestEngine, Event
 from trading_platform.backtest.loader import BacktestDataLoader
+from trading_platform.backtest.strategy_definition import SharedFeatureProvider
 from trading_platform.backtest.run_spike_short import (
     SpikeBacktestSettings,
     create_spike_engine,
+    load_metrics_series,
     parse_args as parse_run_args,
     resolve_settings,
     save_backtest_result,
@@ -30,6 +32,12 @@ class SymbolRunPlan:
     engine: BacktestEngine
 
 
+@dataclass(frozen=True)
+class SharedProviderGroup:
+    representative: SymbolRunPlan
+    provider: SharedFeatureProvider
+
+
 def _event_matches_plan(event: Event, plan: SymbolRunPlan) -> bool:
     if isinstance(event, Bar1s):
         return (
@@ -40,6 +48,40 @@ def _event_matches_plan(event: Event, plan: SymbolRunPlan) -> bool:
         event.close_time >= plan.settings.load_start_ms
         and event.interval in plan.settings.required_kline_intervals
     )
+
+
+def _build_shared_provider_groups(
+    plans: list[SymbolRunPlan],
+) -> tuple[SharedProviderGroup, ...]:
+    buckets: dict[tuple[object, int, tuple[str, ...], bool], list[SymbolRunPlan]] = {}
+    for plan in plans:
+        definition = plan.settings.strategy_definition
+        factory = getattr(definition, "shared_feature_provider", None)
+        requirements = definition.data_requirements.shared_features
+        if factory is None or not requirements:
+            continue
+        key = (
+            factory,
+            plan.settings.load_start_ms,
+            plan.settings.required_kline_intervals,
+            plan.settings.requires_bar1s,
+        )
+        buckets.setdefault(key, []).append(plan)
+
+    groups = []
+    for bucket in buckets.values():
+        shared_features = frozenset().union(*(
+            plan.settings.strategy_definition.data_requirements.shared_features
+            for plan in bucket
+        ))
+        provider = getattr(
+            bucket[0].settings.strategy_definition,
+            "shared_feature_provider",
+        )(shared_features=shared_features)
+        for plan in bucket:
+            provider.bind(plan.engine.strategy)
+        groups.append(SharedProviderGroup(bucket[0], provider))
+    return tuple(groups)
 
 
 def _run_shift_group(plans: list[SymbolRunPlan]) -> set[str]:
@@ -72,8 +114,12 @@ def _run_shift_group(plans: list[SymbolRunPlan]) -> set[str]:
     counts = {plan.run_id: 0 for plan in plans}
     failed: set[str] = set()
     shared_event_count = 0
+    provider_groups = _build_shared_provider_groups(plans)
     for event in events:
         shared_event_count += 1
+        for group in provider_groups:
+            if _event_matches_plan(event, group.representative):
+                group.provider.process_event(event)
         for plan in plans:
             if plan.run_id in failed or not _event_matches_plan(event, plan):
                 continue
@@ -125,14 +171,35 @@ def _run_shift_group(plans: list[SymbolRunPlan]) -> set[str]:
 
 def run_symbol_task(task: dict[str, Any]) -> int:
     plans_by_shift: dict[int, list[SymbolRunPlan]] = {}
+    metrics_cache: dict[
+        tuple[str, str], list[tuple[int, float, float]]
+    ] = {}
     for item in task.get("runs", []):
         args = parse_run_args(item["arguments"])
         settings = resolve_settings(args)
+        preloaded_metrics_series = None
+        if settings.strategy_definition.data_requirements.metrics_5m:
+            metrics_key = (str(args.metrics_root), args.symbol)
+            if metrics_key not in metrics_cache:
+                metrics_cache[metrics_key] = load_metrics_series(
+                    args.metrics_root, args.symbol
+                )
+            preloaded_metrics_series = metrics_cache[metrics_key]
+        engine = (
+            create_spike_engine(
+                args,
+                settings,
+                events=(),
+                preloaded_metrics_series=preloaded_metrics_series,
+            )
+            if preloaded_metrics_series is not None
+            else create_spike_engine(args, settings, events=())
+        )
         plan = SymbolRunPlan(
             run_id=str(item["run_id"]),
             args=args,
             settings=settings,
-            engine=create_spike_engine(args, settings, events=()),
+            engine=engine,
         )
         plans_by_shift.setdefault(settings.bar1s_time_shift_ms, []).append(plan)
     if not plans_by_shift:

@@ -16,8 +16,10 @@ Dynamic Spike Short Strategy - 冻结基线实现
 
 当前已实现全局轮次互斥和第一笔成交计时；完整 Campaign 恢复及持仓退出仍待后续阶段。
 """
+from collections import deque
 from decimal import Decimal
-from typing import Iterable, List, Literal, Optional
+from itertools import islice
+from typing import TYPE_CHECKING, Iterable, List, Literal, Optional
 from dataclasses import dataclass, field, replace
 
 from trading_platform.shared.events import (
@@ -33,6 +35,14 @@ from trading_platform.strategies.spike.exit_features import (
     CandidateFeatureSnapshot,
     candidate_feature_snapshot,
 )
+from trading_platform.strategies.spike.shared_features import (
+    append_kline_and_evict_expired,
+)
+
+if TYPE_CHECKING:
+    from trading_platform.strategies.spike.shared_features import (
+        SpikeSharedFeatureProvider,
+    )
 from trading_platform.strategies.spike.exit_policy import (
     CandidateV1Config,
     ExitAction,
@@ -251,9 +261,11 @@ class DynamicSpikeShortStrategy:
 
         # 数据缓存
         self.bars_1s: List[Bar1s] = []
-        self.klines_1m: List[Kline] = []
-        self.klines_5m: List[Kline] = []
-        self.klines_15m: List[Kline] = []
+        self.klines_1m: deque[Kline] = deque()
+        self.klines_5m: deque[Kline] = deque()
+        self.klines_15m: deque[Kline] = deque()
+        self._kline_cache_time_ordered = {"1m": True, "5m": True, "15m": True}
+        self._shared_feature_provider: SpikeSharedFeatureProvider | None = None
 
         # 信号状态
         self.last_signal_time: Optional[int] = None
@@ -277,6 +289,18 @@ class DynamicSpikeShortStrategy:
         """由运行模式适配器注入最小账户执行接口。"""
         self._account = account
 
+    def bind_shared_feature_provider(
+        self, provider: "SpikeSharedFeatureProvider"
+    ) -> None:
+        """在 sweep 开始前绑定同回放上下文的共享行情窗口。"""
+        if self.bars_1s or self.klines_1m or self.klines_5m or self.klines_15m:
+            raise RuntimeError("shared features must be bound before market events")
+        self._shared_feature_provider = provider
+        self.bars_1s = provider.bars_1s
+        self.klines_1m = provider.klines_1m
+        self.klines_5m = provider.klines_5m
+        self.klines_15m = provider.klines_15m
+
     def set_trading_enabled(self, enabled: bool) -> None:
         """预热阶段只更新数据缓存，不检测或推进交易信号。"""
         self._trading_enabled = enabled
@@ -293,12 +317,19 @@ class DynamicSpikeShortStrategy:
         """预热批量写入完成后只计算一次当前候选特征。"""
         if self.exit_policy != "candidate-v1" or self.first_fill_time is None:
             return
-        self._candidate_features = candidate_feature_snapshot(
-            self.klines_1m,
-            self.klines_5m,
-            self.klines_15m,
-            config=self._candidate_feature_config,
-        )
+        if self._shared_feature_provider is not None:
+            self._candidate_features = (
+                self._shared_feature_provider.candidate_features(
+                    self._candidate_feature_config
+                )
+            )
+        else:
+            self._candidate_features = candidate_feature_snapshot(
+                self.klines_1m,
+                self.klines_5m,
+                self.klines_15m,
+                config=self._candidate_feature_config,
+            )
 
     def on_fill(self, fill: Fill) -> None:
         """记录本轮第一笔真实成交时间，作为 900 秒计时起点。"""
@@ -334,12 +365,7 @@ class DynamicSpikeShortStrategy:
                         )
                 else:
                     self._campaign_origin_price = signal.origin_price
-                self._candidate_features = candidate_feature_snapshot(
-                    self.klines_1m,
-                    self.klines_5m,
-                    self.klines_15m,
-                    config=self._candidate_feature_config,
-                )
+                self.refresh_candidate_features()
             self._record_audit(
                 event_time=fill.fill_time,
                 event_type="campaign_first_fill",
@@ -900,23 +926,37 @@ class DynamicSpikeShortStrategy:
             )
         return blocked
 
+    def _append_kline_and_evict_expired(
+        self, interval: str, cache: deque[Kline], kline: Kline, cutoff: int
+    ) -> None:
+        self._kline_cache_time_ordered[interval] = append_kline_and_evict_expired(
+            cache,
+            kline,
+            cutoff,
+            is_time_ordered=self._kline_cache_time_ordered[interval],
+        )
+
     def on_kline(self, kline: Kline) -> List[OrderIntent]:
         """处理已完成 K 线事件"""
-        if kline.interval == "1m":
-            self.klines_1m.append(kline)
-            retained_minutes = max(30 * 60, self.rise_low_lookback_minutes)
-            cutoff = kline.close_time - retained_minutes * MS_PER_MINUTE
-            self.klines_1m = [k for k in self.klines_1m if k.close_time >= cutoff]
+        if self._shared_feature_provider is None:
+            if kline.interval == "1m":
+                retained_minutes = max(30 * 60, self.rise_low_lookback_minutes)
+                cutoff = kline.close_time - retained_minutes * MS_PER_MINUTE
+                self._append_kline_and_evict_expired(
+                    "1m", self.klines_1m, kline, cutoff
+                )
 
-        elif kline.interval == "5m":
-            self.klines_5m.append(kline)
-            cutoff = kline.close_time - 40 * 3600 * MS_PER_SECOND
-            self.klines_5m = [k for k in self.klines_5m if k.close_time >= cutoff]
+            elif kline.interval == "5m":
+                cutoff = kline.close_time - 40 * 3600 * MS_PER_SECOND
+                self._append_kline_and_evict_expired(
+                    "5m", self.klines_5m, kline, cutoff
+                )
 
-        elif kline.interval == "15m":
-            self.klines_15m.append(kline)
-            cutoff = kline.close_time - 40 * 3600 * MS_PER_SECOND
-            self.klines_15m = [k for k in self.klines_15m if k.close_time >= cutoff]
+            elif kline.interval == "15m":
+                cutoff = kline.close_time - 40 * 3600 * MS_PER_SECOND
+                self._append_kline_and_evict_expired(
+                    "15m", self.klines_15m, kline, cutoff
+                )
 
         if (
             self.exit_policy == "candidate-v1"
@@ -1072,6 +1112,8 @@ class DynamicSpikeShortStrategy:
     # ------------------------------------------------------------------
 
     def _update_cache(self, bar: Bar1s) -> None:
+        if self._shared_feature_provider is not None:
+            return
         self.bars_1s.append(bar)
         if len(self.bars_1s) > self.BAR_BUFFER:
             # 原地删除过期前缀，避免每秒重新分配并复制整个窗口。
@@ -1089,14 +1131,23 @@ class DynamicSpikeShortStrategy:
             return None
 
         current = bars[-1]
-        bar_5s_ago = bars[-6]
-        bar_60s_ago = bars[-61]
+        shared_bar_features = (
+            self._shared_feature_provider.bar_features(bar)
+            if self._shared_feature_provider is not None
+            else None
+        )
+        if self._shared_feature_provider is not None:
+            if shared_bar_features is None or not shared_bar_features.continuous:
+                return None
+        else:
+            bar_5s_ago = bars[-6]
+            bar_60s_ago = bars[-61]
 
-        # 1. 数据连续性：缺口直接放弃本 Bar（脚本同口径）
-        if current.timestamp - bar_5s_ago.timestamp != 5 * MS_PER_SECOND:
-            return None
-        if current.timestamp - bar_60s_ago.timestamp != 60 * MS_PER_SECOND:
-            return None
+            # 1. 数据连续性：缺口直接放弃本 Bar（脚本同口径）
+            if current.timestamp - bar_5s_ago.timestamp != 5 * MS_PER_SECOND:
+                return None
+            if current.timestamp - bar_60s_ago.timestamp != 60 * MS_PER_SECOND:
+                return None
 
         # 2. 信号冷却
         if self.last_signal_time is not None:
@@ -1104,14 +1155,27 @@ class DynamicSpikeShortStrategy:
                 return None
 
         # 3. 5 秒涨幅：close[i] / close[i-5] - 1
-        rise_5s = current.close / bar_5s_ago.close - Decimal("1")
+        rise_5s = (
+            shared_bar_features.rise_5s
+            if shared_bar_features is not None
+            else current.close / bar_5s_ago.close - Decimal("1")
+        )
         if rise_5s < self.rise_5s_threshold:
             return None
 
         # 4. 成交量倍数：sum(volume[i-4..i]) / (median(volume[i-60..i-1]) × 5)
-        volume_5s = sum((b.volume for b in bars[-5:]), Decimal("0"))
-        baseline_volumes = sorted(b.volume for b in bars[-61:-1])
-        median_volume = baseline_volumes[30]
+        if self._shared_feature_provider is not None:
+            shared_bar_features = self._shared_feature_provider.volume_features(bar)
+            if shared_bar_features is None:
+                return None
+            volume_5s = shared_bar_features.volume_5s
+            median_volume = shared_bar_features.median_volume_1s
+            if volume_5s is None or median_volume is None:
+                return None
+        else:
+            volume_5s = sum((b.volume for b in bars[-5:]), Decimal("0"))
+            baseline_volumes = sorted(b.volume for b in bars[-61:-1])
+            median_volume = baseline_volumes[30]
         if median_volume <= 0:
             return None
         if volume_5s / (median_volume * Decimal("5")) < self.VOLUME_MULTIPLE_5S:
@@ -1359,7 +1423,13 @@ class DynamicSpikeShortStrategy:
         if len(self.klines_5m) < self.ATR_PERIOD + 1:
             return None
 
-        atr_klines = self.klines_5m[-(self.ATR_PERIOD + 1):]
+        atr_klines = list(
+            islice(
+                self.klines_5m,
+                len(self.klines_5m) - (self.ATR_PERIOD + 1),
+                None,
+            )
+        )
         if any(
             current.open_time - previous.open_time != 5 * MS_PER_MINUTE
             for previous, current in zip(atr_klines, atr_klines[1:])
@@ -1368,8 +1438,8 @@ class DynamicSpikeShortStrategy:
 
         true_ranges = []
         for i in range(1, self.ATR_PERIOD + 1):
-            k = self.klines_5m[-i]
-            k_prev = self.klines_5m[-i - 1]
+            k = atr_klines[-i]
+            k_prev = atr_klines[-i - 1]
             true_ranges.append(
                 max(
                     k.high - k.low,
@@ -1426,6 +1496,12 @@ class DynamicSpikeBacktestStrategy:
         self._account = account
         for strategy in self.strategies.values():
             strategy.bind_account(account)
+
+    def bind_shared_feature_provider(
+        self, provider: "SpikeSharedFeatureProvider"
+    ) -> None:
+        for strategy in self.strategies.values():
+            strategy.bind_shared_feature_provider(provider)
 
     def set_trading_enabled(self, enabled: bool) -> None:
         for strategy in self.strategies.values():

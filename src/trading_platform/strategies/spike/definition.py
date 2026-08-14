@@ -6,7 +6,16 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, Protocol
 
-from trading_platform.backtest.strategy_definition import MarketDataRequirements
+from trading_platform.backtest.strategy_definition import (
+    FeatureSpec,
+    MarketDataRequirements,
+)
+
+
+SPIKE_RISE_5S_FEATURE = FeatureSpec(name="rise_5s", timeframe="1s")
+SPIKE_CANDIDATE_EXIT_FEATURE = FeatureSpec(
+    name="candidate_exit", timeframe="1m"
+)
 
 
 @dataclass(frozen=True)
@@ -15,6 +24,7 @@ class SpikeDataRequirements(MarketDataRequirements):
 
     market_timeframes: tuple[str, ...] = ("1s", "1m", "5m", "15m")
     execution_timeframe: str = "1s"
+    shared_features: frozenset[FeatureSpec] = frozenset()
     metrics_5m: bool = False
 
 
@@ -69,6 +79,13 @@ def strategy_metadata(definition: SpikeStrategyDefinition, path: str) -> dict[st
         "data_requirements": {
             "market_timeframes": list(definition.data_requirements.market_timeframes),
             "execution_timeframe": definition.data_requirements.execution_timeframe,
+            "shared_features": [
+                {"name": feature.name, "timeframe": feature.timeframe}
+                for feature in sorted(
+                    definition.data_requirements.shared_features,
+                    key=lambda feature: (feature.timeframe, feature.name),
+                )
+            ],
             "metrics_5m": definition.data_requirements.metrics_5m,
         },
     }

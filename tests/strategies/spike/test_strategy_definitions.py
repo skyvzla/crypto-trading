@@ -1,3 +1,4 @@
+from trading_platform.backtest.strategy_definition import FeatureSpec
 from trading_platform.strategies.spike.definition import load_strategy_definition
 
 
@@ -29,7 +30,28 @@ def test_versioned_strategies_are_distinct_complete_implementations():
 
 def test_strategy_data_requirements_include_execution_timeframe():
     definition = load_strategy_definition(
-        "trading_platform.strategies.spike.v2_1:V21"
+        "trading_platform.strategies.spike.v1_1:V11"
     )
     requirements = definition.data_requirements
     assert requirements.execution_timeframe in requirements.market_timeframes
+    assert requirements.shared_features == frozenset({
+        FeatureSpec(name="rise_5s", timeframe="1s"),
+        FeatureSpec(name="candidate_exit", timeframe="1m"),
+    })
+
+
+def test_shared_features_are_opt_in_per_strategy():
+    definitions = [
+        load_strategy_definition("trading_platform.strategies.spike.v1:V1"),
+        load_strategy_definition("trading_platform.strategies.spike.v2:V2"),
+        load_strategy_definition("trading_platform.strategies.spike.v2_1:V21"),
+    ]
+
+    assert all(
+        definition.data_requirements.shared_features == frozenset()
+        for definition in definitions
+    )
+    assert all(
+        not hasattr(definition, "shared_feature_provider")
+        for definition in definitions
+    )

@@ -3,6 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class FeatureSpec:
+    """策略声明的可共享行情特征。"""
+
+    name: str
+    timeframe: str
 
 
 @dataclass(frozen=True)
@@ -11,9 +20,31 @@ class MarketDataRequirements:
 
     market_timeframes: tuple[str, ...]
     execution_timeframe: str
+    shared_features: frozenset[FeatureSpec] = frozenset()
 
     def __post_init__(self) -> None:
         if not self.market_timeframes:
             raise ValueError("market_timeframes must not be empty")
         if self.execution_timeframe not in self.market_timeframes:
             raise ValueError("execution_timeframe must be included in market_timeframes")
+        shared_features = frozenset(self.shared_features)
+        object.__setattr__(self, "shared_features", shared_features)
+        invalid_timeframes = {
+            feature.timeframe
+            for feature in shared_features
+            if feature.timeframe not in self.market_timeframes
+        }
+        if invalid_timeframes:
+            names = ", ".join(sorted(invalid_timeframes))
+            raise ValueError(
+                "shared feature timeframes must be included in market_timeframes: "
+                f"{names}"
+            )
+
+
+class SharedFeatureProvider(Protocol):
+    """参数 sweep 可选的共享特征提供器接口。"""
+
+    def bind(self, consumer: object) -> None: ...
+
+    def process_event(self, event: object) -> None: ...

@@ -332,7 +332,7 @@ def test_candidate_strategy_caches_15m_and_only_recomputes_during_campaign(monke
     cached_while_flat = _kline("15m", 0)
 
     assert strategy.on_kline(cached_while_flat) == []
-    assert strategy.klines_15m == [cached_while_flat]
+    assert list(strategy.klines_15m) == [cached_while_flat]
     assert captured == []
 
     strategy.restore_campaign_timing(
@@ -344,7 +344,7 @@ def test_candidate_strategy_caches_15m_and_only_recomputes_during_campaign(monke
 
     assert strategy.on_kline(candle_during_campaign) == []
 
-    assert strategy.klines_15m == [cached_while_flat, candle_during_campaign]
+    assert list(strategy.klines_15m) == [cached_while_flat, candle_during_campaign]
     assert captured == [((), (), (cached_while_flat, candle_during_campaign))]
 
 

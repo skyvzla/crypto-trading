@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from trading_platform.strategies.spike.definition import (
+    SPIKE_CANDIDATE_EXIT_FEATURE,
+    SPIKE_RISE_5S_FEATURE,
     SpikeDataRequirements,
     SpikeStrategyDefaults,
+)
+from trading_platform.strategies.spike.shared_features import (
+    SpikeSharedFeatureProvider,
 )
 from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
 
@@ -80,8 +85,14 @@ class V11:
     name = "v1.1"
     strategy_class = SpikeV11Strategy
     data_requirements = SpikeDataRequirements(
-        market_timeframes=("1s", "1m", "5m", "15m"), metrics_5m=True
+        market_timeframes=("1s", "1m", "5m", "15m"),
+        shared_features=frozenset({
+            SPIKE_RISE_5S_FEATURE,
+            SPIKE_CANDIDATE_EXIT_FEATURE,
+        }),
+        metrics_5m=True,
     )
+    shared_feature_provider = SpikeSharedFeatureProvider
     defaults = SpikeStrategyDefaults(
         exit_policy="candidate-v1",
         prior_high_lookback_hours=4,

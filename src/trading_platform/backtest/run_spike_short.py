@@ -378,6 +378,8 @@ def create_spike_engine(
     args: argparse.Namespace,
     settings: SpikeBacktestSettings,
     events: Iterable[Event],
+    *,
+    preloaded_metrics_series: list[tuple[int, float, float]] | None = None,
 ) -> BacktestEngine:
     config = BacktestConfig(
         data_dir=settings.duckdb_path,
@@ -401,14 +403,18 @@ def create_spike_engine(
     )
     if settings.prior_high_lookback_minutes == 0:
         config.prior_high_lookback_minutes = 0
-    metrics_series = None
+    metrics_by_symbol = None
     if settings.strategy_definition.data_requirements.metrics_5m:
-        series = load_metrics_series(args.metrics_root, args.symbol)
+        series = (
+            preloaded_metrics_series
+            if preloaded_metrics_series is not None
+            else load_metrics_series(args.metrics_root, args.symbol)
+        )
         if not series:
             raise ValueError(
                 f"strategy {settings.strategy_version} requires metrics for {args.symbol}"
             )
-        metrics_series = {args.symbol: series}
+        metrics_by_symbol = {args.symbol: series}
     if args.exit_policy == "legacy-script":
         strategy = LegacyScriptExitSpikeBacktestStrategy(
             symbols=[args.symbol], total_notional=args.total_notional
@@ -442,7 +448,7 @@ def create_spike_engine(
                     "rise_5s_threshold": settings.rise_5s_threshold,
                     "prior_high_tolerance_percent": settings.prior_high_tolerance_percent,
                     "metrics_series": (
-                        metrics_series or {}
+                        metrics_by_symbol or {}
                     ).get(args.symbol),
                 }.items()
                 if key in (

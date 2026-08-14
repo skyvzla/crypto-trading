@@ -1,8 +1,10 @@
 """
 测试Dynamic Spike Short Strategy
 """
-import pytest
 from decimal import Decimal
+from collections import deque
+
+import pytest
 from trading_platform.shared.events import Bar1s, Kline, Order, Position
 from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
@@ -87,6 +89,90 @@ class TestDynamicSpikeShortStrategy:
         )
         strategy.on_kline(kline_5m)
         assert len(strategy.klines_5m) == 1
+
+    @pytest.mark.parametrize(
+        ("interval", "retained_minutes", "strategy_kwargs"),
+        [
+            ("1m", 30 * 60, {}),
+            (
+                "1m",
+                7 * 24 * 60,
+                {
+                    "rise_low_lookback_minutes": 7 * 24 * 60,
+                    "min_rise_duration_minutes": 24 * 60,
+                },
+            ),
+            ("5m", 40 * 60, {}),
+            ("15m", 40 * 60, {}),
+        ],
+    )
+    def test_kline_cache_evicts_expired_head_in_place(
+        self, interval, retained_minutes, strategy_kwargs
+    ):
+        """缓存保留 cutoff 边界 K 线，并以队列头部淘汰过期 K 线。"""
+        duration_ms = {"1m": 60_000, "5m": 300_000, "15m": 900_000}[interval]
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000"), **strategy_kwargs
+        )
+        cache_name = f"klines_{interval}"
+        cache = getattr(strategy, cache_name)
+
+        def kline_at(open_time: int) -> Kline:
+            return Kline(
+                symbol="BTCUSDT",
+                interval=interval,
+                open_time=open_time,
+                close_time=open_time + duration_ms - 1,
+                available_time=open_time + duration_ms,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            )
+
+        expired = kline_at(0)
+        boundary = kline_at(duration_ms)
+        latest = kline_at(retained_minutes * 60_000 + duration_ms)
+        for kline in (expired, boundary, latest):
+            strategy.on_kline(kline)
+
+        assert isinstance(cache, deque)
+        assert getattr(strategy, cache_name) is cache
+        assert list(cache) == [boundary, latest]
+
+    def test_kline_cache_evicts_expired_late_candle(self):
+        """迟到但仍在窗口内的 K 线随后过期时，也必须从缓存移除。"""
+        interval = "5m"
+        duration_ms = 300_000
+        retention_ms = 40 * 60 * 60_000
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000")
+        )
+
+        def kline_at(open_time: int) -> Kline:
+            return Kline(
+                symbol="BTCUSDT",
+                interval=interval,
+                open_time=open_time,
+                close_time=open_time + duration_ms - 1,
+                available_time=open_time + duration_ms,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            )
+
+        expired = kline_at(0)
+        boundary = kline_at(duration_ms)
+        latest = kline_at(retention_ms + duration_ms)
+        late = kline_at(2 * duration_ms)
+        future = kline_at(retention_ms + 3 * duration_ms)
+        for kline in (expired, boundary, latest, late, future):
+            assert strategy.on_kline(kline) == []
+
+        assert list(strategy.klines_5m) == [latest, future]
 
     def test_signal_detection_insufficient_data(self):
         """测试数据不足时不产生信号"""
