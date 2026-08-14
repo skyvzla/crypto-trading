@@ -123,6 +123,27 @@ def test_completed_keeps_only_recent_max():
     assert names == ["T4", "T3", "T2"]
 
 
+def test_completed_panel_keeps_a_fixed_height():
+    dashboard = TaskDashboard(title="t", total=3, stream=StringIO())
+
+    def render_lines() -> list[str]:
+        output = StringIO()
+        Console(file=output, force_terminal=False, width=120).print(
+            dashboard._render()
+        )
+        return output.getvalue().splitlines()
+
+    empty_lines = render_lines()
+    for name in ("T0", "T1", "T2"):
+        dashboard.task_start(name)
+        dashboard.task_done(name)
+
+    completed_lines = render_lines()
+
+    assert len(completed_lines) == len(empty_lines)
+    assert "T2" in "\n".join(completed_lines)
+
+
 def test_running_sorted_by_start_time():
     import time
 
@@ -325,6 +346,46 @@ def test_start_is_idempotent(monkeypatch):
     plain_dashboard.start()
     plain_dashboard.close()
     assert plain_stream.getvalue().count("event=start") == 1
+
+
+def test_tty_uses_one_hertz_clock_refresh_without_rich_auto_refresh(monkeypatch):
+    refreshed = threading.Event()
+
+    class TTYStream(StringIO):
+        def isatty(self):
+            return True
+
+    class FakeLive:
+        instances = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.refreshes = 0
+            self.__class__.instances.append(self)
+
+        def start(self):
+            pass
+
+        def refresh(self):
+            self.refreshes += 1
+            refreshed.set()
+
+        def stop(self):
+            pass
+
+    monkeypatch.setattr(progress, "Live", FakeLive)
+    monkeypatch.setattr(progress, "_CLOCK_REFRESH_SECONDS", 0.01, raising=False)
+    dashboard = TaskDashboard(title="backtest", stream=TTYStream())
+    dashboard.start()
+
+    live = FakeLive.instances[-1]
+    assert live.kwargs["auto_refresh"] is False
+    assert refreshed.wait(timeout=1)
+
+    dashboard.close()
+    refreshes_after_close = live.refreshes
+    threading.Event().wait(0.03)
+    assert live.refreshes == refreshes_after_close
 
 
 def test_tty_live_reads_current_dashboard_state(monkeypatch):

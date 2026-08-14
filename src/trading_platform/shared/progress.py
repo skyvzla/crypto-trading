@@ -23,6 +23,7 @@ from rich.table import Table
 from rich.text import Text
 
 _HMS_FIELDS = 60 * 60
+_CLOCK_REFRESH_SECONDS = 1.0
 
 
 def _format_duration(seconds: float) -> str:
@@ -92,6 +93,8 @@ class TaskDashboard:
         self._completed: deque[CompletedItem] = deque(maxlen=self._max_completed)
         self._console: Console | None = None
         self._live: Live | None = None
+        self._clock_stop: threading.Event | None = None
+        self._clock_thread: threading.Thread | None = None
         self._started = False
         self._closed = False
 
@@ -125,7 +128,7 @@ class TaskDashboard:
             console = Console(file=self._stream, highlight=False)
             live = Live(
                 console=console,
-                refresh_per_second=4,
+                auto_refresh=False,
                 transient=False,
                 screen=False,
                 get_renderable=self._render,
@@ -135,10 +138,30 @@ class TaskDashboard:
             except Exception:
                 live.stop()
                 raise
+            clock_stop = threading.Event()
+            clock_thread = threading.Thread(
+                target=self._refresh_clock,
+                args=(clock_stop,),
+                name="task-dashboard-clock",
+                daemon=True,
+            )
             with self._lock:
                 self._console = console
                 self._live = live
+                self._clock_stop = clock_stop
+                self._clock_thread = clock_thread
                 self._started = True
+            try:
+                clock_thread.start()
+            except Exception:
+                with self._lock:
+                    self._console = None
+                    self._live = None
+                    self._clock_stop = None
+                    self._clock_thread = None
+                    self._started = False
+                live.stop()
+                raise
 
     def task_start(self, name: str) -> None:
         with self._lock:
@@ -196,10 +219,18 @@ class TaskDashboard:
                 live = self._live
                 self._live = None
                 self._console = None
+                clock_stop = self._clock_stop
+                clock_thread = self._clock_thread
+                self._clock_stop = None
+                self._clock_thread = None
                 done = self._done
                 total = self._total
+            if clock_stop is not None:
+                clock_stop.set()
             if live is not None:
                 live.stop()
+        if clock_thread is not None and clock_thread is not threading.current_thread():
+            clock_thread.join()
         if self._tty:
             return
         encoded_detail = f" detail={_encode_text(detail)}" if detail else ""
@@ -213,7 +244,7 @@ class TaskDashboard:
             flush=True,
         )
 
-    def _refresh(self) -> None:
+    def _refresh(self, *, force: bool = False) -> None:
         if not self._tty:
             self._emit_plain_progress()
             return
@@ -222,10 +253,16 @@ class TaskDashboard:
             with self._lock:
                 now = time.monotonic()
                 live = self._live
-                if live is None or now - self._last_update < 0.2:
+                if live is None or (
+                    not force and now - self._last_update < 0.2
+                ):
                     return
                 self._last_update = now
             live.refresh()
+
+    def _refresh_clock(self, stop: threading.Event) -> None:
+        while not stop.wait(_CLOCK_REFRESH_SECONDS):
+            self._refresh(force=True)
 
     def _emit_plain_progress(self) -> None:
         with self._lock:
@@ -292,8 +329,13 @@ class TaskDashboard:
                 + Text(item.status, style="green" if item.status == "OK" else "red")
                 + Text("  " + _format_duration(item.duration_s))
             )
+        if not completed_block:
+            completed_block.append(Text("  (none)"))
+        completed_block.extend(
+            Text("  ") for _ in range(self._max_completed - len(completed_block))
+        )
         completed_panel = Panel(
-            Group(*completed_block) if completed_block else Text("  (none)"),
+            Group(*completed_block),
             title="Completed",
             border_style="green",
             padding=(0, 1),
