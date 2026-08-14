@@ -152,6 +152,13 @@ candidate-v1 已接 replay/testnet 共用策略和 Redis/WAL 恢复，但旧阈�
 - 行情层提供 WS 实时订阅与 HTTP 历史 K 线双栈，HTTP 只返回已完成 K 线，不绕过实时门禁
 - Kline/Tick 实时策略基类消费 `/quality`，质量未知或降级时不处理旧快照和 Pub/Sub Bar
 
+**已补齐**（2026-08-14）：
+- `Bar1s` 携带每秒首尾 aggTrade ID，Market 发布前先写入按币种裁剪的 Redis Stream，再发送 Pub/Sub。
+- Spike 按币种验证消费水位：重复跳过，缺口立即关闭开仓并撤销非 `reduce-only` 入场单；优先回放 Redis Stream，不足时调用只允许 1000 笔连续 aggTrade 的 Market API。
+- 回放期间继续推进持仓退出逻辑，但不允许历史信号追单；恢复后需要 60 个实时连续 Bar 才重新开放开仓。
+- Watchdog 检测 Market `instance_epoch` 变化后立即重注册订阅并重建水位，不再等待五分钟安全扫描。
+- 线上环境不运行历史归档或历史下载；Parquet/DuckDB 历史数据只由本地工具准备并供回测只读。
+
 2026-08-08 的正式长稳中，Binance 公共 WS ping timeout 后用 26 秒完成第三次重连；期间
 aggTrade 与 1m Kline 出现确定缺口。Market 保持 503、Spike 关闭 market/bar 门禁且账户为空，
 证明 fail-closed 生效；也证明在确定 REST 回补/对账规则前，单纯重连不能完成自动恢复。

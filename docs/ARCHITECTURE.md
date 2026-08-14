@@ -15,9 +15,9 @@
 
 ## 1. 行情数据层
 
-负责 Binance 行情接入、combined stream 解包、aggTrade 聚合为完成的 1s Bar、已完成 K 线存储、Redis 实时分发、历史归档和订阅租约。
+线上 Market 负责 Binance 行情接入、combined stream 解包、aggTrade 聚合为完成的 1s Bar、已完成 K 线存储、Redis 实时与短期流分发、数据连续性和订阅租约；不运行历史归档或历史下载。
 
-策略只能接收完成的 `Bar1s`，不能直接消费 tick。Redis、DuckDB/Parquet 是数据层的基础设施，不构成额外业务层。
+策略只能接收完成的 `Bar1s`，不能直接消费 tick。缺口优先从 Redis 短期流回放，不足时通过 Market API 做有界 REST 回补。本地归档工具负责准备 Parquet 分区与 DuckDB catalog/query，回测只读这些本地历史数据。Redis、DuckDB/Parquet 是数据层的基础设施，不构成额外业务层。
 
 ## 2. 策略执行层
 

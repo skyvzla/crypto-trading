@@ -14,9 +14,10 @@ from typing import Any
 
 import redis.asyncio as redis
 import uvicorn
-from fastapi import FastAPI, Query, Response, status
+from fastapi import FastAPI, HTTPException, Query, Response, status
 
 from trading_platform.market.api.routes import (
+    Bar1sRecoveryResponse,
     HealthResponse,
     KlineRangeResponse,
     QualityResponse,
@@ -601,6 +602,54 @@ def create_app(
         return KlineRangeResponse(
             symbol=symbol.upper(), interval=interval,
             klines=[kline.to_dict() for kline in klines],
+        )
+
+    @app.get("/bar1s/{symbol}/recover", response_model=Bar1sRecoveryResponse)
+    async def recover_bar1s(
+        symbol: str,
+        from_id: int = Query(..., ge=0),
+        to_id: int = Query(..., ge=0),
+    ) -> Bar1sRecoveryResponse:
+        """按 aggTrade ID 回补短缺口；不承担历史行情下载。"""
+        if from_id > to_id:
+            raise HTTPException(status_code=400, detail="from_id must not exceed to_id")
+        count = to_id - from_id + 1
+        if count > service.recovery.aggtrade_limit:
+            raise HTTPException(status_code=400, detail="recovery range exceeds 1000 trades")
+        try:
+            rows = await service.rest_client.get_agg_trades(
+                symbol.upper(), from_id=from_id, limit=count
+            )
+            trades = service.recovery.aggtrades(
+                rows,
+                expected_start_id=from_id,
+                expected_end_id=to_id,
+            )
+            aggregator = Bar1sAggregator()
+            bars = []
+            for trade in trades:
+                bars.extend(
+                    aggregator.add_trade(
+                        symbol.upper(),
+                        trade["price"],
+                        trade["quantity"],
+                        trade["timestamp"],
+                        trade["agg_trade_id"],
+                    )
+                )
+            bars.extend(aggregator.flush_symbol(symbol.upper()))
+        except (RecoveryError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.warning("1s Bar 缺口回补失败: %s", type(exc).__name__)
+            raise HTTPException(
+                status_code=503, detail="market data recovery unavailable"
+            ) from exc
+        return Bar1sRecoveryResponse(
+            symbol=symbol.upper(),
+            from_id=from_id,
+            to_id=to_id,
+            bars=[bar.to_dict() for bar in bars],
         )
 
     # 更新健康检查，返回运行时长

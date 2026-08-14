@@ -6,7 +6,6 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from decimal import Decimal
 
 import redis.asyncio as redis
 
@@ -43,20 +42,13 @@ class ChannelDeliveryState:
         }
 
 
-class DecimalEncoder(json.JSONEncoder):
-    """处理 Decimal 类型的 JSON 编码器"""
-
-    def default(self, obj):
-        if isinstance(obj, Decimal):
-            return str(obj)
-        return super().default(obj)
-
-
 class RedisPublisher:
     """
     Redis Pub/Sub 发布器
     发布 1s Bar 到 bar1s:{symbol} 通道
     """
+
+    STREAM_MAXLEN = 900
 
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
@@ -74,24 +66,24 @@ class RedisPublisher:
         """
         channel = f"bar1s:{bar.symbol}"
 
-        # 序列化为 JSON
-        payload = {
-            "symbol": bar.symbol,
-            "timestamp": bar.timestamp,
-            "available_time": bar.available_time,
-            "open": str(bar.open),
-            "high": str(bar.high),
-            "low": str(bar.low),
-            "close": str(bar.close),
-            "volume": str(bar.volume),
-            "trade_count": bar.trade_count,
-            "vwap": str(bar.vwap),
-        }
-
-        message = json.dumps(payload, cls=DecimalEncoder)
+        payload = bar.to_dict()
+        payload.pop("type_priority", None)
+        payload.pop("sequence", None)
+        if bar.first_aggregate_trade_id is None:
+            payload.pop("first_aggregate_trade_id", None)
+        if bar.last_aggregate_trade_id is None:
+            payload.pop("last_aggregate_trade_id", None)
+        message = json.dumps(payload)
+        stream = f"bar1s:stream:{bar.symbol}"
 
         try:
-            # 发布到 Redis
+            # Stream 是短期传输日志；必须先落盘，Pub/Sub 消费者才能可靠回放。
+            await self.redis.xadd(
+                stream,
+                {"data": message},
+                maxlen=self.STREAM_MAXLEN,
+                approximate=True,
+            )
             subscriber_count = await self.redis.publish(channel, message)
             state = self._delivery.setdefault(
                 channel, ChannelDeliveryState(channel=channel)

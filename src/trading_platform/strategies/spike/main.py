@@ -100,6 +100,9 @@ def require_viable_entry_notional(
 class SpikeLiveProcess:
     """拥有 Spike 进程全部资源，并按 fail-closed 顺序启动和关闭。"""
 
+    CONTINUITY_STABLE_BARS = 60
+    STREAM_RECOVERY_LIMIT = 900
+
     def __init__(
         self,
         settings: SpikeLiveSettings,
@@ -133,6 +136,10 @@ class SpikeLiveProcess:
         self._tasks: list[asyncio.Task] = []
         self._last_kline: dict[tuple[str, str], int] = {}
         self._last_bar_received_monotonic: dict[str, float] = {}
+        self._last_bar_trade_id: dict[str, int] = {}
+        self._bar_continuity_streak: dict[str, int] = {}
+        self._continuity_failed_symbols: set[str] = set()
+        self._market_instance_epoch: str | None = None
         self.http: httpx.AsyncClient | None = None
         self.redis: redis.Redis | None = None
         self.runtime = None
@@ -404,6 +411,7 @@ class SpikeLiveProcess:
             "execution",
             "market",
             "bar_stream",
+            "bar_continuity",
             "subcategory",
             "campaign",
             "exchange_symbols",
@@ -656,6 +664,13 @@ class SpikeLiveProcess:
         for attempt in range(attempts):
             try:
                 health = (await self.http.get("/health")).json()
+                epoch = health.get("instance_epoch")
+                if not isinstance(epoch, str) or not epoch:
+                    raise RuntimeError("market health has no instance_epoch")
+                if self._market_instance_epoch is None:
+                    self._market_instance_epoch = epoch
+                elif epoch != self._market_instance_epoch:
+                    await self._handle_market_epoch_change(epoch)
                 quality_response = await self.http.get("/quality")
                 quality_response.raise_for_status()
                 quality = quality_response.json()
@@ -673,6 +688,22 @@ class SpikeLiveProcess:
             if attempt + 1 < attempts:
                 await asyncio.sleep(2)
         raise RuntimeError("market layer is not ready or uses a different environment")
+
+    async def _handle_market_epoch_change(self, epoch: str) -> None:
+        """Market 重启会丢失内存订阅，立即重注册并重建消费水位。"""
+        assert self.gate is not None
+        assert self.coordinator is not None
+        previous = self._market_instance_epoch
+        self._last_bar_trade_id.clear()
+        self._bar_continuity_streak.clear()
+        self._last_bar_received_monotonic.clear()
+        self._continuity_failed_symbols = set(self._market_symbols())
+        self.gate.set_condition("bar_continuity", False)
+        self.gate.set_condition("bar_stream", False)
+        await self.coordinator.cancel_open_entry_orders()
+        await self._register_market_subscriptions()
+        self._market_instance_epoch = epoch
+        logger.warning("Market instance changed: %s -> %s", previous, epoch)
 
     async def _start_bar_consumer(self) -> None:
         """订阅 Redis 后才允许等待依赖消费者存在的市场质量门禁。"""
@@ -713,11 +744,7 @@ class SpikeLiveProcess:
                     raise RuntimeError(
                         f"unexpected bar symbol on managed subscription: {bar.symbol}"
                     )
-                self._last_bar_received_monotonic[bar.symbol] = (
-                    asyncio.get_running_loop().time()
-                )
-                self._refresh_bar_stream_gate()
-                await self.coordinator.on_bar1s(bar)
+                await self._handle_live_bar(bar)
         except asyncio.CancelledError:
             raise
         except BaseException:
@@ -726,6 +753,147 @@ class SpikeLiveProcess:
             raise
         finally:
             await pubsub.aclose()
+
+    async def _handle_live_bar(self, bar: Bar1s) -> None:
+        """校验逐币种水位，必要时回放缺口，然后交给策略串行处理。"""
+        assert self.coordinator is not None
+        self._last_bar_received_monotonic[bar.symbol] = (
+            asyncio.get_running_loop().time()
+        )
+        self._refresh_bar_stream_gate()
+
+        first_id = bar.first_aggregate_trade_id
+        last_id = bar.last_aggregate_trade_id
+        previous_id = self._last_bar_trade_id.get(bar.symbol)
+        if first_id is None or last_id is None or first_id > last_id:
+            await self._fail_bar_continuity(bar.symbol, "missing or invalid watermark")
+            self._last_bar_trade_id.pop(bar.symbol, None)
+            self._bar_continuity_streak[bar.symbol] = 0
+            await self.coordinator.on_bar1s(bar)
+            return
+
+        if previous_id is not None and last_id <= previous_id:
+            return
+
+        if previous_id is None:
+            await self._fail_bar_continuity(bar.symbol, "establishing initial watermark")
+            self._bar_continuity_streak[bar.symbol] = 0
+
+        if previous_id is not None and first_id != previous_id + 1:
+            await self._fail_bar_continuity(
+                bar.symbol,
+                f"aggTrade gap {previous_id + 1}..{first_id - 1}",
+            )
+            recovered = []
+            if first_id > previous_id + 1:
+                recovered = await self._recover_bar_gap(
+                    bar.symbol, previous_id + 1, first_id - 1
+                )
+            for recovered_bar in recovered:
+                await self.coordinator.on_bar1s(recovered_bar)
+            self._bar_continuity_streak[bar.symbol] = 0
+
+        self._last_bar_trade_id[bar.symbol] = last_id
+        self._bar_continuity_streak[bar.symbol] = (
+            self._bar_continuity_streak.get(bar.symbol, 0) + 1
+        )
+        await self.coordinator.on_bar1s(bar)
+        self._refresh_bar_continuity_gate()
+
+    async def _fail_bar_continuity(self, symbol: str, reason: str) -> None:
+        assert self.gate is not None
+        assert self.coordinator is not None
+        self.gate.set_condition("bar_continuity", False)
+        if symbol not in self._continuity_failed_symbols:
+            self._continuity_failed_symbols.add(symbol)
+            await self.coordinator.cancel_open_entry_orders()
+        logger.warning("%s 关闭开仓行情门禁: %s", symbol, reason)
+
+    async def _recover_bar_gap(
+        self, symbol: str, from_id: int, to_id: int
+    ) -> list[Bar1s]:
+        assert self.redis is not None
+        assert self.http is not None
+        try:
+            rows = await self.redis.xrevrange(
+                f"bar1s:stream:{symbol}",
+                max="+",
+                min="-",
+                count=self.STREAM_RECOVERY_LIMIT,
+            )
+            stream_bars = []
+            for _, fields in rows:
+                raw = fields.get("data") or fields.get(b"data")
+                if raw is not None:
+                    stream_bars.append(Bar1s.from_json(raw))
+            recovered = self._closed_bar_range(stream_bars, from_id, to_id)
+            if recovered:
+                return recovered
+
+            response = await self.http.get(
+                f"/bar1s/{symbol}/recover",
+                params={"from_id": from_id, "to_id": to_id},
+            )
+            response.raise_for_status()
+            api_bars = [Bar1s.from_dict(item) for item in response.json()["bars"]]
+            recovered = self._closed_bar_range(api_bars, from_id, to_id)
+            if not recovered:
+                raise RuntimeError("recovery response does not close the gap")
+            return recovered
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "%s 行情缺口无法恢复，保持开仓关闭: %s: %s",
+                symbol,
+                type(exc).__name__,
+                exc,
+            )
+            return []
+
+    @staticmethod
+    def _closed_bar_range(
+        bars: list[Bar1s], from_id: int, to_id: int
+    ) -> list[Bar1s]:
+        candidates = sorted(
+            (
+                bar
+                for bar in bars
+                if bar.first_aggregate_trade_id is not None
+                and bar.last_aggregate_trade_id is not None
+                and bar.last_aggregate_trade_id >= from_id
+                and bar.first_aggregate_trade_id <= to_id
+            ),
+            key=lambda item: (item.first_aggregate_trade_id or -1, item.timestamp),
+        )
+        recovered: list[Bar1s] = []
+        cursor = from_id
+        for candidate in candidates:
+            first_id = candidate.first_aggregate_trade_id
+            last_id = candidate.last_aggregate_trade_id
+            assert first_id is not None and last_id is not None
+            if last_id < cursor:
+                continue
+            if first_id != cursor or last_id > to_id:
+                return []
+            recovered.append(candidate)
+            cursor = last_id + 1
+            if cursor == to_id + 1:
+                return recovered
+        return []
+
+    def _refresh_bar_continuity_gate(self) -> bool:
+        assert self.gate is not None
+        symbols = self._market_symbols()
+        ready = bool(symbols) and all(
+            self._bar_continuity_streak.get(symbol, 0)
+            >= self.CONTINUITY_STABLE_BARS
+            for symbol in symbols
+        )
+        if ready:
+            self._continuity_failed_symbols.difference_update(symbols)
+        self.gate.set_condition("bar_continuity", ready)
+        return ready
 
     async def _kline_loop(self) -> None:
         assert self.redis is not None
@@ -847,8 +1015,17 @@ class SpikeLiveProcess:
         """缩短市场质量失效到关闭准入之间的时间。"""
         while True:
             await asyncio.sleep(5)
-            await self._refresh_market_gate()
-            self._refresh_bar_stream_gate()
+            await self._refresh_market_safety_once()
+
+    async def _refresh_market_safety_once(self) -> bool:
+        """关闭不可靠行情准入，并撤销仍可能成交的入场挂单。"""
+        assert self.coordinator is not None
+        market_ready = await self._refresh_market_gate()
+        stream_ready = self._refresh_bar_stream_gate()
+        ready = market_ready and stream_ready
+        if not ready:
+            await self.coordinator.cancel_open_entry_orders()
+        return ready
 
     def _refresh_bar_stream_gate(self, *, now: float | None = None) -> bool:
         """检测本进程 Redis 交付是否静默，不依赖上游健康声明。"""

@@ -53,8 +53,8 @@ scripts/deploy.sh
 
 账本迁移 `0003` 增加策略运行状态：Spike 每 5 秒写入心跳，15 秒未更新显示为 `stale`；
 `/api/v1/strategy-runtime-status` 和 Web 将账本数据库健康与策略实例状态分开展示。
-当前宿主机全量回归为 `431 passed, 33 skipped, 1 warning`，Compose 真实 PostgreSQL/Redis
-全量为 `460 passed, 1 skipped, 1 warning`。外部告警通道、Web 身份权限、
+当前 Compose 真实 PostgreSQL/Redis 全量回归为 `737 passed, 1 skipped, 1 warning`。
+外部告警通道、Web 身份权限、
 正式 live 阈值以及自然策略信号下的退出仍未完成，`candidate-v1` 继续冻结；
 自然策略信号下的保护退出与盈利管理仍需依据具体数据评审，因此不要填入正式账户 API Key。
 

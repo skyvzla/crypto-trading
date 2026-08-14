@@ -86,6 +86,167 @@ def _entry(tier=1):
     )
 
 
+def _watermarked_bar(trade_id: int, *, timestamp: int | None = None) -> Bar1s:
+    event_time = trade_id * 1_000 if timestamp is None else timestamp
+    return Bar1s(
+        symbol="BTCUSDT",
+        timestamp=event_time,
+        available_time=event_time + 1_000,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("99"),
+        close=Decimal("100"),
+        volume=Decimal("1"),
+        trade_count=1,
+        vwap=Decimal("100"),
+        first_aggregate_trade_id=trade_id,
+        last_aggregate_trade_id=trade_id,
+    )
+
+
+def _continuity_process() -> SpikeLiveProcess:
+    process = SpikeLiveProcess(
+        SpikeLiveSettings(
+            account_id="spike-test", symbols=["BTCUSDT"], total_notional="20"
+        ),
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    strategy = StrategyStub()
+    process.gate = CompositeEntryGate(strategy)
+    process.exchange_symbol_snapshot = ExchangeSymbolSnapshot(
+        allowed_symbols=frozenset({"BTCUSDT"}),
+        blocked_symbols=frozenset(),
+        blocked_reasons={},
+    )
+    process.coordinator = Mock(
+        account=Mock(symbols_with_live_risk=Mock(return_value=set())),
+        on_bar1s=AsyncMock(),
+        cancel_open_entry_orders=AsyncMock(),
+    )
+    process.redis = AsyncMock()
+    process.http = AsyncMock()
+    return process
+
+
+@pytest.mark.asyncio
+async def test_bar_continuity_requires_stable_live_bars_and_skips_duplicates():
+    process = _continuity_process()
+    process.CONTINUITY_STABLE_BARS = 2
+
+    await process._handle_live_bar(_watermarked_bar(10))
+    assert process.gate.condition("bar_continuity") is False
+    process.coordinator.cancel_open_entry_orders.assert_awaited_once_with()
+
+    await process._handle_live_bar(_watermarked_bar(11))
+    assert process.gate.condition("bar_continuity") is True
+
+    await process._handle_live_bar(_watermarked_bar(11))
+    assert process.coordinator.on_bar1s.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_bar_gap_replays_redis_stream_with_entries_closed():
+    process = _continuity_process()
+    process._last_bar_trade_id["BTCUSDT"] = 10
+    process._bar_continuity_streak["BTCUSDT"] = process.CONTINUITY_STABLE_BARS
+    process.gate.set_condition("bar_continuity", True)
+    recovered = _watermarked_bar(11)
+    process.redis.xrevrange = AsyncMock(
+        return_value=[("1-0", {"data": recovered.to_json()})]
+    )
+
+    await process._handle_live_bar(_watermarked_bar(12))
+
+    assert [call.args[0] for call in process.coordinator.on_bar1s.await_args_list] == [
+        recovered,
+        _watermarked_bar(12),
+    ]
+    process.http.get.assert_not_awaited()
+    process.coordinator.cancel_open_entry_orders.assert_awaited_once_with()
+    assert process.gate.condition("bar_continuity") is False
+
+
+@pytest.mark.asyncio
+async def test_bar_gap_falls_back_to_market_api_when_stream_is_incomplete():
+    process = _continuity_process()
+    process._last_bar_trade_id["BTCUSDT"] = 20
+    process._bar_continuity_streak["BTCUSDT"] = process.CONTINUITY_STABLE_BARS
+    process.redis.xrevrange = AsyncMock(return_value=[])
+    recovered = _watermarked_bar(21)
+    response = Mock()
+    response.raise_for_status = Mock()
+    response.json.return_value = {"bars": [recovered.to_dict()]}
+    process.http.get = AsyncMock(return_value=response)
+
+    await process._handle_live_bar(_watermarked_bar(22))
+
+    process.http.get.assert_awaited_once_with(
+        "/bar1s/BTCUSDT/recover", params={"from_id": 21, "to_id": 21}
+    )
+    assert process.coordinator.on_bar1s.await_args_list[0].args[0] == recovered
+    assert process.gate.condition("bar_continuity") is False
+
+
+@pytest.mark.asyncio
+async def test_unrecoverable_bar_gap_stays_closed_but_delivers_current_bar_for_exit():
+    process = _continuity_process()
+    process._last_bar_trade_id["BTCUSDT"] = 30
+    process._bar_continuity_streak["BTCUSDT"] = process.CONTINUITY_STABLE_BARS
+    process.redis.xrevrange = AsyncMock(return_value=[])
+    response = Mock()
+    response.raise_for_status.side_effect = RuntimeError("market unavailable")
+    process.http.get = AsyncMock(return_value=response)
+    current = _watermarked_bar(32)
+
+    await process._handle_live_bar(current)
+
+    process.coordinator.on_bar1s.assert_awaited_once_with(current)
+    process.coordinator.cancel_open_entry_orders.assert_awaited_once_with()
+    assert process._last_bar_trade_id["BTCUSDT"] == 32
+    assert process.gate.condition("bar_continuity") is False
+
+
+@pytest.mark.asyncio
+async def test_market_epoch_change_closes_entries_and_reregisters_immediately():
+    process = _continuity_process()
+    process._market_instance_epoch = "old-epoch"
+    process._last_bar_trade_id["BTCUSDT"] = 10
+    process._bar_continuity_streak["BTCUSDT"] = process.CONTINUITY_STABLE_BARS
+    process._register_market_subscriptions = AsyncMock()
+    health = Mock()
+    health.json.return_value = {
+        "status": "ready",
+        "instance_epoch": "new-epoch",
+        "binance_testnet": True,
+    }
+    quality = Mock()
+    quality.raise_for_status = Mock()
+    quality.json.return_value = {"ready": True}
+    process.http.get.side_effect = [health, quality]
+
+    assert await process._refresh_market_gate() is True
+
+    assert process._market_instance_epoch == "new-epoch"
+    assert process._last_bar_trade_id == {}
+    assert process.gate.condition("bar_continuity") is False
+    process.coordinator.cancel_open_entry_orders.assert_awaited_once_with()
+    process._register_market_subscriptions.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_market_watchdog_cancels_entries_when_bar_stream_is_stale():
+    process = _continuity_process()
+    process._refresh_market_gate = AsyncMock(return_value=True)
+    process._refresh_bar_stream_gate = Mock(return_value=False)
+
+    assert await process._refresh_market_safety_once() is False
+
+    process.coordinator.cancel_open_entry_orders.assert_awaited_once_with()
+
+
 @pytest.mark.asyncio
 async def test_exchange_symbol_admission_cancels_only_blocked_entry_orders():
     strategy = StrategyStub()
@@ -130,6 +291,44 @@ async def test_exchange_symbol_admission_cancels_only_blocked_entry_orders():
     assert blocked == frozenset({"HFTUSDT"})
     assert strategy.blocked_entry_symbols == frozenset({"HFTUSDT"})
     account.cancel_order.assert_called_once_with("blocked-entry")
+    account.flush_cancellations.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_market_data_failure_cancels_entries_but_preserves_reduce_only_orders():
+    strategy = StrategyStub()
+    entry = Mock(
+        order_id="entry",
+        symbol="BTCUSDT",
+        reduce_only=False,
+        status="NEW",
+    )
+    exit_order = Mock(
+        order_id="exit",
+        symbol="BTCUSDT",
+        reduce_only=True,
+        status="NEW",
+    )
+    account = Mock(
+        iter_orders=Mock(return_value=(entry, exit_order)),
+        cancel_order=Mock(return_value=True),
+        flush_cancellations=AsyncMock(return_value=("entry",)),
+        has_pending_cancellations=False,
+        refresh_positions=AsyncMock(),
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+    )
+
+    await coordinator.cancel_open_entry_orders()
+
+    account.cancel_order.assert_called_once_with("entry")
     account.flush_cancellations.assert_awaited_once()
 
 

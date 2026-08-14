@@ -462,6 +462,26 @@ class SpikeExecutionCoordinator:
             await self._cancel_blocked_entry_orders(blocked)
             return blocked
 
+    async def cancel_open_entry_orders(
+        self, symbols: set[str] | frozenset[str] | None = None
+    ) -> None:
+        """关闭行情准入时撤销入场单，不触碰 reduce-only 风险退出单。"""
+        async with self._lock:
+            selected = None if symbols is None else frozenset(symbols)
+            cancellation_requested = False
+            for order in self.account.iter_orders():
+                if (
+                    not order.reduce_only
+                    and order.status in {"NEW", "PARTIALLY_FILLED"}
+                    and (selected is None or order.symbol in selected)
+                ):
+                    cancellation_requested = (
+                        self.account.cancel_order(order.order_id)
+                        or cancellation_requested
+                    )
+            if cancellation_requested:
+                await self._flush_cancellations()
+
     async def reconcile_exchange_symbol_admission(self) -> None:
         """Recheck orders that just changed from unknown to a cancellable state."""
 

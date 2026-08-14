@@ -45,6 +45,16 @@ async def test_redis_publisher_detects_and_reports_consumer_disconnect(caplog):
     assert publisher.delivery_ready is False
     assert publisher.delivery_issue_count == 1
     assert "消费端断流" in caplog.text
+    stream_call = redis_client.xadd.await_args
+    assert stream_call.args[0] == "bar1s:stream:BTCUSDT"
+    assert json.loads(stream_call.args[1]["data"])["symbol"] == "BTCUSDT"
+    assert "first_aggregate_trade_id" not in json.loads(
+        stream_call.args[1]["data"]
+    )
+    assert stream_call.kwargs == {
+        "maxlen": RedisPublisher.STREAM_MAXLEN,
+        "approximate": True,
+    }
 
     await publisher.publish_bar1s(_bar())
     state = publisher.delivery_snapshot()["bar1s:BTCUSDT"]
@@ -52,6 +62,18 @@ async def test_redis_publisher_detects_and_reports_consumer_disconnect(caplog):
     assert state["last_subscriber_count"] == 2
     assert publisher.delivery_ready is True
     assert publisher.delivery_issue_count == 0
+
+
+@pytest.mark.asyncio
+async def test_redis_publisher_writes_replay_stream_before_pubsub():
+    redis_client = AsyncMock()
+    calls = []
+    redis_client.xadd.side_effect = lambda *args, **kwargs: calls.append("stream")
+    redis_client.publish.side_effect = lambda *args, **kwargs: calls.append("pubsub") or 1
+
+    await RedisPublisher(redis_client).publish_bar1s(_bar())
+
+    assert calls == ["stream", "pubsub"]
 
 
 def test_aggregator_returns_every_bar_closed_by_one_trade():
@@ -70,6 +92,42 @@ def test_aggregator_returns_every_bar_closed_by_one_trade():
     assert [bar.timestamp for bar in aggregator.add_trade(
         "BTCUSDT", Decimal("50"), Decimal("1"), 5000
     )] == [2000, 3000]
+
+
+def test_bar1s_watermarks_are_serialized_and_old_payloads_remain_compatible():
+    bar = _bar()
+    old_payload = bar.to_dict()
+    old_payload.pop("first_aggregate_trade_id")
+    old_payload.pop("last_aggregate_trade_id")
+
+    assert Bar1s.from_dict(old_payload).first_aggregate_trade_id is None
+    assert Bar1s.from_dict(old_payload).last_aggregate_trade_id is None
+
+    watermarked = Bar1s.from_dict(
+        {
+            **old_payload,
+            "first_aggregate_trade_id": 101,
+            "last_aggregate_trade_id": 103,
+        }
+    )
+    assert Bar1s.from_json(watermarked.to_json()) == watermarked
+
+
+def test_aggregator_emits_first_and_last_aggregate_trade_ids():
+    aggregator = Bar1sAggregator()
+    aggregator.add_trade(
+        "BTCUSDT", Decimal("10"), Decimal("1"), 1_100, aggregate_trade_id=102
+    )
+    aggregator.add_trade(
+        "BTCUSDT", Decimal("11"), Decimal("1"), 1_200, aggregate_trade_id=101
+    )
+
+    emitted = aggregator.add_trade(
+        "BTCUSDT", Decimal("12"), Decimal("1"), 2_000, aggregate_trade_id=103
+    )
+
+    assert emitted[0].first_aggregate_trade_id == 101
+    assert emitted[0].last_aggregate_trade_id == 102
 
 
 def test_aggregator_drops_trade_for_an_already_published_second():
@@ -146,6 +204,7 @@ async def test_health_fails_closed_when_active_pubsub_has_no_consumers():
 
     app, service = create_app(MarketLayerConfig(), "test-epoch")
     service.redis.ping = AsyncMock(return_value=True)
+    service.redis_publisher.redis.xadd = AsyncMock(return_value="1-0")
     service.redis_publisher.redis.publish = AsyncMock(return_value=0)
     await service.redis_publisher.publish_bar1s(_bar())
     service.subscription_manager.update_subscription(
@@ -176,6 +235,42 @@ def test_historical_kline_http_stack_returns_completed_range():
     assert response.status_code == 200
     assert response.json()["source"] == "binance_rest"
     assert len(response.json()["klines"]) == 2
+
+
+def test_bar1s_recovery_http_requires_a_closed_contiguous_id_range():
+    from trading_platform.market.main import create_app
+
+    app, service = create_app(MarketLayerConfig(), "bar-recovery-test")
+    service.rest_client.get_agg_trades = AsyncMock(return_value=[
+        {"a": 11, "p": "100", "q": "1", "f": 21, "l": 21, "T": 1_100, "m": True},
+        {"a": 12, "p": "101", "q": "2", "f": 22, "l": 22, "T": 1_500, "m": False},
+    ])
+
+    response = TestClient(app).get(
+        "/bar1s/BTCUSDT/recover?from_id=11&to_id=12"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["bars"][0]["first_aggregate_trade_id"] == 11
+    assert response.json()["bars"][0]["last_aggregate_trade_id"] == 12
+    service.rest_client.get_agg_trades.assert_awaited_once_with(
+        "BTCUSDT", from_id=11, limit=2
+    )
+
+
+def test_bar1s_recovery_http_rejects_unclosed_or_oversized_ranges():
+    from trading_platform.market.main import create_app
+
+    app, service = create_app(MarketLayerConfig(), "bar-recovery-test")
+    service.rest_client.get_agg_trades = AsyncMock(return_value=[])
+    client = TestClient(app)
+
+    assert client.get(
+        "/bar1s/BTCUSDT/recover?from_id=11&to_id=12"
+    ).status_code == 409
+    assert client.get(
+        "/bar1s/BTCUSDT/recover?from_id=1&to_id=1001"
+    ).status_code == 400
 
 
 @pytest.mark.asyncio

@@ -54,6 +54,14 @@ class KlineRangeResponse(BaseModel):
     source: str = "binance_rest"
 
 
+class Bar1sRecoveryResponse(BaseModel):
+    symbol: str
+    from_id: int
+    to_id: int
+    bars: list[dict[str, Any]]
+    source: str = "binance_rest"
+
+
 class HealthResponse(BaseModel):
     """健康检查响应"""
     status: str = "ready"

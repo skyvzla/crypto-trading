@@ -179,6 +179,7 @@ class TradeWindow:
         self.volume = Decimal("0")
         self.trade_count = 0
         self.quote_volume = Decimal("0")  # 用于计算 vwap
+        self.first_aggregate_trade_id: int | None = None
         self.last_aggregate_trade_id: int | None = None
 
     def add_trade(
@@ -199,7 +200,16 @@ class TradeWindow:
         self.quote_volume += price * quantity
         self.trade_count += 1
         if aggregate_trade_id is not None:
-            self.last_aggregate_trade_id = aggregate_trade_id
+            if (
+                self.first_aggregate_trade_id is None
+                or aggregate_trade_id < self.first_aggregate_trade_id
+            ):
+                self.first_aggregate_trade_id = aggregate_trade_id
+            if (
+                self.last_aggregate_trade_id is None
+                or aggregate_trade_id > self.last_aggregate_trade_id
+            ):
+                self.last_aggregate_trade_id = aggregate_trade_id
 
     def to_bar(self, symbol: str) -> Bar1s:
         """转换为 Bar1s"""
@@ -217,6 +227,8 @@ class TradeWindow:
             volume=self.volume,
             trade_count=self.trade_count,
             vwap=vwap,
+            first_aggregate_trade_id=self.first_aggregate_trade_id,
+            last_aggregate_trade_id=self.last_aggregate_trade_id,
             type_priority=1,
             sequence=0,
         )

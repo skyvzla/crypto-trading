@@ -37,6 +37,10 @@ class Bar1s:
     type_priority: int = 1  # Bar1s 优先级高于 Kline
     sequence: int = 0
 
+    # 实时链路连续性水位；历史回测事件可以不提供。
+    first_aggregate_trade_id: int | None = None
+    last_aggregate_trade_id: int | None = None
+
     def to_dict(self) -> dict:
         """序列化为字典"""
         return {
@@ -50,6 +54,8 @@ class Bar1s:
             'volume': str(self.volume),
             'trade_count': self.trade_count,
             'vwap': str(self.vwap),
+            'first_aggregate_trade_id': self.first_aggregate_trade_id,
+            'last_aggregate_trade_id': self.last_aggregate_trade_id,
             'type_priority': self.type_priority,
             'sequence': self.sequence,
         }
@@ -70,6 +76,16 @@ class Bar1s:
             vwap=Decimal(data['vwap']),
             type_priority=data.get('type_priority', 1),
             sequence=data.get('sequence', 0),
+            first_aggregate_trade_id=(
+                None
+                if data.get('first_aggregate_trade_id') is None
+                else int(data['first_aggregate_trade_id'])
+            ),
+            last_aggregate_trade_id=(
+                None
+                if data.get('last_aggregate_trade_id') is None
+                else int(data['last_aggregate_trade_id'])
+            ),
         )
 
     def to_json(self) -> str:
