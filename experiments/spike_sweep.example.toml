@@ -27,7 +27,7 @@ exclude_symbols = []
 [execution]
 # false 时不校验worker总预算，也不设置DuckDB memory_limit；必须显式传 --workers。
 memory_limit_enabled = false
-# DuckDB 单次流式查询的时间窗口。2160小时=90天，策略状态会跨窗口连续保留。
+# DuckDB 单次流式查询的时间窗口。4320小时=180天，策略状态会跨窗口连续保留。
 chunk_hours = 8785
 # 每次由 DuckDB 交给 Python 引擎的事件行数；增大可略降调用开销，但会增加短时内存。
 fetch_batch_size = 10000
@@ -52,6 +52,7 @@ warmup_hours = 16
 
 [matrix]
 # 以下字段会真正展开为参数组合。每个交易对都会对每个组合独立回测。
+# 本示例使用 V1；max_rise_5s_percent 和 max_volume_multiple_5s 仅 V1.1 支持，请在 v1.1 实验配置中设置。
 # 0 表示不使用短期前高过滤；4/6/8/12/24 表示入场前对应小时内的前高限制。
 # 用于比较“短期回调后回到前高附近继续上涨”场景的过滤效果。
 prior_high_lookback_hours = [0, 4, 6, 8, 12, 24]

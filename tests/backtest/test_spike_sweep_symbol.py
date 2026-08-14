@@ -2,13 +2,16 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from trading_platform.backtest.strategy_definition import FeatureSpec
 from trading_platform.shared.events import Bar1s, Kline
 from trading_platform.backtest import run_spike_sweep_symbol as symbol_runner
 from trading_platform.backtest import run_spike_short
+from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
 
 
-def test_symbol_runner_keeps_the_ninety_day_default_read_window():
+def test_symbol_runner_keeps_the_one_hundred_eighty_day_default_read_window():
     args = symbol_runner.parse_run_args([
         "--symbol", "AKEUSDT",
         "--start", "2026-07-01T00:00:00+00:00",
@@ -17,7 +20,7 @@ def test_symbol_runner_keeps_the_ninety_day_default_read_window():
         "--total-notional", "1000",
     ])
 
-    assert args.chunk_hours == 24 * 180
+    assert args.chunk_hours == 4320
 
 
 def test_v2_resolves_confirmed_defaults_and_seven_day_warmup():
@@ -77,6 +80,115 @@ def test_v11_uses_existing_candidate_exit_policy_by_default():
     assert settings.strategy_version == "v1.1"
     assert args.exit_policy == "candidate-v1"
     assert settings.required_kline_intervals == ("1m", "5m", "15m")
+
+
+def test_v11_rejects_volume_cap_below_the_existing_lower_threshold():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v1_1:V11",
+        "--max-volume-multiple-5s", "2.9",
+    ])
+
+    with pytest.raises(ValueError, match="lower volume threshold"):
+        run_spike_short.resolve_settings(args)
+
+
+def test_v11_allows_volume_cap_at_the_existing_lower_threshold():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v1_1:V11",
+        "--max-volume-multiple-5s", "3",
+    ])
+
+    settings = run_spike_short.resolve_settings(args)
+
+    assert settings.max_volume_multiple_5s == Decimal("3")
+
+
+def test_v11_rejects_caps_with_legacy_script_exit():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v1_1:V11",
+        "--exit-policy", "legacy-script",
+        "--max-rise-5s-percent", "7.5",
+    ])
+
+    with pytest.raises(ValueError, match="legacy-script"):
+        run_spike_short.resolve_settings(args)
+
+
+def test_cap_rejection_audit_cools_down_same_reason_but_records_changed_reason():
+    strategy = DynamicSpikeShortStrategy(
+        symbol="AKEUSDT",
+        total_notional=Decimal("1000"),
+        max_rise_5s_percent=Decimal("5.5"),
+        max_volume_multiple_5s=Decimal("3.5"),
+    )
+    start_ms = 1_782_864_000_000
+    details = {
+        "trigger_price": Decimal("106"),
+        "rise_5s": Decimal("0.06"),
+        "volume_5s": Decimal("20"),
+        "median_volume_1s": Decimal("1"),
+        "volume_multiple_5s": Decimal("4"),
+        "low_12h": Decimal("80"),
+        "rise_from_12h_low": Decimal("0.325"),
+    }
+    same_reasons = ("max_rise_5s", "max_volume_multiple_5s")
+
+    strategy._record_cap_rejection(
+        event_time=start_ms,
+        rejection_reasons=same_reasons,
+        **details,
+    )
+    strategy._record_cap_rejection(
+        event_time=start_ms + 1_000,
+        rejection_reasons=same_reasons,
+        **details,
+    )
+    strategy._record_cap_rejection(
+        event_time=start_ms + 2_000,
+        rejection_reasons=same_reasons,
+        **details,
+    )
+    strategy._record_cap_rejection(
+        event_time=start_ms + 3_000,
+        rejection_reasons=("max_rise_5s",),
+        **details,
+    )
+
+    rejections = [
+        event
+        for event in strategy.drain_audit_events()
+        if event.event_type == "signal_rejected"
+    ]
+
+    assert [event.event_time for event in rejections] == [
+        start_ms,
+        start_ms + 3_000,
+    ]
+    assert [event.details["rejection_reasons"] for event in rejections] == [
+        ["max_rise_5s", "max_volume_multiple_5s"],
+        ["max_rise_5s"],
+    ]
+    assert rejections[1].event_time - rejections[0].event_time < (
+        strategy.SIGNAL_COOLDOWN * 1_000
+    )
 
 
 def test_symbol_runner_reads_market_data_once_for_multiple_parameters(
@@ -146,7 +258,7 @@ def test_symbol_runner_reads_market_data_once_for_multiple_parameters(
         "--end", "2026-07-02T00:00:00+00:00",
         "--duckdb-path", "history.duckdb",
         "--total-notional", "1000",
-        "--chunk-hours", "2160",
+        "--chunk-hours", "720",
     ]
     task = {
         "runs": [
@@ -167,7 +279,7 @@ def test_symbol_runner_reads_market_data_once_for_multiple_parameters(
     init_call = next(call["init"] for call in loader_calls if "init" in call)
     assert init_call["start_ms"] == start_ms - 24 * 3_600_000
     iter_call = next(call["iter_all"] for call in loader_calls if "iter_all" in call)
-    assert iter_call["chunk_hours"] == 2160
+    assert iter_call["chunk_hours"] == 720
     assert engines["confirmed"].events == [bar]
     assert engines["candidate"].events == [early_bar, bar, kline_15m]
     assert saved == [("confirmed", "confirmed"), ("candidate", "candidate")]
@@ -359,6 +471,39 @@ def test_v11_shared_features_keep_threshold_decisions_per_strategy(
                     "--rise-5s-threshold-percent", "10",
                 ],
             },
+            {
+                "run_id": "six-percent",
+                "arguments": [
+                    *common,
+                    "--output", str(tmp_path / "six-percent"),
+                    "--rise-5s-threshold-percent", "6",
+                ],
+            },
+            {
+                "run_id": "rise-capped",
+                "arguments": [
+                    *common,
+                    "--output", str(tmp_path / "rise-capped"),
+                    "--max-rise-5s-percent", "5.5",
+                ],
+            },
+            {
+                "run_id": "volume-capped",
+                "arguments": [
+                    *common,
+                    "--output", str(tmp_path / "volume-capped"),
+                    "--max-volume-multiple-5s", "3.5",
+                ],
+            },
+            {
+                "run_id": "combined-capped",
+                "arguments": [
+                    *common,
+                    "--output", str(tmp_path / "combined-capped"),
+                    "--max-rise-5s-percent", "5.5",
+                    "--max-volume-multiple-5s", "3.5",
+                ],
+            },
         ]
     }
 
@@ -367,6 +512,10 @@ def test_v11_shared_features_keep_threshold_decisions_per_strategy(
     assert metrics_loads == [(tmp_path / "metrics", "AKEUSDT")]
     five_percent = results["five-percent"]
     ten_percent = results["ten-percent"]
+    six_percent = results["six-percent"]
+    rise_capped = results["rise-capped"]
+    volume_capped = results["volume-capped"]
+    combined_capped = results["combined-capped"]
     assert len(five_percent.orders) == 3
     assert any(
         event.event_type == "signal_triggered"
@@ -377,3 +526,39 @@ def test_v11_shared_features_keep_threshold_decisions_per_strategy(
         event.event_type == "signal_triggered"
         for event in ten_percent.audit_events
     )
+    assert len(six_percent.orders) == 3
+    six_percent_signal = next(
+        event for event in six_percent.audit_events
+        if event.event_type == "signal_triggered"
+    )
+    assert six_percent_signal.details["rise_threshold_5s"] == "0.06"
+    assert rise_capped.orders == []
+    rise_rejection = next(
+        event for event in rise_capped.audit_events
+        if event.event_type == "signal_rejected"
+    )
+    assert rise_rejection.details["rejection_reasons"] == ["max_rise_5s"]
+    assert rise_rejection.details["rise_5s"] == "0.06"
+    assert rise_rejection.details["max_rise_5s"] == "0.055"
+    assert not any(
+        event.event_type in {"signal_triggered", "entry_plan_created"}
+        for event in rise_capped.audit_events
+    )
+    assert volume_capped.orders == []
+    volume_rejection = next(
+        event for event in volume_capped.audit_events
+        if event.event_type == "signal_rejected"
+    )
+    assert volume_rejection.details["rejection_reasons"] == [
+        "max_volume_multiple_5s"
+    ]
+    assert volume_rejection.details["volume_multiple_5s"] == "4"
+    assert volume_rejection.details["max_volume_multiple_5s"] == "3.5"
+    assert combined_capped.orders == []
+    combined_rejection = next(
+        event for event in combined_capped.audit_events
+        if event.event_type == "signal_rejected"
+    )
+    assert combined_rejection.details["rejection_reasons"] == [
+        "max_rise_5s", "max_volume_multiple_5s"
+    ]

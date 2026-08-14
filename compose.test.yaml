@@ -27,7 +27,7 @@ services:
       context: .
       dockerfile: Dockerfile
       network: host
-    command: ["uv", "run", "pytest", "-q"]
+    command: ["uv", "run", "pytest", "-q", "-n", "13"]
     environment:
       PYTHONPATH: /app/src
       TEST_REDIS_URL: redis://redis:6379/15

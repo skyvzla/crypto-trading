@@ -203,6 +203,8 @@ class DynamicSpikeShortStrategy:
         min_rise_duration_minutes: int = 0,
         early_profit_unlock_ratio: Decimal | None = None,
         rise_5s_threshold: Decimal | None = None,
+        max_rise_5s_percent: Decimal | None = None,
+        max_volume_multiple_5s: Decimal | None = None,
         prior_high_tolerance_percent: Decimal = Decimal("0"),
     ):
         """
@@ -244,6 +246,37 @@ class DynamicSpikeShortStrategy:
         )
         if self.rise_5s_threshold < 0:
             raise ValueError("rise_5s_threshold must not be negative")
+        self.max_rise_5s = (
+            None
+            if max_rise_5s_percent is None or Decimal(max_rise_5s_percent) == 0
+            else Decimal(max_rise_5s_percent) / Decimal("100")
+        )
+        if self.max_rise_5s is not None and self.max_rise_5s < 0:
+            raise ValueError("max_rise_5s_percent must not be negative")
+        if (
+            self.max_rise_5s is not None
+            and self.max_rise_5s < self.rise_5s_threshold
+        ):
+            raise ValueError(
+                "max_rise_5s_percent must be greater than or equal to rise_5s_threshold"
+            )
+        self.max_volume_multiple_5s = (
+            None
+            if max_volume_multiple_5s is None or Decimal(max_volume_multiple_5s) == 0
+            else Decimal(max_volume_multiple_5s)
+        )
+        if (
+            self.max_volume_multiple_5s is not None
+            and self.max_volume_multiple_5s < 0
+        ):
+            raise ValueError("max_volume_multiple_5s must not be negative")
+        if (
+            self.max_volume_multiple_5s is not None
+            and self.max_volume_multiple_5s < self.VOLUME_MULTIPLE_5S
+        ):
+            raise ValueError(
+                "max_volume_multiple_5s must be zero or at least the lower volume threshold"
+            )
         self.prior_high_tolerance_percent = Decimal(prior_high_tolerance_percent)
         if not Decimal("0") <= self.prior_high_tolerance_percent <= Decimal("100"):
             raise ValueError("prior_high_tolerance_percent must be between 0 and 100")
@@ -269,6 +302,7 @@ class DynamicSpikeShortStrategy:
 
         # 信号状态
         self.last_signal_time: Optional[int] = None
+        self._last_cap_rejection_audit: tuple[int, tuple[str, ...]] | None = None
         self.active_signals: List[SpikeSignal] = []
         self.first_fill_time: Optional[int] = None
         self._campaign_id_for_timing: str | None = None
@@ -527,35 +561,15 @@ class DynamicSpikeShortStrategy:
                     event_time=signal.signal_time,
                     event_type="signal_triggered",
                     campaign_id=campaign_id,
-                    details={
-                        "trigger_price": str(signal.trigger_price),
-                        "rise_threshold_5s": str(self.SPIKE_RISE_5S),
-                        "volume_threshold_5s": str(self.VOLUME_MULTIPLE_5S),
-                        "rise_5s": (
-                            str(signal.rise_5s) if signal.rise_5s is not None else None
-                        ),
-                        "volume_5s": (
-                            str(signal.volume_5s) if signal.volume_5s is not None else None
-                        ),
-                        "median_volume_1s": (
-                            str(signal.median_volume_1s)
-                            if signal.median_volume_1s is not None
-                            else None
-                        ),
-                        "volume_multiple_5s": (
-                            str(signal.volume_multiple_5s)
-                            if signal.volume_multiple_5s is not None
-                            else None
-                        ),
-                        "low_12h": (
-                            str(signal.low_12h) if signal.low_12h is not None else None
-                        ),
-                        "rise_from_12h_low": (
-                            str(signal.rise_from_12h_low)
-                            if signal.rise_from_12h_low is not None
-                            else None
-                        ),
-                    },
+                    details=self._signal_audit_details(
+                        trigger_price=signal.trigger_price,
+                        rise_5s=signal.rise_5s,
+                        volume_5s=signal.volume_5s,
+                        median_volume_1s=signal.median_volume_1s,
+                        volume_multiple_5s=signal.volume_multiple_5s,
+                        low_12h=signal.low_12h,
+                        rise_from_12h_low=signal.rise_from_12h_low,
+                    ),
                 )
                 self._record_audit(
                     event_time=signal.signal_time,
@@ -1062,8 +1076,11 @@ class DynamicSpikeShortStrategy:
                 cancelled += 1
         return cancelled
 
+    def _campaign_id_at(self, signal_time: int) -> str:
+        return f"spike_short:{self.symbol}:{signal_time}"
+
     def _campaign_id(self, sig: SpikeSignal) -> str:
-        return f"spike_short:{self.symbol}:{sig.signal_time}"
+        return self._campaign_id_at(sig.signal_time)
 
     def _campaign_id_from_client_order(self, client_order_id: str) -> str | None:
         parsed = parse_entry_client_order_id(
@@ -1105,6 +1122,82 @@ class DynamicSpikeShortStrategy:
                 campaign_id=campaign_id,
                 details=details,
             )
+        )
+
+    def _signal_audit_details(
+        self,
+        *,
+        trigger_price: Decimal,
+        rise_5s: Decimal | None,
+        volume_5s: Decimal | None,
+        median_volume_1s: Decimal | None,
+        volume_multiple_5s: Decimal | None,
+        low_12h: Decimal | None = None,
+        rise_from_12h_low: Decimal | None = None,
+    ) -> dict:
+        return {
+            "trigger_price": str(trigger_price),
+            "rise_threshold_5s": str(self.rise_5s_threshold),
+            "volume_threshold_5s": str(self.VOLUME_MULTIPLE_5S),
+            "rise_5s": str(rise_5s) if rise_5s is not None else None,
+            "volume_5s": str(volume_5s) if volume_5s is not None else None,
+            "median_volume_1s": (
+                str(median_volume_1s) if median_volume_1s is not None else None
+            ),
+            "volume_multiple_5s": (
+                str(volume_multiple_5s)
+                if volume_multiple_5s is not None
+                else None
+            ),
+            "low_12h": str(low_12h) if low_12h is not None else None,
+            "rise_from_12h_low": (
+                str(rise_from_12h_low)
+                if rise_from_12h_low is not None
+                else None
+            ),
+        }
+
+    def _record_cap_rejection(
+        self,
+        *,
+        event_time: int,
+        rejection_reasons: tuple[str, ...],
+        trigger_price: Decimal,
+        rise_5s: Decimal,
+        volume_5s: Decimal,
+        median_volume_1s: Decimal,
+        volume_multiple_5s: Decimal,
+        low_12h: Decimal,
+        rise_from_12h_low: Decimal,
+    ) -> None:
+        previous = self._last_cap_rejection_audit
+        if (
+            previous is not None
+            and previous[1] == rejection_reasons
+            and event_time - previous[0] < self.SIGNAL_COOLDOWN * MS_PER_SECOND
+        ):
+            return
+        self._last_cap_rejection_audit = (event_time, rejection_reasons)
+        details = self._signal_audit_details(
+            trigger_price=trigger_price,
+            rise_5s=rise_5s,
+            volume_5s=volume_5s,
+            median_volume_1s=median_volume_1s,
+            volume_multiple_5s=volume_multiple_5s,
+            low_12h=low_12h,
+            rise_from_12h_low=rise_from_12h_low,
+        )
+        details.update({
+            "rejection_stage": "post_base_entry_filters",
+            "rejection_reasons": list(rejection_reasons),
+            "max_rise_5s": str(self.max_rise_5s),
+            "max_volume_multiple_5s": str(self.max_volume_multiple_5s),
+        })
+        self._record_audit(
+            event_time=event_time,
+            event_type="signal_rejected",
+            campaign_id=self._campaign_id_at(event_time),
+            details=details,
         )
 
     # ------------------------------------------------------------------
@@ -1178,7 +1271,8 @@ class DynamicSpikeShortStrategy:
             median_volume = baseline_volumes[30]
         if median_volume <= 0:
             return None
-        if volume_5s / (median_volume * Decimal("5")) < self.VOLUME_MULTIPLE_5S:
+        volume_multiple_5s = volume_5s / (median_volume * Decimal("5"))
+        if volume_multiple_5s < self.VOLUME_MULTIPLE_5S:
             return None
 
         # 5. 12 小时低点涨幅
@@ -1267,6 +1361,32 @@ class DynamicSpikeShortStrategy:
             tier_prices[1] + atr * self.INVALID_PRIMARY_ATR,
         )
 
+        rejection_reasons = tuple(
+            reason
+            for reason, rejected in (
+                ("max_rise_5s", self.max_rise_5s is not None and rise_5s > self.max_rise_5s),
+                (
+                    "max_volume_multiple_5s",
+                    self.max_volume_multiple_5s is not None
+                    and volume_multiple_5s > self.max_volume_multiple_5s,
+                ),
+            )
+            if rejected
+        )
+        if rejection_reasons:
+            self._record_cap_rejection(
+                event_time=current.timestamp,
+                rejection_reasons=rejection_reasons,
+                trigger_price=current.close,
+                rise_5s=rise_5s,
+                volume_5s=volume_5s,
+                median_volume_1s=median_volume,
+                volume_multiple_5s=volume_multiple_5s,
+                low_12h=low_12h,
+                rise_from_12h_low=current.close / low_12h - Decimal("1"),
+            )
+            return None
+
         active_time = current.timestamp + MS_PER_SECOND
         return SpikeSignal(
             signal_time=current.timestamp,
@@ -1287,7 +1407,7 @@ class DynamicSpikeShortStrategy:
             rise_5s=rise_5s,
             volume_5s=volume_5s,
             median_volume_1s=median_volume,
-            volume_multiple_5s=volume_5s / (median_volume * Decimal("5")),
+            volume_multiple_5s=volume_multiple_5s,
             low_12h=low_12h,
             rise_from_12h_low=current.close / low_12h - Decimal("1"),
             origin_floor=origin_floor,

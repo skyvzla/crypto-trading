@@ -442,11 +442,38 @@ class TestDynamicSpikeShortStrategy:
             "AKEUSDT",
             total_notional=Decimal("1000"),
             rise_5s_threshold=Decimal("0.03"),
+            max_rise_5s_percent=Decimal("8"),
+            max_volume_multiple_5s=Decimal("15"),
             prior_high_tolerance_percent=Decimal("5"),
         )
 
         assert strategy.rise_5s_threshold == Decimal("0.03")
+        assert strategy.max_rise_5s == Decimal("0.08")
+        assert strategy.max_volume_multiple_5s == Decimal("15")
         assert strategy.prior_high_tolerance_percent == Decimal("5")
+
+    def test_v11_upper_limits_allow_zero_to_disable(self):
+        from trading_platform.strategies.spike.v1_1 import SpikeV11Strategy
+
+        strategy = SpikeV11Strategy(
+            "AKEUSDT",
+            total_notional=Decimal("1000"),
+            max_rise_5s_percent=Decimal("0"),
+            max_volume_multiple_5s=Decimal("0"),
+        )
+
+        assert strategy.max_rise_5s is None
+        assert strategy.max_volume_multiple_5s is None
+
+    def test_v11_rejects_volume_cap_below_the_lower_threshold(self):
+        from trading_platform.strategies.spike.v1_1 import SpikeV11Strategy
+
+        with pytest.raises(ValueError, match="lower volume threshold"):
+            SpikeV11Strategy(
+                "AKEUSDT",
+                total_notional=Decimal("1000"),
+                max_volume_multiple_5s=Decimal("2.9"),
+            )
 
     @pytest.mark.parametrize(
         ("low_age_minutes", "signal_expected"),

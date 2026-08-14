@@ -58,6 +58,8 @@ PARAMETER_FLAGS = {
     "max_oi_change_pct": "--max-oi-change-pct",
     "max_ls_ratio": "--max-ls-ratio",
     "rise_5s_threshold_percent": "--rise-5s-threshold-percent",
+    "max_rise_5s_percent": "--max-rise-5s-percent",
+    "max_volume_multiple_5s": "--max-volume-multiple-5s",
     "prior_high_tolerance_percent": "--prior-high-tolerance-percent",
     "limit_fill_fraction": "--limit-fill-fraction",
     "warmup_hours": "--warmup-hours",
@@ -74,6 +76,7 @@ ESTIMATED_PYTHON_EVENT_BYTES = 1_024
 ESTIMATED_DUCKDB_ROW_BYTES = 96
 WORKER_NON_DUCKDB_RESERVE_BYTES = 1024**3
 MIN_WORKER_MEMORY_BYTES = 2 * 1024**3
+_SIGNAL_AUDIT_EVENT_TYPES = frozenset({"signal_triggered", "signal_rejected"})
 
 
 @dataclass(frozen=True)
@@ -883,6 +886,27 @@ def _find_simultaneous_signals(
     return pd.DataFrame(records)
 
 
+def _collect_signal_audit_events(
+    output_root: Path, specs: Collection[RunSpec]
+) -> pd.DataFrame:
+    """收集可复测的候选信号，保留已触发与入口上限拒绝两种决策。"""
+    all_signals = []
+    for spec in specs:
+        audit_path = output_root / "runs" / spec.run_id / "audit_events.parquet"
+        if not audit_path.exists():
+            continue
+        audit = pd.read_parquet(audit_path)
+        audit = audit[audit["event_type"].isin(_SIGNAL_AUDIT_EVENT_TYPES)].copy()
+        if audit.empty:
+            continue
+        audit["run_id"] = spec.run_id
+        audit["parameters"] = json.dumps(
+            spec.params, sort_keys=True, default=str
+        )
+        all_signals.append(audit)
+    return pd.concat(all_signals, ignore_index=True) if all_signals else pd.DataFrame()
+
+
 def _write_trade_breakdowns(
     trades: pd.DataFrame, output_root: Path, *, pnl_split_usdt: float
 ) -> None:
@@ -1368,7 +1392,7 @@ def _write_report(
         "## 复核文件", "",
         "- `parameter_summary.csv`：参数组合总体结果。",
         "- `comparison.csv`：参数组合按币种的执行结果。",
-        "- `all_signals.csv`：所有确认信号（含未成交），可用于后续复测选币。",
+        "- `all_signals.csv`：完整原策略入场检查通过后的信号决策，含已触发和入口上限拒绝；同一拒绝原因在信号冷却窗口内合并，可用于后续复测选币。",
         "- `all_trades.csv`：逐笔买卖点、盈亏及冲突标记。",
         "- `collisions.csv`：多币种同时或重叠交易组。",
         "- `signal_collisions.csv`：同一秒附近触发的多币种信号组。",
@@ -1570,7 +1594,6 @@ def _main(argv: list[str] | None = None) -> int:
         comparison.to_csv(output_root / "comparison.csv", index=False)
         print("回测任务已结束，正在合并逐笔交易和信号...", flush=True)
         all_trades = []
-        all_signals = []
         for spec in specs:
             path = output_root / "runs" / spec.run_id / "trades.csv"
             if path.exists():
@@ -1580,16 +1603,6 @@ def _main(argv: list[str] | None = None) -> int:
                     spec.params, sort_keys=True, default=str
                 )
                 all_trades.append(frame)
-            audit_path = output_root / "runs" / spec.run_id / "audit_events.parquet"
-            if audit_path.exists():
-                audit = pd.read_parquet(audit_path)
-                audit = audit[audit["event_type"] == "signal_triggered"].copy()
-                if not audit.empty:
-                    audit["run_id"] = spec.run_id
-                    audit["parameters"] = json.dumps(
-                        spec.params, sort_keys=True, default=str
-                    )
-                    all_signals.append(audit)
         trades = (
             pd.concat(all_trades, ignore_index=True)
             if all_trades else pd.DataFrame()
@@ -1619,13 +1632,15 @@ def _main(argv: list[str] | None = None) -> int:
         )
         trades.to_csv(output_root / "all_trades.csv", index=False)
         collisions.to_csv(output_root / "collisions.csv", index=False)
-        signals = (
-            pd.concat(all_signals, ignore_index=True)
-            if all_signals else pd.DataFrame()
-        )
+        signals = _collect_signal_audit_events(output_root, specs)
         signals.to_csv(output_root / "all_signals.csv", index=False)
+        triggered_signals = (
+            signals[signals["event_type"] == "signal_triggered"]
+            if "event_type" in signals
+            else signals
+        )
         signal_collisions = _find_simultaneous_signals(
-            signals,
+            triggered_signals,
             tolerance_ms=int(
                 analysis.get("collision_tolerance_seconds", 1) * 1000
             ),

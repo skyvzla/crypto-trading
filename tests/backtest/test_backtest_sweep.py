@@ -18,6 +18,7 @@ from trading_platform.backtest.sweep import (
     _archive_coverage,
     _attach_breakout_context,
     ChildProcessRegistry,
+    _collect_signal_audit_events,
     _configure_duckdb_connection,
     _estimate_monthly_memory,
     _find_simultaneous_signals,
@@ -886,6 +887,47 @@ def test_simultaneous_signal_groups_require_multiple_symbols():
 
     assert len(groups) == 1
     assert groups.iloc[0]["signal_count"] == 2
+
+
+def test_collect_signal_audit_events_keeps_triggered_and_rejected(tmp_path: Path):
+    spec = sweep.RunSpec("run-1", "AKEUSDT", {"total_notional": 1000})
+    run_root = tmp_path / "runs" / spec.run_id
+    run_root.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "event_time": 1_000,
+            "event_type": "signal_triggered",
+            "symbol": "AKEUSDT",
+            "strategy_id": "spike_short",
+            "campaign_id": "spike_short:AKEUSDT:1000",
+            "details": '{"rise_5s":"0.06"}',
+        },
+        {
+            "event_time": 2_000,
+            "event_type": "signal_rejected",
+            "symbol": "AKEUSDT",
+            "strategy_id": "spike_short",
+            "campaign_id": "spike_short:AKEUSDT:2000",
+            "details": '{"rejection_reasons":["max_rise_5s"]}',
+        },
+        {
+            "event_time": 3_000,
+            "event_type": "entry_plan_created",
+            "symbol": "AKEUSDT",
+            "strategy_id": "spike_short",
+            "campaign_id": "spike_short:AKEUSDT:1000",
+            "details": '{}',
+        },
+    ]).to_parquet(run_root / "audit_events.parquet", index=False)
+
+    signals = _collect_signal_audit_events(tmp_path, [spec])
+
+    assert signals["event_type"].tolist() == ["signal_triggered", "signal_rejected"]
+    assert signals["run_id"].tolist() == [spec.run_id, spec.run_id]
+    assert signals["parameters"].tolist() == [
+        '{"total_notional": 1000}',
+        '{"total_notional": 1000}',
+    ]
 
 
 def test_tier_fill_summary_uses_actual_filled_quantities(tmp_path: Path):

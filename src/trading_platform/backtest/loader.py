@@ -18,7 +18,8 @@ from trading_platform.market.archive.parquet import archive_root_from_catalog
 from trading_platform.shared.events import Bar1s, Kline
 
 Event = Union[Bar1s, Kline]
-DEFAULT_CHUNK_HOURS = 24.0 * 180
+# 默认按 180 天（4320 小时）切分 DuckDB 流式回放窗口。
+DEFAULT_CHUNK_HOURS = 4320.0
 
 
 class MetricsDataLoader:

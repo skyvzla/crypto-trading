@@ -29,7 +29,7 @@ REPORT_TITLES = {
     "box_proximity_summary": "箱体底部距离",
     "collisions": "同时交易竞争",
     "signal_collisions": "同时信号竞争",
-    "all_signals": "全部触发信号",
+    "all_signals": "全部信号审计",
     "memory_estimate": "内存估算",
     "universe": "回测交易对范围",
     "loss_over_100_ad_hoc": "大额亏损复核",

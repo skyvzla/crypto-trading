@@ -30,7 +30,7 @@ Spike replay、testnet 进程和执行/账本闭环已经可运行；盈利持�
 # 构建应用镜像
 docker compose -f compose.test.yaml build
 
-# 执行全量测试
+# 执行全量测试（13 个 pytest worker）
 docker compose -f compose.test.yaml run --rm test
 
 # 启动当前开发服务骨架（不得使用正式账户密钥）

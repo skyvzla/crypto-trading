@@ -104,6 +104,7 @@ class V11:
     supported_parameters = frozenset({
         "max_consecutive_up_minutes", "max_oi_change_pct", "max_ls_ratio",
         "rise_5s_threshold_percent", "rise_5s_threshold",
+        "max_rise_5s_percent", "max_volume_multiple_5s",
         "prior_high_tolerance_percent",
     })
     internal_parameters = frozenset({"metrics_series"})
