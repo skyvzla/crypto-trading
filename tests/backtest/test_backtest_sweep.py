@@ -210,10 +210,11 @@ def test_sweep_closes_dashboard_when_worker_submission_fails(
 ):
     class RecordingDashboard:
         def __init__(self, **kwargs):
+            self.kwargs = kwargs
             self.closed = []
 
         def start(self, **kwargs):
-            pass
+            self.started = kwargs
 
         def close(self, *, status="ok", detail=None):
             self.closed.append((status, detail))
@@ -232,7 +233,13 @@ def test_sweep_closes_dashboard_when_worker_submission_fails(
     config_path.write_text("name = 'test'", encoding="utf-8")
     dashboard = RecordingDashboard()
     pool = RaisingPool()
-    spec = sweep.RunSpec("run-1", "AKEUSDT", {"total_notional": 1000})
+    specs = [
+        sweep.RunSpec(f"run-{lookback}", "AKEUSDT", {
+            "total_notional": 1000,
+            "prior_high_lookback_hours": lookback,
+        })
+        for lookback in (4, 8)
+    ]
     config = {
         "name": "test",
         "output": str(tmp_path / "output"),
@@ -254,19 +261,25 @@ def test_sweep_closes_dashboard_when_worker_submission_fails(
             }],
         ),
     )
-    monkeypatch.setattr(sweep, "expand_specs", lambda *_: [spec])
+    monkeypatch.setattr(sweep, "expand_specs", lambda *_: specs)
     monkeypatch.setattr(sweep, "archive_root_from_catalog", lambda _: tmp_path)
     monkeypatch.setattr(
         sweep, "_symbol_worker_resources", lambda *args: (1, None, None)
     )
     monkeypatch.setattr(sweep, "_estimate_monthly_memory", lambda *args, **kwargs: pd.DataFrame())
-    monkeypatch.setattr(sweep, "TaskDashboard", lambda **kwargs: dashboard)
+    monkeypatch.setattr(
+        sweep,
+        "TaskDashboard",
+        lambda **kwargs: (dashboard.kwargs.update(kwargs) or dashboard),
+    )
     monkeypatch.setattr(sweep, "ThreadPoolExecutor", lambda **kwargs: pool)
 
     with pytest.raises(RuntimeError, match="submit failed"):
         sweep._main(["--config", str(config_path)])
 
     assert pool.shutdown_calls == [{"wait": True, "cancel_futures": True}]
+    assert dashboard.kwargs["total"] == 1
+    assert dashboard.started["detail"].startswith("pairs=1 runs=2 ")
     assert dashboard.closed == [("failed", None)]
 
 
@@ -683,7 +696,7 @@ def test_run_symbol_marks_fully_resumed_specs_complete_in_dashboard(tmp_path: Pa
 
     assert [row["status"] for row in rows] == ["resumed", "resumed"]
     assert dashboard.started == ["AKEUSDT"]
-    assert dashboard.skipped == [("AKEUSDT", "Resumed", 2)]
+    assert dashboard.skipped == [("AKEUSDT", "Resumed", 1)]
 
 
 def test_run_symbol_counts_resumed_and_new_specs_in_dashboard(
@@ -752,7 +765,7 @@ def test_run_symbol_counts_resumed_and_new_specs_in_dashboard(
 
     assert {row["status"] for row in rows} == {"resumed", "ok"}
     assert dashboard.started == ["AKEUSDT"]
-    assert dashboard.done == [("AKEUSDT", "OK", 2)]
+    assert dashboard.done == [("AKEUSDT", "OK", 1)]
 
 
 def test_run_symbol_marks_started_task_failed_when_resume_metadata_is_invalid(
@@ -790,7 +803,7 @@ def test_run_symbol_marks_started_task_failed_when_resume_metadata_is_invalid(
         )
 
     assert dashboard.started == ["AKEUSDT"]
-    assert dashboard.failed == [("AKEUSDT", 2)]
+    assert dashboard.failed == [("AKEUSDT", 1)]
 
 
 def test_child_process_registry_terminates_running_subprocess():

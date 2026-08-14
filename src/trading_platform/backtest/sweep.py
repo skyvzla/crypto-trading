@@ -699,7 +699,7 @@ def _run_symbol(
             active.append((spec, run_dir, _run_arguments(spec, config, run_dir)))
         if not active:
             if dashboard is not None:
-                dashboard.task_skip(symbol, "Resumed", increment=len(rows))
+                dashboard.task_skip(symbol, "Resumed", increment=1)
             return rows, time.monotonic() - started_at
 
         task_dir = output_root / "symbol_tasks"
@@ -770,12 +770,12 @@ def _run_symbol(
                 count_as_sample=failed_runs == 0 and not any(
                     row["status"] == "resumed" for row in rows
                 ),
-                increment=len(rows),
+                increment=1,
             )
         return rows, time.monotonic() - started_at
     except BaseException:
         if dashboard is not None:
-            dashboard.task_failed(symbol, increment=len(specs))
+            dashboard.task_failed(symbol, increment=1)
         raise
 
 
@@ -1488,16 +1488,19 @@ def _main(argv: list[str] | None = None) -> int:
     processes = ChildProcessRegistry()
     pool = ThreadPoolExecutor(max_workers=workers)
     futures = {}
-    completed_count = 0
+    completed_symbol_count = 0
     succeeded_count = 0
     failed_count = 0
     dashboard = TaskDashboard(
         title="backtest",
-        total=len(specs),
+        total=len(specs_by_symbol),
         stream=sys.stdout,
     )
     dashboard.start(
-        detail=f"runs={len(specs)} workers={workers} output={output_root}"
+        detail=(
+            f"pairs={len(specs_by_symbol)} runs={len(specs)} "
+            f"workers={workers} output={output_root}"
+        )
     )
     try:
         futures = {
@@ -1509,6 +1512,7 @@ def _main(argv: list[str] | None = None) -> int:
         }
         for future in as_completed(futures):
             symbol, symbol_specs = futures[future]
+            completed_symbol_count += 1
             try:
                 symbol_rows, symbol_elapsed = future.result()
             except Exception as error:
@@ -1520,7 +1524,6 @@ def _main(argv: list[str] | None = None) -> int:
                 ]
                 symbol_elapsed = 0.0
             rows.extend(symbol_rows)
-            completed_count += len(symbol_rows)
             succeeded_count += sum(
                 row["status"] in {"ok", "resumed"} for row in symbol_rows
             )
@@ -1542,7 +1545,8 @@ def _main(argv: list[str] | None = None) -> int:
                 future.cancel()
             pool.shutdown(wait=True, cancel_futures=True)
             print(
-                f"回测已停止：已完成={completed_count}/{len(specs)}；"
+                "回测已停止："
+                f"已完成交易对={completed_symbol_count}/{len(specs_by_symbol)}；"
                 "已完成任务可在下次运行时通过 resume 复用。",
                 flush=True,
             )
