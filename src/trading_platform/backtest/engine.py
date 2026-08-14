@@ -156,9 +156,9 @@ class BacktestEngine:
             self.process_event(event)
             if i % 10000 == 0 and i > 0:
                 if self._event_count_hint is None:
-                    logger.info(f"Progress: {i} events")
+                    logger.debug(f"Progress: {i} events")
                 else:
-                    logger.info(f"Progress: {i}/{self._event_count_hint}")
+                    logger.debug(f"Progress: {i}/{self._event_count_hint}")
 
         logger.info("Backtest completed")
         return self.finish()

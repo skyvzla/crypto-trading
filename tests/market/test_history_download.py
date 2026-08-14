@@ -961,34 +961,14 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
             error="ConnectError: connection reset",
         )
     )
+    reporter.close()
 
     output = capsys.readouterr().err
-    assert "worker=1 Retry 2/3" in output
-    assert (
-        "worker=1 Switch 2/3 BTWUSDT-aggTrades-2026-06-04.zip "
-        "from=socks5h://proxy-a:1080 to=socks5h://proxy-b:1080" in output
-    )
-    assert (
-        "worker=1 Fallback 3/3 BTWUSDT-aggTrades-2026-06-04.zip "
-        "from=socks5h://proxy-b:1080 to=direct reason=final-attempt" in output
-    )
-    assert "worker=1 exited" in output
-    assert (
-        "Retry 2/3 BTWUSDT-aggTrades-2026-06-04.zip "
-        "proxy=socks5h://proxy-a:1080 elapsed=10s" in output
-    )
-    assert "Processing 68 files with 4 workers." in output
-    assert "worker=1 [1/68] BANKUSDT 15m 2026-07 stored 2976 rows" in output
-    assert (
-        "2.0 MiB at 2.0 MiB/s, download=1s, process=4s, total=5s"
-        in output
-    )
-    assert "[2/68] BANKUSDT 1s 2026-07-30 skipped" in output
-    assert (
-        "worker=3 [3/68] BANKUSDT 1s 2026-07-31 failed (1m05s): "
-        "ConnectError: connection reset; task exiting" in output
-    )
-    assert "[68/68]" not in output
+    assert "event=start task=market-archive total=68" in output
+    assert "event=complete task=market-archive status=ok done=3" in output
+    assert "event=error" not in output
+    assert "\x1b[" not in output
+    assert "worker=1 [1/68] BANKUSDT 15m 2026-07 stored 2976 rows" not in output
 
 
 def test_download_history_assigns_process_local_worker_sequence_numbers():

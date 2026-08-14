@@ -20,6 +20,7 @@ from pathlib import Path
 
 from trading_platform.shared.config import BacktestConfig
 from trading_platform.shared.binance.symbol_rules import BinanceSymbolRuleBook
+from trading_platform.shared.progress import TaskDashboard
 from .loader import BacktestDataLoader
 from .engine import BacktestEngine
 from .result import ResultAnalyzer
@@ -196,6 +197,12 @@ def parse_args() -> argparse.Namespace:
         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
         help='日志级别（默认: INFO）'
     )
+    parser.add_argument(
+        '--log-file',
+        type=Path,
+        default=None,
+        help='完整 DEBUG 日志文件（默认: <output_dir>/backtest.log）'
+    )
 
     return parser.parse_args()
 
@@ -280,6 +287,20 @@ def main():
         run_id = f"backtest_{args.strategy}_{timestamp}"
         output_dir = f"reports/{run_id}"
 
+    # 完整日志落文件，供 Agent 按需核验
+    log_file = args.log_file or Path(output_dir) / "backtest.log"
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+    ))
+    logging.getLogger().addHandler(file_handler)
+
+    dashboard = TaskDashboard(title="backtest", total=None, stream=sys.stdout)
+    dashboard.start(detail=f"strategy={args.strategy} output={output_dir}")
+    dashboard.task_start(f"{args.strategy} {','.join(args.symbols)}")
+
     logger.info("=" * 60)
     logger.info("回测引擎启动")
     logger.info("=" * 60)
@@ -288,6 +309,7 @@ def main():
     logger.info(f"时间范围: {args.start} ~ {args.end}")
     logger.info(f"数据源: {args.duckdb_path}")
     logger.info(f"输出目录: {output_dir}")
+    logger.info(f"日志文件: {log_file}")
     logger.info("=" * 60)
 
     # 1. 加载数据
@@ -316,6 +338,7 @@ def main():
         events = chain((first_event,), event_iter)
     except Exception as e:
         logger.error(f"数据加载失败: {e}")
+        dashboard.close(status="failed")
         sys.exit(1)
 
     logger.info("数据加载完成：使用流式事件迭代器")
@@ -331,6 +354,7 @@ def main():
         )
     except Exception as e:
         logger.error(f"策略加载失败: {e}")
+        dashboard.close(status="failed")
         logger.info(
             "\n提示：Spike 策略必须提供至少一个币种和正数 "
             "--total-notional。\n"
@@ -361,10 +385,12 @@ def main():
         result = engine.run()
     except Exception as e:
         logger.error(f"回测运行失败: {e}", exc_info=True)
+        dashboard.close(status="failed")
         sys.exit(1)
 
     if result.virtual_time_end < start_ms:
         logger.error("只有预热数据，交易时间范围内没有事件")
+        dashboard.close(status="failed")
         sys.exit(1)
 
     logger.info("回测运行完成")
@@ -410,8 +436,12 @@ def main():
         logger.info(f"结果已保存到: {output_dir}")
     except Exception as e:
         logger.error(f"保存结果失败: {e}", exc_info=True)
+        dashboard.task_done(f"{args.strategy} {','.join(args.symbols)}", "Failed")
+        dashboard.close(status="failed")
         sys.exit(1)
 
+    dashboard.task_done(f"{args.strategy} {','.join(args.symbols)}", "OK")
+    dashboard.close(status="ok", detail=f"output={output_dir}")
     logger.info("回测完成！")
 
 

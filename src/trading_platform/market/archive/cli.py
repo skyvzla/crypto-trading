@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from contextlib import ExitStack
 import json
+import logging
 import os
 import shutil
 import sys
@@ -15,6 +16,7 @@ import httpx
 import psycopg
 
 from trading_platform.shared.config import DatabaseConfig
+from trading_platform.shared.progress import TaskDashboard
 from trading_platform.shared.symbol_universe_query import (
     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
 )
@@ -36,6 +38,26 @@ from .vision import (
     current_archive_worker_id,
     download_history,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _setup_logging(log_level: str, log_file: Path | None) -> None:
+    root = logging.getLogger("trading_platform.market.archive")
+    root.setLevel(logging.DEBUG)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        root.addHandler(file_handler)
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    console.setFormatter(formatter)
+    root.addHandler(console)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -121,6 +143,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="print the final result as JSON",
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="console log level for retries/routes (default: INFO)",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="write full DEBUG logs to this file (default: logs/market_archive_<ts>.log)",
+    )
     args = parser.parse_args(argv)
     proxies = args.proxies
     if proxies is None:
@@ -144,6 +179,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.min_free_gb < 0:
         parser.error("--min-free-gb must be non-negative")
     main_worker = "worker=main"
+    log_file = args.log_file or Path(
+        f"logs/market_archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    )
+    _setup_logging(args.log_level, log_file)
     try:
         candle_reporter = _ProgressReporter(workers)
         start = _parse_datetime(args.start)
@@ -266,6 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             metrics_results: list[DownloadResult] = []
             metrics_catalog_path = None
+            metrics_reporter: _ProgressReporter | None = None
             if metrics_archive_path is None:
                 with ParquetCandleArchive(
                     args.archive, index_workers=min(workers, 8)
@@ -327,12 +367,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     metrics_catalog_path = metrics_archive_path / "metrics.duckdb"
                     metrics_archive.publish(metrics_catalog_path)
+                    metrics_reporter.close()
         catalog_path = args.catalog or args.archive / "candles.duckdb"
         ensure_duckdb_catalog(args.archive, catalog_path)
     except KeyboardInterrupt:
+        candle_reporter.close(status="interrupted")
         print(f"{main_worker} Cancelled; downloader exiting.", file=sys.stderr)
         return 130
     except Exception as error:
+        candle_reporter.close(status="failed")
         if args.json:
             print(json.dumps({"status": "failed", "error": str(error)}))
         else:
@@ -341,6 +384,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
         return 1
+    candle_reporter.close()
     _print_result(
         candle_results,
         args.archive,
@@ -463,30 +507,38 @@ def _load_allowed_symbols(
 
 
 class _ProgressReporter:
-    def __init__(self, workers: int) -> None:
+    """将 worker 下载进度汇总到 TaskDashboard，细节写入日志文件。"""
+
+    def __init__(self, workers: int, *, title: str = "market-archive") -> None:
         self._workers = workers
+        self._title = title
         self._lock = threading.Lock()
-        self._started = False
-        self._completed = 0
-        self._downloads: dict[int, tuple[str, str]] = {}
+        self._dashboard: TaskDashboard | None = None
+        self._active_names: dict[int, str] = {}
+
+    def _ensure_dashboard(self, total: int) -> TaskDashboard:
+        if self._dashboard is None:
+            self._dashboard = TaskDashboard(
+                title=self._title,
+                total=total,
+                stream=sys.stderr,
+            )
+            self._dashboard.start(detail=f"workers={self._workers}")
+        return self._dashboard
+
+    def _task_name(self, progress: DownloadProgress) -> str:
+        return (
+            f"w{progress.worker_id} {progress.symbol} "
+            f"{progress.timeframe} {progress.period}"
+        )
 
     def __call__(self, progress: DownloadProgress) -> None:
         with self._lock:
-            worker = f"worker={progress.worker_id}"
-            if not self._started:
-                self._started = True
-                print(
-                    f"{worker} Processing {progress.total} files with "
-                    f"{self._workers} workers.",
-                    file=sys.stderr,
-                    flush=True,
-                )
             if progress.phase == "downloaded":
-                seconds = max(progress.elapsed_seconds, 1e-9)
-                self._downloads[progress.current] = (
-                    _format_bytes(progress.downloaded_bytes),
-                    _format_bytes(progress.downloaded_bytes / seconds),
-                )
+                self._ensure_dashboard(progress.total)
+                name = self._task_name(progress)
+                self._active_names[progress.worker_id] = name
+                self._dashboard.task_start(name)
                 return
             if progress.phase not in {
                 "stored",
@@ -495,35 +547,35 @@ class _ProgressReporter:
                 "failed",
             }:
                 return
-            self._completed += 1
-            duration = _format_duration(progress.elapsed_seconds)
-            prefix = (
-                f"{worker} [{self._completed}/{progress.total}] "
-                f"{progress.symbol} "
-                f"{progress.timeframe} {progress.period}"
+            dashboard = self._ensure_dashboard(progress.total)
+            name = self._active_names.pop(progress.worker_id, None) or (
+                self._task_name(progress)
             )
-            if progress.phase == "skipped":
-                message = (
-                    f"{prefix} skipped, already exists ({progress.rows} rows, "
-                    f"{duration})"
+            if progress.phase == "stored":
+                logger.debug(
+                    f"stored {progress.symbol} {progress.timeframe} "
+                    f"{progress.period} rows={progress.rows}"
+                    f" elapsed={progress.elapsed_seconds:.1f}s"
                 )
+                dashboard.task_done(name, "OK")
+            elif progress.phase == "skipped":
+                logger.debug(
+                    f"skipped {progress.symbol} {progress.timeframe} "
+                    f"{progress.period} rows={progress.rows}"
+                )
+                dashboard.task_skip(name)
             elif progress.phase == "unavailable":
-                message = f"{prefix} unavailable (404), skipped ({duration})"
-            elif progress.phase == "failed":
-                message = (
-                    f"{prefix} failed ({duration}): {progress.error}; "
-                    "task exiting"
+                logger.warning(
+                    f"unavailable {progress.symbol} {progress.timeframe} "
+                    f"{progress.period}"
                 )
+                dashboard.task_done(name, "Unavailable", count_as_sample=False)
             else:
-                size, speed = self._downloads.pop(progress.current, ("?", "?"))
-                download = _format_duration(progress.download_seconds)
-                processing = _format_duration(progress.processing_seconds)
-                message = (
-                    f"{prefix} stored {progress.rows} rows "
-                    f"({size} at {speed}/s, download={download}, "
-                    f"process={processing}, total={duration})"
+                logger.error(
+                    f"failed {progress.symbol} {progress.timeframe} "
+                    f"{progress.period}: {progress.error}"
                 )
-            print(message, file=sys.stderr, flush=True)
+                dashboard.task_failed(name)
 
     def retry(
         self,
@@ -545,12 +597,10 @@ class _ProgressReporter:
                 if elapsed_seconds is not None
                 else ""
             )
-            print(
+            logger.warning(
                 f"{worker} Retry {attempt}/{attempts} "
                 f"{filename}{source}{duration}: "
-                f"{type(error).__name__}: {error}",
-                file=sys.stderr,
-                flush=True,
+                f"{type(error).__name__}: {error}"
             )
 
     def route(
@@ -569,31 +619,28 @@ class _ProgressReporter:
             filename = url.rsplit("/", 1)[-1]
             previous = previous_source or "none"
             reason_text = f" reason={reason}" if reason is not None else ""
-            print(
+            logger.info(
                 f"{_worker_label(worker_id)} {mode.title()} "
                 f"{attempt}/{attempts} {filename} from={previous} "
-                f"to={source}{reason_text}",
-                file=sys.stderr,
-                flush=True,
+                f"to={source}{reason_text}"
             )
 
     def metadata_fallback(self, error: Exception) -> None:
         with self._lock:
-            print(
-                "worker=main Warning: exchangeInfo "
+            logger.warning(
+                f"{_worker_label(None)} Warning: exchangeInfo "
                 "unavailable after retries; "
-                f"continuing with 404 fallback: {type(error).__name__}: {error}",
-                file=sys.stderr,
-                flush=True,
+                f"continuing with 404 fallback: {type(error).__name__}: {error}"
             )
 
     def worker_exit(self, worker_id: int) -> None:
         with self._lock:
-            print(
-                f"worker={worker_id} exited",
-                file=sys.stderr,
-                flush=True,
-            )
+            logger.debug(f"{_worker_label(worker_id)} exited")
+
+    def close(self, *, status: str = "ok") -> None:
+        with self._lock:
+            if self._dashboard is not None:
+                self._dashboard.close(status=status)
 
 
 def _worker_label(worker_id: int | None = None) -> str:

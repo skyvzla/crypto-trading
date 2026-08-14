@@ -907,6 +907,10 @@ async def test_subcategory_admission_service_reads_db_and_cancels_on_close(ledge
 async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     ledger, client
 ):
+    # 上一轮运行会写入 20 个 bulk symbol，导致 50% 缩减保护误触发；先清理同步状态。
+    async with ledger.pool.connection() as conn:
+        await conn.execute("TRUNCATE exchange_symbol_sync_state")
+        await conn.commit()
     suffix = uuid4().hex[:8].upper()
     symbol = f"T{suffix}USDT"
     strategy_id = f"spike-{suffix.lower()}"

@@ -14,6 +14,7 @@ dependencies = [
     "pydantic-settings>=2.10",
     "pytz>=2024.1",
     "redis>=5.2,<6.0",
+    "rich>=15.0.0",
     "uvicorn>=0.30",
     "websocket-client>=1.8",
     "websockets>=13.0",

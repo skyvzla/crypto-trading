@@ -41,6 +41,7 @@ from trading_platform.market.archive.index import (
 )
 from trading_platform.market.archive.parquet import archive_root_from_catalog
 from trading_platform.backtest.loader import DEFAULT_CHUNK_HOURS
+from trading_platform.shared.progress import TaskDashboard
 
 logger = logging.getLogger(__name__)
 
@@ -649,23 +650,23 @@ def _stream_process_output(
     *,
     symbol: str,
 ) -> tuple[str, str]:
+    """捕获子进程输出（不转发到终端，由父进程面板汇总进度）。"""
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
 
-    def drain(stream, target: list[str], label: str) -> None:
+    def drain(stream, target: list[str]) -> None:
         if stream is None:
             return
         for line in stream:
             target.append(line)
-            print(f"[{symbol}{label}] {line}", end="", flush=True)
 
     stderr_thread = threading.Thread(
         target=drain,
-        args=(process.stderr, stderr_lines, " stderr"),
+        args=(process.stderr, stderr_lines),
         daemon=True,
     )
     stderr_thread.start()
-    drain(process.stdout, stdout_lines, "")
+    drain(process.stdout, stdout_lines)
     stderr_thread.join()
     process.wait()
     return "".join(stdout_lines), "".join(stderr_lines)
@@ -676,6 +677,7 @@ def _run_symbol(
     config: dict[str, Any],
     output_root: Path,
     processes: ChildProcessRegistry | None = None,
+    dashboard: TaskDashboard | None = None,
 ) -> tuple[list[dict[str, Any]], float]:
     started_at = time.monotonic()
     rows = []
@@ -694,9 +696,12 @@ def _run_symbol(
     if not active:
         return rows, time.monotonic() - started_at
 
+    symbol = specs[0].symbol
+    if dashboard is not None:
+        dashboard.task_start(symbol)
+
     task_dir = output_root / "symbol_tasks"
     task_dir.mkdir(parents=True, exist_ok=True)
-    symbol = specs[0].symbol
     task_path = task_dir / f"{symbol}.json"
     task_path.write_text(json.dumps({
         "symbol": symbol,
@@ -722,10 +727,6 @@ def _run_symbol(
     if processes is not None:
         processes.add(process)
     try:
-        print(
-            f"[{symbol}] 启动共享行情回测：参数实例={len(active)}",
-            flush=True,
-        )
         stdout, stderr = _stream_process_output(process, symbol=symbol)
     finally:
         if processes is not None:
@@ -757,6 +758,16 @@ def _run_symbol(
                 returncode=process.returncode,
                 error=stderr.strip() or None,
             ))
+    failed_runs = sum(
+        row["status"] not in {"ok", "resumed"} for row in rows
+    )
+    if dashboard is not None:
+        dashboard.task_done(
+            symbol,
+            "OK" if failed_runs == 0 else "Failed",
+            count_as_sample=failed_runs == 0,
+            increment=len(active),
+        )
     return rows, time.monotonic() - started_at
 
 
@@ -1472,16 +1483,19 @@ def _main(argv: list[str] | None = None) -> int:
     completed_count = 0
     succeeded_count = 0
     failed_count = 0
-    started_at = time.monotonic()
-    print(
-        f"开始回测：交易对任务={len(specs_by_symbol)}，"
-        f"参数组合={len(specs)}，worker={workers}，输出={output_root}",
-        flush=True,
+    dashboard = TaskDashboard(
+        title="backtest",
+        total=len(specs),
+        stream=sys.stdout,
+    )
+    dashboard.start(
+        detail=f"runs={len(specs)} workers={workers} output={output_root}"
     )
     try:
         futures = {
             pool.submit(
-                _run_symbol, symbol_specs, config, output_root, processes
+                _run_symbol, symbol_specs, config, output_root, processes,
+                dashboard,
             ): (symbol, symbol_specs)
             for symbol, symbol_specs in specs_by_symbol.items()
         }
@@ -1505,17 +1519,13 @@ def _main(argv: list[str] | None = None) -> int:
             failed_count += sum(
                 row["status"] not in {"ok", "resumed"} for row in symbol_rows
             )
-            total_elapsed = time.monotonic() - started_at
-            print(
-                f"进度 {completed_count}/{len(specs)} "
-                f"({completed_count / len(specs):.1%})，"
-                f"成功={succeeded_count}，失败={failed_count}，"
-                f"当前={symbol}，参数完成={len(symbol_rows)}，"
-                f"交易对耗时={symbol_elapsed:.0f}s，"
-                f"累计耗时={total_elapsed:.0f}s",
-                flush=True,
+            symbol_failed = sum(
+                row["status"] not in {"ok", "resumed"} for row in symbol_rows
             )
+            if symbol_failed:
+                dashboard.error(f"{symbol} 失败 {symbol_failed} 个参数实例")
     except KeyboardInterrupt:
+        dashboard.error("收到 Ctrl+C，正在终止活动回测子进程...")
         print("收到 Ctrl+C，正在终止活动回测子进程...", flush=True)
         processes.terminate_all()
         for future in futures:
@@ -1526,6 +1536,7 @@ def _main(argv: list[str] | None = None) -> int:
             "已完成任务可在下次运行时通过 resume 复用。",
             flush=True,
         )
+        dashboard.close(status="interrupted")
         return 130
     else:
         pool.shutdown(wait=True)
@@ -1616,6 +1627,11 @@ def _main(argv: list[str] | None = None) -> int:
             )
         )
         print(f"回测研究入库完成: {research_id}", flush=True)
+    dashboard.close(
+        status="ok" if failed_count == 0 else "partial",
+        detail=f"success={succeeded_count} failed={failed_count} "
+        f"output={output_root}",
+    )
     print(
         f"实验完成: {len(specs)} runs, workers={workers}, output={output_root}",
         flush=True,
