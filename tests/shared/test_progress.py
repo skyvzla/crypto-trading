@@ -64,6 +64,29 @@ def test_eta_shown_after_min_samples():
     assert "eta_s=" in last
 
 
+def test_eta_counts_down_and_estimated_total_stays_stable(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(progress.time, "monotonic", lambda: clock[0])
+    dashboard = TaskDashboard(
+        title="t", total=100, stream=StringIO(), min_eta_samples=1
+    )
+    dashboard.start()
+    dashboard.task_start("batch")
+
+    clock[0] = 10.0
+    dashboard.task_done("batch", increment=10)
+
+    assert dashboard.eta_s == 90.0
+
+    clock[0] = 20.0
+
+    assert dashboard.eta_s == 80.0
+    rendered = StringIO()
+    Console(file=rendered, force_terminal=False, width=120).print(dashboard._render())
+    assert "ETA 00:01:20" in rendered.getvalue()
+    assert "Est. total 00:01:40" in rendered.getvalue()
+
+
 def test_failed_tasks_not_eta_samples():
     out = StringIO()
     dashboard = TaskDashboard(

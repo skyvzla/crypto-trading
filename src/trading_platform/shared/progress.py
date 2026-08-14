@@ -88,6 +88,7 @@ class TaskDashboard:
         self._started_at = time.monotonic()
         self._last_update = 0.0
         self._last_progress_pct = 0
+        self._eta_estimated_at: float | None = None
         self._running: dict[str, float] = {}
         self._samples: list[float] = []
         self._completed: deque[CompletedItem] = deque(maxlen=self._max_completed)
@@ -105,7 +106,8 @@ class TaskDashboard:
     @property
     def eta_s(self) -> float | None:
         with self._lock:
-            return self._estimate_eta(self._total, self._done, self._samples)
+            now = time.monotonic()
+            return self._estimate_eta(self._total, self._done, self._samples, now)
 
     def start(self, *, detail: str | None = None) -> None:
         with self._lifecycle_lock:
@@ -177,15 +179,17 @@ class TaskDashboard:
         increment: int = 1,
     ) -> None:
         with self._lock:
+            completed_at = time.monotonic()
             started = self._running.pop(name, None)
             if started is not None:
-                duration = time.monotonic() - started
+                duration = completed_at - started
                 if count_as_sample and duration >= 0:
                     self._samples.append(duration / max(1, increment))
                 self._completed.appendleft(
                     CompletedItem(name=name, status=status, duration_s=duration)
                 )
             self._done += max(1, increment)
+            self._eta_estimated_at = completed_at
         self._refresh()
 
     def task_skip(self, name: str, status: str = "Skipped", *, increment: int = 1) -> None:
@@ -275,7 +279,9 @@ class TaskDashboard:
                 percent // self._progress_step * self._progress_step
             )
             running = ",".join(quote(name, safe="") for name in sorted(self._running)) or "-"
-            eta = self._estimate_eta(self._total, self._done, self._samples)
+            eta = self._estimate_eta(
+                self._total, self._done, self._samples, time.monotonic()
+            )
             eta_label = (
                 f" eta_s={eta:.0f}" if eta is not None else " eta=collecting"
             )
@@ -292,22 +298,28 @@ class TaskDashboard:
         total: int | None,
         done: int,
         samples: list[float],
+        now: float,
     ) -> float | None:
         if total is None or len(samples) < self._min_eta_samples:
             return None
         remaining = total - done
         if remaining <= 0:
             return 0.0
-        return sum(samples) / len(samples) * remaining
+        estimate = sum(samples) / len(samples) * remaining
+        if self._eta_estimated_at is None:
+            return estimate
+        return max(0.0, estimate - (now - self._eta_estimated_at))
 
     def _render(self) -> Group:
         with self._lock:
+            now = time.monotonic()
             total = self._total
             done = self._done
             samples = list(self._samples)
             running = sorted(self._running.items(), key=lambda item: item[1])
             completed = list(self._completed)
-            elapsed_s = self.elapsed_s
+            elapsed_s = now - self._started_at
+            eta = self._estimate_eta(total, done, samples, now)
         elapsed = _format_duration(elapsed_s)
         running_block: list[Text] = []
         if running:
@@ -347,7 +359,6 @@ class TaskDashboard:
             progress_header = Text(
                 f"  {bar} {percent}  {done}/{total}"
             )
-            eta = self._estimate_eta(total, done, samples)
             if eta is None:
                 eta_text = (
                     f"ETA collecting samples "
