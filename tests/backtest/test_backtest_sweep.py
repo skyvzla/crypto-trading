@@ -205,6 +205,253 @@ def test_main_handles_duckdb_query_interrupt_without_traceback(
     assert "回测已停止" in capsys.readouterr().out
 
 
+def test_sweep_closes_dashboard_when_worker_submission_fails(
+    tmp_path: Path, monkeypatch
+):
+    class RecordingDashboard:
+        def __init__(self, **kwargs):
+            self.closed = []
+
+        def start(self, **kwargs):
+            pass
+
+        def close(self, *, status="ok", detail=None):
+            self.closed.append((status, detail))
+
+    class RaisingPool:
+        def __init__(self, **kwargs):
+            self.shutdown_calls = []
+
+        def submit(self, *args, **kwargs):
+            raise RuntimeError("submit failed")
+
+        def shutdown(self, **kwargs):
+            self.shutdown_calls.append(kwargs)
+
+    config_path = tmp_path / "sweep.toml"
+    config_path.write_text("name = 'test'", encoding="utf-8")
+    dashboard = RecordingDashboard()
+    pool = RaisingPool()
+    spec = sweep.RunSpec("run-1", "AKEUSDT", {"total_notional": 1000})
+    config = {
+        "name": "test",
+        "output": str(tmp_path / "output"),
+        "duckdb_path": "history.duckdb",
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-07-02T00:00:00+00:00",
+        "execution": {"duckdb_threads": 1},
+    }
+    monkeypatch.setattr(sweep.tomllib, "loads", lambda _: config)
+    monkeypatch.setattr(
+        sweep,
+        "resolve_universe",
+        lambda _: (
+            ["AKEUSDT"],
+            [{
+                "symbol": "AKEUSDT",
+                "selected": True,
+                "effective_start": "2026-07-01T00:00:00+00:00",
+            }],
+        ),
+    )
+    monkeypatch.setattr(sweep, "expand_specs", lambda *_: [spec])
+    monkeypatch.setattr(sweep, "archive_root_from_catalog", lambda _: tmp_path)
+    monkeypatch.setattr(
+        sweep, "_symbol_worker_resources", lambda *args: (1, None, None)
+    )
+    monkeypatch.setattr(sweep, "_estimate_monthly_memory", lambda *args, **kwargs: pd.DataFrame())
+    monkeypatch.setattr(sweep, "TaskDashboard", lambda **kwargs: dashboard)
+    monkeypatch.setattr(sweep, "ThreadPoolExecutor", lambda **kwargs: pool)
+
+    with pytest.raises(RuntimeError, match="submit failed"):
+        sweep._main(["--config", str(config_path)])
+
+    assert pool.shutdown_calls == [{"wait": True, "cancel_futures": True}]
+    assert dashboard.closed == [("failed", None)]
+
+
+def test_sweep_closes_dashboard_when_postprocessing_fails(
+    tmp_path: Path, monkeypatch
+):
+    class RecordingDashboard:
+        def __init__(self, **kwargs):
+            self.closed = []
+
+        def start(self, **kwargs):
+            pass
+
+        def close(self, *, status="ok", detail=None):
+            self.closed.append((status, detail))
+
+    class FakeFuture:
+        def result(self):
+            return ([{
+                "run_id": "run-1", "symbol": "AKEUSDT", "status": "ok",
+                "net_pnl": 0.0,
+            }], 0.0)
+
+        def cancel(self):
+            pass
+
+    class FakePool:
+        def __init__(self, **kwargs):
+            self.shutdown_calls = []
+
+        def submit(self, *args, **kwargs):
+            return future
+
+        def shutdown(self, **kwargs):
+            self.shutdown_calls.append(kwargs)
+
+    config_path = tmp_path / "sweep.toml"
+    config_path.write_text("name = 'test'", encoding="utf-8")
+    dashboard = RecordingDashboard()
+    future = FakeFuture()
+    pool = FakePool()
+    spec = sweep.RunSpec("run-1", "AKEUSDT", {"total_notional": 1000})
+    config = {
+        "name": "test",
+        "output": str(tmp_path / "output"),
+        "duckdb_path": "history.duckdb",
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-07-02T00:00:00+00:00",
+        "execution": {"duckdb_threads": 1},
+    }
+    monkeypatch.setattr(sweep.tomllib, "loads", lambda _: config)
+    monkeypatch.setattr(
+        sweep,
+        "resolve_universe",
+        lambda _: (
+            ["AKEUSDT"],
+            [{
+                "symbol": "AKEUSDT",
+                "selected": True,
+                "effective_start": "2026-07-01T00:00:00+00:00",
+            }],
+        ),
+    )
+    monkeypatch.setattr(sweep, "expand_specs", lambda *_: [spec])
+    monkeypatch.setattr(sweep, "archive_root_from_catalog", lambda _: tmp_path)
+    monkeypatch.setattr(
+        sweep, "_symbol_worker_resources", lambda *args: (1, None, None)
+    )
+    monkeypatch.setattr(
+        sweep, "_estimate_monthly_memory", lambda *args, **kwargs: pd.DataFrame()
+    )
+    monkeypatch.setattr(sweep, "TaskDashboard", lambda **kwargs: dashboard)
+    monkeypatch.setattr(sweep, "ThreadPoolExecutor", lambda **kwargs: pool)
+    monkeypatch.setattr(sweep, "as_completed", lambda futures: list(futures))
+    monkeypatch.setattr(
+        sweep,
+        "_attach_breakout_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("postprocessing failed")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="postprocessing failed"):
+        sweep._main(["--config", str(config_path)])
+
+    assert pool.shutdown_calls == [{"wait": True}]
+    assert dashboard.closed == [("failed", None)]
+
+
+def test_sweep_closes_dashboard_when_cleanup_is_interrupted_again(
+    tmp_path: Path, monkeypatch
+):
+    class RecordingDashboard:
+        def __init__(self, **kwargs):
+            self.errors = []
+            self.closed = []
+
+        def start(self, **kwargs):
+            pass
+
+        def error(self, message):
+            self.errors.append(message)
+
+        def close(self, *, status="ok", detail=None):
+            self.closed.append((status, detail))
+
+    class FakeFuture:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
+
+    class InterruptingPool:
+        def __init__(self, **kwargs):
+            self.shutdown_calls = []
+
+        def submit(self, *args, **kwargs):
+            return future
+
+        def shutdown(self, **kwargs):
+            self.shutdown_calls.append(kwargs)
+            raise KeyboardInterrupt
+
+    class RecordingRegistry:
+        def __init__(self):
+            self.terminated = False
+
+        def terminate_all(self):
+            self.terminated = True
+
+    config_path = tmp_path / "sweep.toml"
+    config_path.write_text("name = 'test'", encoding="utf-8")
+    dashboard = RecordingDashboard()
+    future = FakeFuture()
+    pool = InterruptingPool()
+    registry = RecordingRegistry()
+    spec = sweep.RunSpec("run-1", "AKEUSDT", {"total_notional": 1000})
+    config = {
+        "name": "test",
+        "output": str(tmp_path / "output"),
+        "duckdb_path": "history.duckdb",
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-07-02T00:00:00+00:00",
+        "execution": {"duckdb_threads": 1},
+    }
+    monkeypatch.setattr(sweep.tomllib, "loads", lambda _: config)
+    monkeypatch.setattr(
+        sweep,
+        "resolve_universe",
+        lambda _: (
+            ["AKEUSDT"],
+            [{
+                "symbol": "AKEUSDT",
+                "selected": True,
+                "effective_start": "2026-07-01T00:00:00+00:00",
+            }],
+        ),
+    )
+    monkeypatch.setattr(sweep, "expand_specs", lambda *_: [spec])
+    monkeypatch.setattr(sweep, "archive_root_from_catalog", lambda _: tmp_path)
+    monkeypatch.setattr(
+        sweep, "_symbol_worker_resources", lambda *args: (1, None, None)
+    )
+    monkeypatch.setattr(
+        sweep, "_estimate_monthly_memory", lambda *args, **kwargs: pd.DataFrame()
+    )
+    monkeypatch.setattr(sweep, "TaskDashboard", lambda **kwargs: dashboard)
+    monkeypatch.setattr(sweep, "ThreadPoolExecutor", lambda **kwargs: pool)
+    monkeypatch.setattr(sweep, "ChildProcessRegistry", lambda: registry)
+    monkeypatch.setattr(
+        sweep,
+        "as_completed",
+        lambda futures: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        sweep._main(["--config", str(config_path)])
+
+    assert registry.terminated
+    assert future.cancelled
+    assert pool.shutdown_calls == [{"wait": True, "cancel_futures": True}]
+    assert dashboard.closed == [("interrupted", None)]
+
+
 def test_expand_specs_is_deterministic_and_period_sensitive():
     config = {
         "start": "2026-07-01",
@@ -396,6 +643,154 @@ def test_symbol_task_uses_one_subprocess_for_multiple_parameters(
     assert "run_spike_sweep_symbol" in (
         tmp_path / "runs/run-4/symbol_command.txt"
     ).read_text()
+
+
+def test_run_symbol_marks_fully_resumed_specs_complete_in_dashboard(tmp_path: Path):
+    class RecordingDashboard:
+        def __init__(self):
+            self.started = []
+            self.skipped = []
+
+        def task_start(self, name):
+            self.started.append(name)
+
+        def task_skip(self, name, status, *, increment):
+            self.skipped.append((name, status, increment))
+
+    specs = [
+        sweep.RunSpec(f"run-{lookback}", "AKEUSDT", {
+            "total_notional": 1000,
+            "prior_high_lookback_hours": lookback,
+        })
+        for lookback in (4, 8)
+    ]
+    for spec in specs:
+        run_dir = tmp_path / "runs" / spec.run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "summary.json").write_text(
+            '{"positions":{"total":0,"profitable":0},'
+            '"pnl":{"net_pnl":0,"total_profit":0,'
+            '"total_loss":0,"total_commission":0}}'
+        )
+    dashboard = RecordingDashboard()
+
+    rows, _ = _run_symbol(
+        specs,
+        {"execution": {"resume": True}},
+        tmp_path,
+        dashboard=dashboard,
+    )
+
+    assert [row["status"] for row in rows] == ["resumed", "resumed"]
+    assert dashboard.started == ["AKEUSDT"]
+    assert dashboard.skipped == [("AKEUSDT", "Resumed", 2)]
+
+
+def test_run_symbol_counts_resumed_and_new_specs_in_dashboard(
+    tmp_path: Path, monkeypatch
+):
+    class RecordingDashboard:
+        def __init__(self):
+            self.started = []
+            self.done = []
+
+        def task_start(self, name):
+            self.started.append(name)
+
+        def task_done(self, name, status, *, count_as_sample, increment):
+            self.done.append((name, status, increment))
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            self.stdout = StringIO("")
+            self.stderr = StringIO("")
+            task = json.loads(Path(command[-1]).read_text())
+            for run in task["runs"]:
+                arguments = run["arguments"]
+                output = Path(arguments[arguments.index("--output") + 1])
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "summary.json").write_text(
+                    '{"positions":{"total":0,"profitable":0},'
+                    '"pnl":{"net_pnl":0,"total_profit":0,'
+                    '"total_loss":0,"total_commission":0}}'
+                )
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(sweep.subprocess, "Popen", FakeProcess)
+    resumed = sweep.RunSpec("run-resumed", "AKEUSDT", {
+        "total_notional": 1000,
+        "prior_high_lookback_hours": 4,
+    })
+    new = sweep.RunSpec("run-new", "AKEUSDT", {
+        "total_notional": 1000,
+        "prior_high_lookback_hours": 8,
+    })
+    resumed_dir = tmp_path / "runs" / resumed.run_id
+    resumed_dir.mkdir(parents=True)
+    (resumed_dir / "summary.json").write_text(
+        '{"positions":{"total":0,"profitable":0},'
+        '"pnl":{"net_pnl":0,"total_profit":0,'
+        '"total_loss":0,"total_commission":0}}'
+    )
+    dashboard = RecordingDashboard()
+
+    rows, _ = _run_symbol(
+        [resumed, new],
+        {
+            "start": "2026-07-01",
+            "end": "2026-08-01",
+            "duckdb_path": "history.duckdb",
+            "execution": {"resume": True},
+        },
+        tmp_path,
+        dashboard=dashboard,
+    )
+
+    assert {row["status"] for row in rows} == {"resumed", "ok"}
+    assert dashboard.started == ["AKEUSDT"]
+    assert dashboard.done == [("AKEUSDT", "OK", 2)]
+
+
+def test_run_symbol_marks_started_task_failed_when_resume_metadata_is_invalid(
+    tmp_path: Path,
+):
+    class RecordingDashboard:
+        def __init__(self):
+            self.started = []
+            self.failed = []
+
+        def task_start(self, name):
+            self.started.append(name)
+
+        def task_failed(self, name, *, increment):
+            self.failed.append((name, increment))
+
+    specs = [
+        sweep.RunSpec(f"run-{lookback}", "AKEUSDT", {
+            "total_notional": 1000,
+            "prior_high_lookback_hours": lookback,
+        })
+        for lookback in (4, 8)
+    ]
+    run_dir = tmp_path / "runs" / specs[0].run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text("not json")
+    dashboard = RecordingDashboard()
+
+    with pytest.raises(json.JSONDecodeError):
+        _run_symbol(
+            specs,
+            {"execution": {"resume": True}},
+            tmp_path,
+            dashboard=dashboard,
+        )
+
+    assert dashboard.started == ["AKEUSDT"]
+    assert dashboard.failed == [("AKEUSDT", 2)]
 
 
 def test_child_process_registry_terminates_running_subprocess():

@@ -682,93 +682,101 @@ def _run_symbol(
     started_at = time.monotonic()
     rows = []
     active: list[tuple[RunSpec, Path, list[str]]] = []
-    resume = config.get("execution", {}).get("resume", True)
-    for spec in specs:
-        run_dir = output_root / "runs" / spec.run_id
-        summary_path = run_dir / "summary.json"
-        if resume and summary_path.exists():
-            rows.append(_summary_row(
-                spec, json.loads(summary_path.read_text()), "resumed"
-            ))
-            continue
-        run_dir.mkdir(parents=True, exist_ok=True)
-        active.append((spec, run_dir, _run_arguments(spec, config, run_dir)))
-    if not active:
-        return rows, time.monotonic() - started_at
-
     symbol = specs[0].symbol
     if dashboard is not None:
         dashboard.task_start(symbol)
-
-    task_dir = output_root / "symbol_tasks"
-    task_dir.mkdir(parents=True, exist_ok=True)
-    task_path = task_dir / f"{symbol}.json"
-    task_path.write_text(json.dumps({
-        "symbol": symbol,
-        "runs": [
-            {"run_id": spec.run_id, "arguments": arguments}
-            for spec, _run_dir, arguments in active
-        ],
-    }, indent=2, ensure_ascii=False))
-    command = [
-        sys.executable,
-        "-m",
-        "trading_platform.backtest.run_spike_sweep_symbol",
-        "--task",
-        str(task_path),
-    ]
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    if processes is not None:
-        processes.add(process)
     try:
-        stdout, stderr = _stream_process_output(process, symbol=symbol)
-    finally:
-        if processes is not None:
-            processes.remove(process)
+        resume = config.get("execution", {}).get("resume", True)
+        for spec in specs:
+            run_dir = output_root / "runs" / spec.run_id
+            summary_path = run_dir / "summary.json"
+            if resume and summary_path.exists():
+                rows.append(_summary_row(
+                    spec, json.loads(summary_path.read_text()), "resumed"
+                ))
+                continue
+            run_dir.mkdir(parents=True, exist_ok=True)
+            active.append((spec, run_dir, _run_arguments(spec, config, run_dir)))
+        if not active:
+            if dashboard is not None:
+                dashboard.task_skip(symbol, "Resumed", increment=len(rows))
+            return rows, time.monotonic() - started_at
 
-    for spec, run_dir, arguments in active:
-        standalone_command = [
+        task_dir = output_root / "symbol_tasks"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        task_path = task_dir / f"{symbol}.json"
+        task_path.write_text(json.dumps({
+            "symbol": symbol,
+            "runs": [
+                {"run_id": spec.run_id, "arguments": arguments}
+                for spec, _run_dir, arguments in active
+            ],
+        }, indent=2, ensure_ascii=False))
+        command = [
             sys.executable,
             "-m",
-            "trading_platform.backtest.run_spike_short",
-            *arguments,
+            "trading_platform.backtest.run_spike_sweep_symbol",
+            "--task",
+            str(task_path),
         ]
-        (run_dir / "command.txt").write_text(
-            shlex.join(standalone_command) + "\n"
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
         )
-        (run_dir / "symbol_command.txt").write_text(
-            shlex.join(command) + "\n"
+        if processes is not None:
+            processes.add(process)
+        try:
+            stdout, stderr = _stream_process_output(process, symbol=symbol)
+        finally:
+            if processes is not None:
+                processes.remove(process)
+
+        for spec, run_dir, arguments in active:
+            standalone_command = [
+                sys.executable,
+                "-m",
+                "trading_platform.backtest.run_spike_short",
+                *arguments,
+            ]
+            (run_dir / "command.txt").write_text(
+                shlex.join(standalone_command) + "\n"
+            )
+            (run_dir / "symbol_command.txt").write_text(
+                shlex.join(command) + "\n"
+            )
+            (run_dir / "stdout.log").write_text(stdout)
+            (run_dir / "stderr.log").write_text(stderr)
+            summary_path = run_dir / "summary.json"
+            if summary_path.exists():
+                rows.append(_summary_row(
+                    spec, json.loads(summary_path.read_text()), "ok"
+                ))
+            else:
+                rows.append(_failed_summary_row(
+                    spec,
+                    returncode=process.returncode,
+                    error=stderr.strip() or None,
+                ))
+        failed_runs = sum(
+            row["status"] not in {"ok", "resumed"} for row in rows
         )
-        (run_dir / "stdout.log").write_text(stdout)
-        (run_dir / "stderr.log").write_text(stderr)
-        summary_path = run_dir / "summary.json"
-        if summary_path.exists():
-            rows.append(_summary_row(
-                spec, json.loads(summary_path.read_text()), "ok"
-            ))
-        else:
-            rows.append(_failed_summary_row(
-                spec,
-                returncode=process.returncode,
-                error=stderr.strip() or None,
-            ))
-    failed_runs = sum(
-        row["status"] not in {"ok", "resumed"} for row in rows
-    )
-    if dashboard is not None:
-        dashboard.task_done(
-            symbol,
-            "OK" if failed_runs == 0 else "Failed",
-            count_as_sample=failed_runs == 0,
-            increment=len(active),
-        )
-    return rows, time.monotonic() - started_at
+        if dashboard is not None:
+            dashboard.task_done(
+                symbol,
+                "OK" if failed_runs == 0 else "Failed",
+                count_as_sample=failed_runs == 0 and not any(
+                    row["status"] == "resumed" for row in rows
+                ),
+                increment=len(rows),
+            )
+        return rows, time.monotonic() - started_at
+    except BaseException:
+        if dashboard is not None:
+            dashboard.task_failed(symbol, increment=len(specs))
+        raise
 
 
 def _summary_row(spec: RunSpec, summary: dict[str, Any], status: str) -> dict[str, Any]:
@@ -1524,109 +1532,165 @@ def _main(argv: list[str] | None = None) -> int:
             )
             if symbol_failed:
                 dashboard.error(f"{symbol} 失败 {symbol_failed} 个参数实例")
+        pool.shutdown(wait=True)
     except KeyboardInterrupt:
         dashboard.error("收到 Ctrl+C，正在终止活动回测子进程...")
         print("收到 Ctrl+C，正在终止活动回测子进程...", flush=True)
-        processes.terminate_all()
-        for future in futures:
-            future.cancel()
-        pool.shutdown(wait=True, cancel_futures=True)
-        print(
-            f"回测已停止：已完成={completed_count}/{len(specs)}；"
-            "已完成任务可在下次运行时通过 resume 复用。",
-            flush=True,
-        )
-        dashboard.close(status="interrupted")
+        try:
+            processes.terminate_all()
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=True, cancel_futures=True)
+            print(
+                f"回测已停止：已完成={completed_count}/{len(specs)}；"
+                "已完成任务可在下次运行时通过 resume 复用。",
+                flush=True,
+            )
+        finally:
+            dashboard.close(status="interrupted")
         return 130
-    else:
-        pool.shutdown(wait=True)
-    comparison = pd.DataFrame(rows).sort_values(["status", "net_pnl"], ascending=[True, False])
-    comparison.to_csv(output_root / "comparison.csv", index=False)
-    print("回测任务已结束，正在合并逐笔交易和信号...", flush=True)
-    all_trades = []
-    all_signals = []
-    for spec in specs:
-        path = output_root / "runs" / spec.run_id / "trades.csv"
-        if path.exists():
-            frame = pd.read_csv(path)
-            frame["run_id"] = spec.run_id
-            frame["parameters"] = json.dumps(spec.params, sort_keys=True, default=str)
-            all_trades.append(frame)
-        audit_path = output_root / "runs" / spec.run_id / "audit_events.parquet"
-        if audit_path.exists():
-            audit = pd.read_parquet(audit_path)
-            audit = audit[audit["event_type"] == "signal_triggered"].copy()
-            if not audit.empty:
-                audit["run_id"] = spec.run_id
-                audit["parameters"] = json.dumps(
+    except Exception:
+        try:
+            processes.terminate_all()
+            for future in futures:
+                future.cancel()
+            pool.shutdown(wait=True, cancel_futures=True)
+        finally:
+            dashboard.close(status="failed")
+        raise
+    try:
+        comparison = pd.DataFrame(rows).sort_values(
+            ["status", "net_pnl"], ascending=[True, False]
+        )
+        comparison.to_csv(output_root / "comparison.csv", index=False)
+        print("回测任务已结束，正在合并逐笔交易和信号...", flush=True)
+        all_trades = []
+        all_signals = []
+        for spec in specs:
+            path = output_root / "runs" / spec.run_id / "trades.csv"
+            if path.exists():
+                frame = pd.read_csv(path)
+                frame["run_id"] = spec.run_id
+                frame["parameters"] = json.dumps(
                     spec.params, sort_keys=True, default=str
                 )
-                all_signals.append(audit)
-    trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
-    analysis = config.get("analysis", {})
-    windows_hours = [int(value) for value in analysis.get("breakout_windows_hours", [4, 6, 8, 12, 24])]
-    trades = _attach_breakout_context(
-        trades,
-        archive_index_path=config["archive_index_path"],
-        windows_hours=windows_hours,
-        duckdb_threads=duckdb_threads,
-        workers=workers,
-    )
-    print("后计算完成，正在生成冲突、分档和参数汇总报表...", flush=True)
-    trades, collisions = _annotate_collisions(
-        trades, tolerance_ms=int(config.get("analysis", {}).get("collision_tolerance_seconds", 1) * 1000)
-    )
-    trades.to_csv(output_root / "all_trades.csv", index=False)
-    collisions.to_csv(output_root / "collisions.csv", index=False)
-    signals = pd.concat(all_signals, ignore_index=True) if all_signals else pd.DataFrame()
-    signals.to_csv(output_root / "all_signals.csv", index=False)
-    signal_collisions = _find_simultaneous_signals(
-        signals,
-        tolerance_ms=int(analysis.get("collision_tolerance_seconds", 1) * 1000),
-    )
-    signal_collisions.to_csv(output_root / "signal_collisions.csv", index=False)
-    _write_trade_breakdowns(
-        trades, output_root,
-        pnl_split_usdt=float(config.get("analysis", {}).get("pnl_split_usdt", 10)),
-    )
-    _write_tier_fill_summary(trades, output_root)
-    _write_tier3_only_projection_summary(trades, output_root)
-    _write_breakout_summaries(
-        trades, output_root, windows_hours=windows_hours,
-        proximity_percentages=[float(value) for value in analysis.get("box_proximity_percentages", [1, 3, 5, 10])],
-    )
-    parameter_summary = _parameter_summary(
-        comparison, collisions, signal_collisions
-    )
-    parameter_summary.to_csv(output_root / "parameter_summary.csv", index=False)
-    _write_report(
-        output_root,
-        parameter_summary,
-        run_count=len(specs),
-        workers=workers,
-        worker_memory_budget=worker_memory_budget,
-        duckdb_memory_limit=actual_memory_limit,
-    )
-    public_config = {key: value for key, value in config.items() if key != "database_dsn"}
-    (output_root / "experiment.json").write_text(json.dumps({
-        "config": public_config, "symbols": symbols,
-        "runs": len(specs), "workers": workers,
-        "worker_memory_budget": worker_memory_budget,
-        "duckdb_memory_limit_per_worker": actual_memory_limit,
-    }, indent=2, default=str))
-    if args.persist_results:
-        from trading_platform.backtest.report_import_cli import (
-            import_report_directory,
+                all_trades.append(frame)
+            audit_path = output_root / "runs" / spec.run_id / "audit_events.parquet"
+            if audit_path.exists():
+                audit = pd.read_parquet(audit_path)
+                audit = audit[audit["event_type"] == "signal_triggered"].copy()
+                if not audit.empty:
+                    audit["run_id"] = spec.run_id
+                    audit["parameters"] = json.dumps(
+                        spec.params, sort_keys=True, default=str
+                    )
+                    all_signals.append(audit)
+        trades = (
+            pd.concat(all_trades, ignore_index=True)
+            if all_trades else pd.DataFrame()
         )
-
-        print("正在将回测研究导入 PostgreSQL...", flush=True)
-        research_id = asyncio.run(
-            import_report_directory(
-                output_root,
-                config.get("database_dsn") or _dsn_from_environment(),
+        analysis = config.get("analysis", {})
+        windows_hours = [
+            int(value)
+            for value in analysis.get(
+                "breakout_windows_hours", [4, 6, 8, 12, 24]
             )
+        ]
+        trades = _attach_breakout_context(
+            trades,
+            archive_index_path=config["archive_index_path"],
+            windows_hours=windows_hours,
+            duckdb_threads=duckdb_threads,
+            workers=workers,
         )
-        print(f"回测研究入库完成: {research_id}", flush=True)
+        print("后计算完成，正在生成冲突、分档和参数汇总报表...", flush=True)
+        trades, collisions = _annotate_collisions(
+            trades,
+            tolerance_ms=int(
+                config.get("analysis", {}).get(
+                    "collision_tolerance_seconds", 1
+                ) * 1000
+            ),
+        )
+        trades.to_csv(output_root / "all_trades.csv", index=False)
+        collisions.to_csv(output_root / "collisions.csv", index=False)
+        signals = (
+            pd.concat(all_signals, ignore_index=True)
+            if all_signals else pd.DataFrame()
+        )
+        signals.to_csv(output_root / "all_signals.csv", index=False)
+        signal_collisions = _find_simultaneous_signals(
+            signals,
+            tolerance_ms=int(
+                analysis.get("collision_tolerance_seconds", 1) * 1000
+            ),
+        )
+        signal_collisions.to_csv(output_root / "signal_collisions.csv", index=False)
+        _write_trade_breakdowns(
+            trades,
+            output_root,
+            pnl_split_usdt=float(
+                config.get("analysis", {}).get("pnl_split_usdt", 10)
+            ),
+        )
+        _write_tier_fill_summary(trades, output_root)
+        _write_tier3_only_projection_summary(trades, output_root)
+        _write_breakout_summaries(
+            trades,
+            output_root,
+            windows_hours=windows_hours,
+            proximity_percentages=[
+                float(value)
+                for value in analysis.get(
+                    "box_proximity_percentages", [1, 3, 5, 10]
+                )
+            ],
+        )
+        parameter_summary = _parameter_summary(
+            comparison, collisions, signal_collisions
+        )
+        parameter_summary.to_csv(output_root / "parameter_summary.csv", index=False)
+        _write_report(
+            output_root,
+            parameter_summary,
+            run_count=len(specs),
+            workers=workers,
+            worker_memory_budget=worker_memory_budget,
+            duckdb_memory_limit=actual_memory_limit,
+        )
+        public_config = {
+            key: value for key, value in config.items() if key != "database_dsn"
+        }
+        (output_root / "experiment.json").write_text(json.dumps({
+            "config": public_config, "symbols": symbols,
+            "runs": len(specs), "workers": workers,
+            "worker_memory_budget": worker_memory_budget,
+            "duckdb_memory_limit_per_worker": actual_memory_limit,
+        }, indent=2, default=str))
+        if args.persist_results:
+            from trading_platform.backtest.report_import_cli import (
+                import_report_directory,
+            )
+
+            print("正在将回测研究导入 PostgreSQL...", flush=True)
+            research_id = asyncio.run(
+                import_report_directory(
+                    output_root,
+                    config.get("database_dsn") or _dsn_from_environment(),
+                )
+            )
+            print(f"回测研究入库完成: {research_id}", flush=True)
+    except KeyboardInterrupt:
+        dashboard.close(status="interrupted")
+        raise
+    except RuntimeError as error:
+        dashboard.close(
+            status="interrupted" if "Query interrupted" in str(error) else "failed"
+        )
+        raise
+    except Exception:
+        dashboard.close(status="failed")
+        raise
     dashboard.close(
         status="ok" if failed_count == 0 else "partial",
         detail=f"success={succeeded_count} failed={failed_count} "

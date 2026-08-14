@@ -262,9 +262,6 @@ def main():
     """
     args = parse_args()
 
-    # 设置日志级别
-    logging.getLogger().setLevel(args.log_level)
-
     # 解析时间范围
     start_ms = parse_date(args.start)
     end_ms = parse_date(args.end)
@@ -281,51 +278,71 @@ def main():
     # 生成输出目录
     if args.output:
         output_dir = args.output
-        run_id = Path(output_dir).name
     else:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        run_id = f"backtest_{args.strategy}_{timestamp}"
-        output_dir = f"reports/{run_id}"
+        output_dir = f"reports/backtest_{args.strategy}_{timestamp}"
 
     # 完整日志落文件，供 Agent 按需核验
     log_file = args.log_file or Path(output_dir) / "backtest.log"
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    root_logger = logging.getLogger()
+    console_level = getattr(logging, args.log_level)
+    try:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    except OSError as error:
+        logger.error(f"日志文件创建失败: {error}")
+        sys.exit(1)
+    original_root_level = root_logger.level
+    original_console_levels = {}
+    root_logger.setLevel(logging.DEBUG)
+    for handler in root_logger.handlers:
+        if (
+            isinstance(handler, logging.StreamHandler)
+            and not isinstance(handler, logging.FileHandler)
+        ):
+            original_console_levels[handler] = handler.level
+            handler.setLevel(console_level)
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(
         '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
     ))
-    logging.getLogger().addHandler(file_handler)
+    root_logger.addHandler(file_handler)
 
-    dashboard = TaskDashboard(title="backtest", total=None, stream=sys.stdout)
-    dashboard.start(detail=f"strategy={args.strategy} output={output_dir}")
-    dashboard.task_start(f"{args.strategy} {','.join(args.symbols)}")
-
-    logger.info("=" * 60)
-    logger.info("回测引擎启动")
-    logger.info("=" * 60)
-    logger.info(f"策略: {args.strategy}")
-    logger.info(f"币种: {args.symbols}")
-    logger.info(f"时间范围: {args.start} ~ {args.end}")
-    logger.info(f"数据源: {args.duckdb_path}")
-    logger.info(f"输出目录: {output_dir}")
-    logger.info(f"日志文件: {log_file}")
-    logger.info("=" * 60)
-
-    # 1. 加载数据
-    logger.info("Step 1/4: 加载数据")
-    loader = BacktestDataLoader(
-        duckdb_path=args.duckdb_path,
-        symbols=args.symbols,
-        start_ms=load_start_ms,
-        end_ms=end_ms,
-        require_aggtrades=args.strategy == 'spike',
-        required_kline_intervals=(
-            ['1m', '5m'] if args.strategy == 'spike' else []
-        ),
-    )
-
+    task_name = f"{args.strategy} {','.join(args.symbols)}"
+    dashboard: TaskDashboard | None = None
+    loading_strategy = False
     try:
+        dashboard = TaskDashboard(
+            title="backtest",
+            total=None,
+            stream=sys.stdout,
+        )
+        dashboard.start(detail=f"strategy={args.strategy} output={output_dir}")
+        dashboard.task_start(task_name)
+
+        logger.info("=" * 60)
+        logger.info("回测引擎启动")
+        logger.info("=" * 60)
+        logger.info(f"策略: {args.strategy}")
+        logger.info(f"币种: {args.symbols}")
+        logger.info(f"时间范围: {args.start} ~ {args.end}")
+        logger.info(f"数据源: {args.duckdb_path}")
+        logger.info(f"输出目录: {output_dir}")
+        logger.info(f"日志文件: {log_file}")
+        logger.info("=" * 60)
+
+        # 1. 加载数据
+        logger.info("Step 1/4: 加载数据")
+        loader = BacktestDataLoader(
+            duckdb_path=args.duckdb_path,
+            symbols=args.symbols,
+            start_ms=load_start_ms,
+            end_ms=end_ms,
+            require_aggtrades=args.strategy == 'spike',
+            required_kline_intervals=(
+                ['1m', '5m'] if args.strategy == 'spike' else []
+            ),
+        )
         event_iter = loader.iter_all(
             chunk_hours=args.chunk_hours,
             fetch_batch_size=args.fetch_batch_size,
@@ -336,113 +353,106 @@ def main():
         if first_event is None:
             raise ValueError("no market data found in the requested range")
         events = chain((first_event,), event_iter)
-    except Exception as e:
-        logger.error(f"数据加载失败: {e}")
-        dashboard.close(status="failed")
-        sys.exit(1)
+        logger.info("数据加载完成：使用流式事件迭代器")
 
-    logger.info("数据加载完成：使用流式事件迭代器")
-
-    # 2. 加载策略
-    logger.info("Step 2/4: 加载策略")
-    try:
+        # 2. 加载策略
+        logger.info("Step 2/4: 加载策略")
+        loading_strategy = True
         strategy = load_strategy(
             args.strategy,
             args.account_id,
             symbols=args.symbols,
             total_notional=args.total_notional,
         )
-    except Exception as e:
-        logger.error(f"策略加载失败: {e}")
-        dashboard.close(status="failed")
-        logger.info(
-            "\n提示：Spike 策略必须提供至少一个币种和正数 "
-            "--total-notional。\n"
+        loading_strategy = False
+
+        # 3. 运行回测
+        logger.info("Step 3/4: 运行回测")
+        config = BacktestConfig(
+            data_dir=args.duckdb_path,
+            output_dir=output_dir,
+            maker_fee_rate=args.maker_fee,
+            taker_fee_rate=args.taker_fee,
+            trading_start_ms=start_ms,
+            limit_fill_fraction_per_bar=args.limit_fill_fraction,
         )
-        sys.exit(1)
-
-    # 3. 运行回测
-    logger.info("Step 3/4: 运行回测")
-
-    config = BacktestConfig(
-        data_dir=args.duckdb_path,
-        output_dir=output_dir,
-        maker_fee_rate=args.maker_fee,
-        taker_fee_rate=args.taker_fee,
-        trading_start_ms=start_ms,
-        limit_fill_fraction_per_bar=args.limit_fill_fraction,
-    )
-
-    engine = BacktestEngine(
-        strategy=strategy,
-        events=events,
-        config=config,
-        account_id=args.account_id,
-        symbol_rules=load_symbol_rules(args.exchange_info, args.symbols),
-    )
-
-    try:
+        engine = BacktestEngine(
+            strategy=strategy,
+            events=events,
+            config=config,
+            account_id=args.account_id,
+            symbol_rules=load_symbol_rules(args.exchange_info, args.symbols),
+        )
         result = engine.run()
-    except Exception as e:
-        logger.error(f"回测运行失败: {e}", exc_info=True)
-        dashboard.close(status="failed")
-        sys.exit(1)
+        if result.virtual_time_end < start_ms:
+            raise ValueError("只有预热数据，交易时间范围内没有事件")
+        logger.info("回测运行完成")
 
-    if result.virtual_time_end < start_ms:
-        logger.error("只有预热数据，交易时间范围内没有事件")
-        dashboard.close(status="failed")
-        sys.exit(1)
+        # 4. 分析结果
+        logger.info("Step 4/4: 分析结果")
+        analyzer = ResultAnalyzer(result)
+        summary = analyzer.analyze()
 
-    logger.info("回测运行完成")
+        logger.info("=" * 60)
+        logger.info("回测结果摘要")
+        logger.info("=" * 60)
+        logger.info(f"订单总数: {summary['orders']['total']}")
+        logger.info(f"  - 成交: {summary['orders']['filled']}")
+        logger.info(f"  - 撤销: {summary['orders']['cancelled']}")
+        logger.info(f"  - 过期: {summary['orders']['expired']}")
+        logger.info(f"  - 成交率: {summary['orders']['fill_rate']:.2%}")
+        logger.info("")
+        logger.info(f"持仓总数: {summary['positions']['total']}")
+        logger.info(f"  - 未平仓: {summary['positions']['open']}")
+        logger.info(f"  - 已平仓: {summary['positions']['closed']}")
+        logger.info(f"  - 盈利: {summary['positions']['profitable']}")
+        logger.info(f"  - 亏损: {summary['positions']['loss']}")
+        logger.info(f"  - 胜率: {summary['positions']['win_rate']:.2%}")
+        logger.info("")
+        logger.info(f"总盈亏: {summary['pnl']['net_pnl']:.2f} USDT")
+        logger.info(f"  - 未实现盈亏: {summary['pnl']['total_unrealized']:.2f} USDT")
+        logger.info(f"  - 盈利总额: {summary['pnl']['total_profit']:.2f} USDT")
+        logger.info(f"  - 亏损总额: {summary['pnl']['total_loss']:.2f} USDT")
+        logger.info(f"  - 手续费: {summary['pnl']['total_commission']:.2f} USDT")
+        logger.info(f"Profit Factor: {summary['pnl']['profit_factor']:.2f}")
+        logger.info(f"最大回撤: {summary['pnl']['max_drawdown']:.2f} USDT")
+        logger.info(f"Sharpe Ratio: {summary['pnl']['sharpe_ratio']:.2f}")
+        logger.info("=" * 60)
 
-    # 4. 分析结果
-    logger.info("Step 4/4: 分析结果")
-
-    analyzer = ResultAnalyzer(result)
-
-    # 打印摘要
-    summary = analyzer.analyze()
-
-    logger.info("=" * 60)
-    logger.info("回测结果摘要")
-    logger.info("=" * 60)
-    logger.info(f"订单总数: {summary['orders']['total']}")
-    logger.info(f"  - 成交: {summary['orders']['filled']}")
-    logger.info(f"  - 撤销: {summary['orders']['cancelled']}")
-    logger.info(f"  - 过期: {summary['orders']['expired']}")
-    logger.info(f"  - 成交率: {summary['orders']['fill_rate']:.2%}")
-    logger.info("")
-    logger.info(f"持仓总数: {summary['positions']['total']}")
-    logger.info(f"  - 未平仓: {summary['positions']['open']}")
-    logger.info(f"  - 已平仓: {summary['positions']['closed']}")
-    logger.info(f"  - 盈利: {summary['positions']['profitable']}")
-    logger.info(f"  - 亏损: {summary['positions']['loss']}")
-    logger.info(f"  - 胜率: {summary['positions']['win_rate']:.2%}")
-    logger.info("")
-    logger.info(f"总盈亏: {summary['pnl']['net_pnl']:.2f} USDT")
-    logger.info(f"  - 未实现盈亏: {summary['pnl']['total_unrealized']:.2f} USDT")
-    logger.info(f"  - 盈利总额: {summary['pnl']['total_profit']:.2f} USDT")
-    logger.info(f"  - 亏损总额: {summary['pnl']['total_loss']:.2f} USDT")
-    logger.info(f"  - 手续费: {summary['pnl']['total_commission']:.2f} USDT")
-    logger.info(f"Profit Factor: {summary['pnl']['profit_factor']:.2f}")
-    logger.info(f"最大回撤: {summary['pnl']['max_drawdown']:.2f} USDT")
-    logger.info(f"Sharpe Ratio: {summary['pnl']['sharpe_ratio']:.2f}")
-    logger.info("=" * 60)
-
-    # 保存结果
-    try:
         output_path = Path(output_dir)
         analyzer.save_results(str(output_path.parent), output_path.name)
         logger.info(f"结果已保存到: {output_dir}")
-    except Exception as e:
-        logger.error(f"保存结果失败: {e}", exc_info=True)
-        dashboard.task_done(f"{args.strategy} {','.join(args.symbols)}", "Failed")
-        dashboard.close(status="failed")
+    except KeyboardInterrupt:
+        if dashboard is not None:
+            dashboard.task_failed(task_name)
+            dashboard.close(status="interrupted")
+        raise
+    except Exception as error:
+        if loading_strategy:
+            logger.error(f"策略加载失败: {error}")
+            logger.info(
+                "\n提示：Spike 策略必须提供至少一个币种和正数 "
+                "--total-notional。\n"
+            )
+        else:
+            logger.error(f"回测失败: {error}", exc_info=True)
+        if dashboard is not None:
+            dashboard.task_failed(task_name)
+            dashboard.close(status="failed")
         sys.exit(1)
-
-    dashboard.task_done(f"{args.strategy} {','.join(args.symbols)}", "OK")
-    dashboard.close(status="ok", detail=f"output={output_dir}")
-    logger.info("回测完成！")
+    else:
+        assert dashboard is not None
+        dashboard.task_done(task_name, "OK")
+        dashboard.close(status="ok", detail=f"output={output_dir}")
+        logger.info("回测完成！")
+    finally:
+        try:
+            root_logger.removeHandler(file_handler)
+            file_handler.close()
+        finally:
+            root_logger.setLevel(original_root_level)
+            for handler, level in original_console_levels.items():
+                handler.setLevel(level)
 
 
 if __name__ == '__main__':

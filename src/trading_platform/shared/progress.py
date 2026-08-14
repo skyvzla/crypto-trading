@@ -14,6 +14,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TextIO
+from urllib.parse import quote
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -34,6 +35,10 @@ def _format_duration(seconds: float) -> str:
 def _format_bar(ratio: float, width: int = 30) -> str:
     filled = round(min(max(ratio, 0.0), 1.0) * width)
     return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+def _encode_text(value: str) -> str:
+    return quote(value, safe="")
 
 
 @dataclass
@@ -78,6 +83,7 @@ class TaskDashboard:
         self._progress_step = max(1, min(100, progress_step))
         self._tty = self._stream.isatty()
         self._lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         self._started_at = time.monotonic()
         self._last_update = 0.0
         self._last_progress_pct = 0
@@ -86,6 +92,7 @@ class TaskDashboard:
         self._completed: deque[CompletedItem] = deque(maxlen=self._max_completed)
         self._console: Console | None = None
         self._live: Live | None = None
+        self._started = False
         self._closed = False
 
     @property
@@ -94,41 +101,49 @@ class TaskDashboard:
 
     @property
     def eta_s(self) -> float | None:
-        if self._total is None:
-            return None
-        if len(self._samples) < self._min_eta_samples:
-            return None
-        remaining = self._total - self._done
-        if remaining <= 0:
-            return 0.0
-        avg_unit = sum(self._samples) / len(self._samples)
-        return avg_unit * remaining
+        with self._lock:
+            return self._estimate_eta(self._total, self._done, self._samples)
 
     def start(self, *, detail: str | None = None) -> None:
-        with self._lock:
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._closed or self._started:
+                    return
+            encoded_detail = f" detail={_encode_text(detail)}" if detail else ""
             if not self._tty:
-                extras = f" {detail}" if detail else ""
                 print(
-                    f"event=start task={self._title}"
+                    f"event=start task={_encode_text(self._title)}"
                     f" total={self._total if self._total is not None else 'unknown'}"
-                    f"{extras}",
+                    f"{encoded_detail}",
                     file=self._stream,
                     flush=True,
                 )
-            else:
-                self._console = Console(file=self._stream, highlight=False)
-                self._live = Live(
-                    self._render(),
-                    console=self._console,
-                    refresh_per_second=4,
-                    transient=False,
-                    screen=False,
-                )
-                self._live.start()
+                with self._lock:
+                    self._started = True
+                return
+
+            console = Console(file=self._stream, highlight=False)
+            live = Live(
+                console=console,
+                refresh_per_second=4,
+                transient=False,
+                screen=False,
+                get_renderable=self._render,
+            )
+            try:
+                live.start()
+            except Exception:
+                live.stop()
+                raise
+            with self._lock:
+                self._console = console
+                self._live = live
+                self._started = True
 
     def task_start(self, name: str) -> None:
         with self._lock:
             self._running[name] = time.monotonic()
+        self._refresh()
 
     def task_done(
         self,
@@ -148,7 +163,7 @@ class TaskDashboard:
                     CompletedItem(name=name, status=status, duration_s=duration)
                 )
             self._done += max(1, increment)
-            self._refresh()
+        self._refresh()
 
     def task_skip(self, name: str, status: str = "Skipped", *, increment: int = 1) -> None:
         self.task_done(name, status, count_as_sample=False, increment=increment)
@@ -157,86 +172,121 @@ class TaskDashboard:
         self.task_done(name, "Failed", count_as_sample=False, increment=increment)
 
     def error(self, message: str) -> None:
-        with self._lock:
+        with self._lifecycle_lock:
+            with self._lock:
+                console = self._console
             if not self._tty:
                 print(
-                    f"event=error task={self._title} message={message}",
+                    f"event=error task={_encode_text(self._title)}"
+                    f" message={_encode_text(message)}",
                     file=self._stream,
                     flush=True,
                 )
+            elif console is not None:
+                console.print(Text(f"error: {message}"))
             else:
                 print(f"error: {message}", file=self._stream, flush=True)
 
     def close(self, *, status: str = "ok", detail: str | None = None) -> None:
-        with self._lock:
-            if self._closed:
-                return
-            self._closed = True
-            if self._live is not None:
-                self._live.update(self._render(), refresh=True)
-                self._live.stop()
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._closed:
+                    return
+                self._closed = True
+                live = self._live
                 self._live = None
-            if self._tty:
-                return
-            extras = f" {detail}" if detail else ""
-            print(
-                f"event=complete task={self._title} status={status}"
-                f" done={self._done}"
-                f" total={self._total if self._total is not None else 'unknown'}"
-                f" elapsed_s={self.elapsed_s:.0f}{extras}",
-                file=self._stream,
-                flush=True,
-            )
+                self._console = None
+                done = self._done
+                total = self._total
+            if live is not None:
+                live.stop()
+        if self._tty:
+            return
+        encoded_detail = f" detail={_encode_text(detail)}" if detail else ""
+        print(
+            f"event=complete task={_encode_text(self._title)}"
+            f" status={_encode_text(status)}"
+            f" done={done}"
+            f" total={total if total is not None else 'unknown'}"
+            f" elapsed_s={self.elapsed_s:.0f}{encoded_detail}",
+            file=self._stream,
+            flush=True,
+        )
 
     def _refresh(self) -> None:
-        if self._tty:
-            now = time.monotonic()
-            if self._live is not None and now - self._last_update >= 0.2:
-                self._live.update(self._render(), refresh=True)
-                self._last_update = now
-        else:
+        if not self._tty:
             self._emit_plain_progress()
+            return
+
+        with self._lifecycle_lock:
+            with self._lock:
+                now = time.monotonic()
+                live = self._live
+                if live is None or now - self._last_update < 0.2:
+                    return
+                self._last_update = now
+            live.refresh()
 
     def _emit_plain_progress(self) -> None:
-        if self._quiet or self._total is None or self._total <= 0:
-            return
-        percent = int(round(self._done / self._total * 100))
-        step = self._progress_step
-        while self._last_progress_pct + step <= percent:
-            self._last_progress_pct += step
-            threshold = min(self._last_progress_pct, 100)
-            running = ",".join(sorted(self._running)) or "-"
-            eta = self.eta_s
+        with self._lock:
+            if self._quiet or self._total is None or self._total <= 0:
+                return
+            percent = min(100, int(round(self._done / self._total * 100)))
+            if self._last_progress_pct + self._progress_step > percent:
+                return
+            self._last_progress_pct = (
+                percent // self._progress_step * self._progress_step
+            )
+            running = ",".join(quote(name, safe="") for name in sorted(self._running)) or "-"
+            eta = self._estimate_eta(self._total, self._done, self._samples)
             eta_label = (
                 f" eta_s={eta:.0f}" if eta is not None else " eta=collecting"
             )
-            print(
-                f"event=progress task={self._title} done={self._done}"
-                f" total={self._total} percent={threshold}"
+            line = (
+                f"event=progress task={_encode_text(self._title)} done={self._done}"
+                f" total={self._total} percent={percent}"
                 f" elapsed_s={self.elapsed_s:.0f}{eta_label}"
-                f" running={running}",
-                file=self._stream,
-                flush=True,
+                f" running={running}"
             )
+        print(line, file=self._stream, flush=True)
+
+    def _estimate_eta(
+        self,
+        total: int | None,
+        done: int,
+        samples: list[float],
+    ) -> float | None:
+        if total is None or len(samples) < self._min_eta_samples:
+            return None
+        remaining = total - done
+        if remaining <= 0:
+            return 0.0
+        return sum(samples) / len(samples) * remaining
 
     def _render(self) -> Group:
-        elapsed = _format_duration(self.elapsed_s)
+        with self._lock:
+            total = self._total
+            done = self._done
+            samples = list(self._samples)
+            running = sorted(self._running.items(), key=lambda item: item[1])
+            completed = list(self._completed)
+            elapsed_s = self.elapsed_s
+        elapsed = _format_duration(elapsed_s)
         running_block: list[Text] = []
-        if self._running:
-            ordered = sorted(self._running.items(), key=lambda item: item[1])
-            for name, started in ordered:
+        if running:
+            for name, started in running:
                 running_block.append(
                     Text(f"  {name}") + Text("  Elapsed ")
                     + Text(_format_duration(time.monotonic() - started))
                 )
         running_panel = Panel(
             Group(*running_block) if running_block else Text("  (none)"),
-            title=f"Running ({len(self._running)})",
+            title=f"Running ({len(running)})",
             border_style="cyan",
             padding=(0, 1),
         )
         completed_block: list[Text] = []
-        for item in self._completed:
+        for item in completed:
             completed_block.append(
                 Text(f"  {item.name}") + Text("  ")
                 + Text(item.status, style="green" if item.status == "OK" else "red")
@@ -248,23 +298,23 @@ class TaskDashboard:
             border_style="green",
             padding=(0, 1),
         )
-        if self._total is not None and self._total > 0:
-            ratio = self._done / self._total
+        if total is not None and total > 0:
+            ratio = done / total
             bar = _format_bar(ratio)
             percent = f"{ratio:.1%}"
             progress_header = Text(
-                f"  {bar} {percent}  {self._done}/{self._total}"
+                f"  {bar} {percent}  {done}/{total}"
             )
-            eta = self.eta_s
+            eta = self._estimate_eta(total, done, samples)
             if eta is None:
                 eta_text = (
                     f"ETA collecting samples "
-                    f"({len(self._samples)}/{self._min_eta_samples})"
+                    f"({len(samples)}/{self._min_eta_samples})"
                 )
                 total_text = "Est. total --:--:--"
             else:
                 eta_text = f"ETA {_format_duration(eta)}"
-                total_text = f"Est. total {_format_duration(self.elapsed_s + eta)}"
+                total_text = f"Est. total {_format_duration(elapsed_s + eta)}"
             progress_lines = Text() + progress_header
             progress_lines.append_text(
                 Text(

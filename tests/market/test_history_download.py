@@ -1,4 +1,6 @@
 import hashlib
+import json
+import logging
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -971,6 +973,52 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
     assert "worker=1 [1/68] BANKUSDT 15m 2026-07 stored 2976 rows" not in output
 
 
+def test_cli_progress_starts_on_download_and_records_early_terminal_states():
+    reporter = _ProgressReporter(workers=4)
+    reporter(
+        DownloadProgress(
+            phase="downloading",
+            worker_id=1,
+            current=1,
+            total=4,
+            symbol="BTCUSDT",
+            timeframe="1m",
+            period="2026-08",
+        )
+    )
+
+    dashboard = reporter._dashboard
+    assert dashboard is not None
+    assert set(dashboard._running) == {"w1 BTCUSDT 1m 2026-08"}
+
+    for phase, worker_id, symbol in [
+        ("skipped", 2, "ETHUSDT"),
+        ("unavailable", 3, "SOLUSDT"),
+        ("failed", 4, "XRPUSDT"),
+    ]:
+        reporter(
+            DownloadProgress(
+                phase=phase,
+                worker_id=worker_id,
+                current=worker_id,
+                total=4,
+                symbol=symbol,
+                timeframe="1m",
+                period="2026-08",
+                error="connection reset" if phase == "failed" else "",
+            )
+        )
+
+    assert [
+        (item.name, item.status) for item in dashboard._completed
+    ] == [
+        ("w4 XRPUSDT 1m 2026-08", "Failed"),
+        ("w3 SOLUSDT 1m 2026-08", "Unavailable"),
+        ("w2 ETHUSDT 1m 2026-08", "Skipped"),
+    ]
+    reporter.close()
+
+
 def test_download_history_assigns_process_local_worker_sequence_numbers():
     barrier = Barrier(2)
     progress: list[DownloadProgress] = []
@@ -1278,6 +1326,149 @@ def test_cli_handles_keyboard_interrupt_without_traceback(
         "worker=main Cancelled; downloader exiting.\n"
     )
     assert "Traceback" not in captured.err
+
+
+def test_cli_reports_default_log_setup_failure_as_json(tmp_path, monkeypatch, capsys):
+    def fail_log_setup(*_args, **_kwargs):
+        raise OSError("log directory is unavailable")
+
+    monkeypatch.setattr(archive_cli, "_setup_logging", fail_log_setup)
+
+    exit_code = archive_cli.main(
+        [
+            str(tmp_path / "parquet"),
+            "--symbols",
+            "AKEUSDT",
+            "--timeframes",
+            "1s",
+            "--start",
+            "2026-07-01T00:00:00Z",
+            "--end",
+            "2026-07-02T00:00:00Z",
+            "--without-metrics",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "failed",
+        "error": "log directory is unavailable",
+    }
+
+
+@pytest.mark.parametrize(
+    (
+        "outcome",
+        "expected_exit",
+        "expected_candle_status",
+        "expected_metrics_status",
+    ),
+    [
+        ("complete", 0, "ok", "ok"),
+        ("failed", 1, "ok", "failed"),
+        ("interrupted", 130, "ok", "interrupted"),
+    ],
+)
+def test_cli_closes_metrics_reporter_for_every_exit_path(
+    tmp_path,
+    monkeypatch,
+    outcome,
+    expected_exit,
+    expected_candle_status,
+    expected_metrics_status,
+):
+    class Reporter:
+        instances: list["Reporter"] = []
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.statuses: list[str] = []
+            self.instances.append(self)
+
+        def close(self, *, status: str = "ok") -> None:
+            self.statuses.append(status)
+
+        def retry(self, *_args, **_kwargs) -> None:
+            return None
+
+        def metadata_fallback(self, *_args, **_kwargs) -> None:
+            return None
+
+        def worker_exit(self, *_args, **_kwargs) -> None:
+            return None
+
+    def fake_metrics_download(*_args, **_kwargs):
+        assert Reporter.instances[0].statuses == ["ok"]
+        if outcome == "failed":
+            raise RuntimeError("metrics download failed")
+        if outcome == "interrupted":
+            raise KeyboardInterrupt
+        return []
+
+    monkeypatch.setattr(archive_cli, "_ProgressReporter", Reporter)
+    monkeypatch.setattr(
+        archive_cli,
+        "BinanceFuturesMetadataFetcher",
+        lambda *_args, **_kwargs: lambda _symbols: {},
+    )
+    monkeypatch.setattr(archive_cli, "download_history", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        archive_cli,
+        "download_metrics_history",
+        fake_metrics_download,
+    )
+    monkeypatch.setattr(
+        archive_cli,
+        "ensure_duckdb_catalog",
+        lambda _archive, catalog: catalog,
+    )
+    monkeypatch.setattr(
+        archive_cli.MetricsArchive,
+        "publish",
+        lambda _archive, catalog: (_archive.root / "metrics_index.parquet", catalog),
+    )
+
+    exit_code = archive_cli.main(
+        [
+            str(tmp_path / "candles"),
+            "--symbols",
+            "AKEUSDT",
+            "--timeframes",
+            "1m",
+            "--start",
+            "2026-07-01T00:00:00Z",
+            "--end",
+            "2026-07-02T00:00:00Z",
+            "--min-free-gb",
+            "0",
+            "--log-file",
+            str(tmp_path / "archive.log"),
+        ]
+    )
+
+    assert exit_code == expected_exit
+    assert [reporter.statuses for reporter in Reporter.instances] == [
+        [expected_candle_status],
+        [expected_metrics_status],
+    ]
+
+
+def test_setup_logging_replaces_archive_cli_handlers(tmp_path):
+    archive_logger = logging.getLogger("trading_platform.market.archive")
+    original_handlers = list(archive_logger.handlers)
+    original_level = archive_logger.level
+    archive_logger.handlers.clear()
+    try:
+        archive_cli._setup_logging("INFO", tmp_path / "first.log")
+        archive_cli._setup_logging("INFO", tmp_path / "second.log")
+
+        assert len(archive_logger.handlers) == 2
+    finally:
+        for handler in list(archive_logger.handlers):
+            archive_logger.removeHandler(handler)
+            handler.close()
+        archive_logger.handlers.extend(original_handlers)
+        archive_logger.setLevel(original_level)
 
 
 def test_http_fetcher_falls_back_to_binance_s3_origin():

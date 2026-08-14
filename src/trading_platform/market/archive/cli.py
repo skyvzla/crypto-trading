@@ -48,16 +48,29 @@ def _setup_logging(log_level: str, log_file: Path | None) -> None:
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
-    if log_file is not None:
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file, encoding="utf-8")
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(formatter)
-        root.addHandler(file_handler)
-    console = logging.StreamHandler(sys.stderr)
-    console.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-    console.setFormatter(formatter)
-    root.addHandler(console)
+    handlers: list[logging.Handler] = []
+    try:
+        if log_file is not None:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(formatter)
+            handlers.append(file_handler)
+        console = logging.StreamHandler(sys.stderr)
+        console.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+        console.setFormatter(formatter)
+        handlers.append(console)
+    except Exception:
+        for handler in handlers:
+            handler.close()
+        raise
+    for handler in list(root.handlers):
+        if getattr(handler, "_market_archive_cli_handler", False):
+            root.removeHandler(handler)
+            handler.close()
+    for handler in handlers:
+        setattr(handler, "_market_archive_cli_handler", True)
+        root.addHandler(handler)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -182,8 +195,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     log_file = args.log_file or Path(
         f"logs/market_archive_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     )
-    _setup_logging(args.log_level, log_file)
+    candle_reporter: _ProgressReporter | None = None
+    metrics_reporter: _ProgressReporter | None = None
+    candle_reporter_closed = False
     try:
+        _setup_logging(args.log_level, log_file)
         candle_reporter = _ProgressReporter(workers)
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
@@ -305,7 +321,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             metrics_results: list[DownloadResult] = []
             metrics_catalog_path = None
-            metrics_reporter: _ProgressReporter | None = None
             if metrics_archive_path is None:
                 with ParquetCandleArchive(
                     args.archive, index_workers=min(workers, 8)
@@ -361,21 +376,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "on_worker_exit": metrics_reporter.worker_exit,
                     }
                     candle_results = download_history(archive, **candle_kwargs)
+                    candle_reporter.close()
+                    candle_reporter_closed = True
                     metrics_results = download_metrics_history(
                         metrics_archive,
                         **metrics_kwargs,
                     )
                     metrics_catalog_path = metrics_archive_path / "metrics.duckdb"
                     metrics_archive.publish(metrics_catalog_path)
-                    metrics_reporter.close()
         catalog_path = args.catalog or args.archive / "candles.duckdb"
         ensure_duckdb_catalog(args.archive, catalog_path)
     except KeyboardInterrupt:
-        candle_reporter.close(status="interrupted")
+        if metrics_reporter is not None:
+            metrics_reporter.close(status="interrupted")
+        if candle_reporter is not None and not candle_reporter_closed:
+            candle_reporter.close(status="interrupted")
         print(f"{main_worker} Cancelled; downloader exiting.", file=sys.stderr)
         return 130
     except Exception as error:
-        candle_reporter.close(status="failed")
+        if metrics_reporter is not None:
+            metrics_reporter.close(status="failed")
+        if candle_reporter is not None and not candle_reporter_closed:
+            candle_reporter.close(status="failed")
         if args.json:
             print(json.dumps({"status": "failed", "error": str(error)}))
         else:
@@ -384,7 +406,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 file=sys.stderr,
             )
         return 1
-    candle_reporter.close()
+    if metrics_reporter is not None:
+        metrics_reporter.close()
+    if candle_reporter is not None and not candle_reporter_closed:
+        candle_reporter.close()
     _print_result(
         candle_results,
         args.archive,
@@ -534,11 +559,12 @@ class _ProgressReporter:
 
     def __call__(self, progress: DownloadProgress) -> None:
         with self._lock:
-            if progress.phase == "downloaded":
-                self._ensure_dashboard(progress.total)
+            if progress.phase in {"downloading", "downloaded"}:
+                dashboard = self._ensure_dashboard(progress.total)
                 name = self._task_name(progress)
-                self._active_names[progress.worker_id] = name
-                self._dashboard.task_start(name)
+                if self._active_names.get(progress.worker_id) != name:
+                    self._active_names[progress.worker_id] = name
+                    dashboard.task_start(name)
                 return
             if progress.phase not in {
                 "stored",
@@ -548,9 +574,10 @@ class _ProgressReporter:
             }:
                 return
             dashboard = self._ensure_dashboard(progress.total)
-            name = self._active_names.pop(progress.worker_id, None) or (
-                self._task_name(progress)
-            )
+            name = self._active_names.pop(progress.worker_id, None)
+            if name is None:
+                name = self._task_name(progress)
+                dashboard.task_start(name)
             if progress.phase == "stored":
                 logger.debug(
                     f"stored {progress.symbol} {progress.timeframe} "
