@@ -123,6 +123,7 @@ export interface BacktestSymbolSummary {
 export interface BacktestTradeSummary {
   id: string
   trade_id?: string
+  campaign_id?: string | null
   symbol: string
   side?: string
   signal_time?: string | number | null

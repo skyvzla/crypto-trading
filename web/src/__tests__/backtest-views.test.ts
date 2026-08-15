@@ -162,6 +162,7 @@ describe('回测关键视图', () => {
     vi.mocked(backtestApi.trade).mockResolvedValue({
       id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000,
       entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10,
+      trade_id: 'backtest-trade:AKEUSDT:1', campaign_id: 'spike_short:AKEUSDT:1750000000000',
       side: 'SHORT', tier_prices: [1.1, 1.2, 1.3],
       fills: [
         { id: 'f-1', time: 1_750_000_000_000, price: 1.1, side: 'SELL' },
@@ -187,6 +188,10 @@ describe('回测关键视图', () => {
     expect(wrapper.text()).toContain('已成交 1 / 3 档')
     expect(wrapper.text()).toContain('卖1')
     expect(wrapper.text()).toContain('限卖2')
+    expect(wrapper.text()).toContain('交易 ID')
+    expect(wrapper.text()).toContain('backtest-trade:AKEUSDT:1')
+    expect(wrapper.text()).toContain('信号 ID')
+    expect(wrapper.text()).toContain('spike_short:AKEUSDT:1750000000000')
     expect(wrapper.text()).toContain('触发 K线')
     expect(wrapper.text()).toContain('确认')
     expect(wrapper.find('button[aria-label="标线显示"]').exists()).toBe(true)

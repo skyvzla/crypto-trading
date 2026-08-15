@@ -159,6 +159,8 @@ function eventContent(event: { data?: Record<string, unknown>; description?: str
 const rootTo = computed(() => ({ path: '/backtests', query: route.query }))
 const symbolsTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/symbols`, query: route.query }))
 const equityTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/equity` }))
+const displayTradeId = computed(() => tradeQuery.data.value?.trade_id || tradeId.value)
+const signalId = computed(() => tradeQuery.data.value?.campaign_id || null)
 const openedFromEquity = computed(() => route.query.from === 'equity')
 const backTo = computed(() => {
   if (openedFromEquity.value) return equityTo.value
@@ -172,7 +174,7 @@ const crumbs = computed(() => openedFromEquity.value
 </script>
 
 <template>
-  <BacktestPage :title="tradeQuery.data.value ? `${tradeQuery.data.value.symbol} 单笔复盘` : '单笔复盘'" :eyebrow="tradeId" :back-to="backTo" :crumbs="crumbs">
+  <BacktestPage :title="tradeQuery.data.value ? `${tradeQuery.data.value.symbol} 单笔复盘` : '单笔复盘'" :eyebrow="displayTradeId" :back-to="backTo" :crumbs="crumbs">
     <QueryPanel :pending="tradeQuery.isPending.value" :error="tradeQuery.error.value" @retry="tradeQuery.refetch()">
       <template v-if="tradeQuery.data.value">
         <div class="trade-summary-strip">
@@ -183,6 +185,8 @@ const crumbs = computed(() => openedFromEquity.value
           <div><span>收益率</span><strong>{{ formatPercent(tradeQuery.data.value.net_return) }}</strong></div>
           <div class="fill-status"><span>成交档位</span><strong>{{ `已成交 ${filledTierCount} / ${tierDetails.length} 档` }}</strong></div>
           <div><span>退出原因</span><strong>{{ tradeQuery.data.value.exit_reason || '-' }}</strong></div>
+          <div><span>交易 ID</span><strong class="trade-identity">{{ displayTradeId }}</strong></div>
+          <div v-if="signalId"><span>信号 ID</span><strong class="trade-identity">{{ signalId }}</strong></div>
         </div>
 
         <section ref="chartSection" class="chart-section">

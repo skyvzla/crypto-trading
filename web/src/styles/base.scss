@@ -84,13 +84,14 @@ $surface: var(--surface);
   p { margin: 4px 0 0; color: $muted; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
 .row-count { color: $muted; font-family: monospace; text-align: right; }
-.trade-summary-strip { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
+.trade-summary-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .trade-summary-strip > div { min-width: 0; padding: 11px 13px; border-right: 1px solid var(--line); }
 .trade-summary-strip > div:last-child { border-right: 0; }
 .trade-summary-strip {
   span { display: block; margin-bottom: 4px; color: $muted; font-size: 11px; }
   strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 }
+.trade-summary-strip strong.trade-identity { overflow-wrap: anywhere; white-space: normal; font: 11px/1.35 "JetBrains Mono", "IBM Plex Mono", monospace; }
 .chart-section { margin-top: 14px; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; background: var(--surface); }
 .chart-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border-bottom: 1px solid $line; background: var(--surface); overflow-x: auto; }
 .source-tools { display: flex; align-items: center; gap: 5px; white-space: nowrap; svg { vertical-align: -2px; } }
