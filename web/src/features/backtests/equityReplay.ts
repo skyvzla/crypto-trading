@@ -2,7 +2,8 @@ import type { BacktestEquityTrade } from '@/api/types'
 
 export interface EquityReplaySettings {
   initialBalance: number
-  positionRatio: number
+  initialPosition: number
+  reinvestRatio: number
   minimumBalance: number
   feeRate: number
   slippageRate: number
@@ -20,6 +21,9 @@ export interface EquityReplayRow extends BacktestEquityTrade {
   slippageAmount: number
   netReturn: number
   replayPnl: number
+  reinvestedProfit: number
+  tradingCapitalAfter: number
+  reserveCapitalAfter: number
   balanceAfter: number
   drawdown: number
 }
@@ -38,6 +42,8 @@ export interface EquityReplayResult {
   returnRate: number
   maxDrawdown: number
   minimumObservedBalance: number
+  finalTradingCapital: number
+  finalReserveCapital: number
   executedCount: number
   skippedCount: number
   liquidated: boolean
@@ -66,19 +72,22 @@ export function replayEquity(
     return leftTime - rightTime || left.symbol.localeCompare(right.symbol) || left.id.localeCompare(right.id)
   })
   const initialBalance = Math.max(0, finite(settings.initialBalance))
-  const positionRatio = Math.min(1, Math.max(0, finite(settings.positionRatio)))
+  const initialPosition = Math.min(initialBalance, Math.max(0, finite(settings.initialPosition)))
+  const reinvestRatio = Math.min(1, Math.max(0, finite(settings.reinvestRatio)))
   const minimumBalance = Math.max(0, finite(settings.minimumBalance))
   const feeRate = Math.max(0, finite(settings.feeRate))
   const slippageRate = Math.max(0, finite(settings.slippageRate))
   const costRate = 2 * (feeRate + slippageRate)
   const rows: EquityReplayRow[] = []
   const points: EquityPoint[] = []
+  let tradingCapital = initialPosition
+  let reserveCapital = initialBalance - initialPosition
   let balance = initialBalance
   let peak = initialBalance
   let maxDrawdown = 0
   let minimumObservedBalance = initialBalance
   let activeUntil = -Infinity
-  let liquidated = initialBalance <= minimumBalance
+  let liquidated = tradingCapital <= minimumBalance
   let liquidationTime: number | null = liquidated ? (timestamp(ordered[0]?.entry_time) ?? null) : null
 
   const firstTime = timestamp(ordered[0]?.entry_time)
@@ -87,7 +96,7 @@ export function replayEquity(
   ordered.forEach((trade, index) => {
     const entryTime = timestamp(trade.entry_time) ?? timestamp(trade.signal_time) ?? 0
     const exitTime = timestamp(trade.exit_time)
-    const balanceBefore = balance
+    const balanceBefore = tradingCapital + reserveCapital
     const grossReturn = finite(
       trade.gross_return,
       trade.entry_notional && trade.entry_notional > 0 && trade.gross_pnl !== null && trade.gross_pnl !== undefined
@@ -105,8 +114,11 @@ export function replayEquity(
       slippageAmount: 0,
       netReturn: 0,
       replayPnl: 0,
-      balanceAfter: balance,
-      drawdown: peak > 0 ? (balance - peak) / peak : 0
+      reinvestedProfit: 0,
+      tradingCapitalAfter: tradingCapital,
+      reserveCapitalAfter: reserveCapital,
+      balanceAfter: balanceBefore,
+      drawdown: peak > 0 ? (balanceBefore - peak) / peak : 0
     }
 
     if (liquidated) {
@@ -122,12 +134,19 @@ export function replayEquity(
       return
     }
 
-    const positionAmount = balance * positionRatio
+    const positionAmount = tradingCapital
     const feeAmount = positionAmount * feeRate * 2
     const slippageAmount = positionAmount * slippageRate * 2
     const netReturn = grossReturn - costRate
-    const replayPnl = positionAmount * netReturn
-    balance = Math.max(0, balance + replayPnl)
+    const replayPnl = Math.max(-positionAmount, positionAmount * netReturn)
+    const reinvestedProfit = replayPnl > 0 ? replayPnl * reinvestRatio : 0
+    if (replayPnl > 0) {
+      tradingCapital += reinvestedProfit
+      reserveCapital += replayPnl - reinvestedProfit
+    } else {
+      tradingCapital += replayPnl
+    }
+    balance = tradingCapital + reserveCapital
     peak = Math.max(peak, balance)
     minimumObservedBalance = Math.min(minimumObservedBalance, balance)
     const drawdown = peak > 0 ? (balance - peak) / peak : 0
@@ -142,13 +161,16 @@ export function replayEquity(
       slippageAmount,
       netReturn,
       replayPnl,
+      reinvestedProfit,
+      tradingCapitalAfter: tradingCapital,
+      reserveCapitalAfter: reserveCapital,
       balanceAfter: balance,
       drawdown
     }
     rows.push(row)
     points.push({ time: exitTime, value: balance, row })
 
-    if (balance <= minimumBalance) {
+    if (tradingCapital <= minimumBalance) {
       liquidated = true
       liquidationTime = exitTime
     }
@@ -163,6 +185,8 @@ export function replayEquity(
     returnRate: initialBalance > 0 ? (balance - initialBalance) / initialBalance : 0,
     maxDrawdown,
     minimumObservedBalance,
+    finalTradingCapital: tradingCapital,
+    finalReserveCapital: reserveCapital,
     executedCount,
     skippedCount: rows.length - executedCount,
     liquidated,

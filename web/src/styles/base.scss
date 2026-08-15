@@ -134,7 +134,7 @@ $surface: var(--surface);
   label > span { color: $muted; font-size: 11px; }
   .ant-select, .ant-input-number { width: 100%; }
 }
-.equity-summary-strip { display: grid; grid-template-columns: repeat(7, minmax(105px, 1fr)); border: 1px solid $line; border-radius: 6px; overflow: hidden; background: $surface; }
+.equity-summary-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); border: 1px solid $line; border-radius: 6px; overflow: hidden; background: $surface; }
 .equity-summary-strip > div { min-width: 0; padding: 12px; border-right: 1px solid $line; }
 .equity-summary-strip > div:last-child { border-right: 0; }
 .equity-summary-strip span { display: block; margin-bottom: 5px; color: $muted; font-size: 11px; }

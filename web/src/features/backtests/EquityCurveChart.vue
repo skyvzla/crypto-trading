@@ -59,11 +59,14 @@ onBeforeUnmount(() => { observer?.disconnect(); chart?.remove() })
       <dl>
         <dt>结算时间</dt><dd>{{ formatTime(hovered.exit_time) }}</dd>
         <dt>入场 / 退出</dt><dd>{{ formatNumber(hovered.entry_price, 8) }} / {{ formatNumber(hovered.exit_price, 8) }}</dd>
-        <dt>动态仓位</dt><dd>{{ formatNumber(hovered.positionAmount) }} U</dd>
+        <dt>本笔仓位</dt><dd>{{ formatNumber(hovered.positionAmount) }} U</dd>
         <dt>手续费</dt><dd>{{ formatNumber(hovered.feeAmount) }} U</dd>
         <dt>滑点影响</dt><dd>{{ formatNumber(hovered.slippageAmount) }} U</dd>
         <dt>单笔收益率</dt><dd>{{ formatPercent(hovered.netReturn) }}</dd>
         <dt>单笔盈亏</dt><dd :class="hovered.replayPnl >= 0 ? 'value-positive' : 'value-negative'">{{ formatNumber(hovered.replayPnl) }} U</dd>
+        <dt>本笔复投</dt><dd>{{ formatNumber(hovered.reinvestedProfit) }} U</dd>
+        <dt>交易资金池</dt><dd>{{ formatNumber(hovered.tradingCapitalAfter) }} U</dd>
+        <dt>锁定储备</dt><dd>{{ formatNumber(hovered.reserveCapitalAfter) }} U</dd>
         <dt>结算后权益</dt><dd>{{ formatNumber(hovered.balanceAfter) }} U</dd>
       </dl>
     </div>

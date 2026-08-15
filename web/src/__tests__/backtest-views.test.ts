@@ -3,6 +3,7 @@ import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import BacktestResearchListView from '@/views/backtests/BacktestResearchListView.vue'
 import BacktestReportDetailView from '@/views/backtests/BacktestReportDetailView.vue'
+import BacktestEquityReplayView from '@/views/backtests/BacktestEquityReplayView.vue'
 import BacktestSymbolListView from '@/views/backtests/BacktestSymbolListView.vue'
 import BacktestTradeListView from '@/views/backtests/BacktestTradeListView.vue'
 import BacktestTradeReplayView from '@/views/backtests/BacktestTradeReplayView.vue'
@@ -12,6 +13,8 @@ import { router } from '@/router'
 vi.mock('@/api/backtests', () => ({
   backtestApi: {
     researches: vi.fn(),
+    replayParameterSets: vi.fn(),
+    replayTrades: vi.fn(),
     report: vi.fn(),
     symbols: vi.fn(),
     trades: vi.fn(),
@@ -108,6 +111,28 @@ describe('回测关键视图', () => {
     }))
     expect(wrapper.find('input[placeholder="最低盈亏 U"]').exists()).toBe(true)
     expect(wrapper.findAll('.ant-table-column-sorters').length).toBeGreaterThanOrEqual(10)
+  })
+
+  it('收益曲线默认以500U资金池、500U储备和50%盈利复投回放', async () => {
+    vi.mocked(backtestApi.replayParameterSets).mockResolvedValue({
+      items: [{ parameters: {}, trade_count: 1, net_pnl: 50 }]
+    })
+    vi.mocked(backtestApi.replayTrades).mockResolvedValue({
+      parameters: {},
+      items: [{ id: 't-1', symbol: 'AKEUSDT', entry_time: 1_750_000_000_000, exit_time: 1_750_001_800_000, entry_price: 1, exit_price: 0.9, net_pnl: 50, gross_pnl: 50, entry_notional: 500, gross_return: 0.1 }]
+    })
+    const { list } = await plugins('/backtests/r-1/equity')
+    const wrapper = mount(BacktestEquityReplayView, {
+      global: { plugins: list as never, stubs: { EquityCurveChart: true } }
+    })
+    await flushPromises()
+
+    const values = wrapper.findAll('input').map((input) => (input.element as HTMLInputElement).value)
+    expect(values).toEqual(expect.arrayContaining(['1000.00', '500.00', '50.00']))
+    expect(wrapper.text()).toContain('初始仓位')
+    expect(wrapper.text()).toContain('盈利复投')
+    expect(wrapper.text()).toContain('交易资金池')
+    expect(wrapper.text()).toContain('锁定储备')
   })
 
   it('单笔复盘按1500根窗口加载，并在退出定位时重新以退出时间取数', async () => {
