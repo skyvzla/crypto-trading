@@ -1446,7 +1446,8 @@ class DynamicSpikeShortStrategy:
         # 仅当核心入场条件已完整满足时，才把版本指标过滤记为可复测信号。
         # 这不会改变过滤判定，只避免把后续本会失败的半成品候选写入报告。
         entry_filters_pass, rejection_details = self._entry_filter_decision(
-            current.timestamp
+            current.timestamp,
+            rise_from_12h_low=current.close / low_12h - Decimal("1"),
         )
         if not entry_filters_pass:
             if rejection_details is not None:
@@ -1551,9 +1552,15 @@ class DynamicSpikeShortStrategy:
         return True
 
     def _entry_filter_decision(
-        self, event_ms: int
+        self,
+        event_ms: int,
+        rise_from_12h_low: Decimal | None = None,
     ) -> tuple[bool, dict[str, object] | None]:
-        """返回入场过滤结果及可写入审计的拒绝详情。"""
+        """返回入场过滤结果及可写入审计的拒绝详情。
+
+        ``rise_from_12h_low`` 为信号时刻从 12h 低点的涨幅，由版本策略用于
+        按动能分组的两套准入标准；基础版本可忽略该参数。
+        """
         return self._entry_filters_pass(event_ms), None
 
     def _record_entry_filter_rejection(

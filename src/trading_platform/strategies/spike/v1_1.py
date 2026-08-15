@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from trading_platform.strategies.spike.definition import (
     SPIKE_CANDIDATE_EXIT_FEATURE,
     SPIKE_RISE_5S_FEATURE,
@@ -41,7 +43,9 @@ class SpikeV11Strategy(DynamicSpikeShortStrategy):
         return self._entry_filter_decision(event_ms)[0]
 
     def _entry_filter_decision(
-        self, event_ms: int
+        self,
+        event_ms: int,
+        rise_from_12h_low: Decimal | None = None,
     ) -> tuple[bool, dict[str, object] | None]:
         consecutive_rejection = None
         if self.max_consecutive_up_minutes > 0:

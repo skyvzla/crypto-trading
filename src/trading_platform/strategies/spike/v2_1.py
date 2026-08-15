@@ -25,6 +25,9 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
         min_td_sell_setup_5m: int = 0,
         min_volume_multiple_5m: Decimal = Decimal("0"),
         metrics_series: list[tuple[int, float, float]] | None = None,
+        group_rise_12h_threshold: float = 0.0,
+        loose_consecutive_up_minutes: int = 0,
+        loose_max_ls_ratio: float | None = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -39,27 +42,53 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
             raise ValueError("min_td_sell_setup_5m must be between 0 and 9")
         if self.min_volume_multiple_5m < 0:
             raise ValueError("min_volume_multiple_5m must not be negative")
+        if group_rise_12h_threshold < 0 or loose_consecutive_up_minutes < 0:
+            raise ValueError(
+                "group_rise_12h_threshold and loose_consecutive_up_minutes "
+                "must not be negative"
+            )
+        if loose_max_ls_ratio is not None and loose_max_ls_ratio < 0:
+            raise ValueError("loose_max_ls_ratio must not be negative")
+        self.group_rise_12h_threshold = float(group_rise_12h_threshold)
+        self.loose_consecutive_up_minutes = int(loose_consecutive_up_minutes)
+        self.loose_max_ls_ratio = (
+            float(loose_max_ls_ratio)
+            if loose_max_ls_ratio is not None
+            else None
+        )
         self.metrics_series = list(metrics_series or [])
         self._metrics_idx = 0
+
+    def _group_bucket(
+        self, rise_from_12h_low: Decimal | None
+    ) -> tuple[bool, str]:
+        grouped = self.group_rise_12h_threshold > 0
+        if not grouped:
+            return False, "default"
+        strong = (
+            rise_from_12h_low is not None
+            and float(rise_from_12h_low) >= self.group_rise_12h_threshold
+        )
+        return True, "strong" if strong else "weak"
 
     def _entry_filters_pass(self, event_ms: int) -> bool:
         return self._entry_filter_decision(event_ms)[0]
 
     def _entry_filter_decision(
-        self, event_ms: int
+        self,
+        event_ms: int,
+        rise_from_12h_low: Decimal | None = None,
     ) -> tuple[bool, dict[str, object] | None]:
         rejections: list[dict[str, object]] = []
-        if self.max_consecutive_up_minutes > 0:
-            consecutive_up_minutes = self._consecutive_up_minutes()
-            if consecutive_up_minutes > self.max_consecutive_up_minutes:
-                rejections.append({
-                    "rejection_stage": "consecutive_up_entry_filter",
-                    "rejection_reasons": ["max_consecutive_up_minutes"],
-                    "consecutive_up_minutes": consecutive_up_minutes,
-                    "max_consecutive_up_minutes": self.max_consecutive_up_minutes,
-                })
+        consecutive_rejection = self._consecutive_up_rejection_details(
+            rise_from_12h_low
+        )
+        if consecutive_rejection is not None:
+            rejections.append(consecutive_rejection)
         # 同一候选只读取一次指标快照，审计复用该决策以免推进游标两次。
-        metrics_rejection = self._metrics_rejection_details(event_ms)
+        metrics_rejection = self._metrics_rejection_details(
+            event_ms, rise_from_12h_low
+        )
         if metrics_rejection is not None:
             rejections.append(metrics_rejection)
         top_maturity_rejection = self._top_maturity_rejection_details()
@@ -86,6 +115,49 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
                 }
             )
         return False, details
+
+    def _consecutive_up_rejection_details(
+        self, rise_from_12h_low: Decimal | None
+    ) -> dict[str, object] | None:
+        """按动能分组选择连阳上限：强势桶用严格上限，弱势/蓄力桶用宽松上限。
+
+        ``group_rise_12h_threshold`` 为 0 时分组关闭，行为与单一
+        ``max_consecutive_up_minutes`` 完全一致。
+        """
+        grouped, bucket = self._group_bucket(rise_from_12h_low)
+        if not grouped and self.max_consecutive_up_minutes <= 0:
+            return None
+        if grouped and self.max_consecutive_up_minutes <= 0 and self.loose_consecutive_up_minutes <= 0:
+            return None
+        effective_max = self.max_consecutive_up_minutes
+        if grouped:
+            effective_max = (
+                self.max_consecutive_up_minutes
+                if bucket == "strong"
+                else self.loose_consecutive_up_minutes
+            )
+        if effective_max <= 0:
+            return None
+        consecutive_up_minutes = self._consecutive_up_minutes()
+        if consecutive_up_minutes <= effective_max:
+            return None
+        details: dict[str, object] = {
+            "rejection_stage": "consecutive_up_entry_filter",
+            "rejection_reasons": ["max_consecutive_up_minutes"],
+            "consecutive_up_minutes": consecutive_up_minutes,
+            "max_consecutive_up_minutes": effective_max,
+        }
+        if grouped:
+            details.update({
+                "bucket": bucket,
+                "rise_from_12h_low": (
+                    str(rise_from_12h_low)
+                    if rise_from_12h_low is not None
+                    else None
+                ),
+                "group_rise_12h_threshold": self.group_rise_12h_threshold,
+            })
+        return details
 
     def _top_maturity_rejection_details(self) -> dict[str, object] | None:
         if (
@@ -170,9 +242,19 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
         return self._metrics_rejection_details(event_ms) is not None
 
     def _metrics_rejection_details(
-        self, event_ms: int
+        self, event_ms: int, rise_from_12h_low: Decimal | None = None
     ) -> dict[str, object] | None:
         if self.max_oi_change_pct <= 0 and self.max_ls_ratio <= 0:
+            return None
+        grouped, bucket = self._group_bucket(rise_from_12h_low)
+        effective_ls_ratio = self.max_ls_ratio
+        if (
+            grouped
+            and bucket == "weak"
+            and self.loose_max_ls_ratio is not None
+        ):
+            effective_ls_ratio = self.loose_max_ls_ratio
+        if self.max_oi_change_pct <= 0 and effective_ls_ratio <= 0:
             return None
         snapshot = self._metrics_snapshot_with_available_time(event_ms)
         if snapshot is None:
@@ -189,14 +271,15 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
                 ),
                 (
                     "max_ls_ratio",
-                    self.max_ls_ratio > 0 and long_short_ratio > self.max_ls_ratio,
+                    effective_ls_ratio > 0
+                    and long_short_ratio > effective_ls_ratio,
                 ),
             )
             if rejected
         ]
         if not rejection_reasons:
             return None
-        return {
+        details: dict[str, object] = {
             "rejection_stage": "metrics_entry_filters",
             "rejection_reasons": rejection_reasons,
             "oi": oi,
@@ -205,8 +288,20 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
             "ls_ratio": long_short_ratio,
             "metrics_available_time": metrics_available_time,
             "max_oi_change_pct": self.max_oi_change_pct,
-            "max_ls_ratio": self.max_ls_ratio,
+            "max_ls_ratio": effective_ls_ratio,
         }
+        if grouped and bucket == "weak" and self.loose_max_ls_ratio is not None:
+            details.update({
+                "bucket": bucket,
+                "rise_from_12h_low": (
+                    str(rise_from_12h_low)
+                    if rise_from_12h_low is not None
+                    else None
+                ),
+                "group_rise_12h_threshold": self.group_rise_12h_threshold,
+                "loose_max_ls_ratio": self.loose_max_ls_ratio,
+            })
+        return details
 
 
 class V21:
@@ -232,6 +327,9 @@ class V21:
             "max_volume_multiple_5s",
             "min_td_sell_setup_5m",
             "min_volume_multiple_5m",
+            "group_rise_12h_threshold",
+            "loose_consecutive_up_minutes",
+            "loose_max_ls_ratio",
         }
     )
     internal_parameters = frozenset({"metrics_series"})

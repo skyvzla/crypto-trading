@@ -71,6 +71,9 @@ class SpikeBacktestSettings:
     entry_tier_mode: str
     early_profit_unlock_ratio: Decimal | None
     max_consecutive_up_minutes: int
+    group_rise_12h_threshold: float
+    loose_consecutive_up_minutes: int
+    loose_max_ls_ratio: float | None
     max_oi_change_pct: float
     max_ls_ratio: float
     rise_5s_threshold: Decimal
@@ -196,6 +199,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=int,
         default=0,
         help="信号前连续上涨1m K线根数上限；0 表示不限制",
+    )
+    parser.add_argument(
+        "--group-rise-12h-threshold",
+        type=float,
+        default=0.0,
+        help="按动能分组的 12h 涨幅阈值（小数）；0 关闭分组，仅用于离线研究",
+    )
+    parser.add_argument(
+        "--loose-consecutive-up-minutes",
+        type=int,
+        default=0,
+        help="弱势/蓄力桶连阳上限；group 开启且 12h 涨幅低于阈值时生效",
+    )
+    parser.add_argument(
+        "--loose-max-ls-ratio",
+        type=float,
+        default=None,
+        help="弱势/蓄力桶多空比上限；None 不放宽，0 表示弱势桶 LS 不限制",
     )
     parser.add_argument(
         "--max-oi-change-pct",
@@ -380,6 +401,9 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         "min_td_sell_setup_5m": min_td_sell_setup_5m,
         "min_volume_multiple_5m": min_volume_multiple_5m,
         "prior_high_tolerance_percent": args.prior_high_tolerance_percent,
+        "group_rise_12h_threshold": args.group_rise_12h_threshold,
+        "loose_consecutive_up_minutes": args.loose_consecutive_up_minutes,
+        "loose_max_ls_ratio": args.loose_max_ls_ratio,
     }
     unsupported = sorted(
         key
@@ -443,6 +467,9 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
             else None
         ),
         max_consecutive_up_minutes=args.max_consecutive_up_minutes,
+        group_rise_12h_threshold=args.group_rise_12h_threshold,
+        loose_consecutive_up_minutes=args.loose_consecutive_up_minutes,
+        loose_max_ls_ratio=args.loose_max_ls_ratio,
         max_oi_change_pct=args.max_oi_change_pct,
         max_ls_ratio=args.max_ls_ratio,
         rise_5s_threshold=rise_5s_threshold,
@@ -542,6 +569,9 @@ def create_spike_engine(
                 key: value
                 for key, value in {
                     "max_consecutive_up_minutes": settings.max_consecutive_up_minutes,
+                    "group_rise_12h_threshold": settings.group_rise_12h_threshold,
+                    "loose_consecutive_up_minutes": settings.loose_consecutive_up_minutes,
+                    "loose_max_ls_ratio": settings.loose_max_ls_ratio,
                     "max_oi_change_pct": settings.max_oi_change_pct,
                     "max_ls_ratio": settings.max_ls_ratio,
                     "rise_5s_threshold": settings.rise_5s_threshold,

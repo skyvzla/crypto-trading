@@ -1328,5 +1328,265 @@ class TestDynamicSpikeShortStrategy:
         assert fake.active_signals == []
 
 
+class TestV21GroupedConsecutiveFilter:
+    """测试 V21 按动能分组的连阳双标准过滤。"""
+
+    def _strategy(self, **kwargs):
+        return SpikeV21Strategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            **kwargs,
+        )
+
+    def _klines_consecutive_up(self, minutes: int) -> list[Kline]:
+        return [
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=index * 60_000,
+                close_time=(index + 1) * 60_000 - 1,
+                available_time=(index + 1) * 60_000,
+                open=Decimal("1"),
+                high=Decimal("2"),
+                low=Decimal("1"),
+                close=Decimal("2"),
+                volume=Decimal("1"),
+            )
+            for index in range(minutes)
+        ]
+
+    def test_grouped_strong_bucket_uses_strict_cap(self):
+        strategy = self._strategy(
+            max_consecutive_up_minutes=4,
+            group_rise_12h_threshold=1.0,
+            loose_consecutive_up_minutes=0,
+        )
+        strategy.klines_1m = self._klines_consecutive_up(6)
+
+        passed, details = strategy._entry_filter_decision(
+            6 * 60_000, rise_from_12h_low=Decimal("1.23")
+        )
+
+        assert passed is False
+        assert details["bucket"] == "strong"
+        assert details["max_consecutive_up_minutes"] == 4
+        assert details["consecutive_up_minutes"] == 6
+        assert details["rise_from_12h_low"] == "1.23"
+
+    def test_grouped_weak_bucket_is_fully_loosened(self):
+        strategy = self._strategy(
+            max_consecutive_up_minutes=4,
+            group_rise_12h_threshold=1.0,
+            loose_consecutive_up_minutes=0,
+        )
+        strategy.klines_1m = self._klines_consecutive_up(6)
+
+        passed, details = strategy._entry_filter_decision(
+            6 * 60_000, rise_from_12h_low=Decimal("0.27")
+        )
+
+        assert passed is True
+        assert details is None
+
+    def test_grouped_weak_bucket_with_loose_cap(self):
+        strategy = self._strategy(
+            max_consecutive_up_minutes=4,
+            group_rise_12h_threshold=1.0,
+            loose_consecutive_up_minutes=10,
+        )
+        strategy.klines_1m = self._klines_consecutive_up(12)
+
+        passed, details = strategy._entry_filter_decision(
+            12 * 60_000, rise_from_12h_low=Decimal("0.27")
+        )
+
+        assert passed is False
+        assert details["bucket"] == "weak"
+        assert details["max_consecutive_up_minutes"] == 10
+        assert details["consecutive_up_minutes"] == 12
+
+    def test_grouped_weak_bucket_passes_within_loose_cap(self):
+        strategy = self._strategy(
+            max_consecutive_up_minutes=4,
+            group_rise_12h_threshold=1.0,
+            loose_consecutive_up_minutes=10,
+        )
+        strategy.klines_1m = self._klines_consecutive_up(8)
+
+        passed, details = strategy._entry_filter_decision(
+            8 * 60_000, rise_from_12h_low=Decimal("0.27")
+        )
+
+        assert passed is True
+        assert details is None
+
+    def test_grouped_threshold_boundary_counts_as_strong(self):
+        strategy = self._strategy(
+            max_consecutive_up_minutes=4,
+            group_rise_12h_threshold=1.0,
+            loose_consecutive_up_minutes=0,
+        )
+        strategy.klines_1m = self._klines_consecutive_up(5)
+
+        passed, details = strategy._entry_filter_decision(
+            5 * 60_000, rise_from_12h_low=Decimal("1.0")
+        )
+
+        assert passed is False
+        assert details["bucket"] == "strong"
+
+    def test_grouped_disabled_matches_single_cap_audit_shape(self):
+        strategy = self._strategy(max_consecutive_up_minutes=3)
+        strategy.klines_1m = self._klines_consecutive_up(4)
+
+        passed, details = strategy._entry_filter_decision(4 * 60_000)
+
+        assert passed is False
+        assert details == {
+            "rejection_stage": "consecutive_up_entry_filter",
+            "rejection_reasons": ["max_consecutive_up_minutes"],
+            "consecutive_up_minutes": 4,
+            "max_consecutive_up_minutes": 3,
+        }
+
+    def test_grouped_missing_rise_snapshot_falls_back_to_weak(self):
+        strategy = self._strategy(
+            max_consecutive_up_minutes=4,
+            group_rise_12h_threshold=1.0,
+            loose_consecutive_up_minutes=0,
+        )
+        strategy.klines_1m = self._klines_consecutive_up(6)
+
+        passed, details = strategy._entry_filter_decision(6 * 60_000, None)
+
+        assert passed is True
+        assert details is None
+
+    def test_grouped_negative_parameter_is_rejected(self):
+        with pytest.raises(ValueError, match="group_rise_12h_threshold"):
+            self._strategy(
+                max_consecutive_up_minutes=4,
+                group_rise_12h_threshold=-1.0,
+            )
+        with pytest.raises(ValueError, match="loose_consecutive_up_minutes"):
+            self._strategy(
+                max_consecutive_up_minutes=4,
+                loose_consecutive_up_minutes=-1,
+            )
+        with pytest.raises(ValueError, match="loose_max_ls_ratio"):
+            self._strategy(
+                max_consecutive_up_minutes=4,
+                loose_max_ls_ratio=-0.5,
+            )
+
+    def test_grouped_weak_bucket_loosens_ls_ratio(self):
+        strategy = self._strategy(
+            max_ls_ratio=1.5,
+            group_rise_12h_threshold=1.0,
+            loose_max_ls_ratio=0,
+        )
+        strategy.metrics_series = [
+            (0, 100.0, 1.0),
+            (4 * 60_000, 100.0, 5.9),
+        ]
+
+        passed, details = strategy._entry_filter_decision(
+            4 * 60_000, rise_from_12h_low=Decimal("0.27")
+        )
+
+        assert passed is True
+        assert details is None
+
+    def test_grouped_strong_bucket_keeps_strict_ls_ratio(self):
+        strategy = self._strategy(
+            max_ls_ratio=1.5,
+            group_rise_12h_threshold=1.0,
+            loose_max_ls_ratio=0,
+        )
+        strategy.metrics_series = [
+            (0, 100.0, 1.0),
+            (4 * 60_000, 100.0, 5.9),
+        ]
+
+        passed, details = strategy._entry_filter_decision(
+            4 * 60_000, rise_from_12h_low=Decimal("1.23")
+        )
+
+        assert passed is False
+        assert details["rejection_stage"] == "metrics_entry_filters"
+        assert details["rejection_reasons"] == ["max_ls_ratio"]
+        assert details["max_ls_ratio"] == 1.5
+
+    def test_grouped_weak_ls_audit_exposes_bucket(self):
+        strategy = self._strategy(
+            max_ls_ratio=1.5,
+            group_rise_12h_threshold=1.0,
+            loose_max_ls_ratio=0,
+            max_consecutive_up_minutes=0,
+        )
+        strategy.metrics_series = [
+            (0, 100.0, 1.0),
+            (4 * 60_000, 100.0, 1.0),
+        ]
+        strategy.klines_1m = self._klines_consecutive_up(6)
+
+        passed, details = strategy._entry_filter_decision(
+            4 * 60_000, rise_from_12h_low=Decimal("0.27")
+        )
+
+        assert passed is True
+        assert details is None
+
+    def test_loose_ls_disabled_matches_original_audit_shape(self):
+        strategy = self._strategy(
+            max_ls_ratio=1.5,
+            group_rise_12h_threshold=1.0,
+            loose_max_ls_ratio=None,
+            max_consecutive_up_minutes=0,
+        )
+        strategy.metrics_series = [
+            (0, 100.0, 1.0),
+            (4 * 60_000, 100.0, 5.9),
+        ]
+
+        passed, details = strategy._entry_filter_decision(
+            4 * 60_000, rise_from_12h_low=Decimal("0.27")
+        )
+
+        assert passed is False
+        assert details == {
+            "rejection_stage": "metrics_entry_filters",
+            "rejection_reasons": ["max_ls_ratio"],
+            "oi": 100.0,
+            "previous_oi": 100.0,
+            "oi_change_pct": 0.0,
+            "ls_ratio": 5.9,
+            "metrics_available_time": 4 * 60_000,
+            "max_oi_change_pct": 0.0,
+            "max_ls_ratio": 1.5,
+        }
+
+    def test_grouped_weak_ls_loose_audit_on_rejection(self):
+        strategy = self._strategy(
+            max_ls_ratio=1.5,
+            group_rise_12h_threshold=1.0,
+            loose_max_ls_ratio=2.0,
+            max_consecutive_up_minutes=0,
+        )
+        strategy.metrics_series = [
+            (0, 100.0, 1.0),
+            (4 * 60_000, 100.0, 5.9),
+        ]
+
+        passed, details = strategy._entry_filter_decision(
+            4 * 60_000, rise_from_12h_low=Decimal("0.27")
+        )
+
+        assert passed is False
+        assert details["max_ls_ratio"] == 2.0
+        assert details["bucket"] == "weak"
+        assert details["loose_max_ls_ratio"] == 2.0
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -55,6 +55,9 @@ PARAMETER_FLAGS = {
     "entry_tier_mode": "--entry-tier-mode",
     "profit_unlock_percent": "--profit-unlock-percent",
     "max_consecutive_up_minutes": "--max-consecutive-up-minutes",
+    "group_rise_12h_threshold": "--group-rise-12h-threshold",
+    "loose_consecutive_up_minutes": "--loose-consecutive-up-minutes",
+    "loose_max_ls_ratio": "--loose-max-ls-ratio",
     "max_oi_change_pct": "--max-oi-change-pct",
     "max_ls_ratio": "--max-ls-ratio",
     "rise_5s_threshold_percent": "--rise-5s-threshold-percent",
@@ -645,7 +648,7 @@ def _run_arguments(
         arguments.extend(["--metrics-root", str(metrics_root)])
     params = {**spec.params, **config.get("execution", {})}
     for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
-        if key in params:
+        if key in params and params[key] is not None:
             arguments.extend([flag, str(params[key])])
     return arguments
 
