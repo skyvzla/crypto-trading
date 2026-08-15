@@ -136,6 +136,42 @@ def test_v21_allows_native_five_minute_top_maturity_parameters():
     assert settings.min_volume_multiple_5m == Decimal("10")
 
 
+def test_v21_allows_configurable_rise_cap_window():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v2_1:V21",
+        "--max-rise-window-seconds", "15",
+        "--max-rise-window-percent", "10",
+    ])
+
+    settings = run_spike_short.resolve_settings(args)
+
+    assert settings.max_rise_window_seconds == 15
+    assert settings.max_rise_window_percent == Decimal("10")
+
+
+def test_rise_cap_window_rejects_conflicting_legacy_parameter():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v2_1:V21",
+        "--max-rise-5s-percent", "6",
+        "--max-rise-window-percent", "10",
+    ])
+
+    with pytest.raises(ValueError, match="cannot both be set"):
+        run_spike_short.resolve_settings(args)
+
+
 def test_v11_rejects_caps_with_legacy_script_exit():
     args = run_spike_short.parse_args([
         "--symbol", "AKEUSDT",
@@ -164,6 +200,12 @@ def test_cap_rejection_audit_cools_down_same_reason_but_records_changed_reason()
     details = {
         "trigger_price": Decimal("106"),
         "rise_5s": Decimal("0.06"),
+        "rise_window_returns": {
+            5: Decimal("0.06"),
+            10: Decimal("0.08"),
+            15: Decimal("0.10"),
+            60: Decimal("0.12"),
+        },
         "volume_5s": Decimal("20"),
         "median_volume_1s": Decimal("1"),
         "volume_multiple_5s": Decimal("4"),
@@ -210,6 +252,9 @@ def test_cap_rejection_audit_cools_down_same_reason_but_records_changed_reason()
     assert rejections[1].event_time - rejections[0].event_time < (
         strategy.SIGNAL_COOLDOWN * 1_000
     )
+    assert rejections[0].details["rise_10s"] == "0.08"
+    assert rejections[0].details["rise_15s"] == "0.10"
+    assert rejections[0].details["rise_60s"] == "0.12"
 
 
 def test_entry_filter_rejection_audit_cools_down_same_reason_but_records_changed_reason():

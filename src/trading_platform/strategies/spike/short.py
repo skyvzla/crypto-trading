@@ -141,6 +141,7 @@ class SpikeSignal:
     # 回测审计字段；不参与下单决策，保留信号复核所需的原始指标。
     spike_high_time: int | None = None
     rise_5s: Decimal | None = None
+    rise_window_returns: dict[int, Decimal] = field(default_factory=dict)
     volume_5s: Decimal | None = None
     median_volume_1s: Decimal | None = None
     volume_multiple_5s: Decimal | None = None
@@ -193,6 +194,7 @@ class DynamicSpikeShortStrategy:
 
     # 触发判定需要的 1s Bar 数量：索引 i-60 .. i
     BAR_BUFFER = 61
+    RISE_CAP_WINDOW_MAX_SECONDS = 60
     strategy_name = "dynamic-base"
 
     def __init__(
@@ -209,6 +211,8 @@ class DynamicSpikeShortStrategy:
         early_profit_unlock_ratio: Decimal | None = None,
         rise_5s_threshold: Decimal | None = None,
         max_rise_5s_percent: Decimal | None = None,
+        max_rise_window_seconds: int = 5,
+        max_rise_window_percent: Decimal | None = None,
         max_volume_multiple_5s: Decimal | None = None,
         prior_high_tolerance_percent: Decimal = Decimal("0"),
     ):
@@ -251,20 +255,44 @@ class DynamicSpikeShortStrategy:
         )
         if self.rise_5s_threshold < 0:
             raise ValueError("rise_5s_threshold must not be negative")
-        self.max_rise_5s = (
-            None
-            if max_rise_5s_percent is None or Decimal(max_rise_5s_percent) == 0
-            else Decimal(max_rise_5s_percent) / Decimal("100")
-        )
-        if self.max_rise_5s is not None and self.max_rise_5s < 0:
-            raise ValueError("max_rise_5s_percent must not be negative")
+        self.max_rise_window_seconds = int(max_rise_window_seconds)
+        if self.max_rise_window_seconds != max_rise_window_seconds:
+            raise ValueError("max_rise_window_seconds must be an integer")
+        if not 1 <= self.max_rise_window_seconds <= self.RISE_CAP_WINDOW_MAX_SECONDS:
+            raise ValueError(
+                "max_rise_window_seconds must be between 1 and "
+                f"{self.RISE_CAP_WINDOW_MAX_SECONDS}"
+            )
         if (
-            self.max_rise_5s is not None
-            and self.max_rise_5s < self.rise_5s_threshold
+            max_rise_5s_percent is not None
+            and max_rise_window_percent is not None
         ):
             raise ValueError(
-                "max_rise_5s_percent must be greater than or equal to rise_5s_threshold"
+                "max_rise_5s_percent and max_rise_window_percent "
+                "cannot both be set"
             )
+        max_rise_percent = (
+            max_rise_window_percent
+            if max_rise_window_percent is not None
+            else max_rise_5s_percent
+        )
+        self.max_rise_window = (
+            None
+            if max_rise_percent is None or Decimal(max_rise_percent) == 0
+            else Decimal(max_rise_percent) / Decimal("100")
+        )
+        if self.max_rise_window is not None and self.max_rise_window < 0:
+            raise ValueError("max_rise_window_percent must not be negative")
+        if (
+            self.max_rise_window is not None
+            and self.max_rise_window < self.rise_5s_threshold
+        ):
+            raise ValueError(
+                "max_rise_window_percent must be greater than or equal to "
+                "rise_5s_threshold"
+            )
+        # 旧审计和外部调用仍引用此属性；默认 5s 的语义保持不变。
+        self.max_rise_5s = self.max_rise_window
         self.max_volume_multiple_5s = (
             None
             if max_volume_multiple_5s is None or Decimal(max_volume_multiple_5s) == 0
@@ -570,6 +598,7 @@ class DynamicSpikeShortStrategy:
                     details=self._signal_audit_details(
                         trigger_price=signal.trigger_price,
                         rise_5s=signal.rise_5s,
+                        rise_window_returns=signal.rise_window_returns,
                         volume_5s=signal.volume_5s,
                         median_volume_1s=signal.median_volume_1s,
                         volume_multiple_5s=signal.volume_multiple_5s,
@@ -1141,6 +1170,7 @@ class DynamicSpikeShortStrategy:
         *,
         trigger_price: Decimal,
         rise_5s: Decimal | None,
+        rise_window_returns: dict[int, Decimal] | None,
         volume_5s: Decimal | None,
         median_volume_1s: Decimal | None,
         volume_multiple_5s: Decimal | None,
@@ -1153,6 +1183,21 @@ class DynamicSpikeShortStrategy:
             "rise_threshold_5s": str(self.rise_5s_threshold),
             "volume_threshold_5s": str(self.VOLUME_MULTIPLE_5S),
             "rise_5s": str(rise_5s) if rise_5s is not None else None,
+            "rise_10s": (
+                str(rise_window_returns[10])
+                if rise_window_returns is not None and 10 in rise_window_returns
+                else None
+            ),
+            "rise_15s": (
+                str(rise_window_returns[15])
+                if rise_window_returns is not None and 15 in rise_window_returns
+                else None
+            ),
+            "rise_60s": (
+                str(rise_window_returns[60])
+                if rise_window_returns is not None and 60 in rise_window_returns
+                else None
+            ),
             "volume_5s": str(volume_5s) if volume_5s is not None else None,
             "median_volume_1s": (
                 str(median_volume_1s) if median_volume_1s is not None else None
@@ -1180,6 +1225,7 @@ class DynamicSpikeShortStrategy:
         rejection_reasons: tuple[str, ...],
         trigger_price: Decimal,
         rise_5s: Decimal,
+        rise_window_returns: dict[int, Decimal],
         volume_5s: Decimal,
         median_volume_1s: Decimal,
         volume_multiple_5s: Decimal,
@@ -1198,6 +1244,7 @@ class DynamicSpikeShortStrategy:
         details = self._signal_audit_details(
             trigger_price=trigger_price,
             rise_5s=rise_5s,
+            rise_window_returns=rise_window_returns,
             volume_5s=volume_5s,
             median_volume_1s=median_volume_1s,
             volume_multiple_5s=volume_multiple_5s,
@@ -1208,7 +1255,13 @@ class DynamicSpikeShortStrategy:
         details.update({
             "rejection_stage": "post_base_entry_filters",
             "rejection_reasons": list(rejection_reasons),
-            "max_rise_5s": str(self.max_rise_5s),
+            "max_rise_5s": (
+                str(self.max_rise_window)
+                if self.max_rise_window_seconds == 5
+                else None
+            ),
+            "max_rise_window_seconds": self.max_rise_window_seconds,
+            "max_rise_window": str(self.max_rise_window),
             "max_volume_multiple_5s": str(self.max_volume_multiple_5s),
         })
         self._record_audit(
@@ -1229,6 +1282,15 @@ class DynamicSpikeShortStrategy:
         if len(self.bars_1s) > self.BAR_BUFFER:
             # 原地删除过期前缀，避免每秒重新分配并复制整个窗口。
             del self.bars_1s[:-self.BAR_BUFFER]
+
+    def _rise_window_returns(
+        self, bars: list[Bar1s], current: Bar1s
+    ) -> dict[int, Decimal]:
+        """返回可复测的短时涨幅；窗口均只读取当前及此前的 1s Bar。"""
+        return {
+            seconds: current.close / bars[-(seconds + 1)].close - Decimal("1")
+            for seconds in (5, 10, 15, 60)
+        }
 
     def _detect_signal(self, bar: Bar1s) -> Optional[SpikeSignal]:
         """
@@ -1265,7 +1327,7 @@ class DynamicSpikeShortStrategy:
             if current.timestamp - self.last_signal_time < self.SIGNAL_COOLDOWN * MS_PER_SECOND:
                 return None
 
-        # 3. 5 秒涨幅：close[i] / close[i-5] - 1
+        # 3. 原始 5 秒涨幅触发保持不变；额外窗口只用于顶部急涨上限过滤。
         rise_5s = (
             shared_bar_features.rise_5s
             if shared_bar_features is not None
@@ -1273,6 +1335,10 @@ class DynamicSpikeShortStrategy:
         )
         if rise_5s < self.rise_5s_threshold:
             return None
+        rise_window_returns = self._rise_window_returns(bars, current)
+        # 使用与基础触发一致的 5s 精确值，避免共享与非共享路径的数值语义漂移。
+        rise_window_returns[5] = rise_5s
+        rise_cap_window = rise_window_returns[self.max_rise_window_seconds]
 
         # 4. 成交量倍数：sum(volume[i-4..i]) / (median(volume[i-60..i-1]) × 5)
         if self._shared_feature_provider is not None:
@@ -1388,6 +1454,7 @@ class DynamicSpikeShortStrategy:
                     **self._signal_audit_details(
                         trigger_price=current.close,
                         rise_5s=rise_5s,
+                        rise_window_returns=rise_window_returns,
                         volume_5s=volume_5s,
                         median_volume_1s=median_volume,
                         volume_multiple_5s=volume_multiple_5s,
@@ -1406,7 +1473,15 @@ class DynamicSpikeShortStrategy:
         rejection_reasons = tuple(
             reason
             for reason, rejected in (
-                ("max_rise_5s", self.max_rise_5s is not None and rise_5s > self.max_rise_5s),
+                (
+                    (
+                        "max_rise_5s"
+                        if self.max_rise_window_seconds == 5
+                        else "max_rise_window"
+                    ),
+                    self.max_rise_window is not None
+                    and rise_cap_window > self.max_rise_window,
+                ),
                 (
                     "max_volume_multiple_5s",
                     self.max_volume_multiple_5s is not None
@@ -1421,6 +1496,7 @@ class DynamicSpikeShortStrategy:
                 rejection_reasons=rejection_reasons,
                 trigger_price=current.close,
                 rise_5s=rise_5s,
+                rise_window_returns=rise_window_returns,
                 volume_5s=volume_5s,
                 median_volume_1s=median_volume,
                 volume_multiple_5s=volume_multiple_5s,
@@ -1448,6 +1524,7 @@ class DynamicSpikeShortStrategy:
             expire_time=active_time + self.ORDER_TTL * MS_PER_SECOND,
             spike_high_time=spike_high_time,
             rise_5s=rise_5s,
+            rise_window_returns=rise_window_returns,
             volume_5s=volume_5s,
             median_volume_1s=median_volume,
             volume_multiple_5s=volume_multiple_5s,

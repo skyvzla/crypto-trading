@@ -75,6 +75,8 @@ class SpikeBacktestSettings:
     max_ls_ratio: float
     rise_5s_threshold: Decimal
     max_rise_5s_percent: Decimal | None
+    max_rise_window_seconds: int
+    max_rise_window_percent: Decimal | None
     max_volume_multiple_5s: Decimal | None
     min_td_sell_setup_5m: int
     min_volume_multiple_5m: Decimal
@@ -213,7 +215,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-rise-5s-percent", type=Decimal, default=None,
-        help="5秒涨幅上限（百分比）；0 或不传表示不限制",
+        help="兼容旧实验的 5 秒涨幅上限（百分比）；不可与通用窗口上限同时传递",
+    )
+    parser.add_argument(
+        "--max-rise-window-seconds", type=int, default=5,
+        help="顶部急涨上限的观测窗口（秒，1-60）；默认 5，不改变基础入场触发",
+    )
+    parser.add_argument(
+        "--max-rise-window-percent", type=Decimal, default=None,
+        help="顶部急涨上限（百分比）；0 或不传表示不限制",
     )
     parser.add_argument(
         "--max-volume-multiple-5s", type=Decimal, default=None,
@@ -307,11 +317,21 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         if args.prior_high_tolerance_percent is not None else Decimal("0")
     )
     max_rise_5s_percent = args.max_rise_5s_percent
+    max_rise_window_percent = args.max_rise_window_percent
     max_volume_multiple_5s = args.max_volume_multiple_5s
     min_td_sell_setup_5m = args.min_td_sell_setup_5m
     min_volume_multiple_5m = args.min_volume_multiple_5m
     if max_rise_5s_percent is not None and max_rise_5s_percent < 0:
         raise ValueError("--max-rise-5s-percent must not be negative")
+    if max_rise_window_percent is not None and max_rise_window_percent < 0:
+        raise ValueError("--max-rise-window-percent must not be negative")
+    if not 1 <= args.max_rise_window_seconds <= 60:
+        raise ValueError("--max-rise-window-seconds must be between 1 and 60")
+    if max_rise_5s_percent is not None and max_rise_window_percent is not None:
+        raise ValueError(
+            "--max-rise-5s-percent and --max-rise-window-percent "
+            "cannot both be set"
+        )
     if max_volume_multiple_5s is not None and max_volume_multiple_5s < 0:
         raise ValueError("--max-volume-multiple-5s must not be negative")
     if not 0 <= min_td_sell_setup_5m <= 9:
@@ -320,6 +340,8 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         raise ValueError("--min-volume-multiple-5m must not be negative")
     if max_rise_5s_percent == 0:
         max_rise_5s_percent = None
+    if max_rise_window_percent == 0:
+        max_rise_window_percent = None
     if max_volume_multiple_5s == 0:
         max_volume_multiple_5s = None
     if (
@@ -331,11 +353,12 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
             "--max-volume-multiple-5s must be zero or at least the lower volume threshold"
         )
     if (
-        max_rise_5s_percent is not None
-        and max_rise_5s_percent < rise_5s_threshold * Decimal("100")
+        (max_rise_window_percent or max_rise_5s_percent) is not None
+        and (max_rise_window_percent or max_rise_5s_percent)
+        < rise_5s_threshold * Decimal("100")
     ):
         raise ValueError(
-            "--max-rise-5s-percent must be greater than or equal to the lower threshold"
+            "maximum rise must be greater than or equal to the lower threshold"
         )
     profit_unlock_percent = args.profit_unlock_percent
     if profit_unlock_percent is None and defaults.profit_unlock_percent is not None:
@@ -347,6 +370,12 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         "max_ls_ratio": args.max_ls_ratio,
         "rise_5s_threshold_percent": args.rise_5s_threshold_percent,
         "max_rise_5s_percent": args.max_rise_5s_percent,
+        "max_rise_window_percent": args.max_rise_window_percent,
+        "max_rise_window_seconds": (
+            args.max_rise_window_seconds
+            if args.max_rise_window_percent is not None
+            else None
+        ),
         "max_volume_multiple_5s": args.max_volume_multiple_5s,
         "min_td_sell_setup_5m": min_td_sell_setup_5m,
         "min_volume_multiple_5m": min_volume_multiple_5m,
@@ -365,10 +394,11 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         raise ValueError(f"strategy {definition.name} requires --metrics-root")
     if args.exit_policy == "legacy-script" and (
         max_rise_5s_percent is not None
+        or max_rise_window_percent is not None
         or max_volume_multiple_5s is not None
     ):
         raise ValueError(
-            "--max-rise-5s-percent and --max-volume-multiple-5s "
+            "rise/volume upper limits "
             "are not supported with --exit-policy legacy-script"
         )
 
@@ -417,6 +447,8 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         max_ls_ratio=args.max_ls_ratio,
         rise_5s_threshold=rise_5s_threshold,
         max_rise_5s_percent=max_rise_5s_percent,
+        max_rise_window_seconds=args.max_rise_window_seconds,
+        max_rise_window_percent=max_rise_window_percent,
         max_volume_multiple_5s=max_volume_multiple_5s,
         min_td_sell_setup_5m=min_td_sell_setup_5m,
         min_volume_multiple_5m=min_volume_multiple_5m,
@@ -514,6 +546,8 @@ def create_spike_engine(
                     "max_ls_ratio": settings.max_ls_ratio,
                     "rise_5s_threshold": settings.rise_5s_threshold,
                     "max_rise_5s_percent": settings.max_rise_5s_percent,
+                    "max_rise_window_seconds": settings.max_rise_window_seconds,
+                    "max_rise_window_percent": settings.max_rise_window_percent,
                     "max_volume_multiple_5s": settings.max_volume_multiple_5s,
                     "min_td_sell_setup_5m": settings.min_td_sell_setup_5m,
                     "min_volume_multiple_5m": settings.min_volume_multiple_5m,

@@ -226,6 +226,59 @@ class TestDynamicSpikeShortStrategy:
         )
         assert custom.prior_high_lookback_minutes == 8 * 60
         assert len(DynamicSpikeShortStrategy.TIER_WEIGHTS) == 3
+        legacy_cap = DynamicSpikeShortStrategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            max_rise_5s_percent=Decimal("6"),
+        )
+        generic_cap = DynamicSpikeShortStrategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            max_rise_window_seconds=5,
+            max_rise_window_percent=Decimal("6"),
+        )
+        assert legacy_cap.max_rise_window == generic_cap.max_rise_window
+        assert legacy_cap.max_rise_window_seconds == generic_cap.max_rise_window_seconds
+
+    def test_rise_cap_window_returns_only_use_current_and_historical_bars(self):
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000"),
+            max_rise_window_seconds=15,
+            max_rise_window_percent=Decimal("10"),
+        )
+        bars = [
+            Bar1s(
+                symbol="BTCUSDT",
+                timestamp=index * 1_000,
+                available_time=(index + 1) * 1_000,
+                open=Decimal("100"),
+                high=Decimal("100"),
+                low=Decimal("100"),
+                close=Decimal("100") if index < 46 else Decimal("120"),
+                volume=Decimal("1"),
+                trade_count=1,
+                vwap=Decimal("100"),
+            )
+            for index in range(61)
+        ]
+
+        rises = strategy._rise_window_returns(bars, bars[-1])
+
+        assert rises == {
+            5: Decimal("0"),
+            10: Decimal("0"),
+            15: Decimal("0.2"),
+            60: Decimal("0.2"),
+        }
+
+    @pytest.mark.parametrize("seconds", [0, 61, 5.5])
+    def test_rise_cap_window_requires_supported_integer_seconds(self, seconds):
+        with pytest.raises(ValueError, match="max_rise_window_seconds"):
+            DynamicSpikeShortStrategy(
+                "BTCUSDT",
+                total_notional=Decimal("1000"),
+                max_rise_window_seconds=seconds,
+            )
 
     def test_consecutive_up_minutes_counter(self):
         """测试连续上涨根数倒推计数：close > open 计 1，否则中断。"""

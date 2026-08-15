@@ -227,6 +227,8 @@ class V21:
             "max_oi_change_pct",
             "max_ls_ratio",
             "max_rise_5s_percent",
+            "max_rise_window_seconds",
+            "max_rise_window_percent",
             "max_volume_multiple_5s",
             "min_td_sell_setup_5m",
             "min_volume_multiple_5m",
