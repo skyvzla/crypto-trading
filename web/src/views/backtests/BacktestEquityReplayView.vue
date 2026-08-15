@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, h, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { RotateCcw } from 'lucide-vue-next'
-import { Tag, type TableColumnsType } from 'ant-design-vue'
-import { useRoute } from 'vue-router'
+import { CandlestickChart, RotateCcw } from 'lucide-vue-next'
+import { Button, Tag, Tooltip, type TableColumnsType } from 'ant-design-vue'
+import { RouterLink, useRoute } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import EquityCurveChart from '@/features/backtests/EquityCurveChart.vue'
@@ -75,7 +75,8 @@ const columns: TableColumnsType<EquityReplayRow> = [
   { title: '交易资金池', key: 'tradingCapitalAfter', dataIndex: 'tradingCapitalAfter', width: 120, customRender: ({ text }) => `${formatNumber(text)} U` },
   { title: '锁定储备', key: 'reserveCapitalAfter', dataIndex: 'reserveCapitalAfter', width: 110, customRender: ({ text }) => `${formatNumber(text)} U` },
   { title: '结算后权益', key: 'balanceAfter', dataIndex: 'balanceAfter', width: 120, customRender: ({ text }) => `${formatNumber(text)} U` },
-  { title: '回撤', key: 'drawdown', dataIndex: 'drawdown', width: 90, customRender: ({ text }) => formatPercent(text) }
+  { title: '回撤', key: 'drawdown', dataIndex: 'drawdown', width: 90, customRender: ({ text }) => formatPercent(text) },
+  { title: '', key: 'action', width: 64, fixed: 'right', customRender: ({ record: row }) => h(Tooltip, { title: '打开单笔 K 线复盘' }, () => h(RouterLink, { to: { path: `/backtests/${encodeURIComponent(researchId.value)}/trades/${encodeURIComponent(row.id)}`, query: { from: 'equity' } } }, () => h(Button, { type: 'text', shape: 'circle', 'aria-label': '打开单笔K线复盘' }, () => h(CandlestickChart, { size: 16 })))) }
 ]
 </script>
 
@@ -114,7 +115,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
 
         <section class="equity-orders-section">
           <div class="equity-section-heading"><h3>订单时序</h3><span>严格按策略的单持仓准入顺序</span></div>
-          <a-table :columns="columns" :data-source="result.rows" row-key="id" size="small" :scroll="{ x: 1710 }" :pagination="{ pageSize: 50, showSizeChanger: true, pageSizeOptions: ['25', '50', '100'] }" />
+          <a-table :columns="columns" :data-source="result.rows" row-key="id" size="small" :scroll="{ x: 1774 }" :pagination="{ pageSize: 50, showSizeChanger: true, pageSizeOptions: ['25', '50', '100'] }" />
         </section>
       </QueryPanel>
     </QueryPanel>

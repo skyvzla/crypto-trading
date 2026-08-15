@@ -158,13 +158,21 @@ function eventContent(event: { data?: Record<string, unknown>; description?: str
 }
 const rootTo = computed(() => ({ path: '/backtests', query: route.query }))
 const symbolsTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/symbols`, query: route.query }))
-const backTo = computed(() => tradeQuery.data.value
-  ? { path: `/backtests/${encodeURIComponent(researchId.value)}/symbols/${encodeURIComponent(tradeQuery.data.value.symbol)}/trades`, query: route.query }
-  : symbolsTo.value)
+const equityTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/equity` }))
+const openedFromEquity = computed(() => route.query.from === 'equity')
+const backTo = computed(() => {
+  if (openedFromEquity.value) return equityTo.value
+  return tradeQuery.data.value
+    ? { path: `/backtests/${encodeURIComponent(researchId.value)}/symbols/${encodeURIComponent(tradeQuery.data.value.symbol)}/trades`, query: route.query }
+    : symbolsTo.value
+})
+const crumbs = computed(() => openedFromEquity.value
+  ? [{ label: '回测复盘', to: rootTo.value }, { label: '收益曲线', to: equityTo.value }, { label: '单笔复盘' }]
+  : [{ label: '回测复盘', to: rootTo.value }, { label: '交易对数据', to: symbolsTo.value }, { label: '单笔复盘' }])
 </script>
 
 <template>
-  <BacktestPage :title="tradeQuery.data.value ? `${tradeQuery.data.value.symbol} 单笔复盘` : '单笔复盘'" :eyebrow="tradeId" :back-to="backTo" :crumbs="[{ label: '回测复盘', to: rootTo }, { label: '交易对数据', to: symbolsTo }, { label: '单笔复盘' }]">
+  <BacktestPage :title="tradeQuery.data.value ? `${tradeQuery.data.value.symbol} 单笔复盘` : '单笔复盘'" :eyebrow="tradeId" :back-to="backTo" :crumbs="crumbs">
     <QueryPanel :pending="tradeQuery.isPending.value" :error="tradeQuery.error.value" @retry="tradeQuery.refetch()">
       <template v-if="tradeQuery.data.value">
         <div class="trade-summary-strip">

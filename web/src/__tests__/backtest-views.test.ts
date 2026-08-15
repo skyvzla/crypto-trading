@@ -134,6 +134,28 @@ describe('回测关键视图', () => {
     expect(wrapper.find('.equity-value-fields').exists()).toBe(true)
     expect(wrapper.text()).toContain('交易资金池')
     expect(wrapper.text()).toContain('锁定储备')
+    const replayButton = wrapper.find('button[aria-label="打开单笔K线复盘"]')
+    expect(replayButton.exists()).toBe(true)
+    expect(replayButton.element.closest('a')?.getAttribute('href')).toContain('/backtests/r-1/trades/t-1?from=equity')
+  })
+
+  it('从收益曲线打开单笔复盘时，返回按钮回到收益曲线', async () => {
+    vi.mocked(backtestApi.trade).mockResolvedValue({
+      id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000,
+      entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10
+    })
+    vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
+    vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
+    vi.mocked(backtestApi.candles).mockResolvedValue({ symbol: 'AKEUSDT', interval: '5m', source: 'binance', candles: [] })
+    const { list } = await plugins('/backtests/r-1/trades/t-1?from=equity')
+    const wrapper = mount(BacktestTradeReplayView, {
+      global: { plugins: list as never, stubs: { TradeCandlestickChart: true } }
+    })
+    await flushPromises()
+
+    await wrapper.get('button[aria-label="返回"]').trigger('click')
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/backtests/r-1/equity')
   })
 
   it('单笔复盘按1500根窗口加载，并在退出定位时重新以退出时间取数', async () => {
