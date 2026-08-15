@@ -25,6 +25,8 @@ def test_versioned_strategies_are_distinct_complete_implementations():
     assert not v1.supported_parameters
     assert not v2.supported_parameters
     assert "max_oi_change_pct" in v21.supported_parameters
+    assert "max_rise_5s_percent" in v21.supported_parameters
+    assert "max_volume_multiple_5s" in v21.supported_parameters
     assert "metrics_series" in v21.internal_parameters
 
 

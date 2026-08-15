@@ -35,6 +35,10 @@ from trading_platform.strategies.spike.exit_features import (
     CandidateFeatureSnapshot,
     candidate_feature_snapshot,
 )
+from trading_platform.strategies.spike.entry_features import (
+    EntryContextFeatures,
+    entry_context_features,
+)
 from trading_platform.strategies.spike.shared_features import (
     append_kline_and_evict_expired,
 )
@@ -154,6 +158,7 @@ class SpikeSignal:
     rise_low: Decimal | None = None
     rise_low_time: int | None = None
     rise_low_age_minutes: int | None = None
+    entry_context: EntryContextFeatures | None = None
 
 
 class DynamicSpikeShortStrategy:
@@ -570,6 +575,7 @@ class DynamicSpikeShortStrategy:
                         volume_multiple_5s=signal.volume_multiple_5s,
                         low_12h=signal.low_12h,
                         rise_from_12h_low=signal.rise_from_12h_low,
+                        entry_context=signal.entry_context,
                     ),
                 )
                 self._record_audit(
@@ -618,6 +624,11 @@ class DynamicSpikeShortStrategy:
                         "pullback_atr": str(self.RETEST_ATR),
                         "signal_cooldown_seconds": self.SIGNAL_COOLDOWN,
                         "order_ttl_seconds": self.ORDER_TTL,
+                        **(
+                            signal.entry_context.to_audit_details()
+                            if signal.entry_context is not None
+                            else {}
+                        ),
                         "exit_policy": self.exit_policy,
                         "strategy_version": self.strategy_name,
                         "early_profit_unlock_ratio": (
@@ -1135,8 +1146,9 @@ class DynamicSpikeShortStrategy:
         volume_multiple_5s: Decimal | None,
         low_12h: Decimal | None = None,
         rise_from_12h_low: Decimal | None = None,
+        entry_context: EntryContextFeatures | None = None,
     ) -> dict:
-        return {
+        details = {
             "trigger_price": str(trigger_price),
             "rise_threshold_5s": str(self.rise_5s_threshold),
             "volume_threshold_5s": str(self.VOLUME_MULTIPLE_5S),
@@ -1157,6 +1169,9 @@ class DynamicSpikeShortStrategy:
                 else None
             ),
         }
+        if entry_context is not None:
+            details.update(entry_context.to_audit_details())
+        return details
 
     def _record_cap_rejection(
         self,
@@ -1170,6 +1185,7 @@ class DynamicSpikeShortStrategy:
         volume_multiple_5s: Decimal,
         low_12h: Decimal,
         rise_from_12h_low: Decimal,
+        entry_context: EntryContextFeatures | None = None,
     ) -> None:
         previous = self._last_cap_rejection_audit
         if (
@@ -1187,6 +1203,7 @@ class DynamicSpikeShortStrategy:
             volume_multiple_5s=volume_multiple_5s,
             low_12h=low_12h,
             rise_from_12h_low=rise_from_12h_low,
+            entry_context=entry_context,
         )
         details.update({
             "rejection_stage": "post_base_entry_filters",
@@ -1358,6 +1375,7 @@ class DynamicSpikeShortStrategy:
             spike_high + atr * self.INVALID_SPIKE_ATR,
             tier_prices[1] + atr * self.INVALID_PRIMARY_ATR,
         )
+        entry_context = entry_context_features(self.klines_5m, self.klines_15m)
 
         # 仅当核心入场条件已完整满足时，才把版本指标过滤记为可复测信号。
         # 这不会改变过滤判定，只避免把后续本会失败的半成品候选写入报告。
@@ -1366,6 +1384,19 @@ class DynamicSpikeShortStrategy:
         )
         if not entry_filters_pass:
             if rejection_details is not None:
+                rejection_details = {
+                    **self._signal_audit_details(
+                        trigger_price=current.close,
+                        rise_5s=rise_5s,
+                        volume_5s=volume_5s,
+                        median_volume_1s=median_volume,
+                        volume_multiple_5s=volume_multiple_5s,
+                        low_12h=low_12h,
+                        rise_from_12h_low=current.close / low_12h - Decimal("1"),
+                        entry_context=entry_context,
+                    ),
+                    **rejection_details,
+                }
                 self._record_entry_filter_rejection(
                     event_time=current.timestamp,
                     details=rejection_details,
@@ -1395,6 +1426,7 @@ class DynamicSpikeShortStrategy:
                 volume_multiple_5s=volume_multiple_5s,
                 low_12h=low_12h,
                 rise_from_12h_low=current.close / low_12h - Decimal("1"),
+                entry_context=entry_context,
             )
             return None
 
@@ -1430,6 +1462,7 @@ class DynamicSpikeShortStrategy:
             rise_low=rise_low,
             rise_low_time=rise_low_time,
             rise_low_age_minutes=rise_low_age_minutes,
+            entry_context=entry_context,
         )
 
     # ------------------------------------------------------------------

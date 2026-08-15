@@ -158,6 +158,12 @@ class V21:
         profit_unlock_percent=3.0,
     )
     supported_parameters = frozenset(
-        {"max_consecutive_up_minutes", "max_oi_change_pct", "max_ls_ratio"}
+        {
+            "max_consecutive_up_minutes",
+            "max_oi_change_pct",
+            "max_ls_ratio",
+            "max_rise_5s_percent",
+            "max_volume_multiple_5s",
+        }
     )
     internal_parameters = frozenset({"metrics_series"})

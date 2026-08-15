@@ -34,6 +34,8 @@ TRADE_COLUMNS = [
     'atr', 'origin_price', 'origin_floor',
     'trigger_price', 'rise_5s', 'volume_5s', 'median_volume_1s',
     'volume_multiple_5s', 'low_12h', 'rise_from_12h_low', 'tier_prices',
+    'td_sell_setup_5m', 'td_sell_setup_15m', 'upper_wick_ratio_5m',
+    'upper_wick_ratio_15m', 'volume_multiple_5m',
     'tier_weights',
     'tier1_price', 'tier2_price', 'tier3_price',
     'tier1_weight', 'tier2_weight', 'tier3_weight',
@@ -519,6 +521,11 @@ class ResultAnalyzer:
                 'volume_multiple_5s': detail_number('volume_multiple_5s'),
                 'low_12h': detail_number('low_12h'),
                 'rise_from_12h_low': detail_number('rise_from_12h_low'),
+                'td_sell_setup_5m': detail_number('td_sell_setup_5m'),
+                'td_sell_setup_15m': detail_number('td_sell_setup_15m'),
+                'upper_wick_ratio_5m': detail_number('upper_wick_ratio_5m'),
+                'upper_wick_ratio_15m': detail_number('upper_wick_ratio_15m'),
+                'volume_multiple_5m': detail_number('volume_multiple_5m'),
                 'tier_prices': json.dumps(
                     metrics.get('tier_prices', []), ensure_ascii=True
                 ),
