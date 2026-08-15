@@ -1,6 +1,6 @@
 """账本查询与 subcategory 交易池准入 API。"""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
@@ -12,6 +12,7 @@ from trading_platform.ledger.db.models import (
     ExchangeCategory,
     ExchangeSymbol,
     LedgerDB,
+    PerformanceCampaignFact,
     StrategyCategoryAdmission,
     StrategyAuditRecord,
     SubcategoryAdmission,
@@ -259,6 +260,51 @@ class PnLResponse(BaseModel):
     avg_loss: Decimal
 
 
+class DailyPnLResponse(BaseModel):
+    """UTC natural-day realized ledger PnL for the calendar view."""
+
+    date: date
+    account_id: str
+    strategy_id: Optional[str] = None
+    symbol: Optional[str] = None
+    trade_count: int
+    realized_trade_count: int
+    gross_realized_pnl: Decimal
+    total_commission: Decimal
+    commission_asset: Optional[str] = None
+    net_pnl: Optional[Decimal] = None
+
+
+class PerformanceResponse(BaseModel):
+    """Campaign-level performance; fills without reliable round trips are excluded."""
+
+    account_id: str
+    strategy_id: Optional[str] = None
+    symbol: Optional[str] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    timezone: str = "UTC"
+    total_trades: int
+    total_fills: int
+    win_count: int
+    loss_count: int
+    flat_count: int
+    win_rate: float
+    avg_win: Decimal
+    avg_loss: Decimal
+    payoff_ratio: Optional[Decimal] = None
+    expectancy: Decimal
+    profit_factor: Optional[Decimal] = None
+    total_commission: Decimal
+    total_realized_pnl: Decimal
+    net_pnl: Decimal
+    max_drawdown: Decimal
+    candidate_campaigns: int
+    excluded_campaigns: int
+    unattributed_fills: int
+    metric_scope: str = "closed campaigns with complete USDT PnL facts"
+
+
 class CampaignPnLResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -388,6 +434,170 @@ async def get_pnl(
         symbol=symbol,
         net_pnl=realized + unrealized - commission,
         win_rate=values["win_count"] / decided if decided else 0.0,
+        **values,
+    )
+
+
+def _utc_bounds(
+    start_date: Optional[date], end_date: Optional[date]
+) -> tuple[Optional[datetime], Optional[datetime]]:
+    """Turn inclusive UI dates into half-open UTC timestamps."""
+    if (start_date is None) != (end_date is None):
+        raise HTTPException(
+            status_code=422,
+            detail="start_date and end_date must be provided together",
+        )
+    if start_date is None or end_date is None:
+        return None, None
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=422, detail="end_date must not be before start_date"
+        )
+    return (
+        datetime.combine(start_date, time.min, tzinfo=timezone.utc),
+        datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc),
+    )
+
+
+@router.get("/pnl/daily", response_model=list[DailyPnLResponse])
+async def get_daily_pnl(
+    account_id: str = Query(min_length=1, max_length=32),
+    start_date: date = Query(..., description="inclusive UTC date"),
+    end_date: date = Query(..., description="inclusive UTC date"),
+    strategy_id: Optional[str] = Query(None, max_length=64),
+    symbol: Optional[str] = Query(None, max_length=32),
+    db: LedgerDB = Depends(get_db),
+) -> list[DailyPnLResponse]:
+    start_at, end_at = _utc_bounds(start_date, end_date)
+    assert start_at is not None and end_at is not None
+    items = await db.list_daily_realized_pnl(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    return [
+        DailyPnLResponse(
+            date=item.day,
+            account_id=account_id,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            trade_count=item.trade_count,
+            realized_trade_count=item.realized_trade_count,
+            gross_realized_pnl=item.gross_realized_pnl,
+            total_commission=item.total_commission,
+            commission_asset=item.commission_asset,
+            net_pnl=item.net_pnl,
+        )
+        for item in items
+    ]
+
+
+def _performance_values(
+    facts: list[PerformanceCampaignFact],
+    *,
+    start_at: Optional[datetime],
+    end_at: Optional[datetime],
+) -> dict[str, Any]:
+    """Calculate metrics from complete Campaign rows, never individual fills."""
+    selected = [
+        fact
+        for fact in facts
+        if (
+            fact.closed_at is None
+            or start_at is None
+            or fact.closed_at >= start_at
+        )
+        and (fact.closed_at is None or end_at is None or fact.closed_at < end_at)
+    ]
+    eligible = [
+        fact
+        for fact in selected
+        if fact.closed_at is not None
+        and fact.realized_pnl_complete
+        and fact.commission_asset == "USDT"
+        and fact.unique_symbols == 1
+        and fact.sell_quantity >= fact.buy_quantity
+    ]
+    net_values = [fact.gross_realized_pnl - fact.total_commission for fact in eligible]
+    wins = [value for value in net_values if value > 0]
+    losses = [value for value in net_values if value < 0]
+    flats = [value for value in net_values if value == 0]
+    gross_profit = sum(wins, Decimal("0"))
+    gross_loss = abs(sum(losses, Decimal("0")))
+    avg_win = gross_profit / len(wins) if wins else Decimal("0")
+    avg_loss = gross_loss / len(losses) if losses else Decimal("0")
+
+    running = Decimal("0")
+    peak = Decimal("0")
+    max_drawdown = Decimal("0")
+    for value, _fact in sorted(
+        zip(net_values, eligible), key=lambda pair: pair[1].closed_at  # type: ignore[arg-type]
+    ):
+        running += value
+        peak = max(peak, running)
+        max_drawdown = min(max_drawdown, running - peak)
+
+    total_net = sum(net_values, Decimal("0"))
+    decided = len(wins) + len(losses)
+    return {
+        "total_trades": len(eligible),
+        "total_fills": sum(fact.trade_count for fact in eligible),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "flat_count": len(flats),
+        "win_rate": len(wins) / decided if decided else 0.0,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": avg_win / avg_loss if avg_loss else None,
+        "expectancy": total_net / len(eligible) if eligible else Decimal("0"),
+        "profit_factor": gross_profit / gross_loss if gross_loss else None,
+        "total_commission": sum(
+            (fact.total_commission for fact in eligible), Decimal("0")
+        ),
+        "total_realized_pnl": sum(
+            (fact.gross_realized_pnl for fact in eligible), Decimal("0")
+        ),
+        "net_pnl": total_net,
+        "max_drawdown": max_drawdown,
+        "candidate_campaigns": len(selected),
+        "excluded_campaigns": len(selected) - len(eligible),
+    }
+
+
+@router.get("/performance", response_model=PerformanceResponse)
+async def get_performance(
+    account_id: str = Query(min_length=1, max_length=32),
+    strategy_id: Optional[str] = Query(None, max_length=64),
+    symbol: Optional[str] = Query(None, max_length=32),
+    start_date: Optional[date] = Query(None, description="inclusive UTC date"),
+    end_date: Optional[date] = Query(None, description="inclusive UTC date"),
+    db: LedgerDB = Depends(get_db),
+) -> PerformanceResponse:
+    start_at, end_at = _utc_bounds(start_date, end_date)
+    facts = await db.list_performance_campaign_facts(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    unattributed = await db.count_unattributed_trades(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    values = _performance_values(facts, start_at=start_at, end_at=end_at)
+    return PerformanceResponse(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        unattributed_fills=unattributed,
         **values,
     )
 

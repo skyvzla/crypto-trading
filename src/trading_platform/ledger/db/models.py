@@ -4,7 +4,7 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, AsyncIterator, Optional, Sequence
 
@@ -242,6 +242,46 @@ class CampaignPnLSummary:
     released_at: Optional[datetime]
     lifecycle_duration_ms: Optional[int]
     pnl_facts_complete: bool
+
+
+@dataclass
+class PerformanceCampaignFact:
+    """Raw, account-scoped campaign facts used by the Web performance API.
+
+    The Web layer deliberately receives the grouped facts instead of grouping
+    fills itself.  A campaign is eligible only when the same invariants as
+    :meth:`get_campaign_pnl` hold (USDT fees, realised PnL on every fill and a
+    non-negative remaining short quantity).
+    """
+
+    account_id: str
+    strategy_id: str
+    symbol: str
+    campaign_id: str
+    trade_count: int
+    total_commission: Decimal
+    gross_realized_pnl: Decimal
+    sell_quantity: Decimal
+    buy_quantity: Decimal
+    commission_asset: Optional[str]
+    realized_pnl_complete: bool
+    unique_symbols: int
+    first_fill_at: datetime
+    last_fill_at: datetime
+    closed_at: Optional[datetime]
+
+
+@dataclass
+class DailyPnLFact:
+    """One UTC natural-day ledger aggregate."""
+
+    day: date
+    trade_count: int
+    realized_trade_count: int
+    gross_realized_pnl: Decimal
+    total_commission: Decimal
+    commission_asset: Optional[str]
+    net_pnl: Optional[Decimal]
 
 
 class VersionConflictError(Exception):
@@ -945,6 +985,173 @@ class LedgerDB:
             "avg_win": trades[5],
             "avg_loss": trades[6],
         }
+
+    async def list_daily_realized_pnl(
+        self,
+        *,
+        account_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> list[DailyPnLFact]:
+        """Return realized ledger PnL grouped by UTC natural day.
+
+        ``realized_pnl`` is summed with NULL treated as zero while every fill's
+        commission is included.  This mirrors ``/pnl`` and prevents a fee on
+        an entry fill from disappearing from the daily calendar.
+        """
+        parts = [
+            "account_id = %(account_id)s",
+            "exchange_time >= %(start_at)s",
+            "exchange_time < %(end_at)s",
+        ]
+        params: dict[str, object] = {
+            "account_id": account_id,
+            "start_at": start_at,
+            "end_at": end_at,
+        }
+        if strategy_id is not None:
+            parts.append("strategy_id = %(strategy_id)s")
+            params["strategy_id"] = strategy_id
+        if symbol is not None:
+            parts.append("symbol = %(symbol)s")
+            params["symbol"] = symbol
+        where = " AND ".join(parts)
+        query = f"""
+            SELECT (exchange_time AT TIME ZONE 'UTC')::date AS day,
+                COUNT(*)::BIGINT AS trade_count,
+                COUNT(*) FILTER (WHERE realized_pnl IS NOT NULL)::BIGINT
+                    AS realized_trade_count,
+                COALESCE(SUM(realized_pnl), 0) AS gross_realized_pnl,
+                COALESCE(SUM(commission), 0) AS total_commission,
+                CASE WHEN BOOL_AND(commission_asset = 'USDT')
+                    THEN 'USDT' ELSE NULL END AS commission_asset,
+                CASE WHEN BOOL_AND(commission_asset = 'USDT')
+                    THEN COALESCE(SUM(realized_pnl), 0)
+                        - COALESCE(SUM(commission), 0)
+                    ELSE NULL END AS net_pnl
+            FROM trades
+            WHERE {where}
+            GROUP BY (exchange_time AT TIME ZONE 'UTC')::date
+            ORDER BY day
+        """
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(DailyPnLFact))
+            await cursor.execute(query, params)
+            return await cursor.fetchall()
+
+    async def list_performance_campaign_facts(
+        self,
+        *,
+        account_id: str,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        start_at: Optional[datetime] = None,
+        end_at: Optional[datetime] = None,
+    ) -> list[PerformanceCampaignFact]:
+        """Group complete-candidate fills by Campaign for performance analysis.
+
+        Date filters select campaigns having at least one fill in the range,
+        then all fills for those campaigns are grouped.  This is intentional:
+        calculating a round-trip from a sliced set of fills could turn an open
+        campaign into a false winner.  The API subsequently includes only
+        campaigns whose close timestamp is inside the requested range.
+        """
+        filter_parts = ["t.account_id = %(account_id)s"]
+        params: dict[str, object] = {"account_id": account_id}
+        if strategy_id is not None:
+            filter_parts.append("t.strategy_id = %(strategy_id)s")
+            params["strategy_id"] = strategy_id
+        if symbol is not None:
+            filter_parts.append("t.symbol = %(symbol)s")
+            params["symbol"] = symbol
+        if start_at is not None:
+            filter_parts.append("t.exchange_time >= %(start_at)s")
+            params["start_at"] = start_at
+        if end_at is not None:
+            filter_parts.append("t.exchange_time < %(end_at)s")
+            params["end_at"] = end_at
+        selection_where = " AND ".join(filter_parts)
+
+        all_filters = ["t.account_id = %(account_id)s"]
+        if strategy_id is not None:
+            all_filters.append("t.strategy_id = %(strategy_id)s")
+        all_where = " AND ".join(all_filters)
+        query = f"""
+            WITH selected_campaigns AS (
+                SELECT DISTINCT t.account_id, t.strategy_id, t.campaign_id
+                FROM trades AS t
+                WHERE {selection_where}
+                  AND t.campaign_id IS NOT NULL
+            )
+            SELECT t.account_id,
+                t.strategy_id,
+                MIN(t.symbol) AS symbol,
+                t.campaign_id,
+                COUNT(*)::BIGINT AS trade_count,
+                COALESCE(SUM(t.commission), 0) AS total_commission,
+                COALESCE(SUM(t.realized_pnl), 0) AS gross_realized_pnl,
+                COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'SELL'), 0)
+                    AS sell_quantity,
+                COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'BUY'), 0)
+                    AS buy_quantity,
+                CASE WHEN COUNT(DISTINCT t.commission_asset) = 1
+                    THEN MIN(t.commission_asset) END AS commission_asset,
+                BOOL_AND(t.realized_pnl IS NOT NULL) AS realized_pnl_complete,
+                COUNT(DISTINCT t.symbol)::INTEGER AS unique_symbols,
+                MIN(t.exchange_time) AS first_fill_at,
+                MAX(t.exchange_time) AS last_fill_at,
+                MAX(t.exchange_time) FILTER (WHERE t.side = 'BUY') AS closed_at
+            FROM trades AS t
+            JOIN selected_campaigns AS selected
+              ON selected.account_id = t.account_id
+             AND selected.strategy_id = t.strategy_id
+             AND selected.campaign_id = t.campaign_id
+            WHERE {all_where}
+            GROUP BY t.account_id, t.strategy_id, t.campaign_id
+            ORDER BY closed_at NULLS LAST, t.campaign_id
+        """
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(PerformanceCampaignFact))
+            await cursor.execute(query, params)
+            return await cursor.fetchall()
+
+    async def count_unattributed_trades(
+        self,
+        *,
+        account_id: str,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        start_at: Optional[datetime] = None,
+        end_at: Optional[datetime] = None,
+    ) -> int:
+        """Count fills that cannot participate in Campaign-level metrics."""
+        parts = [
+            "account_id = %(account_id)s",
+            "campaign_id IS NULL",
+        ]
+        params: dict[str, object] = {"account_id": account_id}
+        if strategy_id is not None:
+            parts.append("strategy_id = %(strategy_id)s")
+            params["strategy_id"] = strategy_id
+        if symbol is not None:
+            parts.append("symbol = %(symbol)s")
+            params["symbol"] = symbol
+        if start_at is not None:
+            parts.append("exchange_time >= %(start_at)s")
+            params["start_at"] = start_at
+        if end_at is not None:
+            parts.append("exchange_time < %(end_at)s")
+            params["end_at"] = end_at
+        async with self.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    f"SELECT COUNT(*) FROM trades WHERE {' AND '.join(parts)}",
+                    params,
+                )
+            ).fetchone()
+        return int(row[0])
 
     async def _count(
         self,
