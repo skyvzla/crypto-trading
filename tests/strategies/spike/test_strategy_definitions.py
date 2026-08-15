@@ -27,6 +27,8 @@ def test_versioned_strategies_are_distinct_complete_implementations():
     assert "max_oi_change_pct" in v21.supported_parameters
     assert "max_rise_5s_percent" in v21.supported_parameters
     assert "max_volume_multiple_5s" in v21.supported_parameters
+    assert "min_td_sell_setup_5m" in v21.supported_parameters
+    assert "min_volume_multiple_5m" in v21.supported_parameters
     assert "metrics_series" in v21.internal_parameters
 
 

@@ -76,6 +76,8 @@ class SpikeBacktestSettings:
     rise_5s_threshold: Decimal
     max_rise_5s_percent: Decimal | None
     max_volume_multiple_5s: Decimal | None
+    min_td_sell_setup_5m: int
+    min_volume_multiple_5m: Decimal
     prior_high_tolerance_percent: Decimal
     required_kline_intervals: tuple[str, ...]
     requires_bar1s: bool
@@ -218,6 +220,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="5秒成交量相对基准倍数上限；0 或不传表示不限制",
     )
     parser.add_argument(
+        "--min-td-sell-setup-5m", type=int, default=0,
+        help="入场前已完成 5m TD 卖出 setup 最小值；0 表示不限制",
+    )
+    parser.add_argument(
+        "--min-volume-multiple-5m", type=Decimal, default=Decimal("0"),
+        help="入场前已完成 5m K线相对量能最小倍数；0 表示不限制",
+    )
+    parser.add_argument(
         "--prior-high-tolerance-percent", type=Decimal, default=None,
         help="允许最低挂单价低于前高的百分比；0表示严格高于前高",
     )
@@ -298,10 +308,16 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
     )
     max_rise_5s_percent = args.max_rise_5s_percent
     max_volume_multiple_5s = args.max_volume_multiple_5s
+    min_td_sell_setup_5m = args.min_td_sell_setup_5m
+    min_volume_multiple_5m = args.min_volume_multiple_5m
     if max_rise_5s_percent is not None and max_rise_5s_percent < 0:
         raise ValueError("--max-rise-5s-percent must not be negative")
     if max_volume_multiple_5s is not None and max_volume_multiple_5s < 0:
         raise ValueError("--max-volume-multiple-5s must not be negative")
+    if not 0 <= min_td_sell_setup_5m <= 9:
+        raise ValueError("--min-td-sell-setup-5m must be between 0 and 9")
+    if min_volume_multiple_5m < 0:
+        raise ValueError("--min-volume-multiple-5m must not be negative")
     if max_rise_5s_percent == 0:
         max_rise_5s_percent = None
     if max_volume_multiple_5s == 0:
@@ -332,6 +348,8 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         "rise_5s_threshold_percent": args.rise_5s_threshold_percent,
         "max_rise_5s_percent": args.max_rise_5s_percent,
         "max_volume_multiple_5s": args.max_volume_multiple_5s,
+        "min_td_sell_setup_5m": min_td_sell_setup_5m,
+        "min_volume_multiple_5m": min_volume_multiple_5m,
         "prior_high_tolerance_percent": args.prior_high_tolerance_percent,
     }
     unsupported = sorted(
@@ -400,6 +418,8 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         rise_5s_threshold=rise_5s_threshold,
         max_rise_5s_percent=max_rise_5s_percent,
         max_volume_multiple_5s=max_volume_multiple_5s,
+        min_td_sell_setup_5m=min_td_sell_setup_5m,
+        min_volume_multiple_5m=min_volume_multiple_5m,
         prior_high_tolerance_percent=prior_high_tolerance_percent,
         required_kline_intervals=tuple(
             dict.fromkeys(
@@ -495,6 +515,8 @@ def create_spike_engine(
                     "rise_5s_threshold": settings.rise_5s_threshold,
                     "max_rise_5s_percent": settings.max_rise_5s_percent,
                     "max_volume_multiple_5s": settings.max_volume_multiple_5s,
+                    "min_td_sell_setup_5m": settings.min_td_sell_setup_5m,
+                    "min_volume_multiple_5m": settings.min_volume_multiple_5m,
                     "prior_high_tolerance_percent": settings.prior_high_tolerance_percent,
                     "metrics_series": (
                         metrics_by_symbol or {}

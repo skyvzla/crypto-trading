@@ -351,6 +351,44 @@ class TestDynamicSpikeShortStrategy:
             "max_ls_ratio": 1.5,
         }
 
+    def test_top_maturity_filter_uses_native_five_minute_context(self):
+        strategy = SpikeV21Strategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            min_td_sell_setup_5m=4,
+            min_volume_multiple_5m=Decimal("5"),
+        )
+        strategy.klines_5m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="5m",
+                open_time=index * 300_000,
+                close_time=(index + 1) * 300_000 - 1,
+                available_time=(index + 1) * 300_000,
+                open=Decimal("99") + index,
+                high=Decimal("102") + index,
+                low=Decimal("98") + index,
+                close=Decimal("100") + index,
+                volume=Decimal("40") if index == 12 else Decimal("10"),
+            )
+            for index in range(13)
+        ]
+
+        passed, details = strategy._entry_filter_decision(13 * 300_000)
+
+        assert passed is False
+        assert details == {
+            "rejection_stage": "top_maturity_entry_filter",
+            "rejection_reasons": ["min_volume_multiple_5m"],
+            "td_sell_setup_5m": 9,
+            "min_td_sell_setup_5m": 4,
+            "volume_multiple_5m": "4",
+            "min_volume_multiple_5m": "5",
+        }
+
+        strategy.min_volume_multiple_5m = Decimal("4")
+        assert strategy._entry_filter_decision(13 * 300_000) == (True, None)
+
     def test_consecutive_up_filter_rejects_long_streaks(self):
         """max_consecutive_up_minutes 设置后，连续上涨超过上限的信号被拒绝。"""
         minute = 60_000

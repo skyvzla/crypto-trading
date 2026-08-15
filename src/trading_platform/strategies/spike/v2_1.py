@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from trading_platform.strategies.spike.definition import (
     SpikeDataRequirements,
     SpikeStrategyDefaults,
 )
+from trading_platform.strategies.spike.entry_features import entry_context_features
 from trading_platform.strategies.spike.v2 import V2
 from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
 
@@ -19,6 +22,8 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
         max_consecutive_up_minutes: int = 0,
         max_oi_change_pct: float = 0.0,
         max_ls_ratio: float = 0.0,
+        min_td_sell_setup_5m: int = 0,
+        min_volume_multiple_5m: Decimal = Decimal("0"),
         metrics_series: list[tuple[int, float, float]] | None = None,
         **kwargs,
     ):
@@ -28,6 +33,12 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
         self.max_consecutive_up_minutes = int(max_consecutive_up_minutes)
         self.max_oi_change_pct = float(max_oi_change_pct)
         self.max_ls_ratio = float(max_ls_ratio)
+        self.min_td_sell_setup_5m = int(min_td_sell_setup_5m)
+        self.min_volume_multiple_5m = Decimal(str(min_volume_multiple_5m))
+        if not 0 <= self.min_td_sell_setup_5m <= 9:
+            raise ValueError("min_td_sell_setup_5m must be between 0 and 9")
+        if self.min_volume_multiple_5m < 0:
+            raise ValueError("min_volume_multiple_5m must not be negative")
         self.metrics_series = list(metrics_series or [])
         self._metrics_idx = 0
 
@@ -37,35 +48,88 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
     def _entry_filter_decision(
         self, event_ms: int
     ) -> tuple[bool, dict[str, object] | None]:
-        consecutive_rejection = None
+        rejections: list[dict[str, object]] = []
         if self.max_consecutive_up_minutes > 0:
             consecutive_up_minutes = self._consecutive_up_minutes()
             if consecutive_up_minutes > self.max_consecutive_up_minutes:
-                consecutive_rejection = {
+                rejections.append({
                     "rejection_stage": "consecutive_up_entry_filter",
                     "rejection_reasons": ["max_consecutive_up_minutes"],
                     "consecutive_up_minutes": consecutive_up_minutes,
                     "max_consecutive_up_minutes": self.max_consecutive_up_minutes,
-                }
+                })
         # 同一候选只读取一次指标快照，审计复用该决策以免推进游标两次。
         metrics_rejection = self._metrics_rejection_details(event_ms)
-        if consecutive_rejection is None:
-            return metrics_rejection is None, metrics_rejection
-        if metrics_rejection is None:
-            return False, consecutive_rejection
-        return False, {
-            **metrics_rejection,
+        if metrics_rejection is not None:
+            rejections.append(metrics_rejection)
+        top_maturity_rejection = self._top_maturity_rejection_details()
+        if top_maturity_rejection is not None:
+            rejections.append(top_maturity_rejection)
+        if not rejections:
+            return True, None
+        if len(rejections) == 1:
+            return False, rejections[0]
+        details: dict[str, object] = {
             "rejection_stage": "combined_entry_filters",
             "rejection_reasons": [
-                *consecutive_rejection["rejection_reasons"],
-                *metrics_rejection["rejection_reasons"],
+                reason
+                for rejection in rejections
+                for reason in rejection["rejection_reasons"]
             ],
-            "consecutive_up_minutes": consecutive_rejection[
-                "consecutive_up_minutes"
-            ],
-            "max_consecutive_up_minutes": consecutive_rejection[
-                "max_consecutive_up_minutes"
-            ],
+        }
+        for rejection in rejections:
+            details.update(
+                {
+                    key: value
+                    for key, value in rejection.items()
+                    if key not in {"rejection_stage", "rejection_reasons"}
+                }
+            )
+        return False, details
+
+    def _top_maturity_rejection_details(self) -> dict[str, object] | None:
+        if (
+            self.min_td_sell_setup_5m <= 0
+            and self.min_volume_multiple_5m <= 0
+        ):
+            return None
+        context = entry_context_features(self.klines_5m, self.klines_15m)
+        rejection_reasons = [
+            reason
+            for reason, rejected in (
+                (
+                    "min_td_sell_setup_5m",
+                    self.min_td_sell_setup_5m > 0
+                    and (
+                        context.td_sell_setup_5m is None
+                        or context.td_sell_setup_5m < self.min_td_sell_setup_5m
+                    ),
+                ),
+                (
+                    "min_volume_multiple_5m",
+                    self.min_volume_multiple_5m > 0
+                    and (
+                        context.volume_multiple_5m is None
+                        or context.volume_multiple_5m
+                        < self.min_volume_multiple_5m
+                    ),
+                ),
+            )
+            if rejected
+        ]
+        if not rejection_reasons:
+            return None
+        return {
+            "rejection_stage": "top_maturity_entry_filter",
+            "rejection_reasons": rejection_reasons,
+            "td_sell_setup_5m": context.td_sell_setup_5m,
+            "min_td_sell_setup_5m": self.min_td_sell_setup_5m,
+            "volume_multiple_5m": (
+                str(context.volume_multiple_5m)
+                if context.volume_multiple_5m is not None
+                else None
+            ),
+            "min_volume_multiple_5m": str(self.min_volume_multiple_5m),
         }
 
     def _consecutive_up_minutes(self) -> int:
@@ -164,6 +228,8 @@ class V21:
             "max_ls_ratio",
             "max_rise_5s_percent",
             "max_volume_multiple_5s",
+            "min_td_sell_setup_5m",
+            "min_volume_multiple_5m",
         }
     )
     internal_parameters = frozenset({"metrics_series"})

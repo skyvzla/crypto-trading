@@ -60,6 +60,8 @@ PARAMETER_FLAGS = {
     "rise_5s_threshold_percent": "--rise-5s-threshold-percent",
     "max_rise_5s_percent": "--max-rise-5s-percent",
     "max_volume_multiple_5s": "--max-volume-multiple-5s",
+    "min_td_sell_setup_5m": "--min-td-sell-setup-5m",
+    "min_volume_multiple_5m": "--min-volume-multiple-5m",
     "prior_high_tolerance_percent": "--prior-high-tolerance-percent",
     "limit_fill_fraction": "--limit-fill-fraction",
     "warmup_hours": "--warmup-hours",

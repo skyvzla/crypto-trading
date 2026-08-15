@@ -117,6 +117,25 @@ def test_v11_allows_volume_cap_at_the_existing_lower_threshold():
     assert settings.max_volume_multiple_5s == Decimal("3")
 
 
+def test_v21_allows_native_five_minute_top_maturity_parameters():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v2_1:V21",
+        "--min-td-sell-setup-5m", "4",
+        "--min-volume-multiple-5m", "10",
+    ])
+
+    settings = run_spike_short.resolve_settings(args)
+
+    assert settings.min_td_sell_setup_5m == 4
+    assert settings.min_volume_multiple_5m == Decimal("10")
+
+
 def test_v11_rejects_caps_with_legacy_script_exit():
     args = run_spike_short.parse_args([
         "--symbol", "AKEUSDT",
