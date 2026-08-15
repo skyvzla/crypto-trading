@@ -129,11 +129,13 @@ $surface: var(--surface);
 .report-header-label { color: var(--text); font-size: 12px; font-weight: 600; }
 .report-header-key { color: var(--muted); font: 10px/1.1 "JetBrains Mono", "IBM Plex Mono", monospace; overflow-wrap: anywhere; }
 .equity-controls {
-  display: grid; grid-template-columns: minmax(260px, 1.8fr) repeat(5, minmax(135px, 1fr)) 34px; align-items: end; gap: 10px; padding: 12px; margin-bottom: 14px; border: 1px solid $line; border-radius: 6px; background: $surface;
+  display: grid; grid-template-columns: minmax(260px, 1fr) minmax(0, 2fr) 34px; align-items: end; gap: 10px; padding: 12px; margin-bottom: 14px; border: 1px solid $line; border-radius: 6px; background: $surface;
   label { display: grid; min-width: 0; gap: 6px; }
   label > span { color: $muted; font-size: 11px; }
   .ant-select, .ant-input-number { width: 100%; }
 }
+.equity-value-fields { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 10px; }
+.equity-reset { display: grid; place-items: end center; height: 32px; }
 .equity-summary-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(105px, 1fr)); border: 1px solid $line; border-radius: 6px; overflow: hidden; background: $surface; }
 .equity-summary-strip > div { min-width: 0; padding: 12px; border-right: 1px solid $line; }
 .equity-summary-strip > div:last-child { border-right: 0; }
@@ -160,8 +162,8 @@ $surface: var(--surface);
   .chart-toolbar { align-items: flex-start; flex-direction: column; }
   .source-tools { width: 100%; justify-content: space-between; }
   .trade-table-tools { flex-wrap: wrap; }
-  .equity-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .equity-controls .parameter-choice { grid-column: 1 / -1; }
+  .equity-controls { grid-template-columns: minmax(0, 1fr) 34px; }
+  .equity-value-fields { grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .equity-summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .equity-summary-strip > div { border-bottom: 1px solid $line; }
 }
@@ -173,8 +175,8 @@ $surface: var(--surface);
   .pagination-bar { align-items: flex-start; flex-direction: column; }
   .trade-summary-strip { grid-template-columns: 1fr; }
   .chart-shell { min-height: 360px; height: 55vh; }
-  .equity-controls { grid-template-columns: 1fr; }
-  .equity-controls .parameter-choice { grid-column: auto; }
+  .equity-controls { grid-template-columns: minmax(0, 1fr) 34px; }
+  .equity-value-fields { grid-template-columns: 1fr; }
   .equity-summary-strip { grid-template-columns: 1fr; }
   .equity-chart-wrap { min-height: 320px; height: 48vh; }
   .equity-section-heading { align-items: flex-start; flex-direction: column; }

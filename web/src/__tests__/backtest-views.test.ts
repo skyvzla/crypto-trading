@@ -131,6 +131,7 @@ describe('回测关键视图', () => {
     expect(values).toEqual(expect.arrayContaining(['1000.00', '500.00', '50.00']))
     expect(wrapper.text()).toContain('初始仓位')
     expect(wrapper.text()).toContain('盈利复投')
+    expect(wrapper.find('.equity-value-fields').exists()).toBe(true)
     expect(wrapper.text()).toContain('交易资金池')
     expect(wrapper.text()).toContain('锁定储备')
   })

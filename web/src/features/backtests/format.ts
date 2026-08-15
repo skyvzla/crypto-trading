@@ -35,8 +35,7 @@ export function formatNumber(value: NumericLike, digits = 2): string {
 export function formatPercent(value: NumericLike): string {
   const numeric = numericValue(value)
   if (numeric === null) return '-'
-  const normalized = Math.abs(numeric) <= 1 ? numeric * 100 : numeric
-  return `${formatNumber(normalized, 2)}%`
+  return `${formatNumber(numeric * 100, 2)}%`
 }
 
 export function formatDuration(value: NumericLike): string {

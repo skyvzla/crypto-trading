@@ -84,13 +84,15 @@ const columns: TableColumnsType<EquityReplayRow> = [
     <QueryPanel :pending="parameterSetsQuery.isPending.value" :error="parameterSetsQuery.error.value" :empty="parameterSetsQuery.data.value?.items.length === 0" @retry="parameterSetsQuery.refetch()">
       <section class="equity-controls" aria-label="回放参数">
         <label class="parameter-choice"><span>策略参数</span><a-select v-model:value="selectedParameters" :options="parameterOptions" /></label>
-        <label><span>初始资金</span><a-input-number v-model:value="initialBalance" :min="0.01" :precision="2" addon-after="U" /></label>
-        <label><span>初始仓位</span><a-input-number v-model:value="initialPosition" :min="0" :max="initialBalance" :precision="2" addon-after="U" /></label>
-        <label><span>盈利复投</span><a-input-number v-model:value="reinvestPercent" :min="0" :max="100" :precision="2" addon-after="%" /></label>
-        <label><span>最低交易资金池</span><a-input-number v-model:value="minimumBalance" :min="0" :precision="2" addon-after="U" /></label>
-        <label><span>单边手续费</span><a-input-number v-model:value="feePercent" :min="0" :precision="4" addon-after="%" /></label>
-        <label><span>单边滑点</span><a-input-number v-model:value="slippagePercent" :min="0" :precision="4" addon-after="%" /></label>
-        <a-tooltip title="恢复默认参数"><a-button type="text" shape="circle" aria-label="恢复默认回放参数" @click="resetSettings"><RotateCcw :size="16" /></a-button></a-tooltip>
+        <div class="equity-value-fields">
+          <label><span>初始资金</span><a-input-number v-model:value="initialBalance" :min="0.01" :precision="2" addon-after="U" /></label>
+          <label><span>初始仓位</span><a-input-number v-model:value="initialPosition" :min="0" :max="initialBalance" :precision="2" addon-after="U" /></label>
+          <label><span>盈利复投</span><a-input-number v-model:value="reinvestPercent" :min="0" :max="100" :precision="2" addon-after="%" /></label>
+          <label><span>最低交易资金池</span><a-input-number v-model:value="minimumBalance" :min="0" :precision="2" addon-after="U" /></label>
+          <label><span>单边手续费</span><a-input-number v-model:value="feePercent" :min="0" :precision="4" addon-after="%" /></label>
+          <label><span>单边滑点</span><a-input-number v-model:value="slippagePercent" :min="0" :precision="4" addon-after="%" /></label>
+        </div>
+        <div class="equity-reset"><a-tooltip title="恢复默认参数"><a-button type="text" shape="circle" aria-label="恢复默认回放参数" @click="resetSettings"><RotateCcw :size="16" /></a-button></a-tooltip></div>
       </section>
 
       <QueryPanel :pending="tradesQuery.isPending.value" :error="tradesQuery.error.value" :empty="tradesQuery.data.value?.items.length === 0" @retry="tradesQuery.refetch()">
