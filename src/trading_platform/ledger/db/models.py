@@ -4,7 +4,7 @@ import hashlib
 import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, AsyncIterator, Optional, Sequence
 
@@ -15,7 +15,12 @@ from psycopg_pool import AsyncConnectionPool
 from trading_platform.shared.events import StrategyAuditEvent
 from trading_platform.shared.symbol_universe_query import (
     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
+    SYMBOL_UNIVERSE_EVALUATED_CTES_SQL,
+    SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
 )
+
+SUPPORTED_LEDGER_TIMEZONES = frozenset(("UTC", "Asia/Shanghai"))
+
 
 @dataclass
 class Order:
@@ -173,6 +178,36 @@ class ExchangeCategory:
 
 
 @dataclass
+class ExchangeCategoryOverview(ExchangeCategory):
+    symbol_count: int = 0
+
+
+@dataclass
+class ExchangeSymbolSyncState:
+    status: str
+    last_attempt_at: datetime
+    last_success_at: Optional[datetime]
+    synced_symbols: int
+    last_error: Optional[str]
+    stale: bool
+    effective_universe_ready: bool
+
+
+@dataclass
+class SymbolUniverseDecision:
+    symbol: str
+    sync_ready: bool
+    symbol_active: bool
+    perpetual_contract: bool
+    trading_status: bool
+    onboarded: bool
+    delivery_window_open: bool
+    global_enabled: bool
+    blocked_category_keys: list[str]
+    effective: bool
+
+
+@dataclass
 class SymbolGlobalAdmission:
     symbol: str
     enabled: bool
@@ -242,6 +277,58 @@ class CampaignPnLSummary:
     released_at: Optional[datetime]
     lifecycle_duration_ms: Optional[int]
     pnl_facts_complete: bool
+
+
+@dataclass
+class PerformanceCampaignFact:
+    """Raw, account-scoped campaign facts used by the Web performance API.
+
+    The Web layer deliberately receives the grouped facts instead of grouping
+    fills itself.  A campaign is eligible only when the same invariants as
+    :meth:`get_campaign_pnl` hold (USDT fees, realised PnL on every fill and a
+    non-negative remaining short quantity).
+    """
+
+    account_id: str
+    strategy_id: str
+    symbol: str
+    campaign_id: str
+    trade_count: int
+    total_commission: Decimal
+    gross_realized_pnl: Decimal
+    sell_quantity: Decimal
+    buy_quantity: Decimal
+    commission_asset: Optional[str]
+    realized_pnl_complete: bool
+    unique_symbols: int
+    first_fill_at: datetime
+    last_fill_at: datetime
+    closed_at: Optional[datetime]
+    # Derived only from the authoritative fill quantities.  This is a
+    # position direction (LONG/SHORT), not a guessed BUY/SELL label.
+    side: Optional[str] = None
+
+
+@dataclass
+class PerformanceCampaignDimension:
+    """A complete Campaign fact paired with one authoritative dimension."""
+
+    campaign: PerformanceCampaignFact
+    dimension_key: Optional[str]
+    dimension_label: Optional[str]
+
+
+@dataclass
+class DailyPnLFact:
+    """One named-timezone natural-day ledger aggregate."""
+
+    day: date
+    trade_count: int
+    realized_trade_count: int
+    gross_realized_pnl: Decimal
+    total_commission: Decimal
+    commission_asset: Optional[str]
+    net_pnl: Optional[Decimal]
 
 
 class VersionConflictError(Exception):
@@ -946,6 +1033,310 @@ class LedgerDB:
             "avg_loss": trades[6],
         }
 
+    async def list_daily_realized_pnl(
+        self,
+        *,
+        account_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        timezone_name: str = "Asia/Shanghai",
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> list[DailyPnLFact]:
+        """Return realized ledger PnL grouped by a named natural day.
+
+        ``realized_pnl`` is summed with NULL treated as zero while every fill's
+        commission is included.  This mirrors ``/pnl`` and prevents a fee on
+        an entry fill from disappearing from the daily calendar.
+        """
+        if timezone_name not in SUPPORTED_LEDGER_TIMEZONES:
+            raise ValueError("unsupported ledger timezone")
+        parts = [
+            "account_id = %(account_id)s",
+            "exchange_time >= %(start_at)s",
+            "exchange_time < %(end_at)s",
+        ]
+        params: dict[str, object] = {
+            "account_id": account_id,
+            "start_at": start_at,
+            "end_at": end_at,
+            "timezone_name": timezone_name,
+        }
+        if strategy_id is not None:
+            parts.append("strategy_id = %(strategy_id)s")
+            params["strategy_id"] = strategy_id
+        if symbol is not None:
+            parts.append("symbol = %(symbol)s")
+            params["symbol"] = symbol
+        where = " AND ".join(parts)
+        query = f"""
+            SELECT (exchange_time AT TIME ZONE %(timezone_name)s)::date AS day,
+                COUNT(*)::BIGINT AS trade_count,
+                COUNT(*) FILTER (WHERE realized_pnl IS NOT NULL)::BIGINT
+                    AS realized_trade_count,
+                COALESCE(SUM(realized_pnl), 0) AS gross_realized_pnl,
+                COALESCE(SUM(commission), 0) AS total_commission,
+                CASE WHEN BOOL_AND(commission_asset = 'USDT')
+                    THEN 'USDT' ELSE NULL END AS commission_asset,
+                CASE WHEN BOOL_AND(commission_asset = 'USDT')
+                    THEN COALESCE(SUM(realized_pnl), 0)
+                        - COALESCE(SUM(commission), 0)
+                    ELSE NULL END AS net_pnl
+            FROM trades
+            WHERE {where}
+            GROUP BY (exchange_time AT TIME ZONE %(timezone_name)s)::date
+            ORDER BY day
+        """
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(DailyPnLFact))
+            await cursor.execute(query, params)
+            return await cursor.fetchall()
+
+    async def list_performance_campaign_facts(
+        self,
+        *,
+        account_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> list[PerformanceCampaignFact]:
+        """Group complete-candidate fills by Campaign for performance analysis.
+
+        Date filters select campaigns having at least one fill in the range,
+        then all fills for those campaigns are grouped.  This is intentional:
+        calculating a round-trip from a sliced set of fills could turn an open
+        campaign into a false winner.  The API subsequently includes only
+        campaigns whose close timestamp is inside the requested range.
+        """
+        filter_parts = [
+            "t.account_id = %(account_id)s",
+            "t.exchange_time >= %(start_at)s",
+            "t.exchange_time < %(end_at)s",
+        ]
+        params: dict[str, object] = {
+            "account_id": account_id,
+            "start_at": start_at,
+            "end_at": end_at,
+        }
+        if strategy_id is not None:
+            filter_parts.append("t.strategy_id = %(strategy_id)s")
+            params["strategy_id"] = strategy_id
+        if symbol is not None:
+            filter_parts.append("t.symbol = %(symbol)s")
+            params["symbol"] = symbol
+        selection_where = " AND ".join(filter_parts)
+
+        all_filters = ["t.account_id = %(account_id)s"]
+        if strategy_id is not None:
+            all_filters.append("t.strategy_id = %(strategy_id)s")
+        all_where = " AND ".join(all_filters)
+        query = f"""
+            WITH selected_campaigns AS (
+                SELECT DISTINCT t.account_id, t.strategy_id, t.campaign_id
+                FROM trades AS t
+                WHERE {selection_where}
+                  AND t.campaign_id IS NOT NULL
+            )
+            SELECT t.account_id,
+                t.strategy_id,
+                MIN(t.symbol) AS symbol,
+                t.campaign_id,
+                COUNT(*)::BIGINT AS trade_count,
+                COALESCE(SUM(t.commission), 0) AS total_commission,
+                COALESCE(SUM(t.realized_pnl), 0) AS gross_realized_pnl,
+                COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'SELL'), 0)
+                    AS sell_quantity,
+                COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'BUY'), 0)
+                    AS buy_quantity,
+                CASE WHEN COUNT(DISTINCT t.commission_asset) = 1
+                    THEN MIN(t.commission_asset) END AS commission_asset,
+                BOOL_AND(t.realized_pnl IS NOT NULL) AS realized_pnl_complete,
+                COUNT(DISTINCT t.symbol)::INTEGER AS unique_symbols,
+                MIN(t.exchange_time) AS first_fill_at,
+                MAX(t.exchange_time) AS last_fill_at,
+                MAX(t.exchange_time) FILTER (WHERE t.side = 'BUY') AS closed_at,
+                CASE
+                    WHEN COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'SELL'), 0)
+                        >= COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'BUY'), 0)
+                        THEN 'SHORT'
+                    WHEN COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'BUY'), 0)
+                        > COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'SELL'), 0)
+                        THEN 'LONG'
+                    ELSE NULL
+                END AS side
+            FROM trades AS t
+            JOIN selected_campaigns AS selected
+              ON selected.account_id = t.account_id
+             AND selected.strategy_id = t.strategy_id
+             AND selected.campaign_id = t.campaign_id
+            WHERE {all_where}
+            GROUP BY t.account_id, t.strategy_id, t.campaign_id
+            ORDER BY closed_at NULLS LAST, t.campaign_id
+        """
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(PerformanceCampaignFact))
+            await cursor.execute(query, params)
+            return await cursor.fetchall()
+
+    async def list_performance_campaign_dimensions(
+        self,
+        *,
+        account_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        group_by: str,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        category_key: Optional[str] = None,
+        subcategory_key: Optional[str] = None,
+        side: Optional[str] = None,
+    ) -> list[PerformanceCampaignDimension]:
+        """Attach only database-backed dimensions to complete Campaign facts.
+
+        Category assignments are read from the synchronized taxonomy tables.
+        A symbol with no active assignment gets one ``None`` dimension so the
+        API can expose an explicit unclassified bucket.  ``exit_reason`` is
+        intentionally not handled here because ledger trades do not persist a
+        normalized exit reason.
+        """
+        if group_by not in {"symbol", "category", "subcategory", "side"}:
+            raise ValueError(f"unsupported performance dimension: {group_by}")
+        if side is not None and side not in {"LONG", "SHORT"}:
+            raise ValueError("side must be LONG or SHORT")
+
+        campaigns = await self.list_performance_campaign_facts(
+            account_id=account_id,
+            start_at=start_at,
+            end_at=end_at,
+            strategy_id=strategy_id,
+            symbol=symbol,
+        )
+        if not campaigns:
+            return []
+
+        assignments: dict[str, list[tuple[str, str, str]]] = {}
+        if group_by in {"category", "subcategory"} or category_key or subcategory_key:
+            symbols = sorted({fact.symbol for fact in campaigns})
+            async with self.pool.connection() as conn:
+                rows = await (
+                    await conn.execute(
+                        """
+                        SELECT assignment.symbol, category.category_key,
+                            category.category_type, category.name
+                        FROM exchange_symbol_categories AS assignment
+                        JOIN exchange_categories AS category
+                          ON category.category_key = assignment.category_key
+                        WHERE assignment.symbol = ANY(%s)
+                          AND assignment.active = TRUE
+                          AND category.active = TRUE
+                        ORDER BY assignment.symbol, category.category_type,
+                            category.category_key
+                        """,
+                        (symbols,),
+                    )
+                ).fetchall()
+            for assigned_symbol, key, category_type, name in rows:
+                assignments.setdefault(str(assigned_symbol), []).append(
+                    (str(key), str(category_type), str(name))
+                )
+
+        dimensions: list[PerformanceCampaignDimension] = []
+        for campaign in campaigns:
+            if side is not None and campaign.side != side:
+                continue
+            symbol_assignments = assignments.get(campaign.symbol, [])
+            if category_key is not None and not any(
+                key == category_key and category_type == "CATEGORY"
+                for key, category_type, _name in symbol_assignments
+            ):
+                continue
+            if subcategory_key is not None and not any(
+                key == subcategory_key and category_type == "SUBCATEGORY"
+                for key, category_type, _name in symbol_assignments
+            ):
+                continue
+
+            if group_by == "symbol":
+                dimensions.append(
+                    PerformanceCampaignDimension(
+                        campaign=campaign,
+                        dimension_key=campaign.symbol,
+                        dimension_label=campaign.symbol,
+                    )
+                )
+            elif group_by == "side":
+                dimensions.append(
+                    PerformanceCampaignDimension(
+                        campaign=campaign,
+                        dimension_key=campaign.side,
+                        dimension_label=campaign.side,
+                    )
+                )
+            else:
+                wanted_type = (
+                    "CATEGORY" if group_by == "category" else "SUBCATEGORY"
+                )
+                matching = [
+                    (key, name)
+                    for key, category_type, name in symbol_assignments
+                    if category_type == wanted_type
+                ]
+                if matching:
+                    dimensions.extend(
+                        PerformanceCampaignDimension(
+                            campaign=campaign,
+                            dimension_key=key,
+                            dimension_label=name,
+                        )
+                        for key, name in matching
+                    )
+                else:
+                    dimensions.append(
+                        PerformanceCampaignDimension(
+                            campaign=campaign,
+                            dimension_key=None,
+                            dimension_label=None,
+                        )
+                    )
+        return dimensions
+
+    async def count_unattributed_trades(
+        self,
+        *,
+        account_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+    ) -> int:
+        """Count fills that cannot participate in Campaign-level metrics."""
+        parts = [
+            "account_id = %(account_id)s",
+            "campaign_id IS NULL",
+            "exchange_time >= %(start_at)s",
+            "exchange_time < %(end_at)s",
+        ]
+        params: dict[str, object] = {
+            "account_id": account_id,
+            "start_at": start_at,
+            "end_at": end_at,
+        }
+        if strategy_id is not None:
+            parts.append("strategy_id = %(strategy_id)s")
+            params["strategy_id"] = strategy_id
+        if symbol is not None:
+            parts.append("symbol = %(symbol)s")
+            params["symbol"] = symbol
+        async with self.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    f"SELECT COUNT(*) FROM trades WHERE {' AND '.join(parts)}",
+                    params,
+                )
+            ).fetchone()
+        return int(row[0])
+
     async def _count(
         self,
         table: str,
@@ -1418,39 +1809,132 @@ class LedgerDB:
             return await cursor.fetchone()
 
     async def list_exchange_symbols(
-        self, limit: int = 100, offset: int = 0
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        *,
+        unclassified: bool = False,
     ) -> tuple[list[ExchangeSymbolOverview], int]:
+        assignment_filter = ""
+        params: tuple[object, ...] = (limit, offset)
+        if unclassified:
+            assignment_filter = """
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM exchange_symbol_categories AS assignment
+                    WHERE assignment.symbol = symbol.symbol
+                      AND assignment.active = TRUE
+                )
+            """
         async with self.pool.connection() as conn:
             cursor = conn.cursor(row_factory=class_row(ExchangeSymbolOverview))
             await cursor.execute(
-                """
+                f"""
                 SELECT symbol.*,
                        COALESCE(control.enabled, TRUE) AS global_enabled,
                        COALESCE(control.version, 0) AS global_admission_version
                 FROM exchange_symbols AS symbol
                 LEFT JOIN symbol_global_admission AS control
                   ON control.symbol = symbol.symbol
+                {assignment_filter}
                 ORDER BY symbol.symbol LIMIT %s OFFSET %s
                 """,
-                (limit, offset),
+                params,
             )
             items = await cursor.fetchall()
             total = await (
-                await conn.execute("SELECT COUNT(*) FROM exchange_symbols")
+                await conn.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM exchange_symbols AS symbol
+                    {assignment_filter}
+                    """,
+                )
             ).fetchone()
         return items, int(total[0])
 
     async def list_exchange_categories(
         self, *, active_only: bool = True
-    ) -> list[ExchangeCategory]:
-        where = " WHERE active = TRUE" if active_only else ""
+    ) -> list[ExchangeCategoryOverview]:
+        where = "WHERE category.active = TRUE" if active_only else ""
         async with self.pool.connection() as conn:
-            cursor = conn.cursor(row_factory=class_row(ExchangeCategory))
+            cursor = conn.cursor(row_factory=class_row(ExchangeCategoryOverview))
             await cursor.execute(
-                "SELECT * FROM exchange_categories"
-                f"{where} ORDER BY category_type, parent_key NULLS FIRST, code"
+                f"""
+                SELECT category.*,
+                    COUNT(DISTINCT assignment.symbol) FILTER (
+                        WHERE assignment.active = TRUE
+                    )::BIGINT AS symbol_count
+                FROM exchange_categories AS category
+                LEFT JOIN exchange_symbol_categories AS assignment
+                  ON assignment.category_key = category.category_key
+                {where}
+                GROUP BY category.category_key
+                ORDER BY category.category_type,
+                    category.parent_key NULLS FIRST, category.code
+                """
             )
             return await cursor.fetchall()
+
+    async def list_exchange_category_symbols(
+        self,
+        category_key: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[ExchangeSymbolOverview], int]:
+        """Page active symbol assignments for one category without N+1 reads."""
+        normalized_category = category_key.strip()
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeSymbolOverview))
+            await cursor.execute(
+                """
+                SELECT symbol.*,
+                    COALESCE(control.enabled, TRUE) AS global_enabled,
+                    COALESCE(control.version, 0) AS global_admission_version
+                FROM exchange_symbol_categories AS assignment
+                JOIN exchange_symbols AS symbol
+                  ON symbol.symbol = assignment.symbol
+                LEFT JOIN symbol_global_admission AS control
+                  ON control.symbol = symbol.symbol
+                WHERE assignment.category_key = %s
+                  AND assignment.active = TRUE
+                ORDER BY symbol.symbol
+                LIMIT %s OFFSET %s
+                """,
+                (normalized_category, limit, offset),
+            )
+            items = await cursor.fetchall()
+            total = await (
+                await conn.execute(
+                    "SELECT COUNT(*) FROM exchange_symbol_categories "
+                    "WHERE category_key = %s AND active = TRUE",
+                    (normalized_category,),
+                )
+            ).fetchone()
+        return items, int(total[0])
+
+    async def get_exchange_symbol_sync_state(
+        self,
+    ) -> Optional[ExchangeSymbolSyncState]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeSymbolSyncState))
+            await cursor.execute(
+                f"""
+                SELECT status, last_attempt_at, last_success_at,
+                    synced_symbols, last_error,
+                    last_success_at IS NULL OR last_success_at < NOW()
+                        - INTERVAL '{SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS} hours'
+                        AS stale,
+                    status = 'SUCCESS'
+                        AND last_success_at >= NOW()
+                            - INTERVAL '{SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS} hours'
+                        AS effective_universe_ready
+                FROM exchange_symbol_sync_state
+                WHERE singleton = TRUE
+                """
+            )
+            return await cursor.fetchone()
 
     async def get_exchange_category(
         self, category_key: str
@@ -1501,11 +1985,62 @@ class LedgerDB:
                     (
                         timedelta(days=freeze_days),
                         normalized_strategy,
-                        normalized_strategy,
                     ),
                 )
             ).fetchall()
         return [str(row[0]) for row in rows]
+
+    async def list_strategy_symbol_universe_preview(
+        self,
+        *,
+        strategy_id: str,
+        freeze_days: int = 15,
+        effective: Optional[bool] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[SymbolUniverseDecision], int, int]:
+        """Return the actual shared-universe decision and its exclusion facts."""
+        if freeze_days < 0:
+            raise ValueError("freeze_days must be non-negative")
+        normalized_strategy = strategy_id.strip()
+        if not normalized_strategy:
+            raise ValueError("strategy id is required")
+        base_params: list[object] = [
+            timedelta(days=freeze_days),
+            normalized_strategy,
+        ]
+        where = ""
+        page_params = list(base_params)
+        if effective is not None:
+            where = "WHERE effective = %s"
+            page_params.append(effective)
+        page_params.extend((limit, offset))
+        async with self.pool.connection() as conn:
+            summary = await (
+                await conn.execute(
+                    f"""
+                    WITH {SYMBOL_UNIVERSE_EVALUATED_CTES_SQL}
+                    SELECT COUNT(*)::BIGINT AS total_symbols,
+                        COUNT(*) FILTER (WHERE effective = TRUE)::BIGINT
+                            AS effective_symbols
+                    FROM evaluated_universe
+                    """,
+                    base_params,
+                )
+            ).fetchone()
+            cursor = conn.cursor(row_factory=class_row(SymbolUniverseDecision))
+            await cursor.execute(
+                f"""
+                WITH {SYMBOL_UNIVERSE_EVALUATED_CTES_SQL}
+                SELECT * FROM evaluated_universe
+                {where}
+                ORDER BY symbol
+                LIMIT %s OFFSET %s
+                """,
+                page_params,
+            )
+            items = await cursor.fetchall()
+        return items, int(summary[0]), int(summary[1])
 
     async def get_symbol_global_admission(
         self, symbol: str

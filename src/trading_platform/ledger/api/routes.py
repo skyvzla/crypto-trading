@@ -1,8 +1,9 @@
 """账本查询与 subcategory 交易池准入 API。"""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,12 +12,19 @@ from trading_platform.ledger.db.models import (
     CampaignPnLFactsError,
     ExchangeCategory,
     ExchangeSymbol,
+    ExchangeSymbolSyncState,
     LedgerDB,
+    PerformanceCampaignDimension,
+    PerformanceCampaignFact,
     StrategyCategoryAdmission,
     StrategyAuditRecord,
     SubcategoryAdmission,
     SymbolGlobalAdmission,
+    SymbolUniverseDecision,
     VersionConflictError,
+)
+from trading_platform.shared.symbol_universe_query import (
+    SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
 )
 
 
@@ -152,6 +160,37 @@ class ExchangeCategoryResponse(BaseModel):
     parent_key: Optional[str]
     active: bool
     synced_at: datetime
+    symbol_count: int = 0
+
+
+class ExchangeSymbolSyncStatusResponse(BaseModel):
+    initialized: bool
+    status: str
+    last_attempt_at: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None
+    synced_symbols: int
+    last_error: Optional[str] = None
+    stale: bool
+    effective_universe_ready: bool
+    max_age_hours: int
+
+
+class SymbolUniversePreviewItem(BaseModel):
+    symbol: str
+    effective: bool
+    exclusion_reasons: list[str]
+    blocked_category_keys: list[str]
+
+
+class StrategyUniversePreviewResponse(BaseModel):
+    strategy_id: str
+    freeze_days: int
+    total_symbols: int
+    effective_symbols: int
+    excluded_symbols: int
+    items: list[SymbolUniversePreviewItem]
+    limit: int
+    offset: int
 
 
 class SymbolGlobalAdmissionResponse(BaseModel):
@@ -257,6 +296,104 @@ class PnLResponse(BaseModel):
     win_rate: float
     avg_win: Decimal
     avg_loss: Decimal
+
+
+class DailyPnLResponse(BaseModel):
+    """Named-timezone natural-day realized ledger PnL for the calendar view."""
+
+    date: date
+    account_id: str
+    strategy_id: Optional[str] = None
+    symbol: Optional[str] = None
+    timezone: str
+    trade_count: int
+    realized_trade_count: int
+    gross_realized_pnl: Decimal
+    total_commission: Decimal
+    commission_asset: Optional[str] = None
+    net_pnl: Optional[Decimal] = None
+
+
+class PerformanceResponse(BaseModel):
+    """Campaign-level performance within the requested UTC close-date window."""
+
+    account_id: str
+    strategy_id: Optional[str] = None
+    symbol: Optional[str] = None
+    start_date: date
+    end_date: date
+    timezone: str = "UTC"
+    total_trades: int
+    total_fills: int
+    win_count: int
+    loss_count: int
+    flat_count: int
+    win_rate: float
+    avg_win: Decimal
+    avg_loss: Decimal
+    payoff_ratio: Optional[Decimal] = None
+    expectancy: Decimal
+    profit_factor: Optional[Decimal] = None
+    total_commission: Decimal
+    total_realized_pnl: Decimal
+    net_pnl: Decimal
+    max_drawdown: Decimal
+    candidate_campaigns: int
+    excluded_campaigns: int
+    unattributed_fills: int
+    metric_scope: str = (
+        "closed campaigns with complete USDT PnL facts; "
+        "closed_at within the requested UTC date range"
+    )
+
+
+PerformanceDimension = Literal[
+    "symbol", "category", "subcategory", "side", "exit_reason"
+]
+
+
+class PerformanceBreakdownItem(BaseModel):
+    dimension_key: Optional[str] = None
+    dimension_label: Optional[str] = None
+    total_trades: int
+    total_fills: int
+    win_count: int
+    loss_count: int
+    flat_count: int
+    win_rate: float
+    avg_win: Decimal
+    avg_loss: Decimal
+    payoff_ratio: Optional[Decimal] = None
+    expectancy: Decimal
+    profit_factor: Optional[Decimal] = None
+    total_commission: Decimal
+    total_realized_pnl: Decimal
+    net_pnl: Decimal
+    max_drawdown: Decimal
+    candidate_campaigns: int
+    excluded_campaigns: int
+
+
+class PerformanceBreakdownResponse(BaseModel):
+    """Campaign-level performance grouped by one authoritative dimension."""
+
+    account_id: str
+    strategy_id: Optional[str] = None
+    symbol: Optional[str] = None
+    category_key: Optional[str] = None
+    subcategory_key: Optional[str] = None
+    side: Optional[str] = None
+    start_date: date
+    end_date: date
+    group_by: PerformanceDimension
+    dimension_available: bool
+    dimension_note: Optional[str] = None
+    available_dimensions: list[str]
+    items: list[PerformanceBreakdownItem]
+    metric_scope: str = (
+        "closed campaigns with complete USDT PnL facts; "
+        "closed_at within the requested UTC date range"
+    )
 
 
 class CampaignPnLResponse(BaseModel):
@@ -392,6 +529,285 @@ async def get_pnl(
     )
 
 
+def _utc_bounds(
+    start_date: date, end_date: date
+) -> tuple[datetime, datetime]:
+    """Turn inclusive UI dates into half-open UTC timestamps."""
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=422, detail="end_date must not be before start_date"
+        )
+    return (
+        datetime.combine(start_date, time.min, tzinfo=timezone.utc),
+        datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc),
+    )
+
+
+def _date_bounds_in_timezone(
+    start_date: date,
+    end_date: date,
+    timezone_name: str,
+) -> tuple[datetime, datetime]:
+    """Convert inclusive calendar dates to UTC half-open boundaries."""
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=422, detail="end_date must not be before start_date"
+        )
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception as exc:  # pragma: no cover - timezone is Literal constrained
+        raise HTTPException(status_code=422, detail="unsupported timezone") from exc
+    return (
+        datetime.combine(start_date, time.min, tzinfo=zone).astimezone(timezone.utc),
+        datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=zone).astimezone(
+            timezone.utc
+        ),
+    )
+
+
+@router.get("/pnl/daily", response_model=list[DailyPnLResponse])
+async def get_daily_pnl(
+    account_id: str = Query(min_length=1, max_length=32),
+    start_date: date = Query(..., description="inclusive calendar date"),
+    end_date: date = Query(..., description="inclusive calendar date"),
+    timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
+        "Asia/Shanghai", alias="timezone", description="calendar date timezone"
+    ),
+    strategy_id: Optional[str] = Query(None, max_length=64),
+    symbol: Optional[str] = Query(None, max_length=32),
+    db: LedgerDB = Depends(get_db),
+) -> list[DailyPnLResponse]:
+    start_at, end_at = _date_bounds_in_timezone(
+        start_date, end_date, timezone_name
+    )
+    items = await db.list_daily_realized_pnl(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_at=start_at,
+        end_at=end_at,
+        timezone_name=timezone_name,
+    )
+    return [
+        DailyPnLResponse(
+            date=item.day,
+            account_id=account_id,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            timezone=timezone_name,
+            trade_count=item.trade_count,
+            realized_trade_count=item.realized_trade_count,
+            gross_realized_pnl=item.gross_realized_pnl,
+            total_commission=item.total_commission,
+            commission_asset=item.commission_asset,
+            net_pnl=item.net_pnl,
+        )
+        for item in items
+    ]
+
+
+def _performance_values(
+    facts: list[PerformanceCampaignFact],
+    *,
+    start_at: datetime,
+    end_at: datetime,
+) -> dict[str, Any]:
+    """Calculate metrics from complete Campaign rows, never individual fills."""
+    selected = [
+        fact
+        for fact in facts
+        if (
+            fact.closed_at is None
+            or fact.closed_at >= start_at
+        )
+        and (fact.closed_at is None or fact.closed_at < end_at)
+    ]
+    eligible = [
+        fact
+        for fact in selected
+        if fact.closed_at is not None
+        and fact.realized_pnl_complete
+        and fact.commission_asset == "USDT"
+        and fact.unique_symbols == 1
+        and fact.sell_quantity >= fact.buy_quantity
+    ]
+    net_values = [fact.gross_realized_pnl - fact.total_commission for fact in eligible]
+    wins = [value for value in net_values if value > 0]
+    losses = [value for value in net_values if value < 0]
+    flats = [value for value in net_values if value == 0]
+    gross_profit = sum(wins, Decimal("0"))
+    gross_loss = abs(sum(losses, Decimal("0")))
+    avg_win = gross_profit / len(wins) if wins else Decimal("0")
+    avg_loss = gross_loss / len(losses) if losses else Decimal("0")
+
+    running = Decimal("0")
+    peak = Decimal("0")
+    max_drawdown = Decimal("0")
+    for value, _fact in sorted(
+        zip(net_values, eligible), key=lambda pair: pair[1].closed_at  # type: ignore[arg-type]
+    ):
+        running += value
+        peak = max(peak, running)
+        max_drawdown = min(max_drawdown, running - peak)
+
+    total_net = sum(net_values, Decimal("0"))
+    decided = len(wins) + len(losses)
+    return {
+        "total_trades": len(eligible),
+        "total_fills": sum(fact.trade_count for fact in eligible),
+        "win_count": len(wins),
+        "loss_count": len(losses),
+        "flat_count": len(flats),
+        "win_rate": len(wins) / decided if decided else 0.0,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": avg_win / avg_loss if avg_loss else None,
+        "expectancy": total_net / len(eligible) if eligible else Decimal("0"),
+        "profit_factor": gross_profit / gross_loss if gross_loss else None,
+        "total_commission": sum(
+            (fact.total_commission for fact in eligible), Decimal("0")
+        ),
+        "total_realized_pnl": sum(
+            (fact.gross_realized_pnl for fact in eligible), Decimal("0")
+        ),
+        "net_pnl": total_net,
+        "max_drawdown": max_drawdown,
+        "candidate_campaigns": len(selected),
+        "excluded_campaigns": len(selected) - len(eligible),
+    }
+
+
+def _performance_breakdown_values(
+    dimensions: list[PerformanceCampaignDimension],
+    *,
+    start_at: datetime,
+    end_at: datetime,
+) -> list[PerformanceBreakdownItem]:
+    grouped: dict[tuple[Optional[str], Optional[str]], list[PerformanceCampaignFact]] = {}
+    for item in dimensions:
+        grouped.setdefault(
+            (item.dimension_key, item.dimension_label), []
+        ).append(item.campaign)
+
+    rows: list[PerformanceBreakdownItem] = []
+    for (dimension_key, dimension_label), facts in sorted(
+        grouped.items(), key=lambda pair: (pair[0][0] is None, pair[0][0] or "")
+    ):
+        rows.append(
+            PerformanceBreakdownItem(
+                dimension_key=dimension_key,
+                dimension_label=dimension_label,
+                **_performance_values(facts, start_at=start_at, end_at=end_at),
+            )
+        )
+    return rows
+
+
+@router.get("/performance", response_model=PerformanceResponse)
+async def get_performance(
+    account_id: str = Query(min_length=1, max_length=32),
+    strategy_id: Optional[str] = Query(None, max_length=64),
+    symbol: Optional[str] = Query(None, max_length=32),
+    start_date: date = Query(..., description="inclusive UTC close date"),
+    end_date: date = Query(..., description="inclusive UTC close date"),
+    db: LedgerDB = Depends(get_db),
+) -> PerformanceResponse:
+    start_at, end_at = _utc_bounds(start_date, end_date)
+    facts = await db.list_performance_campaign_facts(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    unattributed = await db.count_unattributed_trades(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    values = _performance_values(facts, start_at=start_at, end_at=end_at)
+    return PerformanceResponse(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        unattributed_fills=unattributed,
+        **values,
+    )
+
+
+@router.get(
+    "/performance/breakdown",
+    response_model=PerformanceBreakdownResponse,
+)
+async def get_performance_breakdown(
+    account_id: str = Query(min_length=1, max_length=32),
+    strategy_id: Optional[str] = Query(None, max_length=64),
+    symbol: Optional[str] = Query(None, max_length=32),
+    category_key: Optional[str] = Query(None, max_length=256),
+    subcategory_key: Optional[str] = Query(None, max_length=256),
+    side: Optional[Literal["LONG", "SHORT"]] = Query(None),
+    exit_reason: Optional[str] = Query(None, max_length=128),
+    start_date: date = Query(..., description="inclusive UTC close date"),
+    end_date: date = Query(..., description="inclusive UTC close date"),
+    group_by: PerformanceDimension = Query("symbol"),
+    db: LedgerDB = Depends(get_db),
+) -> PerformanceBreakdownResponse:
+    start_at, end_at = _utc_bounds(start_date, end_date)
+    available_dimensions = ["symbol", "category", "subcategory", "side"]
+    if group_by == "exit_reason" or exit_reason is not None:
+        return PerformanceBreakdownResponse(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            category_key=category_key,
+            subcategory_key=subcategory_key,
+            side=side,
+            start_date=start_date,
+            end_date=end_date,
+            group_by=group_by,
+            dimension_available=False,
+            dimension_note=(
+                "账本 trades 未持久化规范化 exit_reason；当前不能可靠按退出原因聚合。"
+            ),
+            available_dimensions=available_dimensions,
+            items=[],
+        )
+    try:
+        dimensions = await db.list_performance_campaign_dimensions(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            category_key=category_key,
+            subcategory_key=subcategory_key,
+            side=side,
+            start_at=start_at,
+            end_at=end_at,
+            group_by=group_by,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return PerformanceBreakdownResponse(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        category_key=category_key,
+        subcategory_key=subcategory_key,
+        side=side,
+        start_date=start_date,
+        end_date=end_date,
+        group_by=group_by,
+        dimension_available=True,
+        available_dimensions=available_dimensions,
+        items=_performance_breakdown_values(
+            dimensions, start_at=start_at, end_at=end_at
+        ),
+    )
+
+
 @router.get(
     "/campaigns/{campaign_id}/pnl",
     response_model=CampaignPnLResponse,
@@ -419,14 +835,46 @@ async def get_campaign_pnl(
 async def list_exchange_symbols(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    unclassified: bool = Query(
+        False,
+        description="only symbols without an active Category/Subcategory assignment",
+    ),
     db: LedgerDB = Depends(get_db),
 ) -> Page:
-    items, total = await db.list_exchange_symbols(limit, offset)
+    items, total = await db.list_exchange_symbols(
+        limit, offset, unclassified=unclassified
+    )
     return Page(
         items=[ExchangeSymbolResponse.model_validate(item) for item in items],
         total=total,
         limit=limit,
         offset=offset,
+    )
+
+
+@router.get(
+    "/exchange-symbol-sync/status",
+    response_model=ExchangeSymbolSyncStatusResponse,
+)
+async def get_exchange_symbol_sync_status(
+    db: LedgerDB = Depends(get_db),
+) -> ExchangeSymbolSyncStatusResponse:
+    state: Optional[
+        ExchangeSymbolSyncState
+    ] = await db.get_exchange_symbol_sync_state()
+    if state is None:
+        return ExchangeSymbolSyncStatusResponse(
+            initialized=False,
+            status="NEVER",
+            synced_symbols=0,
+            stale=True,
+            effective_universe_ready=False,
+            max_age_hours=SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
+        )
+    return ExchangeSymbolSyncStatusResponse(
+        initialized=True,
+        max_age_hours=SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
+        **state.__dict__,
     )
 
 
@@ -504,6 +952,29 @@ async def list_exchange_categories(
     return [ExchangeCategoryResponse.model_validate(item) for item in items]
 
 
+@router.get(
+    "/exchange-categories/{category_key}/symbols",
+    response_model=Page,
+)
+async def list_exchange_category_symbols(
+    category_key: str = Path(min_length=1, max_length=256),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    if await db.get_exchange_category(category_key) is None:
+        raise HTTPException(status_code=404, detail="exchange category not found")
+    items, total = await db.list_exchange_category_symbols(
+        category_key, limit=limit, offset=offset
+    )
+    return Page(
+        items=[ExchangeSymbolResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/symbol-global-admission-audit", response_model=Page)
 async def list_symbol_global_admission_audit(
     symbol: Optional[str] = None,
@@ -537,6 +1008,70 @@ async def list_strategy_category_admissions(
     return [StrategyCategoryAdmissionResponse.model_validate(item) for item in items]
 
 
+def _universe_exclusion_reasons(
+    decision: SymbolUniverseDecision,
+) -> list[str]:
+    reasons: list[str] = []
+    if not decision.sync_ready:
+        reasons.append("SYNC_UNAVAILABLE_OR_STALE")
+    if not decision.symbol_active:
+        reasons.append("SYMBOL_INACTIVE")
+    if not decision.perpetual_contract:
+        reasons.append("NOT_PERPETUAL")
+    if not decision.trading_status:
+        reasons.append("NOT_TRADING")
+    if not decision.onboarded:
+        reasons.append("NOT_ONBOARDED")
+    if not decision.delivery_window_open:
+        reasons.append("DELIVERY_FREEZE_WINDOW")
+    if not decision.global_enabled:
+        reasons.append("GLOBAL_DISABLED")
+    if decision.blocked_category_keys:
+        reasons.append("STRATEGY_CATEGORY_DISABLED")
+    return reasons
+
+
+@router.get(
+    "/strategy-category-admissions/{strategy_id}/universe-preview",
+    response_model=StrategyUniversePreviewResponse,
+)
+async def get_strategy_universe_preview(
+    strategy_id: str = Path(min_length=1, max_length=64),
+    freeze_days: int = Query(15, ge=0, le=3650),
+    effective: Optional[bool] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> StrategyUniversePreviewResponse:
+    items, total_symbols, effective_symbols = (
+        await db.list_strategy_symbol_universe_preview(
+            strategy_id=strategy_id,
+            freeze_days=freeze_days,
+            effective=effective,
+            limit=limit,
+            offset=offset,
+        )
+    )
+    return StrategyUniversePreviewResponse(
+        strategy_id=strategy_id,
+        freeze_days=freeze_days,
+        total_symbols=total_symbols,
+        effective_symbols=effective_symbols,
+        excluded_symbols=total_symbols - effective_symbols,
+        items=[
+            SymbolUniversePreviewItem(
+                symbol=item.symbol,
+                effective=item.effective,
+                exclusion_reasons=_universe_exclusion_reasons(item),
+                blocked_category_keys=item.blocked_category_keys,
+            )
+            for item in items
+        ],
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.put(
     "/strategy-category-admissions/{strategy_id}/{category_key}",
     response_model=StrategyCategoryAdmissionResponse,
@@ -544,7 +1079,7 @@ async def list_strategy_category_admissions(
 async def set_strategy_category_admission(
     request: AdmissionRequest,
     strategy_id: str = Path(min_length=1, max_length=64),
-    category_key: str = Path(min_length=1, max_length=192),
+    category_key: str = Path(min_length=1, max_length=256),
     db: LedgerDB = Depends(get_db),
 ) -> StrategyCategoryAdmissionResponse:
     category = await db.get_exchange_category(category_key)

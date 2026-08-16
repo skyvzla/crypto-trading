@@ -522,7 +522,6 @@ def _load_allowed_symbols(
                 (
                     timedelta(days=freeze_days),
                     normalized_strategy,
-                    normalized_strategy,
                 ),
             )
             symbols = [str(row[0]).strip().upper() for row in cursor.fetchall()]
