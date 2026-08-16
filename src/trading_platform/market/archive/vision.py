@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from threading import Lock, local
+from threading import Condition, Lock, local
 from typing import BinaryIO
 
 import duckdb
@@ -229,7 +229,7 @@ class BinanceVisionWorkerPoolFetcher:
         self._retry_base_seconds = max(0.0, retry_base_seconds)
         self._on_retry = on_retry
         self._on_route = on_route
-        self._lock = Lock()
+        self._condition = Condition(Lock())
         self._busy = [False] * len(self._fetchers)
         self._next = 0
 
@@ -337,21 +337,25 @@ class BinanceVisionWorkerPoolFetcher:
     ) -> tuple[int | None, Callable[[str], bytes], str]:
         if force_direct:
             return None, self._direct_fetcher, "direct"
-        with self._lock:
-            for offset in range(len(self._fetchers)):
-                index = (self._next + offset) % len(self._fetchers)
-                if index in excluded or self._busy[index]:
-                    continue
-                self._busy[index] = True
-                self._next = (index + 1) % len(self._fetchers)
-                return index, self._fetchers[index], self._labels[index]
-        return None, self._direct_fetcher, "direct"
+        while True:
+            with self._condition:
+                for offset in range(len(self._fetchers)):
+                    index = (self._next + offset) % len(self._fetchers)
+                    if index in excluded or self._busy[index]:
+                        continue
+                    self._busy[index] = True
+                    self._next = (index + 1) % len(self._fetchers)
+                    return index, self._fetchers[index], self._labels[index]
+                if len(excluded) >= len(self._fetchers):
+                    return None, self._direct_fetcher, "direct"
+                self._condition.wait()
 
     def _release(self, index: int | None) -> None:
         if index is None:
             return
-        with self._lock:
+        with self._condition:
             self._busy[index] = False
+            self._condition.notify()
 
     def _notify_retry(
         self,
@@ -388,7 +392,10 @@ class BinanceVisionWorkerPoolFetcher:
                 return
             mode = "fallback"
             reason = "final-attempt" if force_direct else "no-available-proxy"
-        elif previous_label is not None and previous_label != label:
+        elif previous_label is None:
+            mode = "proxy"
+            reason = None
+        elif previous_label != label:
             mode = "switch"
             reason = None
         else:

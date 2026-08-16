@@ -93,6 +93,7 @@ class TaskDashboard:
         self._last_progress_pct = 0
         self._eta_estimated_at: float | None = None
         self._running: dict[str, float] = {}
+        self._running_slots: dict[int, tuple[str, float]] = {}
         self._samples: list[float] = []
         self._completed: deque[CompletedItem] = deque(maxlen=self._max_completed)
         self._console: Console | None = None
@@ -168,9 +169,22 @@ class TaskDashboard:
                 live.stop()
                 raise
 
-    def task_start(self, name: str) -> None:
+    def task_start(self, name: str, *, slot: int | None = None) -> None:
         with self._lock:
-            self._running[name] = time.monotonic()
+            if slot is None:
+                self._running[name] = time.monotonic()
+            else:
+                previous = self._running_slots.get(slot)
+                started = previous[1] if previous is not None else time.monotonic()
+                if previous is not None:
+                    self._running.pop(previous[0], None)
+                self._running_slots[slot] = (name, started)
+                self._running = {
+                    current_name: current_started
+                    for _, (current_name, current_started) in sorted(
+                        self._running_slots.items()
+                    )
+                }
         self._refresh()
 
     def task_done(
@@ -184,6 +198,22 @@ class TaskDashboard:
         with self._lock:
             completed_at = time.monotonic()
             started = self._running.pop(name, None)
+            slot = next(
+                (
+                    slot
+                    for slot, (current_name, _started) in self._running_slots.items()
+                    if current_name == name
+                ),
+                None,
+            )
+            if slot is not None:
+                self._running_slots.pop(slot, None)
+                self._running = {
+                    current_name: current_started
+                    for _, (current_name, current_started) in sorted(
+                        self._running_slots.items()
+                    )
+                }
             if started is not None:
                 duration = completed_at - started
                 if count_as_sample and duration >= 0:
@@ -319,7 +349,13 @@ class TaskDashboard:
             total = self._total
             done = self._done
             samples = list(self._samples)
-            running = sorted(self._running.items(), key=lambda item: item[1])
+            if self._running_slots:
+                running = [
+                    (name, started)
+                    for _, (name, started) in sorted(self._running_slots.items())
+                ]
+            else:
+                running = sorted(self._running.items(), key=lambda item: item[1])
             completed = list(self._completed)
             elapsed_s = now - self._started_at
             eta = self._estimate_eta(total, done, samples, now)

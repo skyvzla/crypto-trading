@@ -738,7 +738,10 @@ def test_worker_pool_switches_proxy_after_connection_failure():
     assert pool("archive") == b"b"
     assert calls == ["a", "b"]
     assert retries == [(2, "proxy-a")]
-    assert routes == [("switch", "proxy-a", "proxy-b", None)]
+    assert routes == [
+        ("proxy", None, "proxy-a", None),
+        ("switch", "proxy-a", "proxy-b", None),
+    ]
 
 
 def test_worker_pool_releases_proxy_when_route_logger_fails():
@@ -794,7 +797,7 @@ def test_worker_pool_switches_proxy_for_streaming_archives():
     assert calls == ["a", "b"]
 
 
-def test_worker_pool_uses_direct_when_all_proxies_are_occupied():
+def test_worker_pool_waits_for_proxy_when_all_proxies_are_occupied():
     started = Event()
     release = Event()
 
@@ -820,10 +823,11 @@ def test_worker_pool_uses_direct_when_all_proxies_are_occupied():
         occupied = executor.submit(pool, "first")
         assert started.wait(timeout=1)
         fallback = executor.submit(pool, "second")
-        assert fallback.result(timeout=1) == b"direct"
+        assert not fallback.done()
         release.set()
         assert occupied.result(timeout=1) == b"proxy"
-    assert routes == [(None, "no-available-proxy")]
+        assert fallback.result(timeout=1) == b"proxy"
+    assert routes == [(None, None), (None, None)]
 
 
 def test_worker_pool_reserves_final_attempt_for_direct_access():
@@ -874,6 +878,7 @@ def test_worker_pool_reports_final_direct_failure():
         pool("archive")
     assert calls == ["proxy-a", "proxy-b", "direct", "direct", "direct"]
     assert routes == [
+        (None, "proxy-1", None),
         ("proxy-1", "proxy-2", None),
         ("proxy-2", "direct", "no-available-proxy"),
     ]
@@ -974,7 +979,10 @@ def test_cli_progress_uses_monotonic_completion_count(capsys):
 
 
 def test_cli_progress_starts_on_download_and_records_early_terminal_states():
-    reporter = _ProgressReporter(workers=4)
+    reporter = _ProgressReporter(
+        workers=4,
+        proxies=["socks5://proxy-a:1080", "socks5://proxy-b:1080"],
+    )
     reporter(
         DownloadProgress(
             phase="downloading",
@@ -989,7 +997,9 @@ def test_cli_progress_starts_on_download_and_records_early_terminal_states():
 
     dashboard = reporter._dashboard
     assert dashboard is not None
-    assert set(dashboard._running) == {"w1 BTCUSDT 1m 2026-08"}
+    assert list(dashboard._running) == [
+        "worker=1 proxy=pending task=BTCUSDT 1m 2026-08"
+    ]
 
     for phase, worker_id, symbol in [
         ("skipped", 2, "ETHUSDT"),
@@ -1012,9 +1022,54 @@ def test_cli_progress_starts_on_download_and_records_early_terminal_states():
     assert [
         (item.name, item.status) for item in dashboard._completed
     ] == [
-        ("w4 XRPUSDT 1m 2026-08", "Failed"),
-        ("w3 SOLUSDT 1m 2026-08", "Unavailable"),
-        ("w2 ETHUSDT 1m 2026-08", "Skipped"),
+        ("worker=4 proxy=pending task=XRPUSDT 1m 2026-08", "Failed"),
+        ("worker=3 proxy=pending task=SOLUSDT 1m 2026-08", "Unavailable"),
+        ("worker=2 proxy=pending task=ETHUSDT 1m 2026-08", "Skipped"),
+    ]
+    reporter.close()
+
+
+def test_cli_progress_keeps_running_rows_in_worker_order_and_updates_proxy():
+    reporter = _ProgressReporter(
+        workers=3,
+        proxies=["socks5://proxy-a:1080", "socks5://proxy-b:1080"],
+    )
+    reporter(
+        DownloadProgress(
+            phase="downloading",
+            worker_id=2,
+            current=2,
+            total=3,
+            symbol="ETHUSDT",
+            timeframe="1m",
+            period="2026-08",
+        )
+    )
+    reporter(
+        DownloadProgress(
+            phase="downloading",
+            worker_id=1,
+            current=1,
+            total=3,
+            symbol="BTCUSDT",
+            timeframe="1s",
+            period="2026-08-01",
+        )
+    )
+    reporter.route(
+        "https://example.com/BTCUSDT-aggTrades-2026-08-01.zip",
+        1,
+        5,
+        "proxy",
+        "socks5://proxy-b:1080",
+        worker_id=1,
+    )
+
+    dashboard = reporter._dashboard
+    assert dashboard is not None
+    assert list(dashboard._running) == [
+        "worker=1 proxy=socks5://proxy-b:1080 task=BTCUSDT 1s 2026-08-01",
+        "worker=2 proxy=pending task=ETHUSDT 1m 2026-08",
     ]
     reporter.close()
 
@@ -1211,9 +1266,9 @@ def test_cli_uses_failover_proxy_pool(
     assert captured["max_workers"] == 2
     assert isinstance(captured["fetch"], BinanceVisionWorkerPoolFetcher)
     assert [options.get("proxy") for options in client_options] == [
-        None,
         "http://proxy-a:8080",
         "http://proxy-b:8080",
+        None,
     ]
     assert all(options["trust_env"] is False for options in client_options)
     assert (
@@ -1457,6 +1512,7 @@ def test_setup_logging_replaces_archive_cli_handlers(tmp_path):
     archive_logger = logging.getLogger("trading_platform.market.archive")
     original_handlers = list(archive_logger.handlers)
     original_level = archive_logger.level
+    original_propagate = archive_logger.propagate
     archive_logger.handlers.clear()
     try:
         archive_cli._setup_logging("INFO", tmp_path / "first.log")
@@ -1469,6 +1525,33 @@ def test_setup_logging_replaces_archive_cli_handlers(tmp_path):
             handler.close()
         archive_logger.handlers.extend(original_handlers)
         archive_logger.setLevel(original_level)
+        archive_logger.propagate = original_propagate
+
+
+def test_setup_logging_does_not_write_raw_stderr_from_tty(tmp_path, monkeypatch):
+    class TTYStream:
+        def isatty(self):
+            return True
+
+    archive_logger = logging.getLogger("trading_platform.market.archive")
+    original_handlers = list(archive_logger.handlers)
+    original_level = archive_logger.level
+    original_propagate = archive_logger.propagate
+    archive_logger.handlers.clear()
+    monkeypatch.setattr(archive_cli.sys, "stderr", TTYStream())
+    try:
+        archive_cli._setup_logging("INFO", tmp_path / "tty.log")
+
+        assert len(archive_logger.handlers) == 1
+        assert isinstance(archive_logger.handlers[0], logging.FileHandler)
+        assert archive_logger.propagate is False
+    finally:
+        for handler in list(archive_logger.handlers):
+            archive_logger.removeHandler(handler)
+            handler.close()
+        archive_logger.handlers.extend(original_handlers)
+        archive_logger.setLevel(original_level)
+        archive_logger.propagate = original_propagate
 
 
 def test_http_fetcher_falls_back_to_binance_s3_origin():

@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 def _setup_logging(log_level: str, log_file: Path | None) -> None:
     root = logging.getLogger("trading_platform.market.archive")
     root.setLevel(logging.DEBUG)
+    root.propagate = False
     formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     )
@@ -56,10 +57,11 @@ def _setup_logging(log_level: str, log_file: Path | None) -> None:
             file_handler.setLevel(logging.DEBUG)
             file_handler.setFormatter(formatter)
             handlers.append(file_handler)
-        console = logging.StreamHandler(sys.stderr)
-        console.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-        console.setFormatter(formatter)
-        handlers.append(console)
+        if not sys.stderr.isatty():
+            console = logging.StreamHandler(sys.stderr)
+            console.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+            console.setFormatter(formatter)
+            handlers.append(console)
     except Exception:
         for handler in handlers:
             handler.close()
@@ -200,7 +202,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     candle_reporter_closed = False
     try:
         _setup_logging(args.log_level, log_file)
-        candle_reporter = _ProgressReporter(workers)
+        candle_reporter = _ProgressReporter(
+            workers,
+            proxies=[_proxy_label(proxy) for proxy in proxies],
+        )
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
         symbols = args.symbols or _load_allowed_symbols(
@@ -257,13 +262,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         with ExitStack() as stack:
             if proxies:
-                metadata_client = stack.enter_context(
-                    httpx.Client(
-                        timeout=args.timeout,
-                        follow_redirects=True,
-                        trust_env=False,
-                    )
-                )
                 clients = [
                     stack.enter_context(
                         httpx.Client(
@@ -275,6 +273,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     for proxy in proxies
                 ]
+                metadata_client = clients[0]
+                direct_client = stack.enter_context(
+                    httpx.Client(
+                        timeout=args.timeout,
+                        follow_redirects=True,
+                        trust_env=False,
+                    )
+                )
             else:
                 clients = [
                     stack.enter_context(
@@ -305,7 +311,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 fetch = BinanceVisionWorkerPoolFetcher(
                     worker_fetchers,
                     direct_fetcher=BinanceVisionHTTPFetcher(
-                        metadata_client,
+                        direct_client,
                         attempts=1,
                     ),
                     attempts=args.attempts,
@@ -340,7 +346,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         on_worker_exit=candle_reporter.worker_exit,
                     )
             else:
-                metrics_reporter = _ProgressReporter(workers)
+                metrics_reporter = _ProgressReporter(
+                    workers,
+                    proxies=[_proxy_label(proxy) for proxy in proxies],
+                )
                 with (
                     ParquetCandleArchive(
                         args.archive, index_workers=min(workers, 8)
@@ -534,12 +543,22 @@ def _load_allowed_symbols(
 class _ProgressReporter:
     """将 worker 下载进度汇总到 TaskDashboard，细节写入日志文件。"""
 
-    def __init__(self, workers: int, *, title: str = "market-archive") -> None:
+    def __init__(
+        self,
+        workers: int,
+        *,
+        title: str = "market-archive",
+        proxies: Sequence[str] = (),
+    ) -> None:
         self._workers = workers
         self._title = title
         self._lock = threading.Lock()
         self._dashboard: TaskDashboard | None = None
         self._active_names: dict[int, str] = {}
+        self._base_names: dict[int, str] = {}
+        self._sources = {worker: "pending" for worker in range(1, workers + 1)}
+        if not proxies:
+            self._sources = {worker: "direct" for worker in range(1, workers + 1)}
 
     def _ensure_dashboard(self, total: int) -> TaskDashboard:
         if self._dashboard is None:
@@ -553,18 +572,25 @@ class _ProgressReporter:
 
     def _task_name(self, progress: DownloadProgress) -> str:
         return (
-            f"w{progress.worker_id} {progress.symbol} "
+            f"{progress.symbol} "
             f"{progress.timeframe} {progress.period}"
         )
+
+    def _display_name(self, worker_id: int, task_name: str) -> str:
+        source = self._sources.get(worker_id, "pending")
+        return f"worker={worker_id} proxy={source} task={task_name}"
 
     def __call__(self, progress: DownloadProgress) -> None:
         with self._lock:
             if progress.phase in {"downloading", "downloaded"}:
                 dashboard = self._ensure_dashboard(progress.total)
-                name = self._task_name(progress)
-                if self._active_names.get(progress.worker_id) != name:
-                    self._active_names[progress.worker_id] = name
-                    dashboard.task_start(name)
+                worker_id = progress.worker_id
+                task_name = self._task_name(progress)
+                self._base_names[worker_id] = task_name
+                name = self._display_name(worker_id, task_name)
+                if self._active_names.get(worker_id) != name:
+                    self._active_names[worker_id] = name
+                    dashboard.task_start(name, slot=worker_id)
                 return
             if progress.phase not in {
                 "stored",
@@ -574,10 +600,14 @@ class _ProgressReporter:
             }:
                 return
             dashboard = self._ensure_dashboard(progress.total)
-            name = self._active_names.pop(progress.worker_id, None)
+            worker_id = progress.worker_id
+            name = self._active_names.pop(worker_id, None)
             if name is None:
-                name = self._task_name(progress)
-                dashboard.task_start(name)
+                task_name = self._task_name(progress)
+                self._base_names[worker_id] = task_name
+                name = self._display_name(worker_id, task_name)
+                dashboard.task_start(name, slot=worker_id)
+            self._base_names.pop(worker_id, None)
             if progress.phase == "stored":
                 logger.debug(
                     f"stored {progress.symbol} {progress.timeframe} "
@@ -643,6 +673,9 @@ class _ProgressReporter:
         worker_id: int | None = None,
     ) -> None:
         with self._lock:
+            resolved_worker = (
+                current_archive_worker_id() if worker_id is None else worker_id
+            )
             filename = url.rsplit("/", 1)[-1]
             previous = previous_source or "none"
             reason_text = f" reason={reason}" if reason is not None else ""
@@ -651,6 +684,13 @@ class _ProgressReporter:
                 f"{attempt}/{attempts} {filename} from={previous} "
                 f"to={source}{reason_text}"
             )
+            if resolved_worker > 0:
+                self._sources[resolved_worker] = source
+                task_name = self._base_names.get(resolved_worker)
+                if task_name is not None and self._dashboard is not None:
+                    updated_name = self._display_name(resolved_worker, task_name)
+                    self._active_names[resolved_worker] = updated_name
+                    self._dashboard.task_start(updated_name, slot=resolved_worker)
 
     def metadata_fallback(self, error: Exception) -> None:
         with self._lock:
