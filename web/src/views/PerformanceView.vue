@@ -12,18 +12,30 @@ import { asNumber, formatMoney, formatPercent, formatRatio, pnlClass } from '@/f
 
 const route = useRoute()
 const router = useRouter()
-const end = new Date()
-const start = new Date(end)
-start.setDate(start.getDate() - 29)
-const isoDate = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+const shanghaiDate = (date: Date) => {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date).map((item) => [item.type, item.value]))
+  return `${parts.year}-${parts.month}-${parts.day}`
+}
+const shiftDate = (value: string, days: number) => {
+  const [year, month, day] = value.split('-').map(Number)
+  const shifted = new Date(Date.UTC(year, month - 1, day + days))
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`
+}
+const defaultEndDate = shanghaiDate(new Date())
+const defaultStartDate = shiftDate(defaultEndDate, -29)
 
 const filters = ref<OperationFilters>({
   account_id: String(route.query.account_id ?? ''),
   strategy_id: String(route.query.strategy_id ?? ''),
   symbol: String(route.query.symbol ?? '')
 })
-const startDate = ref(String(route.query.start_date ?? isoDate(start)))
-const endDate = ref(String(route.query.end_date ?? isoDate(end)))
+const startDate = ref(String(route.query.start_date ?? defaultStartDate))
+const endDate = ref(String(route.query.end_date ?? defaultEndDate))
 const activeTab = ref(String(route.query.tab ?? 'overview'))
 const summary = ref<PerformanceSummary | null>(null)
 const daily = ref<DailyPnL[]>([])
@@ -64,7 +76,7 @@ async function load() {
     summary.value = performance
     daily.value = points
     if (activeTab.value === 'breakdown') await loadBreakdown()
-    refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    refreshedAt.value = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date())
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : '绩效数据加载失败'
   } finally {
@@ -129,14 +141,14 @@ onMounted(load)
       </a-tabs>
       <DataState :loading="loading" :error="error" :empty="!summary" @retry="load">
         <template v-if="summary">
-          <div class="metric-scope"><Info :size="14" /><span>样本口径：<strong>{{ scopeText }}</strong></span><span>时间：{{ startDate }} → {{ endDate }}</span><span>样本：{{ sampleSize }} 轮次 / {{ summary.total_fills }} fills</span><span>成本：净 PnL 已扣账本手续费</span></div>
+          <div class="metric-scope"><Info :size="14" /><span>样本口径：<strong>{{ scopeText }}</strong></span><span>时间：{{ startDate }} → {{ endDate }}</span><span>样本：{{ sampleSize }} 轮次 / {{ summary.total_fills }} fills</span><span>成本：净 PnL 仅扣 USDT 手续费；资金费不可用</span></div>
           <a-alert v-if="sampleSize < 30" type="warning" show-icon :message="`样本不足：当前仅 ${sampleSize} 个已结束轮次`" description="指标仍按真实样本展示，但不建议据此自动改变策略准入。" class="sample-warning" />
 
           <template v-if="activeTab === 'overview'">
             <section class="metric-grid">
               <MetricTile label="净 PnL" :value="formatMoney(summary.net_pnl)" :tone="asNumber(summary.net_pnl) >= 0 ? 'positive' : 'negative'" hint="已实现净额" />
               <MetricTile label="总已实现 PnL" :value="formatMoney(summary.total_realized_pnl)" hint="扣费前已实现" />
-              <MetricTile label="交易成本" :value="formatMoney(summary.total_commission)" tone="warning" hint="账本手续费" />
+              <MetricTile label="交易成本" :value="formatMoney(summary.total_commission)" tone="warning" hint="仅 USDT 手续费" />
               <MetricTile label="最大回撤" :value="formatMoney(summary.max_drawdown)" tone="negative" hint="Campaign 净值序列" />
               <MetricTile label="纳入轮次" :value="String(summary.candidate_campaigns - summary.excluded_campaigns)" :hint="`候选 ${summary.candidate_campaigns} / 排除 ${summary.excluded_campaigns}`" />
               <MetricTile label="未归属 fills" :value="String(summary.unattributed_fills)" :tone="summary.unattributed_fills ? 'warning' : 'neutral'" hint="不计入 Campaign 指标" />

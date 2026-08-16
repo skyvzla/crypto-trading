@@ -209,10 +209,10 @@ a {
 /* Shared operations console vocabulary. Values remain legible in both themes. */
 .operations-page { width: 100%; max-width: 1480px; margin: 0 auto; }
 .operations-heading { display:flex; align-items:flex-end; justify-content:space-between; gap:24px; margin-bottom:18px; padding:6px 0 15px; border-bottom:1px solid var(--line); }
-.operations-heading h1 { margin:4px 0 4px; color:var(--text); font-size:24px; line-height:1.15; letter-spacing:-.02em; }
+.operations-heading h1 { margin:4px 0 4px; color:var(--text); font-size:24px; line-height:1.15; letter-spacing:0; }
 .operations-heading p { max-width:760px; margin:0; color:var(--muted); font-size:13px; }
 .operations-heading-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
-.refresh-stamp { color:#b38732; font:10px/1.2 "IBM Plex Mono", monospace; letter-spacing:.04em; }
+.refresh-stamp { color:#b38732; font:10px/1.2 "IBM Plex Mono", monospace; letter-spacing:0; }
 .filter-ledger { display:grid; grid-template-columns:repeat(3,minmax(150px,1fr)) auto; align-items:end; gap:10px; padding:12px; margin-bottom:14px; border:1px solid var(--line); border-radius:6px; background:var(--surface); }
 .filter-ledger label { display:grid; gap:5px; min-width:0; }
 .filter-ledger label > span { color:var(--muted); font-size:11px; }
@@ -252,6 +252,7 @@ a {
 .calendar-cell { min-width:0; min-height:70px; padding:7px; border:1px solid var(--line); border-radius:4px; background:var(--surface-raised); color:var(--text); text-align:left; cursor:pointer; transition:transform .15s,border-color .15s; }
 .calendar-cell:hover { z-index:1; border-color:var(--primary); transform:translateY(-1px); }.calendar-cell.blank { min-height:70px; border-color:transparent; background:transparent; cursor:default; }.calendar-cell.no-data { color:var(--muted); }
 .calendar-cell.value-positive { background:rgba(47,157,114,var(--cell-alpha,.12)); }.calendar-cell.value-negative { background:rgba(189,98,91,var(--cell-alpha,.12)); }
+.calendar-cell.net-unavailable { border-color:#c59b4b; background:rgba(197,155,75,.08); color:#a77424; }
 .calendar-day { display:block; color:var(--muted); font:10px "IBM Plex Mono",monospace; }.calendar-cell strong { display:block; margin-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:11px "IBM Plex Mono",monospace; }.calendar-cell small { display:block; margin-top:3px; color:var(--muted); font-size:9px; }.calendar-cell i { display:block; margin-top:8px; color:var(--muted); font-style:normal; }
 .pnl-calendar.compact { gap:3px; padding:10px; }.pnl-calendar.compact .calendar-cell { min-height:55px; padding:5px; }.pnl-calendar.compact .calendar-cell.blank { min-height:55px; }.pnl-calendar.compact .calendar-cell strong { margin-top:5px; font-size:10px; }
 .audit-table { width:100%; border-collapse:collapse; font-size:12px; }.audit-table th,.audit-table td { padding:9px 12px; border-bottom:1px solid var(--line); text-align:left; }.audit-table th { color:var(--muted); font-size:10px; font-weight:500; text-transform:uppercase; }.audit-table tr:last-child td { border-bottom:0; }

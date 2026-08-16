@@ -1,21 +1,28 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { DatabaseBackup, FolderTree, ListFilter, Search } from 'lucide-vue-next'
+import { useRoute, useRouter } from 'vue-router'
+import { ChevronDown, ChevronRight, DatabaseBackup, FolderTree, ListFilter, Search } from 'lucide-vue-next'
 import { message } from 'ant-design-vue'
 import { operationsApi } from '@/api/operations'
 import type { ExchangeCategory, ExchangeSymbol, ExchangeSymbolSyncStatus } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import { formatDateTime } from '@/features/operations/format'
+import { collectPageItems } from '@/features/operations/pagination'
 
+const route = useRoute()
+const router = useRouter()
 const categories = ref<ExchangeCategory[]>([])
 const syncStatus = ref<ExchangeSymbolSyncStatus | null>(null)
-const search = ref('')
+const search = ref(String(route.query.q ?? ''))
 const expanded = ref(new Set<string>())
 const selected = ref<ExchangeCategory | null>(null)
 const viewingUnclassified = ref(false)
 const selectedSymbols = ref<ExchangeSymbol[]>([])
 const selectedTotal = ref(0)
+const detailPage = ref(Math.max(1, Number(route.query.detail_page) || 1))
+const detailPageSize = 50
+let detailRequest = 0
 const loading = ref(false)
 const detailLoading = ref(false)
 const error = ref<string | null>(null)
@@ -33,11 +40,21 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const [rows, status] = await Promise.all([operationsApi.categories(false), operationsApi.symbolSyncStatus()])
+    const [categoryPage, status] = await Promise.all([
+      collectPageItems((params) => operationsApi.categoriesPage(false, params)),
+      operationsApi.symbolSyncStatus()
+    ])
+    const rows = categoryPage.items
     categories.value = rows
     syncStatus.value = status
     expanded.value = new Set(rows.filter((item) => item.category_type === 'CATEGORY').slice(0, 3).map((item) => item.category_key))
     refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+    if (route.query.unclassified === 'true') {
+      await selectUnclassified(false)
+    } else if (route.query.category) {
+      const initial = rows.find((item) => item.category_key === String(route.query.category))
+      if (initial) await selectCategory(initial, false)
+    }
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : '分类目录加载失败'
   } finally { loading.value = false }
@@ -53,38 +70,69 @@ function toggleAll() {
   expanded.value = expanded.value.size ? new Set() : new Set(parents.value.map((item) => item.category_key))
 }
 
-async function selectCategory(item: ExchangeCategory) {
+async function selectCategory(item: ExchangeCategory, resetPage = true) {
   viewingUnclassified.value = false
   selected.value = item
+  if (resetPage) {
+    detailPage.value = 1
+    selectedTotal.value = 0
+  }
+  await syncUrl()
+  await loadDetailSymbols()
+}
+
+async function selectUnclassified(resetPage = true) {
+  viewingUnclassified.value = true
+  selected.value = null
+  if (resetPage) {
+    detailPage.value = 1
+    selectedTotal.value = 0
+  }
+  await syncUrl()
+  await loadDetailSymbols()
+}
+
+async function loadDetailSymbols() {
+  const request = ++detailRequest
   selectedSymbols.value = []
-  selectedTotal.value = 0
   detailLoading.value = true
   try {
-    const page = await operationsApi.categorySymbols(item.category_key, { limit: 1000 })
-    if (selected.value?.category_key === item.category_key && !viewingUnclassified.value) {
+    const params = { limit: detailPageSize, offset: (detailPage.value - 1) * detailPageSize }
+    const page = viewingUnclassified.value
+      ? await operationsApi.exchangeSymbols({ ...params, unclassified: true })
+      : selected.value
+        ? await operationsApi.categorySymbols(selected.value.category_key, params)
+        : null
+    if (request === detailRequest && page) {
+      const lastPage = Math.max(1, Math.ceil(page.total / detailPageSize))
+      if (detailPage.value > lastPage) {
+        detailPage.value = lastPage
+        await syncUrl()
+        await loadDetailSymbols()
+        return
+      }
       selectedSymbols.value = page.items
       selectedTotal.value = page.total
     }
   } catch (caught) {
     message.error(caught instanceof Error ? caught.message : '关联交易对加载失败')
-  } finally { detailLoading.value = false }
+  } finally {
+    if (request === detailRequest) detailLoading.value = false
+  }
 }
 
-async function selectUnclassified() {
-  viewingUnclassified.value = true
-  selected.value = null
-  selectedSymbols.value = []
-  selectedTotal.value = 0
-  detailLoading.value = true
-  try {
-    const page = await operationsApi.exchangeSymbols({ unclassified: true, limit: 1000 })
-    if (viewingUnclassified.value) {
-      selectedSymbols.value = page.items
-      selectedTotal.value = page.total
-    }
-  } catch (caught) {
-    message.error(caught instanceof Error ? caught.message : '未分类交易对加载失败')
-  } finally { detailLoading.value = false }
+async function changeDetailPage(page: number) {
+  detailPage.value = page
+  await syncUrl()
+  await loadDetailSymbols()
+}
+
+async function syncUrl() {
+  await router.replace({ query: {
+    ...(search.value.trim() ? { q: search.value.trim() } : {}),
+    ...(viewingUnclassified.value ? { unclassified: 'true' } : selected.value ? { category: selected.value.category_key } : {}),
+    ...((selected.value || viewingUnclassified.value) && detailPage.value > 1 ? { detail_page: String(detailPage.value) } : {})
+  } })
 }
 
 onMounted(load)
@@ -96,21 +144,22 @@ onMounted(load)
     <div v-if="syncStatus" :class="['status-strip', { stale: syncStatus.stale, error: syncStatus.status !== 'SUCCESS' }]">
       <DatabaseBackup :size="14" /><span>来源 <strong>Binance 同步事实</strong> · {{ syncStatus.status }} · 最近成功 {{ formatDateTime(syncStatus.last_success_at) }} · 允许最大年龄 {{ syncStatus.max_age_hours }}h</span><a-tag v-if="syncStatus.stale" color="gold">STALE · 历史数据仍展示</a-tag>
     </div>
-    <div class="category-tools"><a-input v-model:value="search" allow-clear placeholder="搜索 Category / Subcategory"><template #prefix><Search :size="14" /></template></a-input><a-button @click="toggleAll">{{ expanded.size ? '全部收起' : '全部展开' }}</a-button><a-button :type="viewingUnclassified ? 'primary' : 'default'" @click="selectUnclassified"><template #icon><ListFilter :size="14" /></template>未分类交易对</a-button><span>{{ parents.length }} Category · {{ categories.length - parents.length }} Subcategory</span></div>
+    <div class="category-tools"><a-input v-model:value="search" allow-clear placeholder="搜索 Category / Subcategory" @change="syncUrl" @press-enter="syncUrl"><template #prefix><Search :size="14" /></template></a-input><a-button @click="toggleAll">{{ expanded.size ? '全部收起' : '全部展开' }}</a-button><a-button :type="viewingUnclassified ? 'primary' : 'default'" @click="selectUnclassified()"><template #icon><ListFilter :size="14" /></template>未分类交易对</a-button><span>{{ parents.length }} Category · {{ categories.length - parents.length }} Subcategory</span></div>
     <a-alert v-if="syncStatus?.last_error" type="warning" show-icon :message="syncStatus.last_error" description="保留并展示最近一次成功同步的数据。" class="sync-error" />
     <DataState :loading="loading" :error="error" :empty="!categories.length && !viewingUnclassified" @retry="load">
       <div class="category-layout">
         <section class="taxonomy-tree">
           <article v-for="parent in visibleParents" :key="parent.category_key" class="taxonomy-parent">
-            <button type="button" class="taxonomy-node parent" :class="{ selected: selected?.category_key === parent.category_key, inactive: !parent.active }" @click="selectCategory(parent)">
-              <span class="expand-control" role="button" tabindex="0" :aria-label="expanded.has(parent.category_key) ? '收起子分类' : '展开子分类'" @click.stop="toggle(parent.category_key)" @keydown.enter.stop="toggle(parent.category_key)" @keydown.space.prevent.stop="toggle(parent.category_key)">{{ expanded.has(parent.category_key) ? '−' : '+' }}</span><FolderTree :size="15" /><span class="node-copy"><strong>{{ parent.name }}</strong><small>{{ parent.code }} · {{ parent.source }}</small></span><a-tag>{{ parent.symbol_count }} 交易对</a-tag><a-tag v-if="!parent.active" color="default">INACTIVE</a-tag>
-            </button>
+            <div class="taxonomy-node parent" :class="{ selected: selected?.category_key === parent.category_key, inactive: !parent.active }">
+              <button type="button" class="expand-control" :aria-label="expanded.has(parent.category_key) ? '收起子分类' : '展开子分类'" :aria-expanded="expanded.has(parent.category_key)" @click="toggle(parent.category_key)"><ChevronDown v-if="expanded.has(parent.category_key)" :size="14" /><ChevronRight v-else :size="14" /></button>
+              <button type="button" class="parent-select" @click="selectCategory(parent)"><FolderTree :size="15" /><span class="node-copy"><strong>{{ parent.name }}</strong><small>{{ parent.code }} · {{ parent.source }}</small></span><a-tag>{{ parent.symbol_count }} 交易对</a-tag><a-tag v-if="!parent.active" color="default">INACTIVE</a-tag></button>
+            </div>
             <div v-if="expanded.has(parent.category_key) || search.trim()" class="taxonomy-children">
               <button v-for="child in parent.children" :key="child.category_key" type="button" class="taxonomy-node child" :class="{ selected: selected?.category_key === child.category_key, inactive: !child.active }" @click="selectCategory(child)"><span class="tree-line">└</span><span class="node-copy"><strong>{{ child.name }}</strong><small>{{ child.code }}</small></span><a-tag>{{ child.symbol_count }}</a-tag><a-tag v-if="!child.active">INACTIVE</a-tag></button>
               <div v-if="!parent.children.length" class="no-children">没有 Subcategory</div>
             </div>
           </article>
-          <article v-if="orphans.length" class="orphan-block"><h3>缺少父节点的 Subcategory</h3><button v-for="item in orphans" :key="item.category_key" class="taxonomy-node child" @click="selectCategory(item)"><span class="tree-line">!</span><span class="node-copy"><strong>{{ item.name }}</strong><small>{{ item.parent_key || 'NO PARENT KEY' }}</small></span><a-tag color="gold">{{ item.symbol_count }}</a-tag></button></article>
+          <article v-if="orphans.length" class="orphan-block"><h3>缺少父节点的 Subcategory</h3><button v-for="item in orphans" :key="item.category_key" type="button" class="taxonomy-node child" @click="selectCategory(item)"><span class="tree-line">!</span><span class="node-copy"><strong>{{ item.name }}</strong><small>{{ item.parent_key || 'NO PARENT KEY' }}</small></span><a-tag color="gold">{{ item.symbol_count }}</a-tag></button></article>
           <a-empty v-if="!visibleParents.length" description="没有匹配的分类" />
         </section>
 
@@ -120,6 +169,7 @@ onMounted(load)
             <a-spin :spinning="detailLoading">
               <div v-if="selectedSymbols.length" class="category-symbol-list"><div v-for="symbol in selectedSymbols" :key="symbol.symbol" class="category-symbol-row"><span><strong>{{ symbol.symbol }}</strong><small>{{ symbol.base_asset }} / {{ symbol.quote_asset }}</small></span><span><a-tag :color="symbol.status === 'TRADING' ? 'green' : 'gold'">{{ symbol.status }}</a-tag><a-tag :color="symbol.global_enabled ? 'blue' : 'red'">{{ symbol.global_enabled ? '全局允许' : '全局禁止' }}</a-tag></span></div></div>
               <a-empty v-else-if="!detailLoading" :description="viewingUnclassified ? '当前没有未分类交易对' : '该分类没有关联交易对'" />
+              <div v-if="selectedTotal > detailPageSize" class="detail-pagination"><a-pagination :current="detailPage" :page-size="detailPageSize" :total="selectedTotal" size="small" show-less-items @change="changeDetailPage" /></div>
             </a-spin>
           </template>
           <div v-else class="select-hint"><FolderTree :size="28" /><p>选择左侧 Category 或 Subcategory 查看关联交易对和当前有效状态。</p></div>
@@ -130,7 +180,7 @@ onMounted(load)
 </template>
 
 <style scoped lang="scss">
-.status-strip { margin-bottom:10px; }.category-tools { display:grid; grid-template-columns:minmax(230px,1fr) auto auto auto; align-items:center; gap:8px; margin-bottom:12px; }.category-tools > span { color:var(--muted); font:10px "IBM Plex Mono",monospace; }.sync-error { margin-bottom:10px; }.category-layout { display:grid; grid-template-columns:minmax(360px,.85fr) minmax(390px,1.15fr); gap:12px; align-items:start; }.taxonomy-tree { display:grid; gap:7px; }.taxonomy-parent { border:1px solid var(--line); border-radius:5px; overflow:hidden; background:var(--surface); }.taxonomy-node { display:flex; align-items:center; gap:8px; width:100%; min-height:52px; padding:8px 10px; border:0; background:transparent; color:var(--text); text-align:left; cursor:pointer; }.taxonomy-node:hover { background:var(--surface-hover); }.taxonomy-node.selected { box-shadow:inset 3px 0 #b38732; background:rgba(179,135,50,.08); }.taxonomy-node.inactive { opacity:.58; }.expand-control { display:grid; place-items:center; flex:0 0 22px; height:22px; border:1px solid var(--line); border-radius:3px; color:#b38732; font:16px monospace; }.node-copy { min-width:0; margin-right:auto; }.node-copy strong,.node-copy small { display:block; }.node-copy strong { font-size:12px; }.node-copy small { margin-top:3px; color:var(--muted); font:9px "IBM Plex Mono",monospace; overflow-wrap:anywhere; }.taxonomy-children { border-top:1px solid var(--line); background:rgba(80,100,120,.025); }.taxonomy-node.child { min-height:43px; padding-left:42px; border-bottom:1px solid var(--line); }.taxonomy-node.child:last-child { border-bottom:0; }.tree-line { color:#b38732; font-family:monospace; }.no-children { padding:12px 42px; color:var(--muted); font-size:10px; }.orphan-block { border:1px solid #c08a32; }.orphan-block h3 { margin:0; padding:9px 12px; color:#a77424; font-size:11px; }.category-detail { position:sticky; top:0; min-height:350px; }.category-symbol-list { max-height:70vh; overflow:auto; }.category-symbol-list button { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; min-height:54px; padding:8px 12px; border:0; border-bottom:1px solid var(--line); background:transparent; color:var(--text); text-align:left; }.category-symbol-list button:last-child { border-bottom:0; }.category-symbol-list strong,.category-symbol-list small { display:block; }.category-symbol-list strong { font:12px "IBM Plex Mono",monospace; }.category-symbol-list small { color:var(--muted); font-size:10px; }.select-hint { display:grid; place-items:center; gap:8px; min-height:330px; padding:30px; color:var(--muted); text-align:center; }.select-hint p { max-width:320px; line-height:1.7; }
-.category-symbol-row { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:54px; padding:8px 12px; border-bottom:1px solid var(--line); color:var(--text); }.category-symbol-row:last-child { border-bottom:0; }
+.status-strip { margin-bottom:10px; }.category-tools { display:grid; grid-template-columns:minmax(230px,1fr) auto auto auto; align-items:center; gap:8px; margin-bottom:12px; }.category-tools > span { color:var(--muted); font:10px "IBM Plex Mono",monospace; }.sync-error { margin-bottom:10px; }.category-layout { display:grid; grid-template-columns:minmax(360px,.85fr) minmax(390px,1.15fr); gap:12px; align-items:start; }.taxonomy-tree { display:grid; gap:7px; }.taxonomy-parent { border:1px solid var(--line); border-radius:5px; overflow:hidden; background:var(--surface); }.taxonomy-node { display:flex; align-items:center; gap:8px; width:100%; min-height:52px; padding:8px 10px; border:0; background:transparent; color:var(--text); text-align:left; cursor:pointer; }.taxonomy-node:hover { background:var(--surface-hover); }.taxonomy-node.selected { box-shadow:inset 3px 0 #b38732; background:rgba(179,135,50,.08); }.taxonomy-node.inactive { opacity:.58; }.taxonomy-node.parent { padding:0 10px; cursor:default; }.parent-select { display:flex; align-items:center; gap:8px; flex:1; min-width:0; min-height:50px; padding:8px 0; border:0; background:transparent; color:var(--text); text-align:left; cursor:pointer; }.expand-control { display:grid; place-items:center; flex:0 0 24px; width:24px; height:24px; padding:0; border:1px solid var(--line); border-radius:3px; background:transparent; color:#b38732; cursor:pointer; }.expand-control:hover,.expand-control:focus-visible { border-color:#b38732; outline:none; }.node-copy { min-width:0; margin-right:auto; }.node-copy strong,.node-copy small { display:block; }.node-copy strong { font-size:12px; }.node-copy small { margin-top:3px; color:var(--muted); font:9px "IBM Plex Mono",monospace; overflow-wrap:anywhere; }.taxonomy-children { border-top:1px solid var(--line); background:rgba(80,100,120,.025); }.taxonomy-node.child { min-height:43px; padding-left:42px; border-bottom:1px solid var(--line); }.taxonomy-node.child:last-child { border-bottom:0; }.tree-line { color:#b38732; font-family:monospace; }.no-children { padding:12px 42px; color:var(--muted); font-size:10px; }.orphan-block { border:1px solid #c08a32; }.orphan-block h3 { margin:0; padding:9px 12px; color:#a77424; font-size:11px; }.category-detail { position:sticky; top:0; min-height:350px; }.category-symbol-list { max-height:70vh; overflow:auto; }.category-symbol-list button { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; min-height:54px; padding:8px 12px; border:0; border-bottom:1px solid var(--line); background:transparent; color:var(--text); text-align:left; }.category-symbol-list button:last-child { border-bottom:0; }.category-symbol-list strong,.category-symbol-list small { display:block; }.category-symbol-list strong { font:12px "IBM Plex Mono",monospace; }.category-symbol-list small { color:var(--muted); font-size:10px; }.select-hint { display:grid; place-items:center; gap:8px; min-height:330px; padding:30px; color:var(--muted); text-align:center; }.select-hint p { max-width:320px; line-height:1.7; }
+.category-symbol-row { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:54px; padding:8px 12px; border-bottom:1px solid var(--line); color:var(--text); }.category-symbol-row:last-child { border-bottom:0; }.detail-pagination { display:flex; justify-content:flex-end; padding:10px 12px; border-top:1px solid var(--line); }
 @media(max-width:900px){.category-layout{grid-template-columns:1fr}.category-detail{position:static}.category-tools{grid-template-columns:1fr auto auto}.category-tools>span{grid-column:1/-1}}@media(max-width:560px){.category-tools{grid-template-columns:1fr}.taxonomy-node.child{padding-left:22px}}
 </style>

@@ -120,6 +120,33 @@ describe('operationsApi', () => {
     expect(requestedUrl().searchParams.get('timezone')).toBe('Asia/Shanghai')
   })
 
+  it('pages complete campaigns and filters detail fills by campaign identity', async () => {
+    mockJson({ items: [], total: 0, limit: 25, offset: 25, unattributed_fills: 0 })
+
+    await operationsApi.campaigns({
+      account_id: 'a',
+      campaign_id: 'campaign/1',
+      start_date: '2026-08-16',
+      end_date: '2026-08-16',
+      limit: 25,
+      offset: 25
+    })
+    expect(requestedUrl().pathname).toBe('/api/v1/campaigns')
+    expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
+      timezone: 'Asia/Shanghai',
+      account_id: 'a',
+      campaign_id: 'campaign/1',
+      start_date: '2026-08-16',
+      end_date: '2026-08-16',
+      limit: '25',
+      offset: '25'
+    })
+
+    vi.mocked(globalThis.fetch).mockClear()
+    await operationsApi.trades({ account_id: 'a', campaign_id: 'campaign/1' })
+    expect(requestedUrl().searchParams.get('campaign_id')).toBe('campaign/1')
+  })
+
   it('encodes category keys and paginates server-side category symbols', async () => {
     mockJson({ items: [], total: 0, limit: 20, offset: 40 })
 
@@ -136,6 +163,18 @@ describe('operationsApi', () => {
       limit: '20',
       offset: '40'
     })
+  })
+
+  it('uses paged category and strategy-admission catalog endpoints', async () => {
+    mockJson({ items: [], total: 0, limit: 100, offset: 0 })
+
+    await operationsApi.categoriesPage(false, { limit: 100, offset: 0 })
+    expect(requestedUrl().pathname).toBe('/api/v1/exchange-categories/page')
+    expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({ active_only: 'false', limit: '100', offset: '0' })
+
+    vi.mocked(globalThis.fetch).mockClear()
+    await operationsApi.strategyAdmissionsPage('spike/short', { limit: 100, offset: 0 })
+    expect(requestedUrl().pathname).toBe('/api/v1/strategy-category-admissions/spike%2Fshort/page')
   })
 
   it('queries unclassified exchange symbols from the authoritative backend filter', async () => {

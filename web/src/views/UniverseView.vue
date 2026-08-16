@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { Button, Switch, Tag, message, type TableColumnsType } from 'ant-design-vue'
 import { DatabaseBackup, Search } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
@@ -7,15 +8,18 @@ import type { ExchangeCategory, ExchangeSymbol, ExchangeSymbolSyncStatus, Symbol
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import { formatDateTime } from '@/features/operations/format'
+import { collectPageItems } from '@/features/operations/pagination'
 
+const route = useRoute()
+const router = useRouter()
 const symbols = ref<ExchangeSymbol[]>([])
 const categories = ref<ExchangeCategory[]>([])
 const categorySymbolSet = ref<Set<string> | null>(null)
 const syncStatus = ref<ExchangeSymbolSyncStatus | null>(null)
-const search = ref('')
-const tradingStatus = ref('')
-const admissionStatus = ref('')
-const categoryKey = ref('')
+const search = ref(String(route.query.q ?? ''))
+const tradingStatus = ref(String(route.query.status ?? ''))
+const admissionStatus = ref(String(route.query.admission ?? ''))
+const categoryKey = ref(String(route.query.category ?? ''))
 const loading = ref(false)
 const error = ref<string | null>(null)
 const updating = ref(new Set<string>())
@@ -58,8 +62,8 @@ async function load() {
   error.value = null
   try {
     const [symbolPage, categoryRows, status] = await Promise.all([
-      operationsApi.exchangeSymbols({ limit: 1000 }),
-      operationsApi.categories(true),
+      collectPageItems((params) => operationsApi.exchangeSymbols(params)),
+      collectPageItems((params) => operationsApi.categoriesPage(true, params)).then((page) => page.items),
       operationsApi.symbolSyncStatus()
     ])
     symbols.value = symbolPage.items
@@ -73,14 +77,24 @@ async function load() {
 }
 
 async function filterCategory() {
+  await syncUrl()
   if (!categoryKey.value) { categorySymbolSet.value = null; return }
   try {
-    const page = await operationsApi.categorySymbols(categoryKey.value, { limit: 1000 })
+    const page = await collectPageItems((params) => operationsApi.categorySymbols(categoryKey.value, params))
     categorySymbolSet.value = new Set(page.items.map((item) => item.symbol))
   } catch (caught) {
     message.error(caught instanceof Error ? caught.message : '分类交易对加载失败')
     categorySymbolSet.value = new Set()
   }
+}
+
+async function syncUrl() {
+  await router.replace({ query: {
+    ...(search.value.trim() ? { q: search.value.trim() } : {}),
+    ...(tradingStatus.value ? { status: tradingStatus.value } : {}),
+    ...(admissionStatus.value ? { admission: admissionStatus.value } : {}),
+    ...(categoryKey.value ? { category: categoryKey.value } : {})
+  } })
 }
 
 function requestAdmissionChange(item: ExchangeSymbol, enabled: boolean) {
@@ -134,11 +148,11 @@ onMounted(load)
       <DatabaseBackup :size="14" /><span>同步状态 <strong>{{ syncStatus.status }}</strong> · 最近成功 {{ formatDateTime(syncStatus.last_success_at) }} · {{ syncStatus.synced_symbols }} 个交易对 · effective universe {{ syncStatus.effective_universe_ready ? 'ready' : 'not ready' }}</span><a-tag v-if="syncStatus.stale" color="gold">STALE</a-tag><span v-if="syncStatus.last_error">{{ syncStatus.last_error }}</span>
     </div>
     <div class="universe-filters">
-      <a-input v-model:value="search" allow-clear placeholder="搜索交易对或资产"><template #prefix><Search :size="14" /></template></a-input>
-      <a-select v-model:value="tradingStatus" allow-clear placeholder="交易所状态" :options="[{label:'TRADING',value:'TRADING'},{label:'非 TRADING',value:'non-trading'}]" />
-      <a-select v-model:value="admissionStatus" allow-clear placeholder="全局准入" :options="[{label:'允许',value:'enabled'},{label:'禁止',value:'disabled'}]" />
+      <a-input v-model:value="search" allow-clear placeholder="搜索交易对或资产" @change="syncUrl" @press-enter="syncUrl"><template #prefix><Search :size="14" /></template></a-input>
+      <a-select v-model:value="tradingStatus" allow-clear placeholder="交易所状态" :options="[{label:'TRADING',value:'TRADING'},{label:'非 TRADING',value:'non-trading'}]" @change="syncUrl" />
+      <a-select v-model:value="admissionStatus" allow-clear placeholder="全局准入" :options="[{label:'允许',value:'enabled'},{label:'禁止',value:'disabled'}]" @change="syncUrl" />
       <a-select v-model:value="categoryKey" show-search allow-clear placeholder="Category / Subcategory" :options="categoryOptions" :filter-option="(input: string, option: { label?: string }) => String(option.label || '').toLowerCase().includes(input.toLowerCase())" @change="filterCategory" />
-      <span>{{ filtered.length }} / {{ symbols.length }}</span>
+      <span>{{ filtered.length }} / {{ symbols.length }} · 已逐页完整载入</span>
     </div>
     <DataState :loading="loading" :error="error" :empty="!filtered.length" @retry="load">
       <div class="table-frame"><a-table :columns="columns" :data-source="filtered" row-key="symbol" :pagination="{ pageSize: 25, showSizeChanger: true, pageSizeOptions: ['25','50','100'] }" :scroll="{ x: 1050 }" /></div>

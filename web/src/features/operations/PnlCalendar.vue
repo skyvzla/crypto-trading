@@ -5,8 +5,8 @@ import { asNumber, formatMoney, pnlClass } from './format'
 interface DailyPnlRow {
   date: string
   net_pnl: string | number | null
-  trade_count: number
-  realized_trade_count?: number
+  campaign_count: number
+  fill_count: number
 }
 
 const props = withDefaults(defineProps<{
@@ -34,8 +34,8 @@ const cells = computed(() => {
 })
 
 function intensity(row?: DailyPnlRow): number {
-  if (!row) return 0
-  const max = Math.max(1, ...props.rows.map((item) => Math.abs(asNumber(item.net_pnl))))
+  if (!row || row.net_pnl == null) return 0
+  const max = Math.max(1, ...props.rows.filter((item) => item.net_pnl != null).map((item) => Math.abs(asNumber(item.net_pnl))))
   return Math.max(.12, Math.min(.58, Math.abs(asNumber(row.net_pnl)) / max * .58))
 }
 </script>
@@ -49,14 +49,14 @@ function intensity(row?: DailyPnlRow): number {
         v-else
         type="button"
         class="calendar-cell"
-        :class="cell.row ? pnlClass(cell.row.net_pnl) : 'no-data'"
-        :style="cell.row ? { '--cell-alpha': intensity(cell.row) } : undefined"
-        :aria-label="`${cell.date}${cell.row ? ` 净收益 ${formatMoney(cell.row.net_pnl)}` : ' 无数据'}`"
+        :class="cell.row ? (cell.row.net_pnl == null ? 'net-unavailable' : pnlClass(cell.row.net_pnl)) : 'no-data'"
+        :style="cell.row?.net_pnl != null ? { '--cell-alpha': intensity(cell.row) } : undefined"
+        :aria-label="`${cell.date}${cell.row ? (cell.row.net_pnl == null ? ' 净收益不可用' : ` 净收益 ${formatMoney(cell.row.net_pnl)}`) : ' 无数据'}`"
         @click="emit('day', cell.date)"
       >
         <span class="calendar-day">{{ cell.day }}</span>
-        <strong v-if="cell.row">{{ formatMoney(cell.row.net_pnl, compact ? 0 : 2) }}</strong>
-        <small v-if="cell.row && !compact">{{ cell.row.realized_trade_count ?? cell.row.trade_count }} fills</small>
+        <strong v-if="cell.row">{{ cell.row.net_pnl == null ? '不可用' : formatMoney(cell.row.net_pnl, compact ? 0 : 2) }}</strong>
+        <small v-if="cell.row && !compact">{{ cell.row.campaign_count }} Campaign · {{ cell.row.fill_count }} fills</small>
         <i v-else-if="!cell.row">—</i>
       </button>
     </template>

@@ -1,7 +1,9 @@
 import { api } from '@/api/client'
 import type {
   AdmissionUpdate,
+  CampaignPage,
   CampaignPnL,
+  CampaignQuery,
   DailyPnL,
   DailyPnLQuery,
   ExchangeCategory,
@@ -81,6 +83,12 @@ export const operationsApi = {
   trades: (query: TradeQuery = {}) =>
     api.get<Page<LedgerTrade>>('/trades', { ...query }),
 
+  campaigns: (query: CampaignQuery = {}) =>
+    api.get<CampaignPage>('/campaigns', {
+      ...query,
+      timezone: query.timezone ?? 'Asia/Shanghai'
+    }),
+
   campaignPnl: (
     campaignId: string,
     query: { account_id: string; strategy_id: string }
@@ -94,6 +102,12 @@ export const operationsApi = {
 
   categories: (activeOnly = true) =>
     api.get<ExchangeCategory[]>('/exchange-categories', { active_only: activeOnly }),
+
+  categoriesPage: (activeOnly = true, query: PageParams = {}) =>
+    api.get<Page<ExchangeCategory>>('/exchange-categories/page', {
+      active_only: activeOnly,
+      ...query
+    }),
 
   categorySymbols: (categoryKey: string, query: PageParams = {}) =>
     api.get<Page<ExchangeSymbol>>(
@@ -124,6 +138,12 @@ export const operationsApi = {
   strategyAdmissions: (strategyId: string) =>
     api.get<StrategyCategoryAdmission[]>(
       `/strategy-category-admissions/${segment(strategyId)}`
+    ),
+
+  strategyAdmissionsPage: (strategyId: string, query: PageParams = {}) =>
+    api.get<Page<StrategyCategoryAdmission>>(
+      `/strategy-category-admissions/${segment(strategyId)}/page`,
+      { ...query }
     ),
 
   updateStrategyAdmission: (

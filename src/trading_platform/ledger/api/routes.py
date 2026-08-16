@@ -188,6 +188,7 @@ class StrategyUniversePreviewResponse(BaseModel):
     total_symbols: int
     effective_symbols: int
     excluded_symbols: int
+    total: int
     items: list[SymbolUniversePreviewItem]
     limit: int
     offset: int
@@ -299,19 +300,26 @@ class PnLResponse(BaseModel):
 
 
 class DailyPnLResponse(BaseModel):
-    """Named-timezone natural-day realized ledger PnL for the calendar view."""
+    """Named-timezone close-day PnL for complete Campaigns."""
 
     date: date
     account_id: str
     strategy_id: Optional[str] = None
     symbol: Optional[str] = None
     timezone: str
+    campaign_count: int
+    fill_count: int
+    # Compatibility aliases for the existing Web client.
     trade_count: int
     realized_trade_count: int
     gross_realized_pnl: Decimal
     total_commission: Decimal
     commission_asset: Optional[str] = None
     net_pnl: Optional[Decimal] = None
+    funding_fee: Optional[Decimal] = None
+    net_pnl_scope: str = (
+        "realized PnL minus USDT commission; funding fee facts unavailable"
+    )
 
 
 class PerformanceResponse(BaseModel):
@@ -423,6 +431,34 @@ class CampaignPnLResponse(BaseModel):
     lifecycle_duration_ms: Optional[int] = None
 
 
+class CampaignSummaryResponse(BaseModel):
+    account_id: str
+    strategy_id: str
+    symbol: str
+    campaign_id: str
+    side: Optional[str] = None
+    fill_count: int
+    sell_quantity: Decimal
+    buy_quantity: Decimal
+    total_commission: Optional[Decimal] = None
+    commission_asset: Optional[str] = None
+    gross_realized_pnl: Decimal
+    net_realized_pnl: Optional[Decimal] = None
+    first_fill_at: datetime
+    last_fill_at: datetime
+    closed_at: Optional[datetime] = None
+    has_open_quantity: bool
+    pnl_facts_complete: bool
+
+
+class CampaignPageResponse(BaseModel):
+    items: list[CampaignSummaryResponse]
+    total: int
+    limit: int
+    offset: int
+    unattributed_fills: int
+
+
 router = APIRouter(prefix="/api/v1", tags=["ledger"])
 
 
@@ -476,6 +512,7 @@ async def get_trades(
     account_id: Optional[str] = None,
     strategy_id: Optional[str] = None,
     symbol: Optional[str] = None,
+    campaign_id: Optional[str] = Query(None, max_length=128),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     start_date: Optional[date] = Query(None, description="inclusive calendar date"),
@@ -492,8 +529,16 @@ async def get_trades(
     if start_date is not None and end_date is not None:
         start_at, end_at = _date_bounds_in_timezone(start_date, end_date, timezone_name)
         date_filters = {"start_at": start_at, "end_at": end_at}
-    items = await db.get_trades(**filters, **date_filters, limit=limit, offset=offset)
-    total = await db.count_trades(**filters, **date_filters)
+    items = await db.get_trades(
+        **filters,
+        campaign_id=campaign_id,
+        **date_filters,
+        limit=limit,
+        offset=offset,
+    )
+    total = await db.count_trades(
+        **filters, campaign_id=campaign_id, **date_filters
+    )
     return Page(
         items=[TradeResponse.model_validate(item) for item in items],
         total=total,
@@ -596,8 +641,10 @@ async def get_daily_pnl(
             strategy_id=strategy_id,
             symbol=symbol,
             timezone=timezone_name,
-            trade_count=item.trade_count,
-            realized_trade_count=item.realized_trade_count,
+            campaign_count=item.campaign_count,
+            fill_count=item.fill_count,
+            trade_count=item.fill_count,
+            realized_trade_count=item.fill_count,
             gross_realized_pnl=item.gross_realized_pnl,
             total_commission=item.total_commission,
             commission_asset=item.commission_asset,
@@ -626,11 +673,7 @@ def _performance_values(
     eligible = [
         fact
         for fact in selected
-        if fact.closed_at is not None
-        and fact.realized_pnl_complete
-        and fact.commission_asset == "USDT"
-        and fact.unique_symbols == 1
-        and fact.sell_quantity >= fact.buy_quantity
+        if fact.has_complete_closed_pnl
     ]
     net_values = [fact.gross_realized_pnl - fact.total_commission for fact in eligible]
     wins = [value for value in net_values if value > 0]
@@ -823,6 +866,105 @@ async def get_performance_breakdown(
 
 
 @router.get(
+    "/campaigns",
+    response_model=CampaignPageResponse,
+)
+async def list_campaigns(
+    account_id: Optional[str] = Query(None, max_length=32),
+    strategy_id: Optional[str] = Query(None, max_length=64),
+    symbol: Optional[str] = Query(None, max_length=32),
+    campaign_id: Optional[str] = Query(None, max_length=128),
+    start_date: Optional[date] = Query(None, description="inclusive close date"),
+    end_date: Optional[date] = Query(None, description="inclusive close date"),
+    timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
+        "Asia/Shanghai", alias="timezone", description="close date timezone"
+    ),
+    limit: int = Query(50, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> CampaignPageResponse:
+    if (start_date is None) != (end_date is None):
+        raise HTTPException(
+            status_code=422,
+            detail="start_date and end_date must be provided together",
+        )
+    start_at: Optional[datetime] = None
+    end_at: Optional[datetime] = None
+    if start_date is not None and end_date is not None:
+        start_at, end_at = _date_bounds_in_timezone(
+            start_date, end_date, timezone_name
+        )
+    facts = await db.list_performance_campaign_facts(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        campaign_id=campaign_id,
+        start_at=start_at,
+        end_at=end_at,
+        closed_only=start_at is not None,
+        limit=limit,
+        offset=offset,
+    )
+    total = facts[0].total_count if facts else 0
+    if not facts and offset:
+        first_page = await db.list_performance_campaign_facts(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            campaign_id=campaign_id,
+            start_at=start_at,
+            end_at=end_at,
+            closed_only=start_at is not None,
+            limit=1,
+            offset=0,
+        )
+        total = first_page[0].total_count if first_page else 0
+    unattributed = await db.count_unattributed_trades(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=symbol,
+        start_at=start_at,
+        end_at=end_at,
+    )
+    return CampaignPageResponse(
+        items=[
+            CampaignSummaryResponse(
+                account_id=fact.account_id,
+                strategy_id=fact.strategy_id,
+                symbol=fact.symbol,
+                campaign_id=fact.campaign_id,
+                side=fact.side,
+                fill_count=fact.trade_count,
+                sell_quantity=fact.sell_quantity,
+                buy_quantity=fact.buy_quantity,
+                total_commission=(
+                    fact.total_commission
+                    if fact.commission_asset is not None
+                    else None
+                ),
+                commission_asset=fact.commission_asset,
+                gross_realized_pnl=fact.gross_realized_pnl,
+                net_realized_pnl=(
+                    fact.gross_realized_pnl - fact.total_commission
+                    if fact.has_complete_closed_pnl
+                    else None
+                ),
+                first_fill_at=fact.first_fill_at,
+                last_fill_at=fact.last_fill_at,
+                closed_at=fact.closed_at,
+                has_open_quantity=fact.sell_quantity != fact.buy_quantity,
+                pnl_facts_complete=fact.has_complete_closed_pnl,
+            )
+            for fact in facts
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+        unattributed_fills=unattributed,
+    )
+
+
+@router.get(
     "/campaigns/{campaign_id}/pnl",
     response_model=CampaignPnLResponse,
 )
@@ -967,6 +1109,28 @@ async def list_exchange_categories(
 
 
 @router.get(
+    "/exchange-categories/page",
+    response_model=Page,
+)
+async def page_exchange_categories(
+    active_only: bool = True,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    items = await db.list_exchange_categories(
+        active_only=active_only, limit=limit, offset=offset
+    )
+    total = await db.count_exchange_categories(active_only=active_only)
+    return Page(
+        items=[ExchangeCategoryResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get(
     "/exchange-categories/{category_key}/symbols",
     response_model=Page,
 )
@@ -1022,6 +1186,31 @@ async def list_strategy_category_admissions(
     return [StrategyCategoryAdmissionResponse.model_validate(item) for item in items]
 
 
+@router.get(
+    "/strategy-category-admissions/{strategy_id}/page",
+    response_model=Page,
+)
+async def page_strategy_category_admissions(
+    strategy_id: str = Path(min_length=1, max_length=64),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    items = await db.list_strategy_category_admissions(
+        strategy_id, limit=limit, offset=offset
+    )
+    total = await db.count_strategy_category_admissions(strategy_id)
+    return Page(
+        items=[
+            StrategyCategoryAdmissionResponse.model_validate(item)
+            for item in items
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 def _universe_exclusion_reasons(
     decision: SymbolUniverseDecision,
 ) -> list[str]:
@@ -1066,12 +1255,19 @@ async def get_strategy_universe_preview(
             offset=offset,
         )
     )
+    if effective is None:
+        filtered_total = total_symbols
+    elif effective:
+        filtered_total = effective_symbols
+    else:
+        filtered_total = total_symbols - effective_symbols
     return StrategyUniversePreviewResponse(
         strategy_id=strategy_id,
         freeze_days=freeze_days,
         total_symbols=total_symbols,
         effective_symbols=effective_symbols,
         excluded_symbols=total_symbols - effective_symbols,
+        total=filtered_total,
         items=[
             SymbolUniversePreviewItem(
                 symbol=item.symbol,

@@ -43,7 +43,8 @@ const query = computed(() => ({
   ...(filters.value.symbol.trim() ? { symbol: filters.value.symbol.trim() } : {})
 }))
 const todayPnl = computed(() => daily.value.find((item) => item.date === today))
-const monthNet = computed(() => daily.value.reduce((sum, item) => sum + asNumber(item.net_pnl), 0))
+const monthNetAvailable = computed(() => daily.value.every((item) => item.net_pnl != null))
+const monthNet = computed(() => monthNetAvailable.value ? daily.value.reduce((sum, item) => sum + asNumber(item.net_pnl), 0) : null)
 const winningDays = computed(() => daily.value.filter((item) => asNumber(item.net_pnl) > 0).length)
 const losingDays = computed(() => daily.value.filter((item) => asNumber(item.net_pnl) < 0).length)
 const runtimeModes = computed(() => [...new Set(runtimes.value.map((item) => item.mode))])
@@ -157,9 +158,9 @@ onMounted(load)
       />
 
       <section class="metric-grid overview-metrics">
-        <MetricTile label="今日已实现净 PnL" :value="formatMoney(todayPnl?.net_pnl)" hint="上海日界线 · 已扣手续费；资金费暂不可用" :tone="asNumber(todayPnl?.net_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/calendar', query }" />
+        <MetricTile label="今日闭合净 PnL" :value="formatMoney(todayPnl?.net_pnl)" hint="Campaign closed_at 上海日界线 · 资金费暂不可用" :tone="todayPnl?.net_pnl == null ? 'neutral' : asNumber(todayPnl.net_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/calendar', query }" />
         <MetricTile label="当前浮动 PnL" :value="formatMoney(pnl?.total_unrealized_pnl)" hint="来自当前筛选账户" :tone="asNumber(pnl?.total_unrealized_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/positions', query: { ...query, tab: 'positions' } }" />
-        <MetricTile label="当月累计净 PnL" :value="filters.account_id ? formatMoney(monthNet) : '—'" :hint="`${winningDays} 盈利日 / ${losingDays} 亏损日`" :tone="monthNet >= 0 ? 'positive' : 'negative'" :to="{ path: '/performance', query }" />
+        <MetricTile label="当月闭合净 PnL" :value="filters.account_id ? formatMoney(monthNet) : '—'" :hint="monthNet == null ? '存在无法统一计价的日期' : `${winningDays} 盈利日 / ${losingDays} 亏损日`" :tone="monthNet == null ? 'warning' : monthNet >= 0 ? 'positive' : 'negative'" :to="{ path: '/performance', query }" />
         <MetricTile label="当前持仓" :value="positionsTotal == null ? '读取失败' : String(positionsTotal)" hint="进入持仓明细" :tone="positionsTotal == null ? 'warning' : 'neutral'" :to="{ path: '/positions', query: { ...query, tab: 'positions' } }" />
         <MetricTile label="活动订单" :value="activeOrdersTotal == null ? '读取失败' : String(activeOrdersTotal)" hint="NEW + PARTIALLY_FILLED" :tone="activeOrdersTotal == null || activeOrdersTotal > 0 ? 'warning' : 'neutral'" :to="{ path: '/positions', query: { ...query, tab: 'active' } }" />
       </section>

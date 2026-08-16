@@ -187,7 +187,7 @@ onMounted(() => {
 .header-actions { display: flex; height: 100%; align-items: center; justify-content: space-between; padding-inline: 20px; }
 .header-context { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
 .header-context span { color: var(--text); font-weight: 600; }
-.header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: #b38732; font: 9px "IBM Plex Mono", monospace; font-style: normal; letter-spacing: .08em; }
+.header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: #b38732; font: 9px "IBM Plex Mono", monospace; font-style: normal; letter-spacing: 0; }
 .theme-toggle { color: var(--text); }
 .workspace {
   flex: 1;
@@ -195,7 +195,7 @@ onMounted(() => {
   padding: 20px 24px 32px;
   overflow: auto;
 }
-.side-menu :deep(.ant-menu-item-group-title) { padding-top: 17px; padding-bottom: 5px; color: rgba(214, 168, 75, .68); font: 9px "IBM Plex Mono", monospace; letter-spacing: .12em; }
+.side-menu :deep(.ant-menu-item-group-title) { padding-top: 17px; padding-bottom: 5px; color: rgba(214, 168, 75, .68); font: 9px "IBM Plex Mono", monospace; letter-spacing: 0; }
 .app-sider.ant-layout-sider-collapsed .side-menu :deep(.ant-menu-item-group-title) { height: 9px; padding: 8px 0 0; overflow: hidden; color: transparent; }
 @media (max-width: 640px) {
   .header-context i { display: none; }

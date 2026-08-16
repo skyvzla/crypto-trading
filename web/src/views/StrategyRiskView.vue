@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { Ban, CheckCircle2, GitBranch, Search, ShieldCheck } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
@@ -8,17 +9,21 @@ import DataState from '@/features/operations/DataState.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import { formatDateTime } from '@/features/operations/format'
+import { collectPageItems } from '@/features/operations/pagination'
 
+const route = useRoute()
+const router = useRouter()
 const strategies = ref<string[]>([])
-const strategyId = ref('')
+const strategyId = ref(String(route.query.strategy ?? ''))
 const categories = ref<ExchangeCategory[]>([])
 const admissions = ref(new Map<string, StrategyCategoryAdmission>())
 const preview = ref<UniversePreview | null>(null)
 const audits = ref<StrategyCategoryAdmissionAudit[]>([])
 const expanded = ref(new Set<string>())
-const categorySearch = ref('')
-const universeSearch = ref('')
-const universeMode = ref<'all' | 'effective' | 'excluded'>('all')
+const categorySearch = ref(String(route.query.category_q ?? ''))
+const universeSearch = ref(String(route.query.universe_q ?? ''))
+const initialMode = String(route.query.universe_mode ?? 'all')
+const universeMode = ref<'all' | 'effective' | 'excluded'>(initialMode === 'effective' || initialMode === 'excluded' ? initialMode : 'all')
 const loading = ref(false)
 const saving = ref(false)
 const error = ref<string | null>(null)
@@ -39,8 +44,6 @@ const visibleUniverse = computed(() => {
   const query = universeSearch.value.trim().toUpperCase()
   return (preview.value?.items ?? []).filter((item) => {
     if (query && !item.symbol.includes(query)) return false
-    if (universeMode.value === 'effective' && !item.effective) return false
-    if (universeMode.value === 'excluded' && item.effective) return false
     return true
   })
 })
@@ -57,11 +60,14 @@ async function bootstrap() {
   loading.value = true
   error.value = null
   try {
-    const [runtimePage, rows] = await Promise.all([operationsApi.runtimeStatus({ limit: 1000 }), operationsApi.categories(true)])
+    const [runtimePage, rows] = await Promise.all([
+      collectPageItems((params) => operationsApi.runtimeStatus(params)),
+      collectPageItems((params) => operationsApi.categoriesPage(true, params)).then((page) => page.items)
+    ])
     strategies.value = [...new Set(runtimePage.items.map((item) => item.strategy_id))].sort()
     categories.value = rows
     expanded.value = new Set(rows.filter((item) => item.category_type === 'CATEGORY').map((item) => item.category_key))
-    if (!strategyId.value && strategies.value.length) strategyId.value = strategies.value[0]!
+    if (!strategies.value.includes(strategyId.value)) strategyId.value = strategies.value[0] ?? ''
     if (strategyId.value) await loadPolicy()
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : '策略风控数据加载失败'
@@ -73,9 +79,10 @@ async function loadPolicy() {
   loading.value = true
   error.value = null
   try {
+    await syncUrl()
     const [rules, universe, auditPage] = await Promise.all([
-      operationsApi.strategyAdmissions(strategyId.value),
-      operationsApi.universePreview(strategyId.value, { freeze_days: 15, limit: 1000 }),
+      collectPageItems((params) => operationsApi.strategyAdmissionsPage(strategyId.value, params)).then((page) => page.items),
+      loadCompleteUniverse(),
       operationsApi.strategyAdmissionAudits({ strategy_id: strategyId.value, limit: 100 })
     ])
     admissions.value = new Map(rules.map((item) => [item.category_key, item]))
@@ -85,6 +92,51 @@ async function loadPolicy() {
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : '策略准入加载失败'
   } finally { loading.value = false }
+}
+
+async function loadCompleteUniverse(): Promise<UniversePreview> {
+  const items: UniversePreviewItem[] = []
+  let snapshot: UniversePreview | null = null
+  const effective = universeMode.value === 'all' ? undefined : universeMode.value === 'effective'
+
+  do {
+    const page = await operationsApi.universePreview(strategyId.value, {
+      freeze_days: 15,
+      effective,
+      limit: 1000,
+      offset: items.length
+    })
+    snapshot = page
+    const expected = page.total
+    if (!page.items.length && items.length < expected) {
+      throw new Error(`有效交易池分页读取在 ${items.length}/${expected} 条时中断`)
+    }
+    items.push(...page.items)
+    if (items.length >= expected) break
+  } while (snapshot)
+
+  if (!snapshot) throw new Error('有效交易池接口未返回数据')
+  return { ...snapshot, items, limit: items.length || snapshot.limit, offset: 0 }
+}
+
+async function syncUrl() {
+  await router.replace({ query: {
+    ...(strategyId.value ? { strategy: strategyId.value } : {}),
+    ...(categorySearch.value.trim() ? { category_q: categorySearch.value.trim() } : {}),
+    ...(universeSearch.value.trim() ? { universe_q: universeSearch.value.trim() } : {}),
+    ...(universeMode.value !== 'all' ? { universe_mode: universeMode.value } : {})
+  } })
+}
+
+async function changeStrategy() {
+  await syncUrl()
+  await loadPolicy()
+}
+
+async function changeUniverseMode() {
+  universeSearch.value = ''
+  await syncUrl()
+  await loadPolicy()
 }
 
 function requestChange(item: ExchangeCategory, value: boolean) {
@@ -118,7 +170,7 @@ onMounted(bootstrap)
 <template>
   <main class="operations-page strategy-risk-page">
     <PageHeader eyebrow="RISK / CATEGORY ADMISSION" title="策略风控" description="首期只管理选定策略的 Category/Subcategory 可选黑名单；不控制策略进程，也不配置仓位、杠杆或参数。" :loading="loading" :refreshed-at="refreshedAt" @refresh="strategyId ? loadPolicy() : bootstrap()" />
-    <div class="strategy-selector"><label><span>策略 *</span><a-select v-model:value="strategyId" show-search placeholder="选择运行状态中已知策略" :options="strategyOptions" :filter-option="(input: string, option: { label?: string }) => String(option.label || '').toLowerCase().includes(input.toLowerCase())" @change="loadPolicy" /></label><div><ShieldCheck :size="15" /><span>策略来源：账本 runtime status</span></div></div>
+    <div class="strategy-selector"><label><span>策略 *</span><a-select v-model:value="strategyId" show-search placeholder="选择运行状态中已知策略" :options="strategyOptions" :filter-option="(input: string, option: { label?: string }) => String(option.label || '').toLowerCase().includes(input.toLowerCase())" @change="changeStrategy" /></label><div><ShieldCheck :size="15" /><span>策略来源：账本 runtime status</span></div></div>
     <a-alert v-if="!strategies.length && !loading" type="warning" show-icon message="没有可选择的策略" description="策略选择器只使用账本运行状态中的真实 strategy_id，不提供容易输错的自由文本输入。" />
 
     <DataState v-if="strategyId" :loading="loading" :error="error" @retry="loadPolicy">
@@ -132,7 +184,7 @@ onMounted(bootstrap)
       <div class="risk-layout">
         <section class="policy-panel data-card">
           <div class="data-card-heading"><div><h2>分类准入策略</h2><p>父 Category 关闭会覆盖子分类；任一匹配分类关闭即阻止新开仓</p></div></div>
-          <div class="panel-search"><a-input v-model:value="categorySearch" allow-clear placeholder="搜索分类"><template #prefix><Search :size="13" /></template></a-input></div>
+          <div class="panel-search"><a-input v-model:value="categorySearch" allow-clear placeholder="搜索分类" @change="syncUrl" @press-enter="syncUrl"><template #prefix><Search :size="13" /></template></a-input></div>
           <div class="policy-tree">
             <article v-for="parent in visibleTrees" :key="parent.category_key">
               <div class="policy-row parent" :class="{ blocked: !enabled(parent) }"><button class="tree-toggle" @click="toggleTree(parent.category_key)">{{ expanded.has(parent.category_key) ? '−' : '+' }}</button><span class="policy-name"><strong>{{ parent.name }}</strong><small>{{ parent.symbol_count }} 交易对 · {{ policyLabel(parent) }}</small></span><a-tag :color="admissions.has(parent.category_key) ? (!enabled(parent) ? 'red' : 'blue') : 'default'">{{ policyLabel(parent) }}</a-tag><a-switch :checked="enabled(parent)" :checked-children="'允许'" :un-checked-children="'关闭'" @change="requestChange(parent, Boolean($event))" /></div>
@@ -144,8 +196,8 @@ onMounted(bootstrap)
         </section>
 
         <section class="universe-panel data-card">
-          <div class="data-card-heading"><div><h2>生效预览与判定理由</h2><p>页面直接展示后端 effective universe，不自行复制规则</p></div><span class="heading-meta">{{ visibleUniverse.length }} / {{ preview?.items.length ?? 0 }}</span></div>
-          <div class="universe-tools"><a-input v-model:value="universeSearch" allow-clear placeholder="查询交易对"><template #prefix><Search :size="13" /></template></a-input><a-radio-group v-model:value="universeMode" button-style="solid" size="small"><a-radio-button value="all">全部</a-radio-button><a-radio-button value="effective">有效</a-radio-button><a-radio-button value="excluded">排除</a-radio-button></a-radio-group></div>
+          <div class="data-card-heading"><div><h2>生效预览与判定理由</h2><p>直接展示后端 effective universe，并按当前状态逐页完整载入</p></div><span class="heading-meta">{{ visibleUniverse.length }} / {{ preview?.items.length ?? 0 }}</span></div>
+          <div class="universe-tools"><a-input v-model:value="universeSearch" allow-clear placeholder="查询已完整载入的交易对" @change="syncUrl" @press-enter="syncUrl"><template #prefix><Search :size="13" /></template></a-input><a-radio-group v-model:value="universeMode" button-style="solid" size="small" @change="changeUniverseMode"><a-radio-button value="all">全部</a-radio-button><a-radio-button value="effective">有效</a-radio-button><a-radio-button value="excluded">排除</a-radio-button></a-radio-group></div>
           <div class="universe-list">
             <div v-for="item in visibleUniverse" :key="item.symbol" class="universe-row"><span :class="item.effective ? 'effective' : 'excluded'"><CheckCircle2 v-if="item.effective" :size="15" /><Ban v-else :size="15" /><strong>{{ item.symbol }}</strong></span><div><a-tag :color="item.effective ? 'green' : 'red'">{{ item.effective ? '有效' : '排除' }}</a-tag><p>{{ reasons(item) }}</p><small v-if="item.blocked_category_keys.length">阻断分类：{{ item.blocked_category_keys.map((key) => categoryByKey.get(key)?.name || key).join('、') }}</small></div></div>
             <a-empty v-if="!visibleUniverse.length" description="没有匹配交易对" />

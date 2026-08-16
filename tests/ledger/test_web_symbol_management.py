@@ -41,6 +41,8 @@ class FakeLedger:
     def __init__(self):
         self.preview_kwargs = None
         self.symbol_kwargs = None
+        self.category_kwargs = None
+        self.strategy_page_kwargs = None
 
     async def list_exchange_symbols(
         self, limit, offset, *, unclassified=False
@@ -53,6 +55,7 @@ class FakeLedger:
         return [_symbol()], 1
 
     async def list_exchange_categories(self, **_kwargs):
+        self.category_kwargs = _kwargs
         return [
             ExchangeCategoryOverview(
                 category_key="BINANCE:CATEGORY:COIN",
@@ -66,6 +69,9 @@ class FakeLedger:
                 symbol_count=7,
             )
         ]
+
+    async def count_exchange_categories(self, **_kwargs):
+        return 7
 
     async def get_exchange_category(self, category_key):
         if category_key == "missing":
@@ -107,6 +113,26 @@ class FakeLedger:
             20,
             12,
         )
+
+    async def list_strategy_category_admissions(
+        self, strategy_id, **kwargs
+    ):
+        self.strategy_page_kwargs = {"strategy_id": strategy_id, **kwargs}
+        return [
+            StrategyCategoryAdmission(
+                strategy_id=strategy_id,
+                category_key="BINANCE:CATEGORY:COIN",
+                enabled=False,
+                version=1,
+                updated_at=MOMENT,
+                updated_by="tester",
+                reason="risk",
+            )
+        ]
+
+    async def count_strategy_category_admissions(self, strategy_id):
+        assert strategy_id == "spike_short"
+        return 9
 
     async def set_strategy_category_admission(
         self,
@@ -166,6 +192,40 @@ async def test_category_nodes_include_count_and_symbols_are_paged(client):
 
 
 @pytest.mark.asyncio
+async def test_category_and_strategy_policy_snapshots_offer_paged_endpoints(
+    client, ledger
+):
+    async with client as http:
+        categories = await http.get(
+            "/api/v1/exchange-categories/page",
+            params={"active_only": False, "limit": 20, "offset": 4},
+        )
+        strategy = await http.get(
+            "/api/v1/strategy-category-admissions/spike_short/page",
+            params={"limit": 25, "offset": 5},
+        )
+
+    assert categories.status_code == 200
+    assert categories.json()["total"] == 7
+    assert categories.json()["limit"] == 20
+    assert categories.json()["offset"] == 4
+    assert ledger.category_kwargs == {
+        "active_only": False,
+        "limit": 20,
+        "offset": 4,
+    }
+    assert strategy.status_code == 200
+    assert strategy.json()["total"] == 9
+    assert strategy.json()["limit"] == 25
+    assert strategy.json()["offset"] == 5
+    assert ledger.strategy_page_kwargs == {
+        "strategy_id": "spike_short",
+        "limit": 25,
+        "offset": 5,
+    }
+
+
+@pytest.mark.asyncio
 async def test_exchange_symbols_supports_unclassified_filter(client, ledger):
     async with client as http:
         response = await http.get(
@@ -221,6 +281,7 @@ async def test_strategy_preview_returns_backend_exclusion_reasons(
         "total_symbols": 20,
         "effective_symbols": 12,
         "excluded_symbols": 8,
+        "total": 8,
         "items": [
             {
                 "symbol": "BTCUSDT",

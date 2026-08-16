@@ -35,6 +35,14 @@ export interface OrderQuery extends LedgerFilters, PageParams {
 }
 
 export interface TradeQuery extends LedgerFilters, PageParams {
+  campaign_id?: string
+  start_date?: string
+  end_date?: string
+  timezone?: 'UTC' | 'Asia/Shanghai'
+}
+
+export interface CampaignQuery extends LedgerFilters, PageParams {
+  campaign_id?: string
   start_date?: string
   end_date?: string
   timezone?: 'UTC' | 'Asia/Shanghai'
@@ -159,12 +167,16 @@ export interface DailyPnL {
   strategy_id: string | null
   symbol: string | null
   timezone: 'UTC' | 'Asia/Shanghai'
+  campaign_count: number
+  fill_count: number
   trade_count: number
   realized_trade_count: number
   gross_realized_pnl: string
   total_commission: string
   commission_asset: string | null
   net_pnl: string | null
+  funding_fee: string | null
+  net_pnl_scope: string
 }
 
 export interface PerformanceSummary {
@@ -267,6 +279,30 @@ export interface CampaignPnL {
   closed_at: string | null
   released_at: string | null
   lifecycle_duration_ms: number | null
+}
+
+export interface CampaignSummary {
+  account_id: string
+  strategy_id: string
+  symbol: string
+  campaign_id: string
+  side: string | null
+  fill_count: number
+  sell_quantity: string
+  buy_quantity: string
+  total_commission: string | null
+  commission_asset: string | null
+  gross_realized_pnl: string
+  net_realized_pnl: string | null
+  first_fill_at: string
+  last_fill_at: string
+  closed_at: string | null
+  has_open_quantity: boolean
+  pnl_facts_complete: boolean
+}
+
+export interface CampaignPage extends Page<CampaignSummary> {
+  unattributed_fills: number
 }
 
 export interface ExchangeSymbol {
@@ -383,6 +419,7 @@ export interface UniversePreview {
   total_symbols: number
   effective_symbols: number
   excluded_symbols: number
+  total: number
   items: UniversePreviewItem[]
   limit: number
   offset: number

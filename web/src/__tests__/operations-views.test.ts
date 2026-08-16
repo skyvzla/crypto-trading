@@ -3,10 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { router } from '@/router'
 import { operationsApi } from '@/api/operations'
 import OverviewView from '@/views/OverviewView.vue'
+import CalendarView from '@/views/CalendarView.vue'
 import CategoryManagementView from '@/views/CategoryManagementView.vue'
 import PerformanceView from '@/views/PerformanceView.vue'
 import TradeReviewView from '@/views/TradeReviewView.vue'
 import StrategyRiskView from '@/views/StrategyRiskView.vue'
+import UniverseView from '@/views/UniverseView.vue'
 
 beforeEach(async () => {
   vi.restoreAllMocks()
@@ -82,53 +84,167 @@ describe('operations views', () => {
     }))
     expect(wrapper.text()).toContain('BTCUSDT')
     expect(wrapper.text()).toContain('按权威账本维度分组')
+    expect(wrapper.text()).toContain('净 PnL 仅扣 USDT 手续费；资金费不可用')
   })
 
   it('trade review sends calendar drill-down dates to the backend', async () => {
-    await router.push('/trades?account_id=acct&date=2026-08-01')
-    const trades = vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 })
+    await router.push('/trades?account_id=acct&date=2026-08-01&page=3&page_size=50')
+    const campaigns = vi.spyOn(operationsApi, 'campaigns').mockResolvedValue({ items: [], total: 200, limit: 50, offset: 100, unattributed_fills: 0 })
 
     mount(TradeReviewView)
     await flushPromises()
 
-    expect(trades).toHaveBeenCalledWith(expect.objectContaining({
-      account_id: 'acct', start_date: '2026-08-01', end_date: '2026-08-01', timezone: 'Asia/Shanghai'
+    expect(campaigns).toHaveBeenCalledWith(expect.objectContaining({
+      account_id: 'acct', start_date: '2026-08-01', end_date: '2026-08-01', timezone: 'Asia/Shanghai', limit: 50, offset: 100
     }))
   })
 
-  it('loads unclassified symbols from the backend and marks a failed sync', async () => {
-    vi.spyOn(operationsApi, 'categories').mockResolvedValue([
-      { category_key: 'cat', source: 'binance', category_type: 'CATEGORY', code: 'cat', name: 'Category', parent_key: null, active: true, synced_at: '2026-08-16T00:00:00Z', symbol_count: 1 }
-    ])
-    vi.spyOn(operationsApi, 'symbolSyncStatus').mockResolvedValue({ initialized: true, status: 'FAILED', last_attempt_at: '2026-08-16T00:00:00Z', last_success_at: '2026-08-15T00:00:00Z', synced_symbols: 1, last_error: 'sync failed', stale: true, effective_universe_ready: false, max_age_hours: 24 })
-    const exchangeSymbols = vi.spyOn(operationsApi, 'exchangeSymbols').mockResolvedValue({
-      items: [{ symbol: 'ORPHANUSDT', pair: 'ORPHANUSDT', contract_type: 'PERPETUAL', status: 'TRADING', onboard_date: null, delivery_date: null, base_asset: 'ORPHAN', quote_asset: 'USDT', margin_asset: 'USDT', underlying_type: null, active: true, synced_at: '2026-08-16T00:00:00Z', global_enabled: true, global_admission_version: 0 }],
+  it('does not subtract non-USDT commission from realized PnL', async () => {
+    await router.push('/trades?account_id=acct')
+    vi.spyOn(operationsApi, 'campaigns').mockResolvedValue({
+      items: [{ account_id: 'acct', strategy_id: 's', symbol: 'BTCUSDT', campaign_id: 'campaign', side: 'SHORT', fill_count: 2, sell_quantity: '1', buy_quantity: '1', total_commission: '0.1', commission_asset: 'BNB', gross_realized_pnl: '10', net_realized_pnl: null, first_fill_at: '2026-08-01T00:00:00Z', last_fill_at: '2026-08-01T00:01:00Z', closed_at: '2026-08-01T00:01:00Z', has_open_quantity: false, pnl_facts_complete: false }],
       total: 1,
-      limit: 1000,
-      offset: 0
+      limit: 50,
+      offset: 0,
+      unattributed_fills: 0
     })
+
+    const wrapper = mount(TradeReviewView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('不可用')
+    expect(wrapper.text()).toContain('0.10 BNB')
+    expect(wrapper.text()).not.toContain('9.90')
+  })
+
+  it('does not display an aggregate for mixed commission assets', async () => {
+    await router.push('/trades?account_id=acct')
+    vi.spyOn(operationsApi, 'campaigns').mockResolvedValue({
+      items: [{ account_id: 'acct', strategy_id: 's', symbol: 'BTCUSDT', campaign_id: 'mixed-fees', side: 'SHORT', fill_count: 2, sell_quantity: '1', buy_quantity: '1', total_commission: null, commission_asset: null, gross_realized_pnl: '10', net_realized_pnl: null, first_fill_at: '2026-08-01T00:00:00Z', last_fill_at: '2026-08-01T00:01:00Z', closed_at: '2026-08-01T00:01:00Z', has_open_quantity: false, pnl_facts_complete: false }],
+      total: 1,
+      limit: 50,
+      offset: 0,
+      unattributed_fills: 0
+    })
+
+    const wrapper = mount(TradeReviewView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('— 资产不一致')
+    expect(wrapper.text()).not.toContain('0.11')
+  })
+
+  it('marks open campaign PnL as a provisional realized amount', async () => {
+    await router.push('/trades?account_id=acct')
+    vi.spyOn(operationsApi, 'campaigns').mockResolvedValue({
+      items: [{ account_id: 'acct', strategy_id: 's', symbol: 'BTCUSDT', campaign_id: 'open', side: 'SHORT', fill_count: 2, sell_quantity: '2', buy_quantity: '1', total_commission: '0.2', commission_asset: 'USDT', gross_realized_pnl: '5', net_realized_pnl: null, first_fill_at: '2026-08-01T00:00:00Z', last_fill_at: '2026-08-01T00:01:00Z', closed_at: null, has_open_quantity: true, pnl_facts_complete: false }],
+      total: 1,
+      limit: 50,
+      offset: 0,
+      unattributed_fills: 0
+    })
+    vi.spyOn(operationsApi, 'campaignPnl').mockResolvedValue({
+      account_id: 'acct', strategy_id: 's', symbol: 'BTCUSDT', campaign_id: 'open', trade_count: 2,
+      sell_quantity: '2', sell_avg_price: '100', buy_quantity: '1', buy_avg_price: '95',
+      total_commission: '0.2', commission_asset: 'USDT', gross_realized_pnl: '5', net_realized_pnl: '4.8',
+      remaining_quantity: '1', has_open_quantity: true, acquired_at: null,
+      first_fill_at: '2026-08-01T00:00:00Z', last_fill_at: '2026-08-01T00:01:00Z', closed_at: null,
+      released_at: null, lifecycle_duration_ms: null
+    })
+    vi.spyOn(operationsApi, 'strategyAuditEvents').mockResolvedValue({ items: [], total: 0, limit: 200, offset: 0 })
+    vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 })
+
+    const wrapper = mount(TradeReviewView, { attachTo: document.body })
+    await flushPromises()
+    await wrapper.get('.campaign-button').trigger('click')
+    await flushPromises()
+
+    expect(document.body.textContent).toContain('当前净已实现 PnL')
+    expect(document.body.textContent).toContain('仍有敞口')
+    expect(document.body.textContent).toContain('不是最终轮次收益')
+    wrapper.unmount()
+  })
+
+  it('renders campaign close-day counts from the daily PnL API', async () => {
+    await router.push('/calendar?account_id=acct&month=2026-08')
+    vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([{
+      date: '2026-08-01', account_id: 'acct', strategy_id: null, symbol: null, timezone: 'Asia/Shanghai', campaign_count: 2, fill_count: 5, trade_count: 5, realized_trade_count: 2, gross_realized_pnl: '10.2', total_commission: '0.2', commission_asset: 'USDT', net_pnl: '10', funding_fee: null, net_pnl_scope: 'realized PnL minus USDT commission; funding fee facts unavailable'
+    }])
+
+    const wrapper = mount(CalendarView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('闭合 Campaign')
+    expect(wrapper.text()).toContain('2 Campaign · 5 fills')
+    expect(wrapper.text()).toContain('closed_at 上海自然日')
+  })
+
+  it('loads unclassified symbols from the backend and marks a failed sync', async () => {
+    vi.spyOn(operationsApi, 'categoriesPage').mockResolvedValue({
+      items: [{ category_key: 'cat', source: 'binance', category_type: 'CATEGORY', code: 'cat', name: 'Category', parent_key: null, active: true, synced_at: '2026-08-16T00:00:00Z', symbol_count: 1 }],
+      total: 1, limit: 1000, offset: 0
+    })
+    vi.spyOn(operationsApi, 'symbolSyncStatus').mockResolvedValue({ initialized: true, status: 'FAILED', last_attempt_at: '2026-08-16T00:00:00Z', last_success_at: '2026-08-15T00:00:00Z', synced_symbols: 1, last_error: 'sync failed', stale: true, effective_universe_ready: false, max_age_hours: 24 })
+    const exchangeSymbols = vi.spyOn(operationsApi, 'exchangeSymbols').mockImplementation(async (query) => ({
+      items: [{ symbol: query?.offset ? 'PAGE2USDT' : 'ORPHANUSDT', pair: 'ORPHANUSDT', contract_type: 'PERPETUAL', status: 'TRADING', onboard_date: null, delivery_date: null, base_asset: 'ORPHAN', quote_asset: 'USDT', margin_asset: 'USDT', underlying_type: null, active: true, synced_at: '2026-08-16T00:00:00Z', global_enabled: true, global_admission_version: 0 }],
+      total: 51,
+      limit: query?.limit ?? 50,
+      offset: query?.offset ?? 0
+    }))
 
     const wrapper = mount(CategoryManagementView)
     await flushPromises()
 
     expect(wrapper.find('.status-strip').classes()).toContain('error')
+    const expandButton = wrapper.get('button.expand-control')
+    expect(expandButton.attributes('aria-expanded')).toBe('true')
+    expect(wrapper.find('.expand-control[role="button"]').exists()).toBe(false)
+    await expandButton.trigger('click')
+    expect(expandButton.attributes('aria-expanded')).toBe('false')
+
     const button = wrapper.findAll('button').find((item) => item.text().includes('未分类交易对'))
     expect(button).toBeDefined()
     await button!.trigger('click')
     await flushPromises()
 
-    expect(exchangeSymbols).toHaveBeenCalledWith({ unclassified: true, limit: 1000 })
+    expect(exchangeSymbols).toHaveBeenCalledWith({ unclassified: true, limit: 50, offset: 0 })
     expect(wrapper.text()).toContain('ORPHANUSDT')
     expect(wrapper.text()).toContain('NO ACTIVE CATEGORY ASSOCIATION')
+    expect(router.currentRoute.value.query.unclassified).toBe('true')
+
+    await wrapper.get('.ant-pagination-item-2').trigger('click')
+    await flushPromises()
+    expect(exchangeSymbols).toHaveBeenLastCalledWith({ unclassified: true, limit: 50, offset: 50 })
+    expect(wrapper.text()).toContain('PAGE2USDT')
+    expect(router.currentRoute.value.query.detail_page).toBe('2')
+  })
+
+  it('loads every exchange-symbol page before applying local filters', async () => {
+    await router.push('/universe?status=TRADING')
+    const symbol = (name: string) => ({ symbol: name, pair: name, contract_type: 'PERPETUAL', status: 'TRADING', onboard_date: null, delivery_date: null, base_asset: name, quote_asset: 'USDT', margin_asset: 'USDT', underlying_type: null, active: true, synced_at: '2026-08-16T00:00:00Z', global_enabled: true, global_admission_version: 0 })
+    const exchangeSymbols = vi.spyOn(operationsApi, 'exchangeSymbols')
+      .mockResolvedValueOnce({ items: [symbol('AUSDT')], total: 2, limit: 1000, offset: 0 })
+      .mockResolvedValueOnce({ items: [symbol('BUSDT')], total: 2, limit: 1000, offset: 1 })
+    vi.spyOn(operationsApi, 'categoriesPage').mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 })
+    vi.spyOn(operationsApi, 'symbolSyncStatus').mockResolvedValue({ initialized: true, status: 'SUCCESS', last_attempt_at: null, last_success_at: '2026-08-16T00:00:00Z', synced_symbols: 2, last_error: null, stale: false, effective_universe_ready: true, max_age_hours: 24 })
+
+    const wrapper = mount(UniverseView)
+    await flushPromises()
+
+    expect(exchangeSymbols).toHaveBeenNthCalledWith(1, { limit: 1000, offset: 0 })
+    expect(exchangeSymbols).toHaveBeenNthCalledWith(2, { limit: 1000, offset: 1 })
+    expect(wrapper.text()).toContain('2 / 2 · 已逐页完整载入')
   })
 
   it('strategy risk renders effective-universe reasons from the backend response', async () => {
     vi.spyOn(operationsApi, 'runtimeStatus').mockResolvedValue({
       items: [{ account_id: 'acct', strategy_id: 'spike-short', instance_id: 'i', mode: 'testnet', status: 'running', effective_status: 'running', entry_enabled: true, halted: false, halt_reason: null, gate_conditions: {}, started_at: '2026-08-16T00:00:00Z', heartbeat_at: '2026-08-16T00:00:00Z', stopped_at: null }], total: 1, limit: 1000, offset: 0
     })
-    vi.spyOn(operationsApi, 'categories').mockResolvedValue([{ category_key: 'cat', source: 'binance', category_type: 'CATEGORY', code: 'cat', name: 'Category', parent_key: null, active: true, synced_at: '2026-08-16T00:00:00Z', symbol_count: 1 }])
-    vi.spyOn(operationsApi, 'strategyAdmissions').mockResolvedValue([])
-    vi.spyOn(operationsApi, 'universePreview').mockResolvedValue({ strategy_id: 'spike-short', freeze_days: 15, total_symbols: 1, effective_symbols: 1, excluded_symbols: 0, items: [{ symbol: 'BTCUSDT', effective: true, exclusion_reasons: [], blocked_category_keys: [] }], limit: 1000, offset: 0 })
+    vi.spyOn(operationsApi, 'categoriesPage').mockResolvedValue({ items: [{ category_key: 'cat', source: 'binance', category_type: 'CATEGORY', code: 'cat', name: 'Category', parent_key: null, active: true, synced_at: '2026-08-16T00:00:00Z', symbol_count: 1 }], total: 1, limit: 1000, offset: 0 })
+    vi.spyOn(operationsApi, 'strategyAdmissionsPage').mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 })
+    const universePreview = vi.spyOn(operationsApi, 'universePreview')
+      .mockResolvedValueOnce({ strategy_id: 'spike-short', freeze_days: 15, total_symbols: 2, effective_symbols: 2, excluded_symbols: 0, total: 2, items: [{ symbol: 'BTCUSDT', effective: true, exclusion_reasons: [], blocked_category_keys: [] }], limit: 1000, offset: 0 })
+      .mockResolvedValueOnce({ strategy_id: 'spike-short', freeze_days: 15, total_symbols: 2, effective_symbols: 2, excluded_symbols: 0, total: 2, items: [{ symbol: 'ETHUSDT', effective: true, exclusion_reasons: [], blocked_category_keys: [] }], limit: 1000, offset: 1 })
     vi.spyOn(operationsApi, 'strategyAdmissionAudits').mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
 
     const wrapper = mount(StrategyRiskView)
@@ -136,6 +252,8 @@ describe('operations views', () => {
 
     expect(wrapper.text()).toContain('最终有效交易池')
     expect(wrapper.text()).toContain('BTCUSDT')
+    expect(wrapper.text()).toContain('ETHUSDT')
     expect(wrapper.text()).toContain('通过交易所、全局与策略分类门禁')
+    expect(universePreview).toHaveBeenNthCalledWith(2, 'spike-short', expect.objectContaining({ limit: 1000, offset: 1 }))
   })
 })

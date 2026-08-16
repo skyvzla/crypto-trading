@@ -25,8 +25,8 @@ class FakeLedger:
         return [
             DailyPnLFact(
                 day=date(2026, 8, 1),
-                trade_count=3,
-                realized_trade_count=1,
+                campaign_count=1,
+                fill_count=3,
                 gross_realized_pnl=Decimal("12.5"),
                 total_commission=Decimal("0.5"),
                 commission_asset="USDT",
@@ -123,7 +123,7 @@ def client(ledger):
 
 
 @pytest.mark.asyncio
-async def test_daily_pnl_defaults_to_asia_shanghai_calendar(client, ledger):
+async def test_daily_campaign_pnl_defaults_to_asia_shanghai_calendar(client, ledger):
     async with client as http:
         response = await http.get(
             "/api/v1/pnl/daily",
@@ -141,12 +141,18 @@ async def test_daily_pnl_defaults_to_asia_shanghai_calendar(client, ledger):
             "strategy_id": None,
             "symbol": None,
             "timezone": "Asia/Shanghai",
+            "campaign_count": 1,
+            "fill_count": 3,
             "trade_count": 3,
-            "realized_trade_count": 1,
+            "realized_trade_count": 3,
             "gross_realized_pnl": "12.5",
             "total_commission": "0.5",
             "commission_asset": "USDT",
             "net_pnl": "12.0",
+            "funding_fee": None,
+            "net_pnl_scope": (
+                "realized PnL minus USDT commission; funding fee facts unavailable"
+            ),
         }
     ]
     assert ledger.daily_kwargs["start_at"] == datetime(

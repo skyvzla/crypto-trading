@@ -27,10 +27,12 @@ const refreshedAt = ref<string | null>(null)
 const startDate = computed(() => `${year.value}-${String(month.value).padStart(2, '0')}-01`)
 const endDate = computed(() => `${year.value}-${String(month.value).padStart(2, '0')}-${String(new Date(year.value, month.value, 0).getDate()).padStart(2, '0')}`)
 const monthKey = computed(() => `${year.value}-${String(month.value).padStart(2, '0')}`)
-const monthNet = computed(() => rows.value.reduce((sum, item) => sum + asNumber(item.net_pnl), 0))
+const monthNetAvailable = computed(() => rows.value.every((item) => item.net_pnl != null))
+const monthNet = computed(() => monthNetAvailable.value ? rows.value.reduce((sum, item) => sum + asNumber(item.net_pnl), 0) : null)
 const wins = computed(() => rows.value.filter((item) => asNumber(item.net_pnl) > 0).length)
 const losses = computed(() => rows.value.filter((item) => asNumber(item.net_pnl) < 0).length)
-const realizedFillCount = computed(() => rows.value.reduce((sum, item) => sum + item.realized_trade_count, 0))
+const campaignCount = computed(() => rows.value.reduce((sum, item) => sum + item.campaign_count, 0))
+const fillCount = computed(() => rows.value.reduce((sum, item) => sum + item.fill_count, 0))
 const filtersQuery = computed(() => ({
   ...(filters.value.account_id.trim() ? { account_id: filters.value.account_id.trim() } : {}),
   ...(filters.value.strategy_id.trim() ? { strategy_id: filters.value.strategy_id.trim() } : {}),
@@ -78,12 +80,12 @@ onMounted(load)
     <template v-else>
       <div class="calendar-toolbar"><a-button aria-label="上个月" @click="moveMonth(-1)"><template #icon><ChevronLeft :size="15" /></template></a-button><strong>{{ year }} 年 {{ month }} 月</strong><a-button aria-label="下个月" @click="moveMonth(1)"><template #icon><ChevronRight :size="15" /></template></a-button><span><Clock3 :size="13" /> 日界线 Asia/Shanghai</span></div>
       <section class="metric-grid calendar-metrics">
-        <MetricTile label="本月累计净 PnL" :value="formatMoney(monthNet)" :tone="monthNet >= 0 ? 'positive' : 'negative'" hint="按日净额求和" />
+        <MetricTile label="本月累计净 PnL" :value="formatMoney(monthNet)" :tone="monthNet == null ? 'warning' : monthNet >= 0 ? 'positive' : 'negative'" :hint="monthNet == null ? '存在无法统一计价的日期' : '按闭合 Campaign 日净额求和'" />
         <MetricTile label="盈利日" :value="String(wins)" tone="positive" hint="净 PnL > 0" />
         <MetricTile label="亏损日" :value="String(losses)" tone="negative" hint="净 PnL < 0" />
-        <MetricTile label="已实现 fills" :value="String(realizedFillCount)" hint="有 realized_pnl 的账本成交" />
+        <MetricTile label="闭合 Campaign" :value="String(campaignCount)" :hint="`${fillCount} 笔关联 fills`" />
       </section>
-      <div class="status-strip"><Clock3 :size="13" /><span>当前接口按账本 fills 汇总 <strong>{{ startDate }} → {{ endDate }}</strong>，净额仅扣账本手续费；资金费、closed Campaign 数、stale 与完整覆盖字段暂不可用。</span></div>
+      <div class="status-strip"><Clock3 :size="13" /><span>完整且已闭合的 Campaign 按 <strong>closed_at 上海自然日</strong>归属 {{ startDate }} → {{ endDate }}；净额仅扣同币种 USDT 手续费，资金费尚无权威事实。</span></div>
       <DataState :loading="loading" :error="error" @retry="load">
         <section class="data-card full-calendar"><PnlCalendar :year="year" :month="month" :rows="rows" @day="openDay" /><div v-if="!rows.length" class="calendar-empty">本月没有已实现收益记录；点击任意日期仍可进入成交复盘。</div></section>
       </DataState>
