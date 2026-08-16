@@ -315,14 +315,14 @@ class DailyPnLResponse(BaseModel):
 
 
 class PerformanceResponse(BaseModel):
-    """Campaign-level performance within the requested UTC close-date window."""
+    """Campaign-level performance within the requested close-date window."""
 
     account_id: str
     strategy_id: Optional[str] = None
     symbol: Optional[str] = None
     start_date: date
     end_date: date
-    timezone: str = "UTC"
+    timezone: str = "Asia/Shanghai"
     total_trades: int
     total_fills: int
     win_count: int
@@ -343,7 +343,7 @@ class PerformanceResponse(BaseModel):
     unattributed_fills: int
     metric_scope: str = (
         "closed campaigns with complete USDT PnL facts; "
-        "closed_at within the requested UTC date range"
+        "closed_at within the requested calendar date range"
     )
 
 
@@ -385,6 +385,7 @@ class PerformanceBreakdownResponse(BaseModel):
     side: Optional[str] = None
     start_date: date
     end_date: date
+    timezone: str = "Asia/Shanghai"
     group_by: PerformanceDimension
     dimension_available: bool
     dimension_note: Optional[str] = None
@@ -392,7 +393,7 @@ class PerformanceBreakdownResponse(BaseModel):
     items: list[PerformanceBreakdownItem]
     metric_scope: str = (
         "closed campaigns with complete USDT PnL facts; "
-        "closed_at within the requested UTC date range"
+        "closed_at within the requested calendar date range"
     )
 
 
@@ -708,11 +709,16 @@ async def get_performance(
     account_id: str = Query(min_length=1, max_length=32),
     strategy_id: Optional[str] = Query(None, max_length=64),
     symbol: Optional[str] = Query(None, max_length=32),
-    start_date: date = Query(..., description="inclusive UTC close date"),
-    end_date: date = Query(..., description="inclusive UTC close date"),
+    start_date: date = Query(..., description="inclusive close date"),
+    end_date: date = Query(..., description="inclusive close date"),
+    timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
+        "Asia/Shanghai", alias="timezone", description="close date timezone"
+    ),
     db: LedgerDB = Depends(get_db),
 ) -> PerformanceResponse:
-    start_at, end_at = _utc_bounds(start_date, end_date)
+    start_at, end_at = _date_bounds_in_timezone(
+        start_date, end_date, timezone_name
+    )
     facts = await db.list_performance_campaign_facts(
         account_id=account_id,
         strategy_id=strategy_id,
@@ -734,6 +740,7 @@ async def get_performance(
         symbol=symbol,
         start_date=start_date,
         end_date=end_date,
+        timezone=timezone_name,
         unattributed_fills=unattributed,
         **values,
     )
@@ -751,12 +758,17 @@ async def get_performance_breakdown(
     subcategory_key: Optional[str] = Query(None, max_length=256),
     side: Optional[Literal["LONG", "SHORT"]] = Query(None),
     exit_reason: Optional[str] = Query(None, max_length=128),
-    start_date: date = Query(..., description="inclusive UTC close date"),
-    end_date: date = Query(..., description="inclusive UTC close date"),
+    start_date: date = Query(..., description="inclusive close date"),
+    end_date: date = Query(..., description="inclusive close date"),
+    timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
+        "Asia/Shanghai", alias="timezone", description="close date timezone"
+    ),
     group_by: PerformanceDimension = Query("symbol"),
     db: LedgerDB = Depends(get_db),
 ) -> PerformanceBreakdownResponse:
-    start_at, end_at = _utc_bounds(start_date, end_date)
+    start_at, end_at = _date_bounds_in_timezone(
+        start_date, end_date, timezone_name
+    )
     available_dimensions = ["symbol", "category", "subcategory", "side"]
     if group_by == "exit_reason" or exit_reason is not None:
         return PerformanceBreakdownResponse(
@@ -768,6 +780,7 @@ async def get_performance_breakdown(
             side=side,
             start_date=start_date,
             end_date=end_date,
+            timezone=timezone_name,
             group_by=group_by,
             dimension_available=False,
             dimension_note=(
@@ -799,6 +812,7 @@ async def get_performance_breakdown(
         side=side,
         start_date=start_date,
         end_date=end_date,
+        timezone=timezone_name,
         group_by=group_by,
         dimension_available=True,
         available_dimensions=available_dimensions,

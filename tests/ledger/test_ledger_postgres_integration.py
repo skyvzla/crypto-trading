@@ -256,6 +256,7 @@ async def test_daily_pnl_timezone_boundaries_and_campaign_performance(
     assert performance["excluded_campaigns"] == 1
     assert performance["win_count"] == 1
     assert performance["loss_count"] == 1
+    assert performance["timezone"] == "Asia/Shanghai"
     assert Decimal(performance["net_pnl"]) == Decimal("1.6")
 
 
@@ -408,6 +409,7 @@ async def test_performance_breakdown_uses_complete_campaigns_and_synced_dimensio
         (side_rows, "SHORT"),
     ):
         assert payload["dimension_available"] is True
+        assert payload["timezone"] == "Asia/Shanghai"
         assert len(payload["items"]) == 1
         item = payload["items"][0]
         assert item["dimension_key"] == key
