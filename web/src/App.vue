@@ -190,6 +190,7 @@ onMounted(() => {
 .header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: #b38732; font: 9px "IBM Plex Mono", monospace; font-style: normal; letter-spacing: 0; }
 .theme-toggle { color: var(--text); }
 .workspace {
+  --workspace-content-max-width: none;
   flex: 1;
   min-height: 0;
   padding: 20px 24px 32px;

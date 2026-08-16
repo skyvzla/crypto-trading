@@ -15,10 +15,19 @@ from trading_platform.ledger.db.models import (
 
 class FakeLedger:
     def __init__(self):
+        self.accounts_kwargs = None
         self.daily_kwargs = None
         self.performance_kwargs = None
         self.unattributed_kwargs = None
         self.breakdown_kwargs = None
+
+    async def list_accounts(self, **kwargs):
+        self.accounts_kwargs = kwargs
+        accounts = ["account-a", "account-b"]
+        return accounts[kwargs["offset"] : kwargs["offset"] + kwargs["limit"]]
+
+    async def count_accounts(self):
+        return 2
 
     async def list_daily_realized_pnl(self, **_kwargs):
         self.daily_kwargs = _kwargs
@@ -162,6 +171,34 @@ async def test_daily_campaign_pnl_defaults_to_asia_shanghai_calendar(client, led
         2026, 8, 31, 16, tzinfo=timezone.utc
     )
     assert ledger.daily_kwargs["timezone_name"] == "Asia/Shanghai"
+
+
+@pytest.mark.asyncio
+async def test_daily_campaign_pnl_aggregates_all_accounts_when_unset(client, ledger):
+    async with client as http:
+        response = await http.get(
+            "/api/v1/pnl/daily",
+            params={"start_date": "2026-08-01", "end_date": "2026-08-31"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()[0]["account_id"] is None
+    assert ledger.daily_kwargs["account_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_accounts_are_paginated_for_account_selectors(client, ledger):
+    async with client as http:
+        response = await http.get("/api/v1/accounts", params={"limit": 1, "offset": 1})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [{"account_id": "account-b"}],
+        "total": 2,
+        "limit": 1,
+        "offset": 1,
+    }
+    assert ledger.accounts_kwargs == {"limit": 1, "offset": 1}
 
 
 @pytest.mark.asyncio

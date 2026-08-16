@@ -496,6 +496,69 @@ async def test_daily_pnl_timezone_boundaries_and_campaign_performance(
 
 
 @pytest.mark.asyncio
+async def test_daily_pnl_aggregates_all_accounts_and_lists_account_ids(ledger, client):
+    suffix = uuid4().hex[:10]
+    accounts = [f"all-one-{suffix}", f"all-two-{suffix}"]
+    moment = datetime(
+        2200 + int(suffix[:2], 16),
+        1 + int(suffix[2:4], 16) % 12,
+        1 + int(suffix[4:6], 16) % 28,
+        8,
+        tzinfo=timezone.utc,
+    )
+    close_date = moment.date().isoformat()
+
+    for account, realized_pnl in zip(accounts, (Decimal("3"), Decimal("4"))):
+        campaign_id = f"all-{account}"
+        for index, (side, realized) in enumerate(
+            (("SELL", realized_pnl), ("BUY", Decimal("0"))), start=1
+        ):
+            assert await ledger.insert_trade(
+                Trade(
+                    account_id=account,
+                    strategy_id="all-accounts",
+                    symbol="ALLUSDT",
+                    trade_id=f"{campaign_id}-{index}",
+                    order_id=f"{campaign_id}-order-{index}",
+                    client_order_id=f"{campaign_id}-client-{index}",
+                    campaign_id=campaign_id,
+                    side=side,
+                    quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    quote_quantity=Decimal("100"),
+                    commission=Decimal("0.1"),
+                    commission_asset="USDT",
+                    realized_pnl=realized,
+                    is_maker=False,
+                    exchange_time=moment + timedelta(minutes=index),
+                )
+            ) > 0
+
+    response = await client.get(
+        "/api/v1/pnl/daily",
+        params={"start_date": close_date, "end_date": close_date},
+    )
+    assert response.status_code == 200
+    aggregate = response.json()
+    assert len(aggregate) == 1
+    assert aggregate[0]["date"] == close_date
+    assert aggregate[0]["account_id"] is None
+    assert aggregate[0]["campaign_count"] == 2
+    assert aggregate[0]["fill_count"] == 4
+    assert Decimal(aggregate[0]["gross_realized_pnl"]) == Decimal("7")
+    assert Decimal(aggregate[0]["total_commission"]) == Decimal("0.4")
+    assert Decimal(aggregate[0]["net_pnl"]) == Decimal("6.6")
+    assert aggregate[0]["commission_asset"] == "USDT"
+
+    account_page = await client.get("/api/v1/accounts", params={"limit": 1000})
+    assert account_page.status_code == 200
+    account_ids = [item["account_id"] for item in account_page.json()["items"]]
+    assert account_ids == sorted(account_ids)
+    assert set(accounts).issubset(account_ids)
+    assert len(account_ids) == len(set(account_ids))
+
+
+@pytest.mark.asyncio
 async def test_campaign_list_requires_balanced_close_and_compatible_fee_asset(
     ledger, client
 ):

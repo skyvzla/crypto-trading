@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { Search, X } from 'lucide-vue-next'
+import { operationsApi } from '@/api/operations'
+import { collectPageItems } from '@/features/operations/pagination'
 
 export interface OperationFilters {
   account_id: string
@@ -32,6 +34,25 @@ const filters = computed({
   set: (value) => emit('update:modelValue', value)
 })
 
+const accountsLoading = ref(false)
+const accounts = ref<string[]>([])
+const accountOptions = computed(() => [
+  ...(props.accountRequired ? [] : [{ label: '全部账户', value: '' }]),
+  ...accounts.value.map((accountId) => ({ label: accountId, value: accountId }))
+])
+
+async function loadAccounts() {
+  accountsLoading.value = true
+  try {
+    const page = await collectPageItems((params) => operationsApi.accounts(params))
+    accounts.value = page.items.map((item) => item.account_id)
+  } catch {
+    // The current view remains usable with its existing selection if discovery fails.
+  } finally {
+    accountsLoading.value = false
+  }
+}
+
 function update(key: keyof OperationFilters, value: string) {
   filters.value = { ...filters.value, [key]: value }
 }
@@ -41,18 +62,22 @@ function reset() {
   emit('update:status', '')
   emit('apply')
 }
+
+onMounted(() => { void loadAccounts() })
 </script>
 
 <template>
   <div class="filter-ledger">
     <label>
       <span>账户{{ accountRequired ? ' *' : '' }}</span>
-      <a-input
+      <a-select
         :value="filters.account_id"
         allow-clear
-        placeholder="account_id"
+        show-search
+        :loading="accountsLoading"
+        :options="accountOptions"
+        :placeholder="accountRequired ? '选择账户 ID' : '全部账户'"
         @update:value="update('account_id', String($event ?? ''))"
-        @keyup.enter="$emit('apply')"
       />
     </label>
     <label>

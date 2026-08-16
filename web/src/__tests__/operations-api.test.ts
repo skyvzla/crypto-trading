@@ -52,6 +52,28 @@ describe('operationsApi', () => {
     expect(requestedUrl().searchParams.get('timezone')).toBe('UTC')
   })
 
+  it('omits account_id to request the all-account daily aggregate', async () => {
+    mockJson([])
+
+    await operationsApi.dailyPnl({
+      start_date: '2026-08-01',
+      end_date: '2026-08-01'
+    })
+
+    expect(requestedUrl().searchParams.has('account_id')).toBe(false)
+  })
+
+  it('loads paginated account choices from the dedicated directory route', async () => {
+    mockJson({ items: [], total: 0, limit: 100, offset: 0 })
+
+    await operationsApi.accounts({ limit: 100, offset: 0 })
+
+    expect(requestedUrl().pathname).toBe('/api/v1/accounts')
+    expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
+      limit: '100', offset: '0'
+    })
+  })
+
   it('passes campaign-level performance filters without inventing defaults', async () => {
     mockJson({ total_trades: 0 })
 

@@ -99,6 +99,10 @@ class PositionResponse(BaseModel):
     updated_at: datetime
 
 
+class AccountResponse(BaseModel):
+    account_id: str
+
+
 class Page(BaseModel):
     items: list[Any]
     total: int
@@ -303,7 +307,7 @@ class DailyPnLResponse(BaseModel):
     """Named-timezone close-day PnL for complete Campaigns."""
 
     date: date
-    account_id: str
+    account_id: Optional[str] = None
     strategy_id: Optional[str] = None
     symbol: Optional[str] = None
     timezone: str
@@ -567,6 +571,22 @@ async def get_positions(
     )
 
 
+@router.get("/accounts", response_model=Page)
+async def get_accounts(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    items = await db.list_accounts(limit=limit, offset=offset)
+    total = await db.count_accounts()
+    return Page(
+        items=[AccountResponse(account_id=account_id) for account_id in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/pnl", response_model=PnLResponse)
 async def get_pnl(
     account_id: str,
@@ -613,7 +633,7 @@ def _date_bounds_in_timezone(
 
 @router.get("/pnl/daily", response_model=list[DailyPnLResponse])
 async def get_daily_pnl(
-    account_id: str = Query(min_length=1, max_length=32),
+    account_id: Optional[str] = Query(None, min_length=1, max_length=32),
     start_date: date = Query(..., description="inclusive calendar date"),
     end_date: date = Query(..., description="inclusive calendar date"),
     timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(

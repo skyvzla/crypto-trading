@@ -40,11 +40,18 @@ const filtersQuery = computed(() => ({
 }))
 
 async function load() {
-  if (!filters.value.account_id.trim()) { rows.value = []; error.value = null; return }
   loading.value = true
   error.value = null
   try {
-    rows.value = await operationsApi.dailyPnl({ account_id: filters.value.account_id.trim(), strategy_id: filtersQuery.value.strategy_id, symbol: filtersQuery.value.symbol, start_date: startDate.value, end_date: endDate.value, timezone: 'Asia/Shanghai' })
+    const accountId = filters.value.account_id.trim()
+    rows.value = await operationsApi.dailyPnl({
+      ...(accountId ? { account_id: accountId } : {}),
+      strategy_id: filtersQuery.value.strategy_id,
+      symbol: filtersQuery.value.symbol,
+      start_date: startDate.value,
+      end_date: endDate.value,
+      timezone: 'Asia/Shanghai'
+    })
     refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : '收益日历加载失败'
@@ -75,21 +82,18 @@ onMounted(load)
     <PageHeader eyebrow="OPERATIONS / DAILY PNL" title="收益日历" description="按 Asia/Shanghai 自然日查看已实现净收益；收益为空与接口异常明确区分。" :loading="loading" :refreshed-at="refreshedAt" @refresh="load">
       <template #actions><a-button @click="router.push({ path: '/overview', query: filtersQuery })">返回运行总览</a-button></template>
     </PageHeader>
-    <FilterBar v-model="filters" account-required @apply="syncAndLoad" />
-    <a-alert v-if="!filters.account_id.trim()" type="info" show-icon message="请输入账户 ID 后读取收益日历" description="不同账户的收益不会在前端混算。" />
-    <template v-else>
-      <div class="calendar-toolbar"><a-button aria-label="上个月" @click="moveMonth(-1)"><template #icon><ChevronLeft :size="15" /></template></a-button><strong>{{ year }} 年 {{ month }} 月</strong><a-button aria-label="下个月" @click="moveMonth(1)"><template #icon><ChevronRight :size="15" /></template></a-button><span><Clock3 :size="13" /> 日界线 Asia/Shanghai</span></div>
-      <section class="metric-grid calendar-metrics">
-        <MetricTile label="本月累计净 PnL" :value="formatMoney(monthNet)" :tone="monthNet == null ? 'warning' : monthNet >= 0 ? 'positive' : 'negative'" :hint="monthNet == null ? '存在无法统一计价的日期' : '按闭合 Campaign 日净额求和'" />
-        <MetricTile label="盈利日" :value="String(wins)" tone="positive" hint="净 PnL > 0" />
-        <MetricTile label="亏损日" :value="String(losses)" tone="negative" hint="净 PnL < 0" />
-        <MetricTile label="闭合 Campaign" :value="String(campaignCount)" :hint="`${fillCount} 笔关联 fills`" />
-      </section>
-      <div class="status-strip"><Clock3 :size="13" /><span>完整且已闭合的 Campaign 按 <strong>closed_at 上海自然日</strong>归属 {{ startDate }} → {{ endDate }}；净额仅扣同币种 USDT 手续费，资金费尚无权威事实。</span></div>
-      <DataState :loading="loading" :error="error" @retry="load">
-        <section class="data-card full-calendar"><PnlCalendar :year="year" :month="month" :rows="rows" @day="openDay" /><div v-if="!rows.length" class="calendar-empty">本月没有已实现收益记录；点击任意日期仍可进入成交复盘。</div></section>
-      </DataState>
-    </template>
+    <FilterBar v-model="filters" @apply="syncAndLoad" />
+    <div class="calendar-toolbar"><a-button aria-label="上个月" @click="moveMonth(-1)"><template #icon><ChevronLeft :size="15" /></template></a-button><strong>{{ year }} 年 {{ month }} 月</strong><a-button aria-label="下个月" @click="moveMonth(1)"><template #icon><ChevronRight :size="15" /></template></a-button><span><Clock3 :size="13" /> 日界线 Asia/Shanghai</span></div>
+    <section class="metric-grid calendar-metrics">
+      <MetricTile label="本月累计净 PnL" :value="formatMoney(monthNet)" :tone="monthNet == null ? 'warning' : monthNet >= 0 ? 'positive' : 'negative'" :hint="monthNet == null ? '存在无法统一计价的日期' : '按闭合 Campaign 日净额求和'" />
+      <MetricTile label="盈利日" :value="String(wins)" tone="positive" hint="净 PnL > 0" />
+      <MetricTile label="亏损日" :value="String(losses)" tone="negative" hint="净 PnL < 0" />
+      <MetricTile label="闭合 Campaign" :value="String(campaignCount)" :hint="`${fillCount} 笔关联 fills`" />
+    </section>
+    <div class="status-strip"><Clock3 :size="13" /><span>完整且已闭合的 Campaign 按 <strong>closed_at 上海自然日</strong>归属 {{ startDate }} → {{ endDate }}；账户为空时由服务端汇总全部账户，净额仅扣同币种 USDT 手续费，资金费尚无权威事实。</span></div>
+    <DataState :loading="loading" :error="error" @retry="load">
+      <section class="data-card full-calendar"><PnlCalendar :year="year" :month="month" :rows="rows" @day="openDay" /><div v-if="!rows.length" class="calendar-empty">本月没有已实现收益记录；点击任意日期仍可进入成交复盘。</div></section>
+    </DataState>
   </main>
 </template>
 

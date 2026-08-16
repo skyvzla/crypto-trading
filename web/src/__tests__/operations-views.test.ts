@@ -12,6 +12,9 @@ import UniverseView from '@/views/UniverseView.vue'
 
 beforeEach(async () => {
   vi.restoreAllMocks()
+  vi.spyOn(operationsApi, 'accounts').mockResolvedValue({
+    items: [], total: 0, limit: 1000, offset: 0
+  })
   await router.push('/overview')
   await router.isReady()
 })
@@ -165,10 +168,10 @@ describe('operations views', () => {
     wrapper.unmount()
   })
 
-  it('renders campaign close-day counts from the daily PnL API', async () => {
-    await router.push('/calendar?account_id=acct&month=2026-08')
-    vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([{
-      date: '2026-08-01', account_id: 'acct', strategy_id: null, symbol: null, timezone: 'Asia/Shanghai', campaign_count: 2, fill_count: 5, trade_count: 5, realized_trade_count: 2, gross_realized_pnl: '10.2', total_commission: '0.2', commission_asset: 'USDT', net_pnl: '10', funding_fee: null, net_pnl_scope: 'realized PnL minus USDT commission; funding fee facts unavailable'
+  it('defaults the calendar to the all-account aggregate and renders close-day counts', async () => {
+    await router.push('/calendar?month=2026-08')
+    const dailyPnl = vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([{
+      date: '2026-08-01', account_id: null, strategy_id: null, symbol: null, timezone: 'Asia/Shanghai', campaign_count: 2, fill_count: 5, trade_count: 5, realized_trade_count: 2, gross_realized_pnl: '10.2', total_commission: '0.2', commission_asset: 'USDT', net_pnl: '10', funding_fee: null, net_pnl_scope: 'realized PnL minus USDT commission; funding fee facts unavailable'
     }])
 
     const wrapper = mount(CalendarView)
@@ -177,6 +180,7 @@ describe('operations views', () => {
     expect(wrapper.text()).toContain('闭合 Campaign')
     expect(wrapper.text()).toContain('2 Campaign · 5 fills')
     expect(wrapper.text()).toContain('closed_at 上海自然日')
+    expect(dailyPnl.mock.calls[0][0]).not.toHaveProperty('account_id')
   })
 
   it('loads unclassified symbols from the backend and marks a failed sync', async () => {

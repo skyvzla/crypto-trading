@@ -1056,6 +1056,49 @@ class LedgerDB:
     async def count_positions(self, **filters: object) -> int:
         return await self._count("positions", nonzero=True, **filters)
 
+    async def list_accounts(self, *, limit: int, offset: int) -> list[str]:
+        """Return every account represented by persisted ledger facts."""
+        query = """
+            SELECT account_id
+            FROM (
+                SELECT account_id FROM orders
+                UNION
+                SELECT account_id FROM trades
+                UNION
+                SELECT account_id FROM positions
+                UNION
+                SELECT account_id FROM strategy_audit_events
+                UNION
+                SELECT account_id FROM strategy_runtime_status
+            ) AS accounts
+            ORDER BY account_id
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+        async with self.pool.connection() as conn:
+            rows = await (
+                await conn.execute(query, {"limit": limit, "offset": offset})
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    async def count_accounts(self) -> int:
+        query = """
+            SELECT COUNT(*)
+            FROM (
+                SELECT account_id FROM orders
+                UNION
+                SELECT account_id FROM trades
+                UNION
+                SELECT account_id FROM positions
+                UNION
+                SELECT account_id FROM strategy_audit_events
+                UNION
+                SELECT account_id FROM strategy_runtime_status
+            ) AS accounts
+        """
+        async with self.pool.connection() as conn:
+            row = await (await conn.execute(query)).fetchone()
+        return int(row[0])
+
     async def get_pnl_summary(
         self,
         account_id: str,
@@ -1101,7 +1144,7 @@ class LedgerDB:
     async def list_daily_realized_pnl(
         self,
         *,
-        account_id: str,
+        account_id: Optional[str],
         start_at: datetime,
         end_at: datetime,
         timezone_name: str = "Asia/Shanghai",

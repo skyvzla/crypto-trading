@@ -60,10 +60,13 @@ export interface PnLQuery extends LedgerFilters {
 }
 
 export interface DailyPnLQuery extends LedgerFilters {
-  account_id: string
   start_date: string
   end_date: string
   timezone?: 'UTC' | 'Asia/Shanghai'
+}
+
+export interface LedgerAccount {
+  account_id: string
 }
 
 export interface PerformanceQuery extends LedgerFilters {
@@ -163,7 +166,7 @@ export interface PnLSummary {
 
 export interface DailyPnL {
   date: string
-  account_id: string
+  account_id: string | null
   strategy_id: string | null
   symbol: string | null
   timezone: 'UTC' | 'Asia/Shanghai'

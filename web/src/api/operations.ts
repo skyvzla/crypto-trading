@@ -11,6 +11,7 @@ import type {
   ExchangeSymbolQuery,
   ExchangeSymbolSyncStatus,
   Health,
+  LedgerAccount,
   LedgerOrder,
   LedgerPosition,
   LedgerTrade,
@@ -59,6 +60,9 @@ export const operationsApi = {
 
   runtimeStatus: (query: RuntimeStatusQuery = {}) =>
     api.get<Page<StrategyRuntimeStatus>>('/strategy-runtime-status', { ...query }),
+
+  accounts: (query: PageParams = {}) =>
+    api.get<Page<LedgerAccount>>('/accounts', { ...query }),
 
   pnl: (query: PnLQuery) => api.get<PnLSummary>('/pnl', { ...query }),
 
