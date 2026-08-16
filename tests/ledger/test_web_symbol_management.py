@@ -9,6 +9,7 @@ from trading_platform.ledger.db.models import (
     ExchangeCategoryOverview,
     ExchangeSymbolOverview,
     ExchangeSymbolSyncState,
+    StrategyCategoryAdmission,
     SymbolUniverseDecision,
 )
 
@@ -39,6 +40,17 @@ def _symbol() -> ExchangeSymbolOverview:
 class FakeLedger:
     def __init__(self):
         self.preview_kwargs = None
+        self.symbol_kwargs = None
+
+    async def list_exchange_symbols(
+        self, limit, offset, *, unclassified=False
+    ):
+        self.symbol_kwargs = {
+            "limit": limit,
+            "offset": offset,
+            "unclassified": unclassified,
+        }
+        return [_symbol()], 1
 
     async def list_exchange_categories(self, **_kwargs):
         return [
@@ -96,6 +108,26 @@ class FakeLedger:
             12,
         )
 
+    async def set_strategy_category_admission(
+        self,
+        strategy_id,
+        category_key,
+        enabled,
+        expected_version,
+        updated_by,
+        reason,
+    ):
+        assert expected_version == 0
+        return StrategyCategoryAdmission(
+            strategy_id=strategy_id,
+            category_key=category_key,
+            enabled=enabled,
+            version=1,
+            updated_at=MOMENT,
+            updated_by=updated_by,
+            reason=reason,
+        )
+
 
 @pytest.fixture
 def ledger():
@@ -131,6 +163,23 @@ async def test_category_nodes_include_count_and_symbols_are_paged(client):
     assert symbols.json()["offset"] == 2
     assert symbols.json()["items"][0]["symbol"] == "BTCUSDT"
     assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_exchange_symbols_supports_unclassified_filter(client, ledger):
+    async with client as http:
+        response = await http.get(
+            "/api/v1/exchange-symbols",
+            params={"unclassified": True, "limit": 20, "offset": 3},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["symbol"] == "BTCUSDT"
+    assert ledger.symbol_kwargs == {
+        "limit": 20,
+        "offset": 3,
+        "unclassified": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -193,3 +242,27 @@ async def test_strategy_preview_returns_backend_exclusion_reasons(
         "limit": 25,
         "offset": 5,
     }
+
+
+@pytest.mark.asyncio
+async def test_strategy_category_admission_accepts_256_character_key(client):
+    category_key = "x" * 256
+    request = {
+        "enabled": False,
+        "expected_version": 0,
+        "updated_by": "tester",
+        "reason": "boundary",
+    }
+    async with client as http:
+        accepted = await http.put(
+            f"/api/v1/strategy-category-admissions/spike_short/{category_key}",
+            json=request,
+        )
+        rejected = await http.put(
+            "/api/v1/strategy-category-admissions/spike_short/" + "x" * 257,
+            json=request,
+        )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["category_key"] == category_key
+    assert rejected.status_code == 422

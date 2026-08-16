@@ -260,6 +260,177 @@ async def test_daily_pnl_timezone_boundaries_and_campaign_performance(
 
 
 @pytest.mark.asyncio
+async def test_performance_breakdown_uses_complete_campaigns_and_synced_dimensions(
+    ledger, client
+):
+    suffix = uuid4().hex[:10].upper()
+    account = f"breakdown-{suffix}"
+    strategy = f"breakdown-{suffix.lower()}"
+    symbol = f"BD{suffix}USDT"
+    category_key = f"TEST:CATEGORY:{suffix}"
+    subcategory_key = f"TEST:SUBCATEGORY:{suffix}"
+
+    async with ledger.pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO exchange_symbols (
+                symbol, pair, contract_type, status, base_asset, quote_asset,
+                margin_asset, underlying_type, raw_metadata, active
+            ) VALUES (%s, %s, 'PERPETUAL', 'TRADING', %s, 'USDT', 'USDT',
+                'COIN', '{}'::jsonb, TRUE)
+            ON CONFLICT (symbol) DO NOTHING
+            """,
+            (symbol, symbol, symbol.removesuffix("USDT")),
+        )
+        await conn.execute(
+            """
+            INSERT INTO exchange_categories (
+                category_key, source, category_type, code, name, parent_key
+            ) VALUES (%s, 'TEST', 'CATEGORY', %s, %s, NULL),
+                     (%s, 'TEST', 'SUBCATEGORY', %s, %s, %s)
+            ON CONFLICT (category_key) DO NOTHING
+            """,
+            (
+                category_key,
+                suffix,
+                f"Category {suffix}",
+                subcategory_key,
+                suffix,
+                f"Subcategory {suffix}",
+                category_key,
+            ),
+        )
+        await conn.execute(
+            """
+            INSERT INTO exchange_symbol_categories (symbol, category_key, active)
+            VALUES (%s, %s, TRUE), (%s, %s, TRUE)
+            ON CONFLICT (symbol, category_key) DO UPDATE SET active = TRUE
+            """,
+            (symbol, category_key, symbol, subcategory_key),
+        )
+        await conn.commit()
+
+    campaigns = {
+        "cross-boundary": (
+            ("SELL", "6", datetime(2026, 8, 2, 23, tzinfo=timezone.utc)),
+            ("BUY", "0", datetime(2026, 8, 3, 1, tzinfo=timezone.utc)),
+        ),
+        "loss": (
+            ("SELL", "-4", datetime(2026, 8, 3, 2, tzinfo=timezone.utc)),
+            ("BUY", "0", datetime(2026, 8, 3, 3, tzinfo=timezone.utc)),
+        ),
+        "open": (("SELL", "3", datetime(2026, 8, 3, 4, tzinfo=timezone.utc)),),
+    }
+    for campaign_id, fills in campaigns.items():
+        for index, (fill_side, realized, moment) in enumerate(fills, start=1):
+            assert await ledger.insert_trade(
+                Trade(
+                    account_id=account,
+                    strategy_id=strategy,
+                    symbol=symbol,
+                    trade_id=f"{campaign_id}-{index}",
+                    order_id=f"{campaign_id}-order-{index}",
+                    client_order_id=f"{campaign_id}-client-{index}",
+                    campaign_id=campaign_id,
+                    side=fill_side,
+                    quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    quote_quantity=Decimal("100"),
+                    commission=Decimal("0.1"),
+                    commission_asset="USDT",
+                    realized_pnl=Decimal(realized),
+                    is_maker=False,
+                    exchange_time=moment,
+                )
+            ) > 0
+
+    # Same symbol/strategy in another account must never enter this account's
+    # performance aggregate, even when the Campaign and time window match.
+    for index, (fill_side, realized) in enumerate(
+        (("SELL", "100"), ("BUY", "0")), start=1
+    ):
+        assert await ledger.insert_trade(
+            Trade(
+                account_id=f"other-{suffix}",
+                strategy_id=strategy,
+                symbol=symbol,
+                trade_id=f"other-account-{index}",
+                order_id=f"other-account-order-{index}",
+                client_order_id=f"other-account-client-{index}",
+                campaign_id="other-account-campaign",
+                side=fill_side,
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                quote_quantity=Decimal("100"),
+                commission=Decimal("0.1"),
+                commission_asset="USDT",
+                realized_pnl=Decimal(realized),
+                is_maker=False,
+                exchange_time=datetime(2026, 8, 3, 5 + index, tzinfo=timezone.utc),
+            )
+        ) > 0
+
+    base_params = {
+        "account_id": account,
+        "strategy_id": strategy,
+        "start_date": "2026-08-03",
+        "end_date": "2026-08-03",
+    }
+    symbol_rows = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={**base_params, "group_by": "symbol"},
+        )
+    ).json()
+    category_rows = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={**base_params, "group_by": "category"},
+        )
+    ).json()
+    subcategory_rows = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={**base_params, "group_by": "subcategory"},
+        )
+    ).json()
+    side_rows = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={**base_params, "group_by": "side"},
+        )
+    ).json()
+
+    for payload, key in (
+        (symbol_rows, symbol),
+        (category_rows, category_key),
+        (subcategory_rows, subcategory_key),
+        (side_rows, "SHORT"),
+    ):
+        assert payload["dimension_available"] is True
+        assert len(payload["items"]) == 1
+        item = payload["items"][0]
+        assert item["dimension_key"] == key
+        assert item["total_trades"] == 2
+        assert item["candidate_campaigns"] == 3
+        assert item["excluded_campaigns"] == 1
+        assert Decimal(item["net_pnl"]) == Decimal("1.6")
+
+    filtered = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={
+                **base_params,
+                "group_by": "symbol",
+                "subcategory_key": subcategory_key,
+                "side": "SHORT",
+            },
+        )
+    ).json()
+    assert filtered["items"][0]["dimension_key"] == symbol
+
+
+@pytest.mark.asyncio
 async def test_strategy_audit_batch_is_atomic_idempotent_and_queryable(ledger, client):
     suffix = uuid4().hex[:10]
     account = f"a-{suffix}"
@@ -1197,6 +1368,34 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     assert any(
         item["symbol"] == symbol for item in symbols_response.json()["items"]
     )
+    unclassified_symbols_response = await client.get(
+        "/api/v1/exchange-symbols",
+        params={"unclassified": True, "limit": 1000},
+    )
+    assert unclassified_symbols_response.status_code == 200
+    unclassified_symbols = {
+        item["symbol"]
+        for item in unclassified_symbols_response.json()["items"]
+    }
+    # HFTUSDT has no Binance underlyingType and therefore no active assignment;
+    # the synchronized symbol with Category/Subcategory must not leak into it.
+    assert "HFTUSDT" in unclassified_symbols
+    assert symbol not in unclassified_symbols
+    async with ledger.pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO exchange_symbol_categories "
+            "(symbol, category_key, active) VALUES (%s, %s, FALSE) "
+            "ON CONFLICT (symbol, category_key) DO UPDATE SET active = FALSE",
+            ("HFTUSDT", category_by_code["COIN"].category_key),
+        )
+        await conn.commit()
+    inactive_assignment_response = await client.get(
+        "/api/v1/exchange-symbols",
+        params={"unclassified": True, "limit": 1000},
+    )
+    assert "HFTUSDT" in {
+        item["symbol"] for item in inactive_assignment_response.json()["items"]
+    }
     categories_response = await client.get("/api/v1/exchange-categories")
     assert categories_response.status_code == 200
     assert any(item["code"] == subtype for item in categories_response.json())

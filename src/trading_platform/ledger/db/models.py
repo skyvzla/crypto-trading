@@ -304,6 +304,18 @@ class PerformanceCampaignFact:
     first_fill_at: datetime
     last_fill_at: datetime
     closed_at: Optional[datetime]
+    # Derived only from the authoritative fill quantities.  This is a
+    # position direction (LONG/SHORT), not a guessed BUY/SELL label.
+    side: Optional[str] = None
+
+
+@dataclass
+class PerformanceCampaignDimension:
+    """A complete Campaign fact paired with one authoritative dimension."""
+
+    campaign: PerformanceCampaignFact
+    dimension_key: Optional[str]
+    dimension_label: Optional[str]
 
 
 @dataclass
@@ -1084,10 +1096,10 @@ class LedgerDB:
         self,
         *,
         account_id: str,
+        start_at: datetime,
+        end_at: datetime,
         strategy_id: Optional[str] = None,
         symbol: Optional[str] = None,
-        start_at: Optional[datetime] = None,
-        end_at: Optional[datetime] = None,
     ) -> list[PerformanceCampaignFact]:
         """Group complete-candidate fills by Campaign for performance analysis.
 
@@ -1097,20 +1109,22 @@ class LedgerDB:
         campaign into a false winner.  The API subsequently includes only
         campaigns whose close timestamp is inside the requested range.
         """
-        filter_parts = ["t.account_id = %(account_id)s"]
-        params: dict[str, object] = {"account_id": account_id}
+        filter_parts = [
+            "t.account_id = %(account_id)s",
+            "t.exchange_time >= %(start_at)s",
+            "t.exchange_time < %(end_at)s",
+        ]
+        params: dict[str, object] = {
+            "account_id": account_id,
+            "start_at": start_at,
+            "end_at": end_at,
+        }
         if strategy_id is not None:
             filter_parts.append("t.strategy_id = %(strategy_id)s")
             params["strategy_id"] = strategy_id
         if symbol is not None:
             filter_parts.append("t.symbol = %(symbol)s")
             params["symbol"] = symbol
-        if start_at is not None:
-            filter_parts.append("t.exchange_time >= %(start_at)s")
-            params["start_at"] = start_at
-        if end_at is not None:
-            filter_parts.append("t.exchange_time < %(end_at)s")
-            params["end_at"] = end_at
         selection_where = " AND ".join(filter_parts)
 
         all_filters = ["t.account_id = %(account_id)s"]
@@ -1141,7 +1155,16 @@ class LedgerDB:
                 COUNT(DISTINCT t.symbol)::INTEGER AS unique_symbols,
                 MIN(t.exchange_time) AS first_fill_at,
                 MAX(t.exchange_time) AS last_fill_at,
-                MAX(t.exchange_time) FILTER (WHERE t.side = 'BUY') AS closed_at
+                MAX(t.exchange_time) FILTER (WHERE t.side = 'BUY') AS closed_at,
+                CASE
+                    WHEN COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'SELL'), 0)
+                        >= COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'BUY'), 0)
+                        THEN 'SHORT'
+                    WHEN COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'BUY'), 0)
+                        > COALESCE(SUM(t.quantity) FILTER (WHERE t.side = 'SELL'), 0)
+                        THEN 'LONG'
+                    ELSE NULL
+                END AS side
             FROM trades AS t
             JOIN selected_campaigns AS selected
               ON selected.account_id = t.account_id
@@ -1156,33 +1179,155 @@ class LedgerDB:
             await cursor.execute(query, params)
             return await cursor.fetchall()
 
+    async def list_performance_campaign_dimensions(
+        self,
+        *,
+        account_id: str,
+        start_at: datetime,
+        end_at: datetime,
+        group_by: str,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        category_key: Optional[str] = None,
+        subcategory_key: Optional[str] = None,
+        side: Optional[str] = None,
+    ) -> list[PerformanceCampaignDimension]:
+        """Attach only database-backed dimensions to complete Campaign facts.
+
+        Category assignments are read from the synchronized taxonomy tables.
+        A symbol with no active assignment gets one ``None`` dimension so the
+        API can expose an explicit unclassified bucket.  ``exit_reason`` is
+        intentionally not handled here because ledger trades do not persist a
+        normalized exit reason.
+        """
+        if group_by not in {"symbol", "category", "subcategory", "side"}:
+            raise ValueError(f"unsupported performance dimension: {group_by}")
+        if side is not None and side not in {"LONG", "SHORT"}:
+            raise ValueError("side must be LONG or SHORT")
+
+        campaigns = await self.list_performance_campaign_facts(
+            account_id=account_id,
+            start_at=start_at,
+            end_at=end_at,
+            strategy_id=strategy_id,
+            symbol=symbol,
+        )
+        if not campaigns:
+            return []
+
+        assignments: dict[str, list[tuple[str, str, str]]] = {}
+        if group_by in {"category", "subcategory"} or category_key or subcategory_key:
+            symbols = sorted({fact.symbol for fact in campaigns})
+            async with self.pool.connection() as conn:
+                rows = await (
+                    await conn.execute(
+                        """
+                        SELECT assignment.symbol, category.category_key,
+                            category.category_type, category.name
+                        FROM exchange_symbol_categories AS assignment
+                        JOIN exchange_categories AS category
+                          ON category.category_key = assignment.category_key
+                        WHERE assignment.symbol = ANY(%s)
+                          AND assignment.active = TRUE
+                          AND category.active = TRUE
+                        ORDER BY assignment.symbol, category.category_type,
+                            category.category_key
+                        """,
+                        (symbols,),
+                    )
+                ).fetchall()
+            for assigned_symbol, key, category_type, name in rows:
+                assignments.setdefault(str(assigned_symbol), []).append(
+                    (str(key), str(category_type), str(name))
+                )
+
+        dimensions: list[PerformanceCampaignDimension] = []
+        for campaign in campaigns:
+            if side is not None and campaign.side != side:
+                continue
+            symbol_assignments = assignments.get(campaign.symbol, [])
+            if category_key is not None and not any(
+                key == category_key and category_type == "CATEGORY"
+                for key, category_type, _name in symbol_assignments
+            ):
+                continue
+            if subcategory_key is not None and not any(
+                key == subcategory_key and category_type == "SUBCATEGORY"
+                for key, category_type, _name in symbol_assignments
+            ):
+                continue
+
+            if group_by == "symbol":
+                dimensions.append(
+                    PerformanceCampaignDimension(
+                        campaign=campaign,
+                        dimension_key=campaign.symbol,
+                        dimension_label=campaign.symbol,
+                    )
+                )
+            elif group_by == "side":
+                dimensions.append(
+                    PerformanceCampaignDimension(
+                        campaign=campaign,
+                        dimension_key=campaign.side,
+                        dimension_label=campaign.side,
+                    )
+                )
+            else:
+                wanted_type = (
+                    "CATEGORY" if group_by == "category" else "SUBCATEGORY"
+                )
+                matching = [
+                    (key, name)
+                    for key, category_type, name in symbol_assignments
+                    if category_type == wanted_type
+                ]
+                if matching:
+                    dimensions.extend(
+                        PerformanceCampaignDimension(
+                            campaign=campaign,
+                            dimension_key=key,
+                            dimension_label=name,
+                        )
+                        for key, name in matching
+                    )
+                else:
+                    dimensions.append(
+                        PerformanceCampaignDimension(
+                            campaign=campaign,
+                            dimension_key=None,
+                            dimension_label=None,
+                        )
+                    )
+        return dimensions
+
     async def count_unattributed_trades(
         self,
         *,
         account_id: str,
+        start_at: datetime,
+        end_at: datetime,
         strategy_id: Optional[str] = None,
         symbol: Optional[str] = None,
-        start_at: Optional[datetime] = None,
-        end_at: Optional[datetime] = None,
     ) -> int:
         """Count fills that cannot participate in Campaign-level metrics."""
         parts = [
             "account_id = %(account_id)s",
             "campaign_id IS NULL",
+            "exchange_time >= %(start_at)s",
+            "exchange_time < %(end_at)s",
         ]
-        params: dict[str, object] = {"account_id": account_id}
+        params: dict[str, object] = {
+            "account_id": account_id,
+            "start_at": start_at,
+            "end_at": end_at,
+        }
         if strategy_id is not None:
             parts.append("strategy_id = %(strategy_id)s")
             params["strategy_id"] = strategy_id
         if symbol is not None:
             parts.append("symbol = %(symbol)s")
             params["symbol"] = symbol
-        if start_at is not None:
-            parts.append("exchange_time >= %(start_at)s")
-            params["start_at"] = start_at
-        if end_at is not None:
-            parts.append("exchange_time < %(end_at)s")
-            params["end_at"] = end_at
         async with self.pool.connection() as conn:
             row = await (
                 await conn.execute(
@@ -1664,25 +1809,47 @@ class LedgerDB:
             return await cursor.fetchone()
 
     async def list_exchange_symbols(
-        self, limit: int = 100, offset: int = 0
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        *,
+        unclassified: bool = False,
     ) -> tuple[list[ExchangeSymbolOverview], int]:
+        assignment_filter = ""
+        params: tuple[object, ...] = (limit, offset)
+        if unclassified:
+            assignment_filter = """
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM exchange_symbol_categories AS assignment
+                    WHERE assignment.symbol = symbol.symbol
+                      AND assignment.active = TRUE
+                )
+            """
         async with self.pool.connection() as conn:
             cursor = conn.cursor(row_factory=class_row(ExchangeSymbolOverview))
             await cursor.execute(
-                """
+                f"""
                 SELECT symbol.*,
                        COALESCE(control.enabled, TRUE) AS global_enabled,
                        COALESCE(control.version, 0) AS global_admission_version
                 FROM exchange_symbols AS symbol
                 LEFT JOIN symbol_global_admission AS control
                   ON control.symbol = symbol.symbol
+                {assignment_filter}
                 ORDER BY symbol.symbol LIMIT %s OFFSET %s
                 """,
-                (limit, offset),
+                params,
             )
             items = await cursor.fetchall()
             total = await (
-                await conn.execute("SELECT COUNT(*) FROM exchange_symbols")
+                await conn.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM exchange_symbols AS symbol
+                    {assignment_filter}
+                    """,
+                )
             ).fetchone()
         return items, int(total[0])
 

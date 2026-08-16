@@ -52,11 +52,11 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
     first = await apply_migrations(pool, schema=schema)
     second = await apply_migrations(pool, schema=schema)
 
-    assert first.current_version == 7
-    assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7)
-    assert second.current_version == 7
+    assert first.current_version == 8
+    assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8)
+    assert second.current_version == 8
     assert second.applied_versions == ()
-    assert await verify_current(pool, schema=schema) == 7
+    assert await verify_current(pool, schema=schema) == 8
 
 
 @pytest.mark.asyncio
@@ -90,7 +90,7 @@ async def test_existing_schema_is_adopted_without_losing_rows(migration_db):
                 ("existing",),
             )
         ).fetchone()
-    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7)
+    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8)
     assert count == (1,)
 
 
@@ -105,7 +105,7 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
 
     assert sorted((first.applied_versions, second.applied_versions)) == [
         (),
-        (1, 2, 3, 4, 5, 6, 7),
+        (1, 2, 3, 4, 5, 6, 7, 8),
     ]
     async with pool.connection() as conn:
         row = await (
@@ -116,7 +116,39 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
                 ).format(sql.Identifier(schema))
             )
         ).fetchone()
-    assert row == (7, 1, 7)
+    assert row == (8, 1, 8)
+
+
+@pytest.mark.asyncio
+async def test_web_performance_indexes_are_migrated(migration_db):
+    pool, schema = migration_db
+    await apply_migrations(pool, schema=schema)
+
+    async with pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname = %s AND indexname IN "
+                "('idx_trades_account_exchange_time', "
+                "'idx_trades_campaign_performance') ORDER BY indexname",
+                (schema,),
+            )
+        ).fetchall()
+
+    assert [row[0] for row in rows] == [
+        "idx_trades_account_exchange_time",
+        "idx_trades_campaign_performance",
+    ]
+    definitions = {name: definition for name, definition in rows}
+    assert "account_id, exchange_time DESC" in definitions[
+        "idx_trades_account_exchange_time"
+    ]
+    assert "account_id, strategy_id, symbol, exchange_time DESC" in definitions[
+        "idx_trades_campaign_performance"
+    ]
+    assert "WHERE (campaign_id IS NOT NULL)" in definitions[
+        "idx_trades_campaign_performance"
+    ]
 
 
 @pytest.mark.asyncio
