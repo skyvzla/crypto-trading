@@ -1,0 +1,148 @@
+import { api } from '@/api/client'
+import type {
+  AdmissionUpdate,
+  CampaignPnL,
+  DailyPnL,
+  DailyPnLQuery,
+  ExchangeCategory,
+  ExchangeSymbol,
+  ExchangeSymbolQuery,
+  ExchangeSymbolSyncStatus,
+  Health,
+  LedgerOrder,
+  LedgerPosition,
+  LedgerTrade,
+  OrderQuery,
+  Page,
+  PageParams,
+  PerformanceQuery,
+  PerformanceSummary,
+  PnLQuery,
+  PnLSummary,
+  PositionQuery,
+  RuntimeStatusQuery,
+  StrategyAuditEvent,
+  StrategyCategoryAdmission,
+  StrategyCategoryAdmissionAudit,
+  StrategyRuntimeStatus,
+  SymbolGlobalAdmission,
+  SymbolGlobalAdmissionAudit,
+  TradeQuery,
+  UniversePreview,
+  UniversePreviewQuery
+} from '@/api/types'
+
+const segment = (value: string) => encodeURIComponent(value)
+
+export interface StrategyAuditQuery extends PageParams {
+  account_id?: string
+  strategy_id?: string
+  symbol?: string
+  event_type?: string
+  campaign_id?: string
+}
+
+export interface StrategyAdmissionAuditQuery extends PageParams {
+  strategy_id?: string
+}
+
+export interface SymbolAdmissionAuditQuery extends PageParams {
+  symbol?: string
+}
+
+export const operationsApi = {
+  health: () => api.get<Health>('/health'),
+
+  runtimeStatus: (query: RuntimeStatusQuery = {}) =>
+    api.get<Page<StrategyRuntimeStatus>>('/strategy-runtime-status', { ...query }),
+
+  pnl: (query: PnLQuery) => api.get<PnLSummary>('/pnl', { ...query }),
+
+  dailyPnl: (query: DailyPnLQuery) =>
+    api.get<DailyPnL[]>('/pnl/daily', {
+      ...query,
+      timezone: query.timezone ?? 'Asia/Shanghai'
+    }),
+
+  performance: (query: PerformanceQuery) =>
+    api.get<PerformanceSummary>('/performance', { ...query }),
+
+  positions: (query: PositionQuery = {}) =>
+    api.get<Page<LedgerPosition>>('/positions', { ...query }),
+
+  orders: (query: OrderQuery = {}) =>
+    api.get<Page<LedgerOrder>>('/orders', { ...query }),
+
+  trades: (query: TradeQuery = {}) =>
+    api.get<Page<LedgerTrade>>('/trades', { ...query }),
+
+  campaignPnl: (
+    campaignId: string,
+    query: { account_id: string; strategy_id: string }
+  ) => api.get<CampaignPnL>(`/campaigns/${segment(campaignId)}/pnl`, query),
+
+  exchangeSymbols: (query: ExchangeSymbolQuery = {}) =>
+    api.get<Page<ExchangeSymbol>>('/exchange-symbols', { ...query }),
+
+  symbolCategories: (symbol: string) =>
+    api.get<ExchangeCategory[]>(`/exchange-symbols/${segment(symbol)}/categories`),
+
+  categories: (activeOnly = true) =>
+    api.get<ExchangeCategory[]>('/exchange-categories', { active_only: activeOnly }),
+
+  categorySymbols: (categoryKey: string, query: PageParams = {}) =>
+    api.get<Page<ExchangeSymbol>>(
+      `/exchange-categories/${segment(categoryKey)}/symbols`,
+      { ...query }
+    ),
+
+  symbolSyncStatus: () =>
+    api.get<ExchangeSymbolSyncStatus>('/exchange-symbol-sync/status'),
+
+  symbolAdmission: (symbol: string) =>
+    api.get<SymbolGlobalAdmission>(
+      `/exchange-symbols/${segment(symbol)}/admission`
+    ),
+
+  updateSymbolAdmission: (symbol: string, update: AdmissionUpdate) =>
+    api.put<SymbolGlobalAdmission>(
+      `/exchange-symbols/${segment(symbol)}/admission`,
+      update
+    ),
+
+  symbolAdmissionAudits: (query: SymbolAdmissionAuditQuery = {}) =>
+    api.get<Page<SymbolGlobalAdmissionAudit>>(
+      '/symbol-global-admission-audit',
+      { ...query }
+    ),
+
+  strategyAdmissions: (strategyId: string) =>
+    api.get<StrategyCategoryAdmission[]>(
+      `/strategy-category-admissions/${segment(strategyId)}`
+    ),
+
+  updateStrategyAdmission: (
+    strategyId: string,
+    categoryKey: string,
+    update: AdmissionUpdate
+  ) =>
+    api.put<StrategyCategoryAdmission>(
+      `/strategy-category-admissions/${segment(strategyId)}/${segment(categoryKey)}`,
+      update
+    ),
+
+  strategyAdmissionAudits: (query: StrategyAdmissionAuditQuery = {}) =>
+    api.get<Page<StrategyCategoryAdmissionAudit>>(
+      '/strategy-category-admission-audit',
+      { ...query }
+    ),
+
+  universePreview: (strategyId: string, query: UniversePreviewQuery = {}) =>
+    api.get<UniversePreview>(
+      `/strategy-category-admissions/${segment(strategyId)}/universe-preview`,
+      { ...query }
+    ),
+
+  strategyAuditEvents: (query: StrategyAuditQuery = {}) =>
+    api.get<Page<StrategyAuditEvent>>('/strategy-audit-events', { ...query })
+}

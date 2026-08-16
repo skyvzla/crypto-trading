@@ -12,6 +12,12 @@ describe('App navigation', () => {
 
     expect(wrapper.text()).toContain('回测复盘')
     expect(wrapper.text()).toContain('交易对管理')
+    expect(wrapper.text()).toContain('持仓与订单')
+    expect(wrapper.text()).toContain('成交复盘')
+    expect(wrapper.text()).toContain('绩效分析')
+    expect(wrapper.text()).toContain('策略风控')
+    expect(wrapper.text()).toContain('分类管理')
+    expect(wrapper.find('.side-menu').text()).not.toContain('收益日历')
     expect(wrapper.text()).not.toContain('=>')
     expect(wrapper.find('.app-header').exists()).toBe(true)
     expect(wrapper.find('.app-body').exists()).toBe(true)

@@ -1,8 +1,13 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router'
 
-// 骨架阶段所有视图都指向同一个占位组件；接口定稿后逐个替换 component。
-const Placeholder = () => import('@/views/PlaceholderView.vue')
+const Overview = () => import('@/views/OverviewView.vue')
+const Calendar = () => import('@/views/CalendarView.vue')
+const PositionsOrders = () => import('@/views/PositionsOrdersView.vue')
+const TradeReview = () => import('@/views/TradeReviewView.vue')
+const Performance = () => import('@/views/PerformanceView.vue')
 const Universe = () => import('@/views/UniverseView.vue')
+const Categories = () => import('@/views/CategoryManagementView.vue')
+const StrategyRisk = () => import('@/views/StrategyRiskView.vue')
 const BacktestResearchList = () => import('@/views/backtests/BacktestResearchListView.vue')
 const BacktestReportCatalog = () => import('@/views/backtests/BacktestReportCatalogView.vue')
 const BacktestReportDetail = () => import('@/views/backtests/BacktestReportDetailView.vue')
@@ -16,38 +21,32 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/overview',
     name: 'overview',
-    component: Placeholder,
-    meta: { title: '运行总览', ready: false }
+    component: Overview,
+    meta: { title: '运行总览', ready: true }
   },
   {
     path: '/calendar',
     name: 'calendar',
-    component: Placeholder,
-    meta: { title: '收益日历', ready: false, needsApi: 'PnL 时序聚合端点' }
+    component: Calendar,
+    meta: { title: '收益日历', ready: true }
   },
   {
     path: '/positions',
     name: 'positions',
-    component: Placeholder,
-    meta: { title: '持仓', ready: false }
+    component: PositionsOrders,
+    meta: { title: '持仓与订单', ready: true }
   },
   {
     path: '/trades',
     name: 'trades',
-    component: Placeholder,
-    meta: { title: '成交与买卖点', ready: false }
+    component: TradeReview,
+    meta: { title: '成交复盘', ready: true }
   },
   {
-    path: '/stats',
-    name: 'stats',
-    component: Placeholder,
-    meta: { title: '胜率与盈亏比', ready: false }
-  },
-  {
-    path: '/symbols',
-    name: 'symbols',
-    component: Placeholder,
-    meta: { title: '交易对统计', ready: false, needsApi: '按交易对聚合端点' }
+    path: '/performance',
+    name: 'performance',
+    component: Performance,
+    meta: { title: '绩效分析', ready: true }
   },
   {
     path: '/universe',
@@ -98,11 +97,20 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '单笔 K 线复盘', ready: true }
   },
   {
-    path: '/admissions',
-    name: 'admissions',
-    component: Placeholder,
-    meta: { title: 'Subcategory 管理', ready: false }
+    path: '/strategy-risk',
+    name: 'strategy-risk',
+    component: StrategyRisk,
+    meta: { title: '策略风控', ready: true }
   },
+  {
+    path: '/categories',
+    name: 'categories',
+    component: Categories,
+    meta: { title: '分类管理', ready: true }
+  },
+  { path: '/stats', name: 'stats', redirect: '/performance' },
+  { path: '/symbols', name: 'symbols', redirect: '/performance' },
+  { path: '/admissions', name: 'admissions', redirect: '/categories' },
   { path: '/:pathMatch(.*)*', redirect: '/overview' }
 ]
 
