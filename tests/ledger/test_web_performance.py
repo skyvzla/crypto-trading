@@ -18,6 +18,7 @@ class FakeLedger:
         self.daily_kwargs = None
         self.performance_kwargs = None
         self.unattributed_kwargs = None
+        self.breakdown_kwargs = None
 
     async def list_daily_realized_pnl(self, **_kwargs):
         self.daily_kwargs = _kwargs
@@ -95,6 +96,7 @@ class FakeLedger:
         return 4
 
     async def list_performance_campaign_dimensions(self, **_kwargs):
+        self.breakdown_kwargs = _kwargs
         return [
             PerformanceCampaignDimension(
                 campaign=fact,
@@ -221,21 +223,22 @@ async def test_performance_metrics_exclude_open_campaigns(client, ledger):
     assert payload["end_date"] == "2026-08-01"
     assert payload["metric_scope"] == (
         "closed campaigns with complete USDT PnL facts; "
-        "closed_at within the requested UTC date range"
+        "closed_at within the requested calendar date range"
     )
+    assert payload["timezone"] == "Asia/Shanghai"
     expected_bounds = {
         "account_id": "a",
         "strategy_id": "s",
         "symbol": None,
-        "start_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
-        "end_at": datetime(2026, 8, 2, tzinfo=timezone.utc),
+        "start_at": datetime(2026, 7, 31, 16, tzinfo=timezone.utc),
+        "end_at": datetime(2026, 8, 1, 16, tzinfo=timezone.utc),
     }
     assert ledger.performance_kwargs == expected_bounds
     assert ledger.unattributed_kwargs == expected_bounds
 
 
 @pytest.mark.asyncio
-async def test_performance_requires_a_bounded_utc_date_range(client, ledger):
+async def test_performance_requires_a_bounded_timezone_date_range(client, ledger):
     async with client as http:
         missing = await http.get(
             "/api/v1/performance", params={"account_id": "a"}
@@ -275,6 +278,16 @@ async def test_performance_breakdown_is_campaign_level_and_exit_reason_is_explic
                 "group_by": "symbol",
             },
         )
+        utc_response = await http.get(
+            "/api/v1/performance/breakdown",
+            params={
+                "account_id": "a",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-01",
+                "timezone": "UTC",
+                "group_by": "symbol",
+            },
+        )
         exit_response = await http.get(
             "/api/v1/performance/breakdown",
             params={
@@ -300,6 +313,14 @@ async def test_performance_breakdown_is_campaign_level_and_exit_reason_is_explic
     ]
     assert payload["items"][0]["dimension_key"] == "BTCUSDT"
     assert payload["items"][0]["total_trades"] == 2
+    assert utc_response.status_code == 200
+    assert utc_response.json()["timezone"] == "UTC"
+    assert ledger.breakdown_kwargs["start_at"] == datetime(
+        2026, 8, 1, tzinfo=timezone.utc
+    )
+    assert ledger.breakdown_kwargs["end_at"] == datetime(
+        2026, 8, 2, tzinfo=timezone.utc
+    )
 
     assert exit_response.status_code == 200
     assert exit_response.json()["dimension_available"] is False

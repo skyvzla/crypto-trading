@@ -709,14 +709,16 @@ async def get_performance(
     account_id: str = Query(min_length=1, max_length=32),
     strategy_id: Optional[str] = Query(None, max_length=64),
     symbol: Optional[str] = Query(None, max_length=32),
-    start_date: date = Query(..., description="inclusive Campaign close date"),
-    end_date: date = Query(..., description="inclusive Campaign close date"),
+    start_date: date = Query(..., description="inclusive close date"),
+    end_date: date = Query(..., description="inclusive close date"),
     timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
-        "Asia/Shanghai", alias="timezone", description="Campaign close-date timezone"
+        "Asia/Shanghai", alias="timezone", description="close date timezone"
     ),
     db: LedgerDB = Depends(get_db),
 ) -> PerformanceResponse:
-    start_at, end_at = _date_bounds_in_timezone(start_date, end_date, timezone_name)
+    start_at, end_at = _date_bounds_in_timezone(
+        start_date, end_date, timezone_name
+    )
     facts = await db.list_performance_campaign_facts(
         account_id=account_id,
         strategy_id=strategy_id,
@@ -756,15 +758,17 @@ async def get_performance_breakdown(
     subcategory_key: Optional[str] = Query(None, max_length=256),
     side: Optional[Literal["LONG", "SHORT"]] = Query(None),
     exit_reason: Optional[str] = Query(None, max_length=128),
-    start_date: date = Query(..., description="inclusive Campaign close date"),
-    end_date: date = Query(..., description="inclusive Campaign close date"),
+    start_date: date = Query(..., description="inclusive close date"),
+    end_date: date = Query(..., description="inclusive close date"),
     timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
-        "Asia/Shanghai", alias="timezone", description="Campaign close-date timezone"
+        "Asia/Shanghai", alias="timezone", description="close date timezone"
     ),
     group_by: PerformanceDimension = Query("symbol"),
     db: LedgerDB = Depends(get_db),
 ) -> PerformanceBreakdownResponse:
-    start_at, end_at = _date_bounds_in_timezone(start_date, end_date, timezone_name)
+    start_at, end_at = _date_bounds_in_timezone(
+        start_date, end_date, timezone_name
+    )
     available_dimensions = ["symbol", "category", "subcategory", "side"]
     if group_by == "exit_reason" or exit_reason is not None:
         return PerformanceBreakdownResponse(
