@@ -15,7 +15,12 @@ from psycopg_pool import AsyncConnectionPool
 from trading_platform.shared.events import StrategyAuditEvent
 from trading_platform.shared.symbol_universe_query import (
     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
+    SYMBOL_UNIVERSE_EVALUATED_CTES_SQL,
+    SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
 )
+
+SUPPORTED_LEDGER_TIMEZONES = frozenset(("UTC", "Asia/Shanghai"))
+
 
 @dataclass
 class Order:
@@ -173,6 +178,36 @@ class ExchangeCategory:
 
 
 @dataclass
+class ExchangeCategoryOverview(ExchangeCategory):
+    symbol_count: int = 0
+
+
+@dataclass
+class ExchangeSymbolSyncState:
+    status: str
+    last_attempt_at: datetime
+    last_success_at: Optional[datetime]
+    synced_symbols: int
+    last_error: Optional[str]
+    stale: bool
+    effective_universe_ready: bool
+
+
+@dataclass
+class SymbolUniverseDecision:
+    symbol: str
+    sync_ready: bool
+    symbol_active: bool
+    perpetual_contract: bool
+    trading_status: bool
+    onboarded: bool
+    delivery_window_open: bool
+    global_enabled: bool
+    blocked_category_keys: list[str]
+    effective: bool
+
+
+@dataclass
 class SymbolGlobalAdmission:
     symbol: str
     enabled: bool
@@ -273,7 +308,7 @@ class PerformanceCampaignFact:
 
 @dataclass
 class DailyPnLFact:
-    """One UTC natural-day ledger aggregate."""
+    """One named-timezone natural-day ledger aggregate."""
 
     day: date
     trade_count: int
@@ -992,15 +1027,18 @@ class LedgerDB:
         account_id: str,
         start_at: datetime,
         end_at: datetime,
+        timezone_name: str = "Asia/Shanghai",
         strategy_id: Optional[str] = None,
         symbol: Optional[str] = None,
     ) -> list[DailyPnLFact]:
-        """Return realized ledger PnL grouped by UTC natural day.
+        """Return realized ledger PnL grouped by a named natural day.
 
         ``realized_pnl`` is summed with NULL treated as zero while every fill's
         commission is included.  This mirrors ``/pnl`` and prevents a fee on
         an entry fill from disappearing from the daily calendar.
         """
+        if timezone_name not in SUPPORTED_LEDGER_TIMEZONES:
+            raise ValueError("unsupported ledger timezone")
         parts = [
             "account_id = %(account_id)s",
             "exchange_time >= %(start_at)s",
@@ -1010,6 +1048,7 @@ class LedgerDB:
             "account_id": account_id,
             "start_at": start_at,
             "end_at": end_at,
+            "timezone_name": timezone_name,
         }
         if strategy_id is not None:
             parts.append("strategy_id = %(strategy_id)s")
@@ -1019,7 +1058,7 @@ class LedgerDB:
             params["symbol"] = symbol
         where = " AND ".join(parts)
         query = f"""
-            SELECT (exchange_time AT TIME ZONE 'UTC')::date AS day,
+            SELECT (exchange_time AT TIME ZONE %(timezone_name)s)::date AS day,
                 COUNT(*)::BIGINT AS trade_count,
                 COUNT(*) FILTER (WHERE realized_pnl IS NOT NULL)::BIGINT
                     AS realized_trade_count,
@@ -1033,7 +1072,7 @@ class LedgerDB:
                     ELSE NULL END AS net_pnl
             FROM trades
             WHERE {where}
-            GROUP BY (exchange_time AT TIME ZONE 'UTC')::date
+            GROUP BY (exchange_time AT TIME ZONE %(timezone_name)s)::date
             ORDER BY day
         """
         async with self.pool.connection() as conn:
@@ -1649,15 +1688,86 @@ class LedgerDB:
 
     async def list_exchange_categories(
         self, *, active_only: bool = True
-    ) -> list[ExchangeCategory]:
-        where = " WHERE active = TRUE" if active_only else ""
+    ) -> list[ExchangeCategoryOverview]:
+        where = "WHERE category.active = TRUE" if active_only else ""
         async with self.pool.connection() as conn:
-            cursor = conn.cursor(row_factory=class_row(ExchangeCategory))
+            cursor = conn.cursor(row_factory=class_row(ExchangeCategoryOverview))
             await cursor.execute(
-                "SELECT * FROM exchange_categories"
-                f"{where} ORDER BY category_type, parent_key NULLS FIRST, code"
+                f"""
+                SELECT category.*,
+                    COUNT(DISTINCT assignment.symbol) FILTER (
+                        WHERE assignment.active = TRUE
+                    )::BIGINT AS symbol_count
+                FROM exchange_categories AS category
+                LEFT JOIN exchange_symbol_categories AS assignment
+                  ON assignment.category_key = category.category_key
+                {where}
+                GROUP BY category.category_key
+                ORDER BY category.category_type,
+                    category.parent_key NULLS FIRST, category.code
+                """
             )
             return await cursor.fetchall()
+
+    async def list_exchange_category_symbols(
+        self,
+        category_key: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[ExchangeSymbolOverview], int]:
+        """Page active symbol assignments for one category without N+1 reads."""
+        normalized_category = category_key.strip()
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeSymbolOverview))
+            await cursor.execute(
+                """
+                SELECT symbol.*,
+                    COALESCE(control.enabled, TRUE) AS global_enabled,
+                    COALESCE(control.version, 0) AS global_admission_version
+                FROM exchange_symbol_categories AS assignment
+                JOIN exchange_symbols AS symbol
+                  ON symbol.symbol = assignment.symbol
+                LEFT JOIN symbol_global_admission AS control
+                  ON control.symbol = symbol.symbol
+                WHERE assignment.category_key = %s
+                  AND assignment.active = TRUE
+                ORDER BY symbol.symbol
+                LIMIT %s OFFSET %s
+                """,
+                (normalized_category, limit, offset),
+            )
+            items = await cursor.fetchall()
+            total = await (
+                await conn.execute(
+                    "SELECT COUNT(*) FROM exchange_symbol_categories "
+                    "WHERE category_key = %s AND active = TRUE",
+                    (normalized_category,),
+                )
+            ).fetchone()
+        return items, int(total[0])
+
+    async def get_exchange_symbol_sync_state(
+        self,
+    ) -> Optional[ExchangeSymbolSyncState]:
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExchangeSymbolSyncState))
+            await cursor.execute(
+                f"""
+                SELECT status, last_attempt_at, last_success_at,
+                    synced_symbols, last_error,
+                    last_success_at IS NULL OR last_success_at < NOW()
+                        - INTERVAL '{SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS} hours'
+                        AS stale,
+                    status = 'SUCCESS'
+                        AND last_success_at >= NOW()
+                            - INTERVAL '{SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS} hours'
+                        AS effective_universe_ready
+                FROM exchange_symbol_sync_state
+                WHERE singleton = TRUE
+                """
+            )
+            return await cursor.fetchone()
 
     async def get_exchange_category(
         self, category_key: str
@@ -1708,11 +1818,62 @@ class LedgerDB:
                     (
                         timedelta(days=freeze_days),
                         normalized_strategy,
-                        normalized_strategy,
                     ),
                 )
             ).fetchall()
         return [str(row[0]) for row in rows]
+
+    async def list_strategy_symbol_universe_preview(
+        self,
+        *,
+        strategy_id: str,
+        freeze_days: int = 15,
+        effective: Optional[bool] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[SymbolUniverseDecision], int, int]:
+        """Return the actual shared-universe decision and its exclusion facts."""
+        if freeze_days < 0:
+            raise ValueError("freeze_days must be non-negative")
+        normalized_strategy = strategy_id.strip()
+        if not normalized_strategy:
+            raise ValueError("strategy id is required")
+        base_params: list[object] = [
+            timedelta(days=freeze_days),
+            normalized_strategy,
+        ]
+        where = ""
+        page_params = list(base_params)
+        if effective is not None:
+            where = "WHERE effective = %s"
+            page_params.append(effective)
+        page_params.extend((limit, offset))
+        async with self.pool.connection() as conn:
+            summary = await (
+                await conn.execute(
+                    f"""
+                    WITH {SYMBOL_UNIVERSE_EVALUATED_CTES_SQL}
+                    SELECT COUNT(*)::BIGINT AS total_symbols,
+                        COUNT(*) FILTER (WHERE effective = TRUE)::BIGINT
+                            AS effective_symbols
+                    FROM evaluated_universe
+                    """,
+                    base_params,
+                )
+            ).fetchone()
+            cursor = conn.cursor(row_factory=class_row(SymbolUniverseDecision))
+            await cursor.execute(
+                f"""
+                WITH {SYMBOL_UNIVERSE_EVALUATED_CTES_SQL}
+                SELECT * FROM evaluated_universe
+                {where}
+                ORDER BY symbol
+                LIMIT %s OFFSET %s
+                """,
+                page_params,
+            )
+            items = await cursor.fetchall()
+        return items, int(summary[0]), int(summary[1])
 
     async def get_symbol_global_admission(
         self, symbol: str

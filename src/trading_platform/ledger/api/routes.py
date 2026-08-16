@@ -2,7 +2,8 @@
 
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,13 +12,18 @@ from trading_platform.ledger.db.models import (
     CampaignPnLFactsError,
     ExchangeCategory,
     ExchangeSymbol,
+    ExchangeSymbolSyncState,
     LedgerDB,
     PerformanceCampaignFact,
     StrategyCategoryAdmission,
     StrategyAuditRecord,
     SubcategoryAdmission,
     SymbolGlobalAdmission,
+    SymbolUniverseDecision,
     VersionConflictError,
+)
+from trading_platform.shared.symbol_universe_query import (
+    SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
 )
 
 
@@ -153,6 +159,37 @@ class ExchangeCategoryResponse(BaseModel):
     parent_key: Optional[str]
     active: bool
     synced_at: datetime
+    symbol_count: int = 0
+
+
+class ExchangeSymbolSyncStatusResponse(BaseModel):
+    initialized: bool
+    status: str
+    last_attempt_at: Optional[datetime] = None
+    last_success_at: Optional[datetime] = None
+    synced_symbols: int
+    last_error: Optional[str] = None
+    stale: bool
+    effective_universe_ready: bool
+    max_age_hours: int
+
+
+class SymbolUniversePreviewItem(BaseModel):
+    symbol: str
+    effective: bool
+    exclusion_reasons: list[str]
+    blocked_category_keys: list[str]
+
+
+class StrategyUniversePreviewResponse(BaseModel):
+    strategy_id: str
+    freeze_days: int
+    total_symbols: int
+    effective_symbols: int
+    excluded_symbols: int
+    items: list[SymbolUniversePreviewItem]
+    limit: int
+    offset: int
 
 
 class SymbolGlobalAdmissionResponse(BaseModel):
@@ -261,12 +298,13 @@ class PnLResponse(BaseModel):
 
 
 class DailyPnLResponse(BaseModel):
-    """UTC natural-day realized ledger PnL for the calendar view."""
+    """Named-timezone natural-day realized ledger PnL for the calendar view."""
 
     date: date
     account_id: str
     strategy_id: Optional[str] = None
     symbol: Optional[str] = None
+    timezone: str
     trade_count: int
     realized_trade_count: int
     gross_realized_pnl: Decimal
@@ -459,23 +497,50 @@ def _utc_bounds(
     )
 
 
+def _date_bounds_in_timezone(
+    start_date: date,
+    end_date: date,
+    timezone_name: str,
+) -> tuple[datetime, datetime]:
+    """Convert inclusive calendar dates to UTC half-open boundaries."""
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=422, detail="end_date must not be before start_date"
+        )
+    try:
+        zone = ZoneInfo(timezone_name)
+    except Exception as exc:  # pragma: no cover - timezone is Literal constrained
+        raise HTTPException(status_code=422, detail="unsupported timezone") from exc
+    return (
+        datetime.combine(start_date, time.min, tzinfo=zone).astimezone(timezone.utc),
+        datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=zone).astimezone(
+            timezone.utc
+        ),
+    )
+
+
 @router.get("/pnl/daily", response_model=list[DailyPnLResponse])
 async def get_daily_pnl(
     account_id: str = Query(min_length=1, max_length=32),
-    start_date: date = Query(..., description="inclusive UTC date"),
-    end_date: date = Query(..., description="inclusive UTC date"),
+    start_date: date = Query(..., description="inclusive calendar date"),
+    end_date: date = Query(..., description="inclusive calendar date"),
+    timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
+        "Asia/Shanghai", alias="timezone", description="calendar date timezone"
+    ),
     strategy_id: Optional[str] = Query(None, max_length=64),
     symbol: Optional[str] = Query(None, max_length=32),
     db: LedgerDB = Depends(get_db),
 ) -> list[DailyPnLResponse]:
-    start_at, end_at = _utc_bounds(start_date, end_date)
-    assert start_at is not None and end_at is not None
+    start_at, end_at = _date_bounds_in_timezone(
+        start_date, end_date, timezone_name
+    )
     items = await db.list_daily_realized_pnl(
         account_id=account_id,
         strategy_id=strategy_id,
         symbol=symbol,
         start_at=start_at,
         end_at=end_at,
+        timezone_name=timezone_name,
     )
     return [
         DailyPnLResponse(
@@ -483,6 +548,7 @@ async def get_daily_pnl(
             account_id=account_id,
             strategy_id=strategy_id,
             symbol=symbol,
+            timezone=timezone_name,
             trade_count=item.trade_count,
             realized_trade_count=item.realized_trade_count,
             gross_realized_pnl=item.gross_realized_pnl,
@@ -641,6 +707,32 @@ async def list_exchange_symbols(
 
 
 @router.get(
+    "/exchange-symbol-sync/status",
+    response_model=ExchangeSymbolSyncStatusResponse,
+)
+async def get_exchange_symbol_sync_status(
+    db: LedgerDB = Depends(get_db),
+) -> ExchangeSymbolSyncStatusResponse:
+    state: Optional[
+        ExchangeSymbolSyncState
+    ] = await db.get_exchange_symbol_sync_state()
+    if state is None:
+        return ExchangeSymbolSyncStatusResponse(
+            initialized=False,
+            status="NEVER",
+            synced_symbols=0,
+            stale=True,
+            effective_universe_ready=False,
+            max_age_hours=SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
+        )
+    return ExchangeSymbolSyncStatusResponse(
+        initialized=True,
+        max_age_hours=SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
+        **state.__dict__,
+    )
+
+
+@router.get(
     "/exchange-symbols/{symbol}/categories",
     response_model=list[ExchangeCategoryResponse],
 )
@@ -714,6 +806,29 @@ async def list_exchange_categories(
     return [ExchangeCategoryResponse.model_validate(item) for item in items]
 
 
+@router.get(
+    "/exchange-categories/{category_key}/symbols",
+    response_model=Page,
+)
+async def list_exchange_category_symbols(
+    category_key: str = Path(min_length=1, max_length=256),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    if await db.get_exchange_category(category_key) is None:
+        raise HTTPException(status_code=404, detail="exchange category not found")
+    items, total = await db.list_exchange_category_symbols(
+        category_key, limit=limit, offset=offset
+    )
+    return Page(
+        items=[ExchangeSymbolResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/symbol-global-admission-audit", response_model=Page)
 async def list_symbol_global_admission_audit(
     symbol: Optional[str] = None,
@@ -745,6 +860,70 @@ async def list_strategy_category_admissions(
 ) -> list[StrategyCategoryAdmissionResponse]:
     items = await db.list_strategy_category_admissions(strategy_id)
     return [StrategyCategoryAdmissionResponse.model_validate(item) for item in items]
+
+
+def _universe_exclusion_reasons(
+    decision: SymbolUniverseDecision,
+) -> list[str]:
+    reasons: list[str] = []
+    if not decision.sync_ready:
+        reasons.append("SYNC_UNAVAILABLE_OR_STALE")
+    if not decision.symbol_active:
+        reasons.append("SYMBOL_INACTIVE")
+    if not decision.perpetual_contract:
+        reasons.append("NOT_PERPETUAL")
+    if not decision.trading_status:
+        reasons.append("NOT_TRADING")
+    if not decision.onboarded:
+        reasons.append("NOT_ONBOARDED")
+    if not decision.delivery_window_open:
+        reasons.append("DELIVERY_FREEZE_WINDOW")
+    if not decision.global_enabled:
+        reasons.append("GLOBAL_DISABLED")
+    if decision.blocked_category_keys:
+        reasons.append("STRATEGY_CATEGORY_DISABLED")
+    return reasons
+
+
+@router.get(
+    "/strategy-category-admissions/{strategy_id}/universe-preview",
+    response_model=StrategyUniversePreviewResponse,
+)
+async def get_strategy_universe_preview(
+    strategy_id: str = Path(min_length=1, max_length=64),
+    freeze_days: int = Query(15, ge=0, le=3650),
+    effective: Optional[bool] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> StrategyUniversePreviewResponse:
+    items, total_symbols, effective_symbols = (
+        await db.list_strategy_symbol_universe_preview(
+            strategy_id=strategy_id,
+            freeze_days=freeze_days,
+            effective=effective,
+            limit=limit,
+            offset=offset,
+        )
+    )
+    return StrategyUniversePreviewResponse(
+        strategy_id=strategy_id,
+        freeze_days=freeze_days,
+        total_symbols=total_symbols,
+        effective_symbols=effective_symbols,
+        excluded_symbols=total_symbols - effective_symbols,
+        items=[
+            SymbolUniversePreviewItem(
+                symbol=item.symbol,
+                effective=item.effective,
+                exclusion_reasons=_universe_exclusion_reasons(item),
+                blocked_category_keys=item.blocked_category_keys,
+            )
+            for item in items
+        ],
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.put(

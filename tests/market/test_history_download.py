@@ -1086,7 +1086,6 @@ def test_load_allowed_symbols_uses_exchange_lifecycle_gate(monkeypatch):
     assert cursor.execute.call_args.args[1] == (
         archive_cli.timedelta(days=15),
         None,
-        None,
     )
 
 

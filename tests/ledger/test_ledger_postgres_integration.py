@@ -143,6 +143,123 @@ async def test_health_pagination_idempotency_and_pnl(ledger, client):
 
 
 @pytest.mark.asyncio
+async def test_daily_pnl_timezone_boundaries_and_campaign_performance(
+    ledger, client
+):
+    suffix = uuid4().hex[:10]
+    account = f"web-{suffix}"
+    strategy = f"perf-{suffix}"
+
+    # The two fills fall on different Shanghai calendar dates but the same UTC date.
+    for index, moment in enumerate(
+        (
+            datetime(2026, 8, 1, 15, 30, tzinfo=timezone.utc),
+            datetime(2026, 8, 1, 16, 30, tzinfo=timezone.utc),
+        ),
+        start=1,
+    ):
+        assert await ledger.insert_trade(
+            Trade(
+                account_id=account,
+                strategy_id=strategy,
+                symbol="TZUSDT",
+                trade_id=f"tz-{index}",
+                order_id=f"tz-order-{index}",
+                client_order_id=f"tz-client-{index}-{suffix}",
+                side="SELL",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                quote_quantity=Decimal("100"),
+                commission=Decimal("0.1"),
+                commission_asset="USDT",
+                realized_pnl=Decimal(str(index)),
+                is_maker=False,
+                exchange_time=moment,
+            )
+        ) > 0
+
+    shanghai = (
+        await client.get(
+            "/api/v1/pnl/daily",
+            params={
+                "account_id": account,
+                "start_date": "2026-08-02",
+                "end_date": "2026-08-02",
+            },
+        )
+    ).json()
+    assert len(shanghai) == 1
+    assert shanghai[0]["date"] == "2026-08-02"
+    assert shanghai[0]["timezone"] == "Asia/Shanghai"
+    assert Decimal(shanghai[0]["net_pnl"]) == Decimal("1.9")
+
+    utc = (
+        await client.get(
+            "/api/v1/pnl/daily",
+            params={
+                "account_id": account,
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-01",
+                "timezone": "UTC",
+            },
+        )
+    ).json()
+    assert len(utc) == 1
+    assert utc[0]["date"] == "2026-08-01"
+    assert utc[0]["timezone"] == "UTC"
+    assert Decimal(utc[0]["net_pnl"]) == Decimal("2.8")
+
+    # Campaign metrics are calculated from complete round trips, not individual fills.
+    for campaign_id, side_values in {
+        "win": (("SELL", "6"), ("BUY", "0")),
+        "loss": (("SELL", "-4"), ("BUY", "0")),
+        "open": (("SELL", "3"),),
+    }.items():
+        for index, (side, realized) in enumerate(side_values, start=1):
+            moment = datetime(
+                2026, 8, 3, 12 + index, tzinfo=timezone.utc
+            )
+            assert await ledger.insert_trade(
+                Trade(
+                    account_id=account,
+                    strategy_id=strategy,
+                    symbol="PERFUSDT",
+                    trade_id=f"{campaign_id}-{index}",
+                    order_id=f"{campaign_id}-order-{index}",
+                    client_order_id=f"{campaign_id}-client-{index}-{suffix}",
+                    campaign_id=campaign_id,
+                    side=side,
+                    quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    quote_quantity=Decimal("100"),
+                    commission=Decimal("0.1"),
+                    commission_asset="USDT",
+                    realized_pnl=Decimal(realized),
+                    is_maker=False,
+                    exchange_time=moment,
+                )
+            ) > 0
+
+    performance = (
+        await client.get(
+            "/api/v1/performance",
+            params={
+                "account_id": account,
+                "strategy_id": strategy,
+                "start_date": "2026-08-03",
+                "end_date": "2026-08-03",
+            },
+        )
+    ).json()
+    assert performance["total_trades"] == 2
+    assert performance["candidate_campaigns"] == 3
+    assert performance["excluded_campaigns"] == 1
+    assert performance["win_count"] == 1
+    assert performance["loss_count"] == 1
+    assert Decimal(performance["net_pnl"]) == Decimal("1.6")
+
+
+@pytest.mark.asyncio
 async def test_strategy_audit_batch_is_atomic_idempotent_and_queryable(ledger, client):
     suffix = uuid4().hex[:10]
     account = f"a-{suffix}"
@@ -1083,6 +1200,25 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     categories_response = await client.get("/api/v1/exchange-categories")
     assert categories_response.status_code == 200
     assert any(item["code"] == subtype for item in categories_response.json())
+    category_response = next(
+        item
+        for item in categories_response.json()
+        if item["code"] == subtype
+    )
+    assert category_response["symbol_count"] == 1
+    category_symbols_response = await client.get(
+        f"/api/v1/exchange-categories/{category_response['category_key']}/symbols",
+        params={"limit": 10},
+    )
+    assert category_symbols_response.status_code == 200
+    assert category_symbols_response.json()["total"] == 1
+    assert category_symbols_response.json()["items"][0]["symbol"] == symbol
+    sync_status_response = await client.get(
+        "/api/v1/exchange-symbol-sync/status"
+    )
+    assert sync_status_response.status_code == 200
+    assert sync_status_response.json()["status"] == "SUCCESS"
+    assert sync_status_response.json()["effective_universe_ready"] is True
     strategy_response = await client.get(
         f"/api/v1/strategy-category-admissions/{strategy_id}"
     )
@@ -1099,6 +1235,19 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     )
     assert category_audit.status_code == 200
     assert category_audit.json()["total"] == 6
+    preview_response = await client.get(
+        f"/api/v1/strategy-category-admissions/{strategy_id}/universe-preview",
+        params={"effective": True, "limit": 10},
+    )
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    # Previous sync snapshots remain as inactive facts and are intentionally
+    # included in the preview with an exclusion reason.
+    assert preview["total_symbols"] >= 2
+    assert preview["effective_symbols"] == 1
+    assert preview["excluded_symbols"] == preview["total_symbols"] - 1
+    assert preview["items"][0]["symbol"] == symbol
+    assert preview["items"][0]["effective"] is True
 
     hft = await ledger.get_exchange_symbol("hftusdt")
     assert hft is not None

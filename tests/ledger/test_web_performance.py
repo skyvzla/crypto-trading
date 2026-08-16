@@ -10,7 +10,11 @@ from trading_platform.ledger.db.models import DailyPnLFact, PerformanceCampaignF
 
 
 class FakeLedger:
+    def __init__(self):
+        self.daily_kwargs = None
+
     async def list_daily_realized_pnl(self, **_kwargs):
+        self.daily_kwargs = _kwargs
         return [
             DailyPnLFact(
                 day=date(2026, 8, 1),
@@ -84,9 +88,14 @@ class FakeLedger:
 
 
 @pytest.fixture
-def client():
+def ledger():
+    return FakeLedger()
+
+
+@pytest.fixture
+def client(ledger):
     app = FastAPI()
-    app.state.ledger_db = FakeLedger()
+    app.state.ledger_db = ledger
     app.include_router(router)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -94,7 +103,7 @@ def client():
 
 
 @pytest.mark.asyncio
-async def test_daily_pnl_is_a_utc_calendar_aggregate(client):
+async def test_daily_pnl_defaults_to_asia_shanghai_calendar(client, ledger):
     async with client as http:
         response = await http.get(
             "/api/v1/pnl/daily",
@@ -111,6 +120,7 @@ async def test_daily_pnl_is_a_utc_calendar_aggregate(client):
             "account_id": "a",
             "strategy_id": None,
             "symbol": None,
+            "timezone": "Asia/Shanghai",
             "trade_count": 3,
             "realized_trade_count": 1,
             "gross_realized_pnl": "12.5",
@@ -119,6 +129,46 @@ async def test_daily_pnl_is_a_utc_calendar_aggregate(client):
             "net_pnl": "12.0",
         }
     ]
+    assert ledger.daily_kwargs["start_at"] == datetime(
+        2026, 7, 31, 16, tzinfo=timezone.utc
+    )
+    assert ledger.daily_kwargs["end_at"] == datetime(
+        2026, 8, 31, 16, tzinfo=timezone.utc
+    )
+    assert ledger.daily_kwargs["timezone_name"] == "Asia/Shanghai"
+
+
+@pytest.mark.asyncio
+async def test_daily_pnl_allows_utc_and_rejects_arbitrary_timezone(client, ledger):
+    async with client as http:
+        utc_response = await http.get(
+            "/api/v1/pnl/daily",
+            params={
+                "account_id": "a",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-01",
+                "timezone": "UTC",
+            },
+        )
+        invalid_response = await http.get(
+            "/api/v1/pnl/daily",
+            params={
+                "account_id": "a",
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-01",
+                "timezone": "UTC'); DROP TABLE trades; --",
+            },
+        )
+    assert utc_response.status_code == 200
+    assert utc_response.json()[0]["timezone"] == "UTC"
+    assert ledger.daily_kwargs["start_at"] == datetime(
+        2026, 8, 1, tzinfo=timezone.utc
+    )
+    assert ledger.daily_kwargs["end_at"] == datetime(
+        2026, 8, 2, tzinfo=timezone.utc
+    )
+    assert ledger.daily_kwargs["timezone_name"] == "UTC"
+    assert invalid_response.status_code == 422
 
 
 @pytest.mark.asyncio
