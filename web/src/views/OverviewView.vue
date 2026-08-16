@@ -43,6 +43,10 @@ const query = computed(() => ({
   ...(filters.value.symbol.trim() ? { symbol: filters.value.symbol.trim() } : {})
 }))
 const todayPnl = computed(() => daily.value.find((item) => item.date === today))
+const closedPnlScope = computed(() => {
+  const accountId = filters.value.account_id.trim()
+  return accountId ? `账户 ${accountId}` : '全部账户'
+})
 const monthNetAvailable = computed(() => daily.value.every((item) => item.net_pnl != null))
 const monthNet = computed(() => monthNetAvailable.value ? daily.value.reduce((sum, item) => sum + asNumber(item.net_pnl), 0) : null)
 const winningDays = computed(() => daily.value.filter((item) => asNumber(item.net_pnl) > 0).length)
@@ -55,12 +59,22 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const [healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult] = await Promise.allSettled([
+    const accountId = filters.value.account_id.trim()
+    const [healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult, pnlResult] = await Promise.allSettled([
       operationsApi.health(),
       operationsApi.runtimeStatus({ ...query.value, limit: 100 }),
       operationsApi.positions({ ...query.value, limit: 1 }),
       operationsApi.orders({ ...query.value, active_only: true, limit: 1 }),
-      operationsApi.trades({ ...query.value, limit: 6 })
+      operationsApi.trades({ ...query.value, limit: 6 }),
+      operationsApi.dailyPnl({
+        ...query.value,
+        start_date: startDate,
+        end_date: endDate,
+        timezone: 'Asia/Shanghai'
+      }),
+      accountId
+        ? operationsApi.pnl({ account_id: accountId, ...query.value })
+        : Promise.resolve(null)
     ])
     unavailableSources.value = []
     health.value = healthResult.status === 'fulfilled' ? healthResult.value : null
@@ -73,26 +87,12 @@ async function load() {
     if (activeOrdersResult.status === 'rejected') unavailableSources.value.push('活动订单')
     recentTrades.value = tradeResult.status === 'fulfilled' ? tradeResult.value.items : []
     if (tradeResult.status === 'rejected') unavailableSources.value.push('最近成交')
-    if ([healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult].every((item) => item.status === 'rejected')) {
+    daily.value = dailyResult.status === 'fulfilled' ? dailyResult.value : []
+    if (dailyResult.status === 'rejected') unavailableSources.value.push('当月已实现收益')
+    pnl.value = pnlResult.status === 'fulfilled' ? pnlResult.value : null
+    if (accountId && pnlResult.status === 'rejected') unavailableSources.value.push('当前浮动收益')
+    if ([healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult].every((item) => item.status === 'rejected')) {
       throw new Error('运行数据接口均不可用')
-    }
-    if (filters.value.account_id.trim()) {
-      const [pnlResult, dailyResult] = await Promise.all([
-        operationsApi.pnl({ account_id: filters.value.account_id.trim(), ...query.value }),
-        operationsApi.dailyPnl({
-          account_id: filters.value.account_id.trim(),
-          strategy_id: query.value.strategy_id,
-          symbol: query.value.symbol,
-          start_date: startDate,
-          end_date: endDate,
-          timezone: 'Asia/Shanghai'
-        })
-      ])
-      pnl.value = pnlResult
-      daily.value = dailyResult
-    } else {
-      pnl.value = null
-      daily.value = []
     }
     refreshedAt.value = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date())
   } catch (caught) {
@@ -148,19 +148,10 @@ onMounted(load)
         </article>
       </section>
 
-      <a-alert
-        v-if="!filters.account_id.trim()"
-        type="info"
-        show-icon
-        message="填写账户后显示收益"
-        description="PnL 接口要求 account_id；未选择账户时不会拼接或猜测多个账户的收益。"
-        class="account-notice"
-      />
-
       <section class="metric-grid overview-metrics">
-        <MetricTile label="今日闭合净 PnL" :value="formatMoney(todayPnl?.net_pnl)" hint="Campaign closed_at 上海日界线 · 资金费暂不可用" :tone="todayPnl?.net_pnl == null ? 'neutral' : asNumber(todayPnl.net_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/calendar', query }" />
-        <MetricTile label="当前浮动 PnL" :value="formatMoney(pnl?.total_unrealized_pnl)" hint="来自当前筛选账户" :tone="asNumber(pnl?.total_unrealized_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/positions', query: { ...query, tab: 'positions' } }" />
-        <MetricTile label="当月闭合净 PnL" :value="filters.account_id ? formatMoney(monthNet) : '—'" :hint="monthNet == null ? '存在无法统一计价的日期' : `${winningDays} 盈利日 / ${losingDays} 亏损日`" :tone="monthNet == null ? 'warning' : monthNet >= 0 ? 'positive' : 'negative'" :to="{ path: '/performance', query }" />
+        <MetricTile label="今日闭合净 PnL" :value="formatMoney(todayPnl?.net_pnl)" :hint="`Campaign closed_at 上海日界线 · ${closedPnlScope}`" :tone="todayPnl?.net_pnl == null ? 'neutral' : asNumber(todayPnl.net_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/calendar', query }" />
+        <MetricTile label="当前浮动 PnL" :value="filters.account_id.trim() ? formatMoney(pnl?.total_unrealized_pnl) : '—'" :hint="filters.account_id.trim() ? '来自当前筛选账户' : '选择账户后查看当前浮动收益'" :tone="pnl?.total_unrealized_pnl == null ? 'neutral' : asNumber(pnl.total_unrealized_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/positions', query: { ...query, tab: 'positions' } }" />
+        <MetricTile label="当月闭合净 PnL" :value="formatMoney(monthNet)" :hint="monthNet == null ? '存在无法统一计价的日期' : `${winningDays} 盈利日 / ${losingDays} 亏损日`" :tone="monthNet == null ? 'warning' : monthNet >= 0 ? 'positive' : 'negative'" :to="{ path: filters.account_id.trim() ? '/performance' : '/calendar', query }" />
         <MetricTile label="当前持仓" :value="positionsTotal == null ? '读取失败' : String(positionsTotal)" hint="进入持仓明细" :tone="positionsTotal == null ? 'warning' : 'neutral'" :to="{ path: '/positions', query: { ...query, tab: 'positions' } }" />
         <MetricTile label="活动订单" :value="activeOrdersTotal == null ? '读取失败' : String(activeOrdersTotal)" hint="NEW + PARTIALLY_FILLED" :tone="activeOrdersTotal == null || activeOrdersTotal > 0 ? 'warning' : 'neutral'" :to="{ path: '/positions', query: { ...query, tab: 'active' } }" />
       </section>
@@ -168,11 +159,11 @@ onMounted(load)
       <section class="two-column overview-panels">
         <article class="data-card calendar-card">
           <div class="data-card-heading">
-            <div><h2><CalendarDays :size="15" /> 收益日历</h2><p>{{ year }} 年 {{ month }} 月 · 日界线 Asia/Shanghai</p></div>
+            <div><h2><CalendarDays :size="15" /> 收益日历</h2><p>{{ year }} 年 {{ month }} 月 · {{ closedPnlScope }} · 日界线 Asia/Shanghai</p></div>
             <RouterLink :to="{ path: '/calendar', query: query }" class="table-link">查看完整日历 →</RouterLink>
           </div>
           <PnlCalendar :year="year" :month="month" :rows="daily" compact @day="openDay" />
-          <div v-if="!daily.length" class="inline-empty">{{ filters.account_id ? '本月没有已实现收益记录' : '选择账户后读取本月数据' }}</div>
+          <div v-if="!daily.length" class="inline-empty">{{ unavailableSources.includes('当月已实现收益') ? '收益日历读取失败' : '本月没有已实现收益记录' }}</div>
         </article>
 
         <article class="data-card recent-card">
@@ -195,7 +186,7 @@ onMounted(load)
 .health-node { display:flex; align-items:center; gap:10px; min-height:66px; padding:10px 12px; border:1px solid var(--line); border-left:3px solid #7b8997; border-radius:5px; background:var(--surface); }
 .health-node.ok { border-left-color:#2f9d72; }.health-node.bad { border-left-color:#bd625b; }.health-node.unknown { border-left-color:#c08a32; }
 .health-node svg { flex:0 0 auto; color:var(--muted); }.health-node span,.health-node strong { display:block; }.health-node span { color:var(--muted); font-size:10px; }.health-node strong { margin-top:4px; font-size:12px; }
-.account-notice,.partial-failure { margin-bottom:12px; }.overview-metrics { margin-bottom:14px; }.overview-panels { margin-top:4px; }
+.partial-failure { margin-bottom:12px; }.overview-metrics { margin-bottom:14px; }.overview-panels { margin-top:4px; }
 .data-card-heading h2 { display:flex; align-items:center; gap:6px; }
 .recent-list button { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; min-height:59px; padding:9px 13px; border:0; border-bottom:1px solid var(--line); background:transparent; color:var(--text); text-align:left; cursor:pointer; }
 .recent-list button:last-child { border-bottom:0; }.recent-list button:hover { background:var(--surface-hover); }.recent-list button > div:last-child { text-align:right; }

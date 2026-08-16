@@ -131,7 +131,7 @@ onMounted(load)
       <label><span>结束日期</span><a-date-picker :value="endDate" value-format="YYYY-MM-DD" @update:value="endDate = String($event ?? '')" /></label>
       <a-button @click="applyFilters">应用日期</a-button>
     </div>
-    <a-alert v-if="!filters.account_id.trim()" type="info" show-icon message="请输入账户 ID" description="绩效接口不会跨账户混算；账户是必填筛选条件。" />
+    <a-alert v-if="!filters.account_id.trim()" type="info" show-icon message="请选择账户 ID" description="绩效分析按账户归属；选择账户后显示完整 Campaign 指标。" />
 
     <template v-else>
       <a-tabs :active-key="activeTab" @change="changeTab">

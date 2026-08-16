@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { Search, X } from 'lucide-vue-next'
+import { RefreshCw, Search, X } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
 import { collectPageItems } from '@/features/operations/pagination'
 
@@ -35,6 +35,7 @@ const filters = computed({
 })
 
 const accountsLoading = ref(false)
+const accountsError = ref(false)
 const accounts = ref<string[]>([])
 const accountOptions = computed(() => [
   ...(props.accountRequired ? [] : [{ label: '全部账户', value: '' }]),
@@ -43,11 +44,12 @@ const accountOptions = computed(() => [
 
 async function loadAccounts() {
   accountsLoading.value = true
+  accountsError.value = false
   try {
     const page = await collectPageItems((params) => operationsApi.accounts(params))
     accounts.value = page.items.map((item) => item.account_id)
   } catch {
-    // The current view remains usable with its existing selection if discovery fails.
+    accountsError.value = true
   } finally {
     accountsLoading.value = false
   }
@@ -79,6 +81,14 @@ onMounted(() => { void loadAccounts() })
         :placeholder="accountRequired ? '选择账户 ID' : '全部账户'"
         @update:value="update('account_id', String($event ?? ''))"
       />
+      <span v-if="accountsError" class="filter-account-error">
+        账户列表读取失败
+        <a-tooltip title="重新读取账户列表">
+          <a-button type="text" size="small" aria-label="重新读取账户列表" @click.stop="loadAccounts">
+            <template #icon><RefreshCw :size="13" /></template>
+          </a-button>
+        </a-tooltip>
+      </span>
     </label>
     <label>
       <span>策略</span>

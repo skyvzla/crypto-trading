@@ -20,7 +20,7 @@ beforeEach(async () => {
 })
 
 describe('operations views', () => {
-  it('overview requires an explicit account before showing PnL', async () => {
+  it('overview defaults closed PnL to all accounts while floating PnL stays account-scoped', async () => {
     vi.spyOn(operationsApi, 'health').mockResolvedValue({ status: 'healthy', service: 'ledger', timestamp: '2026-08-16T00:00:00Z' })
     vi.spyOn(operationsApi, 'runtimeStatus').mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
     vi.spyOn(operationsApi, 'pnl').mockResolvedValue({
@@ -41,19 +41,53 @@ describe('operations views', () => {
     vi.spyOn(operationsApi, 'positions').mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0 })
     vi.spyOn(operationsApi, 'orders').mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0 })
     vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 6, offset: 0 })
+    const dailyPnl = vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([])
 
     const wrapper = mount(OverviewView)
     await flushPromises()
 
-    expect(wrapper.text()).toContain('填写账户后显示收益')
-    expect(wrapper.text()).toContain('选择账户后读取本月数据')
+    expect(wrapper.text()).not.toContain('填写账户后显示收益')
+    expect(wrapper.text()).toContain('本月没有已实现收益记录')
+    expect(dailyPnl.mock.calls[0][0]).not.toHaveProperty('account_id')
     expect(operationsApi.pnl).not.toHaveBeenCalled()
   })
 
   it('performance keeps the account boundary visible instead of mixing accounts', () => {
     const wrapper = mount(PerformanceView)
-    expect(wrapper.text()).toContain('请输入账户 ID')
-    expect(wrapper.text()).toContain('不会跨账户混算')
+    expect(wrapper.text()).toContain('请选择账户 ID')
+    expect(wrapper.text()).toContain('绩效分析按账户归属')
+  })
+
+  it('keeps current floating PnL and selected daily PnL scoped to the chosen account', async () => {
+    await router.push('/overview?account_id=acct')
+    vi.spyOn(operationsApi, 'health').mockResolvedValue({ status: 'healthy', service: 'ledger', timestamp: '2026-08-16T00:00:00Z' })
+    vi.spyOn(operationsApi, 'runtimeStatus').mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
+    const pnl = vi.spyOn(operationsApi, 'pnl').mockResolvedValue({
+      account_id: 'acct', strategy_id: null, symbol: null, total_trades: 0,
+      total_commission: '0', total_realized_pnl: '0', total_unrealized_pnl: '0',
+      net_pnl: '0', win_count: 0, loss_count: 0, win_rate: 0, avg_win: '0', avg_loss: '0'
+    })
+    vi.spyOn(operationsApi, 'positions').mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0 })
+    vi.spyOn(operationsApi, 'orders').mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0 })
+    vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 6, offset: 0 })
+    const dailyPnl = vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([])
+
+    const wrapper = mount(OverviewView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('账户 acct')
+    expect(pnl).toHaveBeenCalledWith(expect.objectContaining({ account_id: 'acct' }))
+    expect(dailyPnl).toHaveBeenCalledWith(expect.objectContaining({ account_id: 'acct' }))
+  })
+
+  it('shows a retry control when the account directory cannot be read', async () => {
+    vi.mocked(operationsApi.accounts).mockRejectedValue(new Error('unavailable'))
+
+    const wrapper = mount(PerformanceView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('账户列表读取失败')
+    expect(wrapper.find('[aria-label="重新读取账户列表"]').exists()).toBe(true)
   })
 
   it('performance consumes authoritative breakdown rows in Shanghai time', async () => {
