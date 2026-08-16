@@ -94,7 +94,7 @@ onMounted(() => {
 <template>
   <a-config-provider :theme="providerTheme">
     <a-layout has-sider class="app-layout">
-      <a-layout-sider collapsible breakpoint="md" class="app-sider">
+      <a-layout-sider collapsible breakpoint="md" :collapsed-width="56" class="app-sider">
         <div class="brand">
           <span class="brand-mark">TL</span>
           <span class="brand-name">Trade Ledger</span>

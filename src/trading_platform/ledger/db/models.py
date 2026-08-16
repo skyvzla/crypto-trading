@@ -705,10 +705,13 @@ class LedgerDB:
         strategy_id: Optional[str] = None,
         symbol: Optional[str] = None,
         status: Optional[str] = None,
+        active_only: bool = False,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Order]:
         where, params = self._filters(account_id, strategy_id, symbol, status)
+        if active_only:
+            where = f"{where}{' AND ' if where else ' WHERE '}status IN ('NEW', 'PARTIALLY_FILLED')"
         params.update(limit=limit, offset=offset)
         async with self.pool.connection() as conn:
             cursor = conn.cursor(row_factory=class_row(Order))
@@ -719,8 +722,20 @@ class LedgerDB:
             )
             return await cursor.fetchall()
 
-    async def count_orders(self, **filters: object) -> int:
-        return await self._count("orders", **filters)
+    async def count_orders(
+        self,
+        account_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        status: Optional[str] = None,
+        active_only: bool = False,
+    ) -> int:
+        where, params = self._filters(account_id, strategy_id, symbol, status)
+        if active_only:
+            where = f"{where}{' AND ' if where else ' WHERE '}status IN ('NEW', 'PARTIALLY_FILLED')"
+        async with self.pool.connection() as conn:
+            row = await (await conn.execute(f"SELECT COUNT(*) FROM orders{where}", params)).fetchone()
+        return int(row[0])
 
     async def insert_trade(self, trade: Trade) -> int:
         async with self.pool.connection() as conn:
@@ -777,10 +792,21 @@ class LedgerDB:
         account_id: Optional[str] = None,
         strategy_id: Optional[str] = None,
         symbol: Optional[str] = None,
+        start_at: Optional[datetime] = None,
+        end_at: Optional[datetime] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[Trade]:
         where, params = self._filters(account_id, strategy_id, symbol)
+        date_parts: list[str] = []
+        if start_at is not None:
+            date_parts.append("exchange_time >= %(start_at)s")
+            params["start_at"] = start_at
+        if end_at is not None:
+            date_parts.append("exchange_time < %(end_at)s")
+            params["end_at"] = end_at
+        if date_parts:
+            where = f"{where}{' AND ' if where else ' WHERE '}{' AND '.join(date_parts)}"
         params.update(limit=limit, offset=offset)
         async with self.pool.connection() as conn:
             cursor = conn.cursor(row_factory=class_row(Trade))
@@ -824,8 +850,27 @@ class LedgerDB:
             )
             return await cursor.fetchall()
 
-    async def count_trades(self, **filters: object) -> int:
-        return await self._count("trades", **filters)
+    async def count_trades(
+        self,
+        account_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        start_at: Optional[datetime] = None,
+        end_at: Optional[datetime] = None,
+    ) -> int:
+        where, params = self._filters(account_id, strategy_id, symbol)
+        date_parts: list[str] = []
+        if start_at is not None:
+            date_parts.append("exchange_time >= %(start_at)s")
+            params["start_at"] = start_at
+        if end_at is not None:
+            date_parts.append("exchange_time < %(end_at)s")
+            params["end_at"] = end_at
+        if date_parts:
+            where = f"{where}{' AND ' if where else ' WHERE '}{' AND '.join(date_parts)}"
+        async with self.pool.connection() as conn:
+            row = await (await conn.execute(f"SELECT COUNT(*) FROM trades{where}", params)).fetchone()
+        return int(row[0])
 
     async def get_campaign_pnl(
         self,

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Button, Tag, type TableColumnsType } from 'ant-design-vue'
+import { Button, Tag, type TableColumnsType, type TablePaginationConfig } from 'ant-design-vue'
 import { operationsApi } from '@/api/operations'
 import type { LedgerOrder, LedgerPosition } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
@@ -23,6 +23,8 @@ const historyStatus = ref(String(route.query.status ?? 'FILLED'))
 const positions = ref<LedgerPosition[]>([])
 const orders = ref<LedgerOrder[]>([])
 const total = ref(0)
+const currentPage = ref(Math.max(1, Number(route.query.page ?? 1) || 1))
+const pageSize = ref(Math.max(10, Math.min(100, Number(route.query.page_size ?? 25) || 25)))
 const loading = ref(false)
 const error = ref<string | null>(null)
 const refreshedAt = ref<string | null>(null)
@@ -41,6 +43,14 @@ const query = computed(() => ({
   ...(filters.value.account_id.trim() ? { account_id: filters.value.account_id.trim() } : {}),
   ...(filters.value.strategy_id.trim() ? { strategy_id: filters.value.strategy_id.trim() } : {}),
   ...(filters.value.symbol.trim() ? { symbol: filters.value.symbol.trim() } : {})
+}))
+const tablePagination = computed<TablePaginationConfig>(() => ({
+  current: currentPage.value,
+  pageSize: pageSize.value,
+  total: total.value,
+  showSizeChanger: true,
+  pageSizeOptions: ['10', '25', '50', '100'],
+  showTotal: (value) => `共 ${value} 条`
 }))
 
 const positionColumns: TableColumnsType<LedgerPosition> = [
@@ -77,18 +87,15 @@ async function load() {
   error.value = null
   try {
     if (activeTab.value === 'positions') {
-      const page = await operationsApi.positions({ ...query.value, limit: 100 })
+      const page = await operationsApi.positions({ ...query.value, limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value })
       positions.value = page.items
       total.value = page.total
     } else if (activeTab.value === 'active') {
-      const [newPage, partialPage] = await Promise.all([
-        operationsApi.orders({ ...query.value, status: 'NEW', limit: 500 }),
-        operationsApi.orders({ ...query.value, status: 'PARTIALLY_FILLED', limit: 500 })
-      ])
-      orders.value = [...newPage.items, ...partialPage.items].sort((a, b) => b.created_at.localeCompare(a.created_at))
-      total.value = newPage.total + partialPage.total
+      const page = await operationsApi.orders({ ...query.value, active_only: true, limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value })
+      orders.value = page.items
+      total.value = page.total
     } else {
-      const page = await operationsApi.orders({ ...query.value, status: historyStatus.value || undefined, limit: 100 })
+      const page = await operationsApi.orders({ ...query.value, status: historyStatus.value || undefined, limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value })
       orders.value = page.items
       total.value = page.total
     }
@@ -101,12 +108,21 @@ async function load() {
 }
 
 async function applyFilters() {
-  await router.replace({ query: { ...query.value, tab: activeTab.value, ...(activeTab.value === 'history' && historyStatus.value ? { status: historyStatus.value } : {}) } })
+  await router.replace({ query: { ...query.value, tab: activeTab.value, page: currentPage.value, page_size: pageSize.value, ...(activeTab.value === 'history' && historyStatus.value ? { status: historyStatus.value } : {}) } })
   await load()
 }
 
 async function changeTab(key: string) {
   activeTab.value = key
+  currentPage.value = 1
+  await applyFilters()
+}
+
+async function onTableChange(pagination: TablePaginationConfig) {
+  const nextSize = pagination.pageSize ?? pageSize.value
+  if (nextSize !== pageSize.value) currentPage.value = 1
+  else currentPage.value = pagination.current ?? 1
+  pageSize.value = nextSize
   await applyFilters()
 }
 
@@ -133,8 +149,8 @@ onMounted(load)
     <div class="result-ledger"><span>{{ total }} 条记录</span><span v-if="activeTab === 'active'">口径：NEW + PARTIALLY_FILLED</span><span v-else-if="activeTab === 'history'">口径：后端订单状态筛选</span></div>
     <DataState :loading="loading" :error="error" :empty="activeTab === 'positions' ? !positions.length : !orders.length" @retry="load">
       <div class="table-frame">
-        <a-table v-if="activeTab === 'positions'" :columns="positionColumns" :data-source="positions" row-key="id" :pagination="{ pageSize: 25, showSizeChanger: true }" :scroll="{ x: 1180 }" size="middle" />
-        <a-table v-else :columns="orderColumns" :data-source="orders" row-key="id" :pagination="{ pageSize: 25, showSizeChanger: true }" :scroll="{ x: 1250 }" size="middle" />
+        <a-table v-if="activeTab === 'positions'" :columns="positionColumns" :data-source="positions" row-key="id" :pagination="tablePagination" :scroll="{ x: 1180 }" size="middle" @change="onTableChange" />
+        <a-table v-else :columns="orderColumns" :data-source="orders" row-key="id" :pagination="tablePagination" :scroll="{ x: 1250 }" size="middle" @change="onTableChange" />
       </div>
     </DataState>
 

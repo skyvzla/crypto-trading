@@ -72,6 +72,30 @@ describe('operationsApi', () => {
     })
   })
 
+  it('queries authoritative performance breakdown dimensions in Shanghai time', async () => {
+    mockJson({ dimension_available: true, items: [] })
+
+    await operationsApi.performanceBreakdown({
+      account_id: 'testnet',
+      strategy_id: 'spike-short',
+      start_date: '2026-08-01',
+      end_date: '2026-08-15',
+      timezone: 'Asia/Shanghai',
+      group_by: 'subcategory'
+    })
+
+    const url = requestedUrl()
+    expect(url.pathname).toBe('/api/v1/performance/breakdown')
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      account_id: 'testnet',
+      strategy_id: 'spike-short',
+      start_date: '2026-08-01',
+      end_date: '2026-08-15',
+      timezone: 'Asia/Shanghai',
+      group_by: 'subcategory'
+    })
+  })
+
   it('uses separate order, position and trade ledger routes', async () => {
     mockJson({ items: [], total: 0, limit: 50, offset: 0 })
 
@@ -80,12 +104,20 @@ describe('operationsApi', () => {
     expect(requestedUrl().searchParams.get('status')).toBe('NEW')
 
     vi.mocked(globalThis.fetch).mockClear()
+    await operationsApi.orders({ account_id: 'a', active_only: true, limit: 25, offset: 25 })
+    expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
+      account_id: 'a', active_only: 'true', limit: '25', offset: '25'
+    })
+
+    vi.mocked(globalThis.fetch).mockClear()
     await operationsApi.positions({ account_id: 'a', strategy_id: 's' })
     expect(requestedUrl().pathname).toBe('/api/v1/positions')
 
     vi.mocked(globalThis.fetch).mockClear()
-    await operationsApi.trades({ account_id: 'a', symbol: 'BTCUSDT' })
+    await operationsApi.trades({ account_id: 'a', symbol: 'BTCUSDT', start_date: '2026-08-16', end_date: '2026-08-16', timezone: 'Asia/Shanghai' })
     expect(requestedUrl().pathname).toBe('/api/v1/trades')
+    expect(requestedUrl().searchParams.get('start_date')).toBe('2026-08-16')
+    expect(requestedUrl().searchParams.get('timezone')).toBe('Asia/Shanghai')
   })
 
   it('encodes category keys and paginates server-side category symbols', async () => {

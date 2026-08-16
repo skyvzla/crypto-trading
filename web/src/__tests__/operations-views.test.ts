@@ -5,6 +5,7 @@ import { operationsApi } from '@/api/operations'
 import OverviewView from '@/views/OverviewView.vue'
 import CategoryManagementView from '@/views/CategoryManagementView.vue'
 import PerformanceView from '@/views/PerformanceView.vue'
+import TradeReviewView from '@/views/TradeReviewView.vue'
 import StrategyRiskView from '@/views/StrategyRiskView.vue'
 
 beforeEach(async () => {
@@ -48,6 +49,51 @@ describe('operations views', () => {
     const wrapper = mount(PerformanceView)
     expect(wrapper.text()).toContain('请输入账户 ID')
     expect(wrapper.text()).toContain('不会跨账户混算')
+  })
+
+  it('performance consumes authoritative breakdown rows in Shanghai time', async () => {
+    await router.push('/performance?account_id=acct&tab=breakdown&group_by=symbol')
+    vi.spyOn(operationsApi, 'performance').mockResolvedValue({
+      account_id: 'acct', strategy_id: null, symbol: null, start_date: '2026-08-01', end_date: '2026-08-30', timezone: 'Asia/Shanghai',
+      total_trades: 1, total_fills: 2, win_count: 1, loss_count: 0, flat_count: 0, win_rate: 1,
+      avg_win: '5', avg_loss: '0', payoff_ratio: null, expectancy: '5', profit_factor: null,
+      total_commission: '0.1', total_realized_pnl: '5.1', net_pnl: '5', max_drawdown: '0',
+      candidate_campaigns: 1, excluded_campaigns: 0, unattributed_fills: 0,
+      metric_scope: 'closed campaigns'
+    })
+    vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([])
+    const breakdown = vi.spyOn(operationsApi, 'performanceBreakdown').mockResolvedValue({
+      account_id: 'acct', strategy_id: null, symbol: null, category_key: null, subcategory_key: null, side: null,
+      start_date: '2026-08-01', end_date: '2026-08-30', timezone: 'Asia/Shanghai', group_by: 'symbol',
+      dimension_available: true, dimension_note: null, available_dimensions: ['symbol', 'category', 'subcategory', 'side'],
+      metric_scope: 'closed campaigns', items: [{
+        dimension_key: 'BTCUSDT', dimension_label: 'BTCUSDT', total_trades: 1, total_fills: 2,
+        win_count: 1, loss_count: 0, flat_count: 0, win_rate: 1, avg_win: '5', avg_loss: '0',
+        payoff_ratio: null, expectancy: '5', profit_factor: null, total_commission: '0.1',
+        total_realized_pnl: '5.1', net_pnl: '5', max_drawdown: '0', candidate_campaigns: 1, excluded_campaigns: 0
+      }]
+    })
+
+    const wrapper = mount(PerformanceView)
+    await flushPromises()
+
+    expect(breakdown).toHaveBeenCalledWith(expect.objectContaining({
+      account_id: 'acct', timezone: 'Asia/Shanghai', group_by: 'symbol'
+    }))
+    expect(wrapper.text()).toContain('BTCUSDT')
+    expect(wrapper.text()).toContain('按权威账本维度分组')
+  })
+
+  it('trade review sends calendar drill-down dates to the backend', async () => {
+    await router.push('/trades?account_id=acct&date=2026-08-01')
+    const trades = vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 })
+
+    mount(TradeReviewView)
+    await flushPromises()
+
+    expect(trades).toHaveBeenCalledWith(expect.objectContaining({
+      account_id: 'acct', start_date: '2026-08-01', end_date: '2026-08-01', timezone: 'Asia/Shanghai'
+    }))
   })
 
   it('loads unclassified symbols from the backend and marks a failed sync', async () => {

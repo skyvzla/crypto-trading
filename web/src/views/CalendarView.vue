@@ -13,7 +13,9 @@ import { asNumber, formatMoney } from '@/features/operations/format'
 
 const route = useRoute()
 const router = useRouter()
-const initial = /^\d{4}-\d{2}$/.test(String(route.query.month ?? '')) ? String(route.query.month) : new Date().toISOString().slice(0, 7)
+const shanghaiParts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit' }).formatToParts(new Date())
+const shanghaiMonth = `${shanghaiParts.find((item) => item.type === 'year')?.value}-${shanghaiParts.find((item) => item.type === 'month')?.value}`
+const initial = /^\d{4}-\d{2}$/.test(String(route.query.month ?? '')) ? String(route.query.month) : shanghaiMonth
 const year = ref(Number(initial.slice(0, 4)))
 const month = ref(Number(initial.slice(5, 7)))
 const filters = ref<OperationFilters>({ account_id: String(route.query.account_id ?? ''), strategy_id: String(route.query.strategy_id ?? ''), symbol: String(route.query.symbol ?? '') })
@@ -28,7 +30,7 @@ const monthKey = computed(() => `${year.value}-${String(month.value).padStart(2,
 const monthNet = computed(() => rows.value.reduce((sum, item) => sum + asNumber(item.net_pnl), 0))
 const wins = computed(() => rows.value.filter((item) => asNumber(item.net_pnl) > 0).length)
 const losses = computed(() => rows.value.filter((item) => asNumber(item.net_pnl) < 0).length)
-const campaignCount = computed(() => rows.value.reduce((sum, item) => sum + item.realized_trade_count, 0))
+const realizedFillCount = computed(() => rows.value.reduce((sum, item) => sum + item.realized_trade_count, 0))
 const filtersQuery = computed(() => ({
   ...(filters.value.account_id.trim() ? { account_id: filters.value.account_id.trim() } : {}),
   ...(filters.value.strategy_id.trim() ? { strategy_id: filters.value.strategy_id.trim() } : {}),
@@ -79,9 +81,9 @@ onMounted(load)
         <MetricTile label="本月累计净 PnL" :value="formatMoney(monthNet)" :tone="monthNet >= 0 ? 'positive' : 'negative'" hint="按日净额求和" />
         <MetricTile label="盈利日" :value="String(wins)" tone="positive" hint="净 PnL > 0" />
         <MetricTile label="亏损日" :value="String(losses)" tone="negative" hint="净 PnL < 0" />
-        <MetricTile label="已实现轮次" :value="String(campaignCount)" hint="daily.realized_trade_count" />
+        <MetricTile label="已实现 fills" :value="String(realizedFillCount)" hint="有 realized_pnl 的账本成交" />
       </section>
-      <div class="status-strip"><Clock3 :size="13" /><span>当前接口返回 <strong>{{ startDate }} → {{ endDate }}</strong> 的有数据日期；没有返回 stale、最后同步时间或完整覆盖字段，因此不伪造同步状态。</span></div>
+      <div class="status-strip"><Clock3 :size="13" /><span>当前接口按账本 fills 汇总 <strong>{{ startDate }} → {{ endDate }}</strong>，净额仅扣账本手续费；资金费、closed Campaign 数、stale 与完整覆盖字段暂不可用。</span></div>
       <DataState :loading="loading" :error="error" @retry="load">
         <section class="data-card full-calendar"><PnlCalendar :year="year" :month="month" :rows="rows" @day="openDay" /><div v-if="!rows.length" class="calendar-empty">本月没有已实现收益记录；点击任意日期仍可进入成交复盘。</div></section>
       </DataState>

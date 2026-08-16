@@ -31,9 +31,14 @@ export interface ExchangeSymbolQuery extends PageParams {
 
 export interface OrderQuery extends LedgerFilters, PageParams {
   status?: string
+  active_only?: boolean
 }
 
-export interface TradeQuery extends LedgerFilters, PageParams {}
+export interface TradeQuery extends LedgerFilters, PageParams {
+  start_date?: string
+  end_date?: string
+  timezone?: 'UTC' | 'Asia/Shanghai'
+}
 
 export interface PositionQuery extends LedgerFilters, PageParams {}
 
@@ -55,8 +60,9 @@ export interface DailyPnLQuery extends LedgerFilters {
 
 export interface PerformanceQuery extends LedgerFilters {
   account_id: string
-  start_date?: string
-  end_date?: string
+  start_date: string
+  end_date: string
+  timezone?: 'UTC' | 'Asia/Shanghai'
 }
 
 export interface AdmissionUpdate {
@@ -186,6 +192,56 @@ export interface PerformanceSummary {
   candidate_campaigns: number
   excluded_campaigns: number
   unattributed_fills: number
+  metric_scope: string
+}
+
+export type PerformanceDimension = 'symbol' | 'category' | 'subcategory' | 'side' | 'exit_reason'
+
+export interface PerformanceBreakdownQuery extends PerformanceQuery {
+  group_by: PerformanceDimension
+  category_key?: string
+  subcategory_key?: string
+  side?: 'LONG' | 'SHORT'
+  exit_reason?: string
+}
+
+export interface PerformanceBreakdownItem {
+  dimension_key: string | null
+  dimension_label: string | null
+  total_trades: number
+  total_fills: number
+  win_count: number
+  loss_count: number
+  flat_count: number
+  win_rate: number
+  avg_win: string
+  avg_loss: string
+  payoff_ratio: string | null
+  expectancy: string
+  profit_factor: string | null
+  total_commission: string
+  total_realized_pnl: string
+  net_pnl: string
+  max_drawdown: string
+  candidate_campaigns: number
+  excluded_campaigns: number
+}
+
+export interface PerformanceBreakdownResponse {
+  account_id: string
+  strategy_id: string | null
+  symbol: string | null
+  category_key: string | null
+  subcategory_key: string | null
+  side: string | null
+  start_date: string
+  end_date: string
+  timezone: string
+  group_by: PerformanceDimension
+  dimension_available: boolean
+  dimension_note: string | null
+  available_dimensions: PerformanceDimension[]
+  items: PerformanceBreakdownItem[]
   metric_scope: string
 }
 

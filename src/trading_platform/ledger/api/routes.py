@@ -315,14 +315,14 @@ class DailyPnLResponse(BaseModel):
 
 
 class PerformanceResponse(BaseModel):
-    """Campaign-level performance within the requested UTC close-date window."""
+    """Campaign-level performance within the requested close-date window."""
 
     account_id: str
     strategy_id: Optional[str] = None
     symbol: Optional[str] = None
     start_date: date
     end_date: date
-    timezone: str = "UTC"
+    timezone: str = "Asia/Shanghai"
     total_trades: int
     total_fills: int
     win_count: int
@@ -343,7 +343,7 @@ class PerformanceResponse(BaseModel):
     unattributed_fills: int
     metric_scope: str = (
         "closed campaigns with complete USDT PnL facts; "
-        "closed_at within the requested UTC date range"
+        "closed_at within the requested calendar date range"
     )
 
 
@@ -385,6 +385,7 @@ class PerformanceBreakdownResponse(BaseModel):
     side: Optional[str] = None
     start_date: date
     end_date: date
+    timezone: str = "Asia/Shanghai"
     group_by: PerformanceDimension
     dimension_available: bool
     dimension_note: Optional[str] = None
@@ -392,7 +393,7 @@ class PerformanceBreakdownResponse(BaseModel):
     items: list[PerformanceBreakdownItem]
     metric_scope: str = (
         "closed campaigns with complete USDT PnL facts; "
-        "closed_at within the requested UTC date range"
+        "closed_at within the requested calendar date range"
     )
 
 
@@ -450,15 +451,18 @@ async def get_orders(
     strategy_id: Optional[str] = None,
     symbol: Optional[str] = None,
     status: Optional[str] = None,
+    active_only: bool = Query(False, description="only NEW or PARTIALLY_FILLED orders"),
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: LedgerDB = Depends(get_db),
 ) -> Page:
+    if active_only and status is not None:
+        raise HTTPException(status_code=422, detail="status and active_only cannot be combined")
     filters = _filter_kwargs(account_id, strategy_id, symbol)
     items = await db.get_orders(
-        **filters, status=status, limit=limit, offset=offset
+        **filters, status=status, active_only=active_only, limit=limit, offset=offset
     )
-    total = await db.count_orders(**filters, status=status)
+    total = await db.count_orders(**filters, status=status, active_only=active_only)
     return Page(
         items=[OrderResponse.model_validate(item) for item in items],
         total=total,
@@ -474,11 +478,22 @@ async def get_trades(
     symbol: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    start_date: Optional[date] = Query(None, description="inclusive calendar date"),
+    end_date: Optional[date] = Query(None, description="inclusive calendar date"),
+    timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
+        "Asia/Shanghai", alias="timezone", description="calendar date timezone"
+    ),
     db: LedgerDB = Depends(get_db),
 ) -> Page:
     filters = _filter_kwargs(account_id, strategy_id, symbol)
-    items = await db.get_trades(**filters, limit=limit, offset=offset)
-    total = await db.count_trades(**filters)
+    if (start_date is None) != (end_date is None):
+        raise HTTPException(status_code=422, detail="start_date and end_date must be provided together")
+    date_filters: dict[str, object] = {}
+    if start_date is not None and end_date is not None:
+        start_at, end_at = _date_bounds_in_timezone(start_date, end_date, timezone_name)
+        date_filters = {"start_at": start_at, "end_at": end_at}
+    items = await db.get_trades(**filters, **date_filters, limit=limit, offset=offset)
+    total = await db.count_trades(**filters, **date_filters)
     return Page(
         items=[TradeResponse.model_validate(item) for item in items],
         total=total,
@@ -526,20 +541,6 @@ async def get_pnl(
         net_pnl=realized + unrealized - commission,
         win_rate=values["win_count"] / decided if decided else 0.0,
         **values,
-    )
-
-
-def _utc_bounds(
-    start_date: date, end_date: date
-) -> tuple[datetime, datetime]:
-    """Turn inclusive UI dates into half-open UTC timestamps."""
-    if end_date < start_date:
-        raise HTTPException(
-            status_code=422, detail="end_date must not be before start_date"
-        )
-    return (
-        datetime.combine(start_date, time.min, tzinfo=timezone.utc),
-        datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=timezone.utc),
     )
 
 
@@ -708,11 +709,14 @@ async def get_performance(
     account_id: str = Query(min_length=1, max_length=32),
     strategy_id: Optional[str] = Query(None, max_length=64),
     symbol: Optional[str] = Query(None, max_length=32),
-    start_date: date = Query(..., description="inclusive UTC close date"),
-    end_date: date = Query(..., description="inclusive UTC close date"),
+    start_date: date = Query(..., description="inclusive Campaign close date"),
+    end_date: date = Query(..., description="inclusive Campaign close date"),
+    timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
+        "Asia/Shanghai", alias="timezone", description="Campaign close-date timezone"
+    ),
     db: LedgerDB = Depends(get_db),
 ) -> PerformanceResponse:
-    start_at, end_at = _utc_bounds(start_date, end_date)
+    start_at, end_at = _date_bounds_in_timezone(start_date, end_date, timezone_name)
     facts = await db.list_performance_campaign_facts(
         account_id=account_id,
         strategy_id=strategy_id,
@@ -734,6 +738,7 @@ async def get_performance(
         symbol=symbol,
         start_date=start_date,
         end_date=end_date,
+        timezone=timezone_name,
         unattributed_fills=unattributed,
         **values,
     )
@@ -751,12 +756,15 @@ async def get_performance_breakdown(
     subcategory_key: Optional[str] = Query(None, max_length=256),
     side: Optional[Literal["LONG", "SHORT"]] = Query(None),
     exit_reason: Optional[str] = Query(None, max_length=128),
-    start_date: date = Query(..., description="inclusive UTC close date"),
-    end_date: date = Query(..., description="inclusive UTC close date"),
+    start_date: date = Query(..., description="inclusive Campaign close date"),
+    end_date: date = Query(..., description="inclusive Campaign close date"),
+    timezone_name: Literal["UTC", "Asia/Shanghai"] = Query(
+        "Asia/Shanghai", alias="timezone", description="Campaign close-date timezone"
+    ),
     group_by: PerformanceDimension = Query("symbol"),
     db: LedgerDB = Depends(get_db),
 ) -> PerformanceBreakdownResponse:
-    start_at, end_at = _utc_bounds(start_date, end_date)
+    start_at, end_at = _date_bounds_in_timezone(start_date, end_date, timezone_name)
     available_dimensions = ["symbol", "category", "subcategory", "side"]
     if group_by == "exit_reason" or exit_reason is not None:
         return PerformanceBreakdownResponse(
@@ -768,6 +776,7 @@ async def get_performance_breakdown(
             side=side,
             start_date=start_date,
             end_date=end_date,
+            timezone=timezone_name,
             group_by=group_by,
             dimension_available=False,
             dimension_note=(
@@ -799,6 +808,7 @@ async def get_performance_breakdown(
         side=side,
         start_date=start_date,
         end_date=end_date,
+        timezone=timezone_name,
         group_by=group_by,
         dimension_available=True,
         available_dimensions=available_dimensions,

@@ -143,6 +143,78 @@ async def test_health_pagination_idempotency_and_pnl(ledger, client):
 
 
 @pytest.mark.asyncio
+async def test_web_order_activity_and_trade_calendar_filters_are_server_side(
+    ledger, client
+):
+    suffix = uuid4().hex[:10]
+    account = f"web-filter-{suffix}"
+    for status in ("NEW", "FILLED"):
+        await ledger.insert_order(
+            Order(
+                account_id=account,
+                strategy_id="s",
+                symbol="BTCUSDT",
+                order_id=f"order-{status.lower()}",
+                client_order_id=f"client-{status.lower()}-{suffix}",
+                side="BUY",
+                order_type="LIMIT",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                status=status,
+            )
+        )
+
+    for index, moment in enumerate(
+        (
+            datetime(2026, 8, 1, 15, 30, tzinfo=timezone.utc),
+            datetime(2026, 8, 1, 16, 30, tzinfo=timezone.utc),
+        ),
+        start=1,
+    ):
+        await ledger.insert_trade(
+            Trade(
+                account_id=account,
+                strategy_id="s",
+                symbol="BTCUSDT",
+                trade_id=f"trade-{index}",
+                order_id=f"trade-order-{index}",
+                client_order_id=f"trade-client-{index}-{suffix}",
+                side="BUY",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                quote_quantity=Decimal("100"),
+                commission=Decimal("0.1"),
+                commission_asset="USDT",
+                realized_pnl=Decimal("1"),
+                exchange_time=moment,
+            )
+        )
+
+    active = (
+        await client.get(
+            "/api/v1/orders",
+            params={"account_id": account, "active_only": True},
+        )
+    ).json()
+    assert active["total"] == 1
+    assert active["items"][0]["status"] == "NEW"
+
+    shanghai_day = (
+        await client.get(
+            "/api/v1/trades",
+            params={
+                "account_id": account,
+                "start_date": "2026-08-02",
+                "end_date": "2026-08-02",
+                "timezone": "Asia/Shanghai",
+            },
+        )
+    ).json()
+    assert shanghai_day["total"] == 1
+    assert shanghai_day["items"][0]["trade_id"] == "trade-2"
+
+
+@pytest.mark.asyncio
 async def test_daily_pnl_timezone_boundaries_and_campaign_performance(
     ledger, client
 ):

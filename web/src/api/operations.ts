@@ -16,6 +16,8 @@ import type {
   Page,
   PageParams,
   PerformanceQuery,
+  PerformanceBreakdownQuery,
+  PerformanceBreakdownResponse,
   PerformanceSummary,
   PnLQuery,
   PnLSummary,
@@ -66,6 +68,9 @@ export const operationsApi = {
 
   performance: (query: PerformanceQuery) =>
     api.get<PerformanceSummary>('/performance', { ...query }),
+
+  performanceBreakdown: (query: PerformanceBreakdownQuery) =>
+    api.get<PerformanceBreakdownResponse>('/performance/breakdown', { ...query }),
 
   positions: (query: PositionQuery = {}) =>
     api.get<Page<LedgerPosition>>('/positions', { ...query }),

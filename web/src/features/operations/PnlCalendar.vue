@@ -56,7 +56,7 @@ function intensity(row?: DailyPnlRow): number {
       >
         <span class="calendar-day">{{ cell.day }}</span>
         <strong v-if="cell.row">{{ formatMoney(cell.row.net_pnl, compact ? 0 : 2) }}</strong>
-        <small v-if="cell.row && !compact">{{ cell.row.realized_trade_count ?? cell.row.trade_count }} 轮次</small>
+        <small v-if="cell.row && !compact">{{ cell.row.realized_trade_count ?? cell.row.trade_count }} fills</small>
         <i v-else-if="!cell.row">—</i>
       </button>
     </template>

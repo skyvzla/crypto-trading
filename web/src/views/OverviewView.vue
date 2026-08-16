@@ -13,12 +13,12 @@ import { asNumber, formatDateTime, formatMoney, pnlClass } from '@/features/oper
 
 const route = useRoute()
 const router = useRouter()
-const now = new Date()
-const year = now.getFullYear()
-const month = now.getMonth() + 1
+const nowParts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date()).map((item) => [item.type, item.value]))
+const year = Number(nowParts.year)
+const month = Number(nowParts.month)
 const startDate = `${year}-${String(month).padStart(2, '0')}-01`
 const endDate = `${year}-${String(month).padStart(2, '0')}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`
-const today = `${year}-${String(month).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+const today = `${nowParts.year}-${nowParts.month}-${nowParts.day}`
 
 const filters = ref<OperationFilters>({
   account_id: String(route.query.account_id ?? ''),
@@ -30,11 +30,12 @@ const error = ref<string | null>(null)
 const refreshedAt = ref<string | null>(null)
 const health = ref<Health | null>(null)
 const runtimes = ref<StrategyRuntimeStatus[]>([])
-const positionsTotal = ref(0)
-const activeOrdersTotal = ref(0)
+const positionsTotal = ref<number | null>(null)
+const activeOrdersTotal = ref<number | null>(null)
 const recentTrades = ref<LedgerTrade[]>([])
 const pnl = ref<PnLSummary | null>(null)
 const daily = ref<DailyPnL[]>([])
+const unavailableSources = ref<string[]>([])
 
 const query = computed(() => ({
   ...(filters.value.account_id.trim() ? { account_id: filters.value.account_id.trim() } : {}),
@@ -53,22 +54,25 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    const [healthResult, runtimeResult, positionResult, newOrdersResult, partialOrdersResult, tradeResult] = await Promise.allSettled([
+    const [healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult] = await Promise.allSettled([
       operationsApi.health(),
       operationsApi.runtimeStatus({ ...query.value, limit: 100 }),
       operationsApi.positions({ ...query.value, limit: 1 }),
-      operationsApi.orders({ ...query.value, status: 'NEW', limit: 1 }),
-      operationsApi.orders({ ...query.value, status: 'PARTIALLY_FILLED', limit: 1 }),
+      operationsApi.orders({ ...query.value, active_only: true, limit: 1 }),
       operationsApi.trades({ ...query.value, limit: 6 })
     ])
+    unavailableSources.value = []
     health.value = healthResult.status === 'fulfilled' ? healthResult.value : null
+    if (healthResult.status === 'rejected') unavailableSources.value.push('账本健康')
     runtimes.value = runtimeResult.status === 'fulfilled' ? runtimeResult.value.items : []
-    positionsTotal.value = positionResult.status === 'fulfilled' ? positionResult.value.total : 0
-    activeOrdersTotal.value =
-      (newOrdersResult.status === 'fulfilled' ? newOrdersResult.value.total : 0) +
-      (partialOrdersResult.status === 'fulfilled' ? partialOrdersResult.value.total : 0)
+    if (runtimeResult.status === 'rejected') unavailableSources.value.push('策略心跳')
+    positionsTotal.value = positionResult.status === 'fulfilled' ? positionResult.value.total : null
+    if (positionResult.status === 'rejected') unavailableSources.value.push('当前持仓')
+    activeOrdersTotal.value = activeOrdersResult.status === 'fulfilled' ? activeOrdersResult.value.total : null
+    if (activeOrdersResult.status === 'rejected') unavailableSources.value.push('活动订单')
     recentTrades.value = tradeResult.status === 'fulfilled' ? tradeResult.value.items : []
-    if ([healthResult, runtimeResult, positionResult, newOrdersResult, partialOrdersResult, tradeResult].every((item) => item.status === 'rejected')) {
+    if (tradeResult.status === 'rejected') unavailableSources.value.push('最近成交')
+    if ([healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult].every((item) => item.status === 'rejected')) {
       throw new Error('运行数据接口均不可用')
     }
     if (filters.value.account_id.trim()) {
@@ -127,6 +131,7 @@ onMounted(load)
 
     <FilterBar v-model="filters" @apply="applyFilters" />
     <DataState :loading="loading" :error="error" @retry="load">
+      <a-alert v-if="unavailableSources.length" type="warning" show-icon :message="`部分数据读取失败：${unavailableSources.join('、')}`" description="失败项显示为“读取失败”，不会当作 0 或空数据。" class="partial-failure" />
       <section class="health-rail" aria-label="运行健康状态">
         <article :class="['health-node', health?.status === 'healthy' ? 'ok' : 'bad']">
           <Database :size="18" /><div><span>账本数据库</span><strong>{{ health?.status === 'healthy' ? '正常' : '不可用' }}</strong></div>
@@ -152,11 +157,11 @@ onMounted(load)
       />
 
       <section class="metric-grid overview-metrics">
-        <MetricTile label="今日已实现净 PnL" :value="formatMoney(todayPnl?.net_pnl)" hint="Asia/Shanghai · 已扣账本手续费" :tone="asNumber(todayPnl?.net_pnl) >= 0 ? 'positive' : 'negative'" />
-        <MetricTile label="当前浮动 PnL" :value="formatMoney(pnl?.total_unrealized_pnl)" hint="来自当前筛选账户" :tone="asNumber(pnl?.total_unrealized_pnl) >= 0 ? 'positive' : 'negative'" />
-        <MetricTile label="当月累计净 PnL" :value="filters.account_id ? formatMoney(monthNet) : '—'" :hint="`${winningDays} 盈利日 / ${losingDays} 亏损日`" :tone="monthNet >= 0 ? 'positive' : 'negative'" />
-        <MetricTile label="当前持仓" :value="String(positionsTotal)" hint="点击进入持仓与订单" />
-        <MetricTile label="活动订单" :value="String(activeOrdersTotal)" hint="NEW + PARTIALLY_FILLED" :tone="activeOrdersTotal ? 'warning' : 'neutral'" />
+        <MetricTile label="今日已实现净 PnL" :value="formatMoney(todayPnl?.net_pnl)" hint="上海日界线 · 已扣手续费；资金费暂不可用" :tone="asNumber(todayPnl?.net_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/calendar', query }" />
+        <MetricTile label="当前浮动 PnL" :value="formatMoney(pnl?.total_unrealized_pnl)" hint="来自当前筛选账户" :tone="asNumber(pnl?.total_unrealized_pnl) >= 0 ? 'positive' : 'negative'" :to="{ path: '/positions', query: { ...query, tab: 'positions' } }" />
+        <MetricTile label="当月累计净 PnL" :value="filters.account_id ? formatMoney(monthNet) : '—'" :hint="`${winningDays} 盈利日 / ${losingDays} 亏损日`" :tone="monthNet >= 0 ? 'positive' : 'negative'" :to="{ path: '/performance', query }" />
+        <MetricTile label="当前持仓" :value="positionsTotal == null ? '读取失败' : String(positionsTotal)" hint="进入持仓明细" :tone="positionsTotal == null ? 'warning' : 'neutral'" :to="{ path: '/positions', query: { ...query, tab: 'positions' } }" />
+        <MetricTile label="活动订单" :value="activeOrdersTotal == null ? '读取失败' : String(activeOrdersTotal)" hint="NEW + PARTIALLY_FILLED" :tone="activeOrdersTotal == null || activeOrdersTotal > 0 ? 'warning' : 'neutral'" :to="{ path: '/positions', query: { ...query, tab: 'active' } }" />
       </section>
 
       <section class="two-column overview-panels">
@@ -189,7 +194,7 @@ onMounted(load)
 .health-node { display:flex; align-items:center; gap:10px; min-height:66px; padding:10px 12px; border:1px solid var(--line); border-left:3px solid #7b8997; border-radius:5px; background:var(--surface); }
 .health-node.ok { border-left-color:#2f9d72; }.health-node.bad { border-left-color:#bd625b; }.health-node.unknown { border-left-color:#c08a32; }
 .health-node svg { flex:0 0 auto; color:var(--muted); }.health-node span,.health-node strong { display:block; }.health-node span { color:var(--muted); font-size:10px; }.health-node strong { margin-top:4px; font-size:12px; }
-.account-notice { margin-bottom:12px; }.overview-metrics { margin-bottom:14px; }.overview-panels { margin-top:4px; }
+.account-notice,.partial-failure { margin-bottom:12px; }.overview-metrics { margin-bottom:14px; }.overview-panels { margin-top:4px; }
 .data-card-heading h2 { display:flex; align-items:center; gap:6px; }
 .recent-list button { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; min-height:59px; padding:9px 13px; border:0; border-bottom:1px solid var(--line); background:transparent; color:var(--text); text-align:left; cursor:pointer; }
 .recent-list button:last-child { border-bottom:0; }.recent-list button:hover { background:var(--surface-hover); }.recent-list button > div:last-child { text-align:right; }

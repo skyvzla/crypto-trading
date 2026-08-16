@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { BarChart3, Info, Scale } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
-import type { DailyPnL, PerformanceSummary } from '@/api/types'
+import type { DailyPnL, PerformanceBreakdownResponse, PerformanceDimension, PerformanceSummary } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
 import FilterBar, { type OperationFilters } from '@/features/operations/FilterBar.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
@@ -27,6 +27,7 @@ const endDate = ref(String(route.query.end_date ?? isoDate(end)))
 const activeTab = ref(String(route.query.tab ?? 'overview'))
 const summary = ref<PerformanceSummary | null>(null)
 const daily = ref<DailyPnL[]>([])
+const breakdown = ref<PerformanceBreakdownResponse | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
 const refreshedAt = ref<string | null>(null)
@@ -57,17 +58,32 @@ async function load() {
   error.value = null
   try {
     const [performance, points] = await Promise.all([
-      operationsApi.performance(query.value),
+      operationsApi.performance({ ...query.value, timezone: 'Asia/Shanghai' }),
       operationsApi.dailyPnl({ ...query.value, timezone: 'Asia/Shanghai' })
     ])
     summary.value = performance
     daily.value = points
+    if (activeTab.value === 'breakdown') await loadBreakdown()
     refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (caught) {
     error.value = caught instanceof Error ? caught.message : '绩效数据加载失败'
   } finally {
     loading.value = false
   }
+}
+
+async function loadBreakdown() {
+  if (!filters.value.account_id.trim()) return
+  const groupBy = (String(route.query.group_by ?? 'symbol') as PerformanceDimension)
+  const allowed: PerformanceDimension[] = ['symbol', 'category', 'subcategory', 'side', 'exit_reason']
+  const normalized = allowed.includes(groupBy) ? groupBy : 'symbol'
+  breakdown.value = await operationsApi.performanceBreakdown({
+    ...query.value,
+    start_date: startDate.value,
+    end_date: endDate.value,
+    timezone: 'Asia/Shanghai',
+    group_by: normalized
+  })
 }
 
 async function applyFilters() {
@@ -78,6 +94,16 @@ async function applyFilters() {
 async function changeTab(key: string) {
   activeTab.value = key
   await router.replace({ query: { ...query.value, tab: key } })
+  if (key === 'breakdown') {
+    try {
+      loading.value = true
+      await loadBreakdown()
+    } catch (caught) {
+      error.value = caught instanceof Error ? caught.message : '绩效分组加载失败'
+    } finally {
+      loading.value = false
+    }
+  }
 }
 
 onMounted(load)
@@ -136,18 +162,39 @@ onMounted(load)
             <section class="metric-grid quality-metrics">
               <MetricTile label="平均盈利" :value="formatMoney(summary.avg_win)" tone="positive" :hint="`${summary.win_count} 个盈利轮次`" />
               <MetricTile label="平均亏损" :value="formatMoney(summary.avg_loss)" tone="negative" :hint="`${summary.loss_count} 个亏损轮次`" />
-              <MetricTile label="单轮期望值" :value="formatMoney(summary.expectancy)" :tone="asNumber(summary.expectancy) >= 0 ? 'positive' : 'negative'" hint="胜率 × 均盈 + 败率 × 均亏" />
+              <MetricTile label="单轮期望值" :value="formatMoney(summary.expectancy)" :tone="asNumber(summary.expectancy) >= 0 ? 'positive' : 'negative'" hint="胜率 × 平均盈利 − 败率 × 平均亏损" />
               <MetricTile label="Profit Factor" :value="formatRatio(summary.profit_factor)" hint="总盈利 ÷ 总亏损绝对值" />
             </section>
             <a-alert v-if="summary.loss_count === 0" type="info" show-icon message="没有亏损样本，盈亏比和 Profit Factor 显示为 —，不会显示无穷大。" />
+            <a-alert type="info" show-icon message="部分诊断指标暂不可用" description="当前账本没有持仓时长、盈亏分布和权益时序接口；页面不会用 fills 推测这些指标。" />
           </template>
 
           <template v-else>
-            <section class="breakdown-panel">
+            <section v-if="breakdown && !breakdown.dimension_available" class="breakdown-panel">
               <BarChart3 :size="30" />
-              <div><h2>{{ filters.symbol ? `${filters.symbol} 绩效` : '交易对与分类分解' }}</h2><p v-if="filters.symbol">上方指标已按当前交易对筛选；更换交易对可进行逐项检查。</p><p v-else>当前 `/performance` 只返回所选账户/策略/交易对的单组聚合，尚未返回按交易对、Category、Subcategory、方向或退出原因的分组结果。页面不通过客户端抽样拼出不完整排行榜。</p></div>
+              <div><h2>该分组维度暂不可用</h2><p>{{ breakdown.dimension_note }}</p></div>
             </section>
-            <div class="breakdown-actions"><RouterLink to="/categories"><a-button>查看分类目录</a-button></RouterLink><a-button @click="activeTab = 'overview'">查看当前筛选绩效</a-button></div>
+            <template v-else-if="breakdown">
+              <div class="breakdown-toolbar">
+                <span>按权威账本维度分组 · {{ breakdown.timezone }}</span>
+                <a-select :value="breakdown.group_by" :options="[
+                  { label: '交易对', value: 'symbol' },
+                  { label: 'Category', value: 'category' },
+                  { label: 'Subcategory', value: 'subcategory' },
+                  { label: '方向', value: 'side' },
+                  { label: '退出原因（不可用）', value: 'exit_reason', disabled: true }
+                ]" @change="(value: PerformanceDimension) => router.replace({ query: { ...route.query, group_by: value } }).then(loadBreakdown)" />
+              </div>
+              <div class="table-frame breakdown-table"><a-table :data-source="breakdown.items" row-key="dimension_key" :pagination="false" :scroll="{ x: 1100 }" size="middle">
+                <a-table-column key="dimension" title="维度" data-index="dimension_label"><template #default="{ record }"><strong>{{ record.dimension_label || '未分类' }}</strong><small class="table-subtext">{{ record.dimension_key || 'NO ACTIVE ASSOCIATION' }}</small></template></a-table-column>
+                <a-table-column key="trades" title="轮次" data-index="total_trades" />
+                <a-table-column key="win_rate" title="胜率"><template #default="{ record }">{{ formatPercent(record.win_rate) }}</template></a-table-column>
+                <a-table-column key="payoff" title="盈亏比"><template #default="{ record }">{{ formatRatio(record.payoff_ratio) }}</template></a-table-column>
+                <a-table-column key="net" title="净 PnL"><template #default="{ record }"><span :class="pnlClass(record.net_pnl)">{{ formatMoney(record.net_pnl) }}</span></template></a-table-column>
+                <a-table-column key="drawdown" title="最大回撤"><template #default="{ record }">{{ formatMoney(record.max_drawdown) }}</template></a-table-column>
+              </a-table></div>
+            </template>
+            <section v-else class="breakdown-panel"><BarChart3 :size="30" /><div><h2>读取绩效分组</h2><p>按交易对、Category、Subcategory 或方向查看完整 Campaign 聚合。</p></div></section>
           </template>
         </template>
       </DataState>
@@ -157,5 +204,6 @@ onMounted(load)
 
 <style scoped lang="scss">
 .date-filter { display:flex; align-items:flex-end; gap:9px; margin:-4px 0 14px; }.date-filter label { display:grid; gap:4px; }.date-filter label span { color:var(--muted); font-size:10px; }.date-rule { align-self:center; margin-top:15px; color:#b38732; font:9px "IBM Plex Mono",monospace; }.metric-scope { display:flex; align-items:center; flex-wrap:wrap; gap:8px 18px; margin-bottom:10px; padding:9px 11px; border:1px solid var(--line); background:var(--surface); color:var(--muted); font-size:10px; }.metric-scope strong { color:var(--text); }.sample-warning { margin-bottom:12px; }.daily-chart-card { margin-top:14px; }.daily-bars { display:flex; align-items:stretch; gap:4px; height:230px; padding:16px 14px 9px; overflow-x:auto; }.daily-bar-item { display:flex; flex:1 0 26px; min-width:26px; flex-direction:column; align-items:center; gap:7px; }.bar-track { display:flex; align-items:flex-end; width:100%; height:180px; border-bottom:1px solid var(--line); background:linear-gradient(to top,transparent 49.7%,var(--line) 50%,transparent 50.3%); }.bar-track i { display:block; width:100%; min-height:3px; background:#7b8997; opacity:.84; }.bar-track i.value-positive { background:#2f9d72; }.bar-track i.value-negative { background:#bd625b; }.daily-bar-item span { color:var(--muted); font:8px "IBM Plex Mono",monospace; transform:rotate(-38deg); }.chart-empty { display:grid; place-items:center; height:190px; color:var(--muted); }.quality-hero { display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:16px; margin-bottom:14px; }.quality-hero article { min-height:155px; padding:20px; border:1px solid var(--line); border-top:3px solid #b38732; background:var(--surface); text-align:center; }.quality-hero span { color:var(--muted); font-size:11px; }.quality-hero strong { display:block; margin:12px 0 8px; font:600 34px "IBM Plex Mono",monospace; }.quality-hero p { margin:0; color:var(--muted); font-size:10px; }.quality-cross { display:grid; place-items:center; gap:6px; max-width:130px; color:#b38732; text-align:center; }.quality-cross span { font-size:9px; }.quality-metrics { margin-bottom:12px; }.breakdown-panel { display:flex; align-items:center; gap:16px; min-height:180px; padding:24px; border:1px dashed var(--line); background:var(--surface); }.breakdown-panel svg { flex:0 0 auto; color:#b38732; }.breakdown-panel h2 { margin:0 0 7px; font-size:16px; }.breakdown-panel p { margin:0; color:var(--muted); line-height:1.7; }.breakdown-actions { display:flex; gap:8px; margin-top:10px; }
-@media(max-width:650px){.date-filter{align-items:stretch;flex-direction:column}.date-rule{align-self:flex-start;margin:0}.quality-hero{grid-template-columns:1fr}.quality-cross{max-width:none}}
+.breakdown-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:9px; color:var(--muted); font:10px "IBM Plex Mono",monospace; }.breakdown-table { margin-top:0; }.table-subtext { display:block; margin-top:3px; color:var(--muted); font:9px "IBM Plex Mono",monospace; }
+@media(max-width:650px){.date-filter{align-items:stretch;flex-direction:column}.date-rule{align-self:flex-start;margin:0}.quality-hero{grid-template-columns:1fr}.quality-cross{max-width:none}.breakdown-toolbar{align-items:stretch;flex-direction:column}}
 </style>
