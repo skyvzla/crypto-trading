@@ -216,7 +216,6 @@ onMounted(() => {
 .header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: var(--color-gold); font: var(--font-size-xs) var(--font-family-mono); font-style: normal; letter-spacing: 0; }
 .theme-toggle { color: var(--text); }
 .workspace {
-  --workspace-content-max-width: none;
   flex: 1;
   min-height: 0;
   padding: 20px 24px 32px;

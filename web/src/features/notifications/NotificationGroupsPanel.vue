@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Pencil, Plus, Trash2 } from 'lucide-vue-next'
 import type { NotificationGroup } from '@/api/types'
+import NotificationSectionHeader from './NotificationSectionHeader.vue'
 
 defineProps<{ groups: NotificationGroup[]; endpointNames: (ids: string[]) => string }>()
 const emit = defineEmits<{
@@ -13,10 +14,11 @@ const emit = defineEmits<{
 
 <template>
   <section class="view-panel" aria-labelledby="groups-heading">
-    <div class="section-heading"><div><span class="section-kicker">RESPONSIBILITY MAP</span><h2 id="groups-heading">职责组</h2></div><a-button type="primary" @click="emit('new')"><template #icon><Plus :size="15" /></template>新建职责组</a-button></div>
-    <p class="section-description">把端点编成稳定的职责边界。策略只引用职责组，替换 Bot、群组或 URL 时无需修改策略。</p>
-    <div class="data-table-wrap surface-panel">
-      <a-table :data-source="groups" :pagination="false" row-key="id" size="small">
+    <NotificationSectionHeader id="groups-heading" kicker="RESPONSIBILITY MAP" title="职责组" description="把端点编成稳定的职责边界。策略只引用职责组，替换 Bot、群组或 URL 时无需修改策略。">
+      <template #actions><a-button type="primary" @click="emit('new')"><template #icon><Plus :size="15" /></template>新建职责组</a-button></template>
+    </NotificationSectionHeader>
+    <div class="data-table-wrap data-card">
+      <a-table :data-source="groups" :pagination="false" :scroll="{ x: 700 }" row-key="id" size="small">
         <a-table-column key="name" title="职责组" :width="220"><template #default="{ record }"><div class="primary-cell"><strong>{{ record.name }}</strong><small>{{ record.description || '未填写说明' }}</small></div></template></a-table-column>
         <a-table-column key="endpoints" title="成员端点"><template #default="{ record }"><span class="wrap-value">{{ endpointNames(record.endpoint_ids) }}</span></template></a-table-column>
         <a-table-column key="version" title="版本" :width="80"><template #default="{ record }"><span class="mono-value">v{{ record.version }}</span></template></a-table-column>

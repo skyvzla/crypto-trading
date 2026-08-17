@@ -12,7 +12,6 @@
   --font-size-xs: 12px;
   --font-size-sm: 14px;
   --font-size-md: 16px;
-  --font-size-lg: 18px;
   --font-size-page-title: 22px;
   --font-size-display: 24px;
   --font-size-section-title: 26px;
@@ -52,7 +51,6 @@
 .backtest-page,
 .operations-page {
   width: 100%;
-  max-width: var(--workspace-content-max-width, none);
   margin: 0 auto;
 }
 
