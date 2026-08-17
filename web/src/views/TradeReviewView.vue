@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, h, onActivated, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Button, type TableColumnsType, type TablePaginationConfig } from 'ant-design-vue'
+import { Button, Tag, type TableColumnsType, type TablePaginationConfig } from 'ant-design-vue'
 import { CandlestickChart, CircleDotDashed } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
 import type { CampaignPnL, CampaignSummary, LedgerTrade, StrategyAuditEvent } from '@/api/types'
@@ -61,8 +61,9 @@ const tablePagination = computed<TablePaginationConfig>(() => ({
 }))
 
 const campaignColumns: TableColumnsType<CampaignSummary> = [
-  { title: 'Campaign / 交易对', key: 'campaign', fixed: 'left', width: 235, customRender: ({ record }) => h(Button, { type: 'link', class: 'campaign-button', onClick: () => openCampaign(record) }, () => `${record.symbol} · ${record.campaign_id}`) },
-  { title: '状态', key: 'status', width: 90, customRender: ({ record }) => record.closed_at ? '已结束' : record.has_open_quantity ? '进行中' : '事实不完整' },
+  { title: '交易对', dataIndex: 'symbol', key: 'symbol', fixed: 'left', width: 132, customRender: ({ text }) => h('strong', { class: 'campaign-symbol' }, String(text)) },
+  { title: 'Campaign', dataIndex: 'campaign_id', key: 'campaign', width: 270, ellipsis: true, customRender: ({ record }) => h(Button, { type: 'link', class: 'campaign-button', onClick: () => openCampaign(record) }, () => record.campaign_id) },
+  { title: '状态', key: 'status', width: 108, customRender: ({ record }) => h(Tag, { class: 'campaign-status', color: record.closed_at ? 'success' : record.has_open_quantity ? 'processing' : 'warning' }, () => record.closed_at ? '已结束' : record.has_open_quantity ? '进行中' : '事实不完整') },
   { title: 'fills', dataIndex: 'fill_count', key: 'fills', width: 75 },
   { title: '净已实现 PnL', dataIndex: 'net_realized_pnl', key: 'netPnl', width: 135, customCell: (record) => ({ class: record.net_realized_pnl == null ? 'value-unavailable' : pnlClass(record.net_realized_pnl) }), customRender: ({ record }) => record.net_realized_pnl == null ? h('span', { class: 'net-unavailable', title: record.commission_asset === 'USDT' ? 'Campaign 尚未闭合或 PnL 事实不完整' : '手续费缺少权威 USDT 换算' }, '不可用') : formatMoney(record.net_realized_pnl) },
   { title: '毛 PnL', dataIndex: 'gross_realized_pnl', key: 'grossPnl', width: 115, customRender: ({ text }) => formatMoney(String(text)) },
@@ -191,15 +192,18 @@ onActivated(() => {
 <template>
   <main class="operations-page trade-review-page">
     <PageHeader eyebrow="ANALYSIS / EXECUTION TRACE" title="成交复盘" description="以服务端完整 Campaign 为浏览单位，下钻到全部账本 fills 和策略审计事件。" :loading="loading" :refreshed-at="refreshedAt" @refresh="load" />
-    <FilterBar v-model="filters" @apply="applyFilters" />
+    <FilterBar v-model="filters" @reset="selectedDate = ''" @apply="applyFilters">
+      <template #extra-fields>
+        <label class="trade-date-filter"><span>成交日期</span><a-date-picker :value="selectedDate || undefined" value-format="YYYY-MM-DD" allow-clear placeholder="全部日期" @update:value="selectedDate = String($event ?? '')" /></label>
+      </template>
+    </FilterBar>
     <div class="review-tools">
-      <label><span>上海自然日</span><a-date-picker :value="selectedDate || undefined" value-format="YYYY-MM-DD" allow-clear @update:value="selectedDate = String($event ?? '')" @change="applyFilters" /></label>
       <span>服务端共 {{ serverTotal }} Campaigns · 当前页 {{ campaigns.length }} 个 · 未归属 {{ unattributedFills }} fills</span>
     </div>
     <a-alert v-if="unattributedFills" type="warning" show-icon :message="`${unattributedFills} 笔成交缺少 Campaign 归属`" description="未归属 fills 不参与 Campaign 列表、收益日历或绩效统计，页面不会按时间相邻关系猜测归属。" class="scope-alert" />
     <a-alert v-else type="info" show-icon message="Campaign 由服务端完整聚合" description="分页单位为完整 Campaign；非 USDT 手续费没有权威换算时，净 PnL 明确显示不可用。结果与规范化退出原因筛选仍待权威字段。" class="scope-alert" />
     <DataState :loading="loading" :error="error" :empty="!campaigns.length" @retry="load">
-      <div class="table-frame"><a-table :columns="campaignColumns" :data-source="campaigns" :row-key="campaignKey" :pagination="tablePagination" :scroll="{ x: 1400 }" @change="changePage" /></div>
+      <div class="table-frame"><a-table :columns="campaignColumns" :data-source="campaigns" :row-key="campaignKey" :pagination="tablePagination" :scroll="{ x: 1670 }" @change="changePage" /></div>
     </DataState>
 
     <a-drawer v-model:open="detailOpen" width="min(860px, 96vw)" title="Campaign 成交链路">
@@ -234,6 +238,6 @@ onActivated(() => {
 </template>
 
 <style scoped lang="scss">
-.review-tools { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; margin-bottom:10px; color:var(--muted); font:var(--font-size-xs) var(--font-family-mono); }.review-tools label { display:grid; gap:4px; }.scope-alert { margin-bottom:12px; }.campaign-button { display:block; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.net-unavailable,.value-unavailable { color:var(--color-warning); text-decoration:underline dotted; text-underline-offset:3px; }.campaign-identity { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-bottom:12px; }.campaign-identity > div,.detail-metrics article { padding:10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); }.campaign-identity span,.detail-metrics span { display:block; color:var(--muted); font:var(--font-size-xs) var(--font-family-mono); }.campaign-identity strong,.detail-metrics strong { display:block; margin-top:5px; overflow-wrap:anywhere; font:var(--font-size-sm) var(--font-family-mono); }.detail-metrics { margin-bottom:14px; }.drawer-section { margin-top:18px; }.drawer-section h3 { margin:0 0 9px; font-size:var(--font-size-md); }.chart-unavailable { display:flex; align-items:center; gap:12px; padding:14px; border:1px dashed var(--line); color:var(--muted); }.chart-unavailable h3 { color:var(--text); }.chart-unavailable p { margin:0; font-size:var(--font-size-xs); }.event-title { display:flex; justify-content:space-between; gap:10px; }.event-title time { color:var(--muted); font-size:var(--font-size-xs); }.drawer-section p { color:var(--muted); font-size:var(--font-size-xs); }.drawer-section pre { max-height:180px; margin:6px 0 0; padding:8px; overflow:auto; border:1px solid var(--line); background:var(--surface-hover); color:var(--text); font:var(--font-size-xs) var(--font-family-mono); white-space:pre-wrap; }.timeline-empty { display:flex; gap:7px; align-items:center; color:var(--muted); font-size:var(--font-size-xs); }
+.review-tools { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; color:var(--muted); font:var(--font-size-xs) var(--font-family-mono); }.scope-alert { margin-bottom:12px; }.campaign-symbol,.campaign-button { display:block; width:100%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.campaign-button { padding-inline:0; text-align:left; }.campaign-status { white-space:nowrap; }.net-unavailable,.value-unavailable { color:var(--color-warning); text-decoration:underline dotted; text-underline-offset:3px; }.campaign-identity { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-bottom:12px; }.campaign-identity > div,.detail-metrics article { padding:10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); }.campaign-identity span,.detail-metrics span { display:block; color:var(--muted); font:var(--font-size-xs) var(--font-family-mono); }.campaign-identity strong,.detail-metrics strong { display:block; margin-top:5px; overflow-wrap:anywhere; font:var(--font-size-sm) var(--font-family-mono); }.detail-metrics { margin-bottom:14px; }.drawer-section { margin-top:18px; }.drawer-section h3 { margin:0 0 9px; font-size:var(--font-size-md); }.chart-unavailable { display:flex; align-items:center; gap:12px; padding:14px; border:1px dashed var(--line); color:var(--muted); }.chart-unavailable h3 { color:var(--text); }.chart-unavailable p { margin:0; font-size:var(--font-size-xs); }.event-title { display:flex; justify-content:space-between; gap:10px; }.event-title time { color:var(--muted); font-size:var(--font-size-xs); }.drawer-section p { color:var(--muted); font-size:var(--font-size-xs); }.drawer-section pre { max-height:180px; margin:6px 0 0; padding:8px; overflow:auto; border:1px solid var(--line); background:var(--surface-hover); color:var(--text); font:var(--font-size-xs) var(--font-family-mono); white-space:pre-wrap; }.timeline-empty { display:flex; gap:7px; align-items:center; color:var(--muted); font-size:var(--font-size-xs); }
 @media(max-width:700px){.campaign-identity{grid-template-columns:1fr}.review-tools{align-items:flex-start;flex-direction:column}}
 </style>

@@ -233,13 +233,13 @@ a {
 .operations-heading p { max-width:760px; margin:0; color:var(--muted); font-size:var(--font-size-md); }
 .operations-heading-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
 .refresh-stamp { color:var(--color-gold); font:var(--font-size-xs)/1.2 var(--font-family-mono); letter-spacing:0; }
-.filter-ledger { display:grid; grid-template-columns:repeat(3,minmax(150px,1fr)) auto; align-items:end; gap:10px; padding:12px; margin-bottom:14px; border:1px solid var(--line); border-radius:6px; background:var(--surface); }
-.filter-ledger label { display:grid; gap:5px; min-width:0; }
+.filter-ledger { display:flex; flex-wrap:wrap; align-items:end; gap:10px; padding:12px; margin-bottom:14px; border:1px solid var(--line); border-radius:6px; background:var(--surface); }
+.filter-ledger > label { display:grid; flex:1 1 160px; gap:5px; min-width:0; }
 .filter-ledger label > span { color:var(--muted); font-size:var(--font-size-xs); }
-.filter-ledger .ant-select { width:100%; }
+.filter-ledger .ant-select,.filter-ledger .ant-picker { width:100%; }
 .filter-ledger .filter-account-error { display:flex; align-items:center; gap:2px; color:var(--color-danger); font-size:var(--font-size-xs); }
 .filter-ledger .filter-account-error .ant-btn { width:22px; min-width:22px; height:22px; padding:0; color:var(--color-danger); }
-.filter-actions { display:flex; gap:6px; }
+.filter-actions { display:flex; flex:0 0 auto; gap:6px; }
 .operation-state { display:flex; align-items:center; justify-content:center; gap:10px; min-height:180px; color:var(--muted); border:1px solid var(--line); border-radius:6px; background:var(--surface); }
 .operation-result { border:1px solid var(--line); border-radius:6px; background:var(--surface); }
 .operation-result .ant-result-icon { color:var(--color-warning); }
@@ -274,5 +274,5 @@ a {
 .calendar-day { display:block; color:var(--muted); font:var(--font-size-xs) var(--font-family-mono); }.calendar-cell strong { display:block; margin-top:8px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:var(--font-size-xs) var(--font-family-mono); }.calendar-cell small { display:block; margin-top:3px; color:var(--muted); font-size:var(--font-size-xs); }.calendar-cell i { display:block; margin-top:8px; color:var(--muted); font-style:normal; }
 .pnl-calendar.compact { gap:3px; padding:10px; }.pnl-calendar.compact .calendar-cell { min-height:55px; padding:5px; }.pnl-calendar.compact .calendar-cell.blank { min-height:55px; }.pnl-calendar.compact .calendar-cell strong { margin-top:5px; font-size:var(--font-size-xs); }
 .audit-table { width:100%; border-collapse:collapse; font-size:var(--font-size-sm); }.audit-table th,.audit-table td { padding:9px 12px; border-bottom:1px solid var(--line); text-align:left; }.audit-table th { color:var(--muted); font-size:var(--font-size-xs); font-weight:500; text-transform:uppercase; }.audit-table tr:last-child td { border-bottom:0; }
-@media (max-width: 920px) { .operations-heading { align-items:flex-start; flex-direction:column; }.operations-heading-actions { justify-content:flex-start; }.filter-ledger { grid-template-columns:repeat(2,minmax(150px,1fr)); }.two-column { grid-template-columns:1fr; } }
-@media (max-width: 580px) { .filter-ledger { grid-template-columns:1fr; }.filter-actions { justify-content:flex-end; }.operations-heading h1 { font-size:var(--font-size-display); }.pnl-calendar { gap:2px; padding:7px; }.calendar-cell { min-height:52px; padding:4px; }.calendar-cell.blank { min-height:52px; }.calendar-cell strong { margin-top:4px; font-size:var(--font-size-xs); }.calendar-cell small { display:none; } }
+@media (max-width: 920px) { .operations-heading { align-items:flex-start; flex-direction:column; }.operations-heading-actions { justify-content:flex-start; }.two-column { grid-template-columns:1fr; } }
+@media (max-width: 580px) { .filter-ledger > label { flex-basis:100%; }.filter-actions { justify-content:flex-end; }.operations-heading h1 { font-size:var(--font-size-display); }.pnl-calendar { gap:2px; padding:7px; }.calendar-cell { min-height:52px; padding:4px; }.calendar-cell.blank { min-height:52px; }.calendar-cell strong { margin-top:4px; font-size:var(--font-size-xs); }.calendar-cell small { display:none; } }

@@ -136,6 +136,53 @@ describe('operations views', () => {
     }))
   })
 
+  it('keeps campaign identity, symbol, and status in separate review-table cells', async () => {
+    await router.push('/trades?account_id=acct')
+    vi.spyOn(operationsApi, 'campaigns').mockResolvedValue({
+      items: [{ account_id: 'acct', strategy_id: 's', symbol: 'BTCUSDT', campaign_id: 'campaign-with-a-long-identifier', side: 'SHORT', fill_count: 2, sell_quantity: '1', buy_quantity: '1', total_commission: '0.1', commission_asset: 'USDT', gross_realized_pnl: '10', net_realized_pnl: '9.9', first_fill_at: '2026-08-01T00:00:00Z', last_fill_at: '2026-08-01T00:01:00Z', closed_at: '2026-08-01T00:01:00Z', has_open_quantity: false, pnl_facts_complete: true }],
+      total: 1,
+      limit: 50,
+      offset: 0,
+      unattributed_fills: 0
+    })
+
+    const wrapper = mount(TradeReviewView)
+    await flushPromises()
+
+    const symbol = wrapper.find('.campaign-symbol')
+    const campaign = wrapper.find('.campaign-button')
+    const status = wrapper.find('.campaign-status')
+    const symbolCell = symbol.element.closest('td')
+    const campaignCell = campaign.element.closest('td')
+    const statusCell = status.element.closest('td')
+
+    expect(symbol.text()).toBe('BTCUSDT')
+    expect(campaign.text()).toBe('campaign-with-a-long-identifier')
+    expect(status.text()).toBe('已结束')
+    expect(symbolCell).not.toBeNull()
+    expect(campaignCell).not.toBe(symbolCell)
+    expect(statusCell).not.toBe(symbolCell)
+    expect(statusCell).not.toBe(campaignCell)
+    expect(wrapper.find('.filter-ledger > .trade-date-filter').text()).toContain('成交日期')
+    expect(wrapper.text()).not.toContain('上海自然日')
+  })
+
+  it('clears the slotted trade-date filter together with common filters', async () => {
+    await router.push('/trades?account_id=acct&date=2026-08-01')
+    const campaigns = vi.spyOn(operationsApi, 'campaigns').mockResolvedValue({ items: [], total: 0, limit: 50, offset: 0, unattributed_fills: 0 })
+
+    const wrapper = mount(TradeReviewView)
+    await flushPromises()
+    await wrapper.get('[aria-label="清空筛选"]').trigger('click')
+    await flushPromises()
+
+    const request = campaigns.mock.calls.at(-1)?.[0]
+    expect(request).toBeDefined()
+    expect(request).not.toHaveProperty('start_date')
+    expect(request).not.toHaveProperty('end_date')
+    expect(request).not.toHaveProperty('timezone')
+  })
+
   it('does not subtract non-USDT commission from realized PnL', async () => {
     await router.push('/trades?account_id=acct')
     vi.spyOn(operationsApi, 'campaigns').mockResolvedValue({

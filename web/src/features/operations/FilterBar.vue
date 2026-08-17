@@ -26,6 +26,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   'update:modelValue': [value: OperationFilters]
   'update:status': [value: string]
+  reset: []
   apply: []
 }>()
 
@@ -62,6 +63,7 @@ function update(key: keyof OperationFilters, value: string) {
 function reset() {
   filters.value = { account_id: '', strategy_id: '', symbol: '' }
   emit('update:status', '')
+  emit('reset')
   emit('apply')
 }
 
@@ -120,6 +122,7 @@ onMounted(() => { void loadAccounts() })
         @update:value="$emit('update:status', String($event ?? ''))"
       />
     </label>
+    <slot name="extra-fields" />
     <div class="filter-actions">
       <a-button type="primary" @click="$emit('apply')">
         <template #icon><Search :size="14" /></template>
