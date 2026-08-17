@@ -381,6 +381,7 @@ class SpikeExecutionCoordinator:
             ),
             reduced_at_origin=reduced_at_origin,
             exit_requested=exit_requested,
+            entry_bucket=None if lease is None else lease.entry_bucket,
         )
 
     def _fail_campaign_recovery(self, message: str) -> NoReturn:
@@ -604,12 +605,17 @@ class SpikeExecutionCoordinator:
         origin_price = (
             origin_getter(campaign_id) if callable(origin_getter) else None
         )
+        bucket_getter = getattr(self.strategy, "campaign_entry_bucket", None)
+        entry_bucket = (
+            bucket_getter(campaign_id) if callable(bucket_getter) else None
+        )
         lease = CampaignLease(
             campaign_id,
             STRATEGY_ID,
             symbol,
             event_time,
             origin_price=None if origin_price is None else str(origin_price),
+            entry_bucket=entry_bucket,
         )
         acquired = await self.campaign_store.acquire(lease)
         if acquired:

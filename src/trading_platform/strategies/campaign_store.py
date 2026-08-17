@@ -17,6 +17,7 @@ class CampaignLease:
     origin_checked: bool = False
     reduced_at_origin: bool = False
     exit_requested: bool = False
+    entry_bucket: str | None = None
 
 
 class RedisCampaignStore:

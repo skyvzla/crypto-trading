@@ -66,6 +66,10 @@ def _strategy(
     agreement: int | None,
     quantity: str = "2",
     early_profit_unlock_ratio: Decimal | None = None,
+    profit_drawdown_peak_ratio: Decimal | None = None,
+    profit_drawdown_ratio: Decimal | None = None,
+    strong_bucket_strict_age_ms: int | None = None,
+    weak_bucket_strict_age_ms: int | None = None,
 ):
     account = PositionAccount(quantity)
     strategy = DynamicSpikeShortStrategy(
@@ -74,6 +78,10 @@ def _strategy(
         account=account,
         exit_policy="candidate-v1",
         early_profit_unlock_ratio=early_profit_unlock_ratio,
+        profit_drawdown_peak_ratio=profit_drawdown_peak_ratio,
+        profit_drawdown_ratio=profit_drawdown_ratio,
+        strong_bucket_strict_age_ms=strong_bucket_strict_age_ms,
+        weak_bucket_strict_age_ms=weak_bucket_strict_age_ms,
     )
     strategy.restore_campaign_timing(
         "spike_short:AKEUSDT:1",
@@ -234,6 +242,108 @@ def test_candidate_momentum_threshold_tightens_at_90_300_900_seconds(
         assert strategy.campaign_exit_state() == (False, False, True)
     else:
         assert strategy.campaign_exit_state() == (False, False, False)
+
+
+def _push_1m_close(strategy, *, open_time: int, close: str) -> None:
+    strategy.klines_1m.append(
+        Kline(
+            symbol="AKEUSDT",
+            interval="1m",
+            open_time=open_time,
+            close_time=open_time + 59_999,
+            available_time=open_time + 60_000,
+            open=Decimal(close),
+            high=Decimal(close),
+            low=Decimal(close),
+            close=Decimal(close),
+            volume=Decimal("1"),
+        )
+    )
+
+
+def test_profit_drawdown_peak_ratio_arms_only_after_peak_gain():
+    strategy, account = _strategy(
+        agreement=None,
+        profit_drawdown_peak_ratio=Decimal("0.20"),
+        profit_drawdown_ratio=Decimal("0.10"),
+    )
+
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS, close="85")
+    assert _evaluate(strategy, elapsed_ms=100_000, price="85") == []
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS + 60_000, close="80")
+    assert _evaluate(strategy, elapsed_ms=110_000, price="80") == []
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS + 120_000, close="88")
+    intents = _evaluate(strategy, elapsed_ms=120_000, price="88")
+
+    assert len(intents) == 1
+    assert intents[0].quantity == account.position.quantity
+    assert intents[0].trigger_reason == "candidate_profit_drawdown_exit"
+    assert strategy.campaign_exit_state() == (False, False, True)
+
+
+def test_profit_drawdown_peak_ratio_requires_arming_then_drawdown():
+    strategy, _ = _strategy(
+        agreement=None,
+        profit_drawdown_peak_ratio=Decimal("0.20"),
+        profit_drawdown_ratio=Decimal("0.10"),
+    )
+
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS, close="95")
+    assert _evaluate(strategy, elapsed_ms=100_000, price="95") == []
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS + 60_000, close="80")
+    assert _evaluate(strategy, elapsed_ms=110_000, price="80") == []
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS + 120_000, close="84")
+    assert _evaluate(strategy, elapsed_ms=120_000, price="84") == []
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS + 180_000, close="88.1")
+    intents = _evaluate(strategy, elapsed_ms=180_000, price="88.1")
+
+    assert len(intents) == 1
+    assert intents[0].trigger_reason == "candidate_profit_drawdown_exit"
+
+
+def test_profit_drawdown_peak_ratio_does_not_weaken_momentum_tiers():
+    strategy, _ = _strategy(
+        agreement=1,
+        profit_drawdown_peak_ratio=Decimal("0.20"),
+        profit_drawdown_ratio=Decimal("0.10"),
+    )
+
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS, close="80")
+    assert _evaluate(strategy, elapsed_ms=100_000, price="80") == []
+    assert strategy._candidate_drawdown_armed is True
+    _push_1m_close(strategy, open_time=FIRST_FILL_MS + 60_000, close="82")
+    assert _evaluate(strategy, elapsed_ms=120_000, price="82") == []
+
+
+def test_static_bucket_strong_extends_time_risk_hold():
+    strategy, _ = _strategy(
+        agreement=None,
+        strong_bucket_strict_age_ms=1_500_000,
+        weak_bucket_strict_age_ms=600_000,
+    )
+    strategy._candidate_entry_bucket = "strong"
+
+    assert _evaluate(strategy, elapsed_ms=1_200_000, price="101") == []
+    intents = _evaluate(strategy, elapsed_ms=1_500_000, price="101")
+
+    assert len(intents) == 1
+    assert intents[0].trigger_reason == "candidate_time_risk_exit"
+    assert strategy.campaign_exit_state() == (False, False, True)
+
+
+def test_static_bucket_weak_cuts_time_risk_early():
+    strategy, _ = _strategy(
+        agreement=None,
+        strong_bucket_strict_age_ms=1_500_000,
+        weak_bucket_strict_age_ms=600_000,
+    )
+    strategy._candidate_entry_bucket = "weak"
+
+    assert _evaluate(strategy, elapsed_ms=599_000, price="101") == []
+    intents = _evaluate(strategy, elapsed_ms=600_000, price="101")
+
+    assert len(intents) == 1
+    assert intents[0].trigger_reason == "candidate_time_risk_exit"
 
 
 def test_profit_threshold_permanently_unlocks_risk_exit_before_ninety_seconds():

@@ -160,6 +160,19 @@ class SpikeSignal:
     rise_low_time: int | None = None
     rise_low_age_minutes: int | None = None
     entry_context: EntryContextFeatures | None = None
+    # 箱体/通道突破审计字段
+    box_upper_3d: Decimal | None = None
+    box_upper_7d: Decimal | None = None
+    box_lower_3d: Decimal | None = None
+    box_lower_7d: Decimal | None = None
+    box_breakthrough: Decimal | None = None
+    box_break_lower: Decimal | None = None
+    box_break_first_time: int | None = None
+    box_break_minutes: int | None = None
+    box_break_hours: float | None = None
+    # 过早触发过滤审计字段：信号触发价相对前 30m 均价的偏离、前 60m 价格极差
+    spike_avg_deviation_pct: float | None = None
+    spike_range_pct: float | None = None
 
 
 class DynamicSpikeShortStrategy:
@@ -178,6 +191,17 @@ class DynamicSpikeShortStrategy:
     SPIKE_RISE_5S = Decimal("0.05")  # 5 秒涨幅阈值
     VOLUME_MULTIPLE_5S = Decimal("3.0")  # 5 秒成交量倍数
     RISE_FROM_12H_LOW = Decimal("0.20")  # 12 小时低点涨幅阈值
+
+    # 加速豁免：5s 涨幅不足但呈分钟级持续加速（蠕升）时放行。
+    # 条件：5s 涨幅 >= accel_rise_5s_min，当前分钟实时涨幅（1s 累计）
+    # 达到前 accel_prev_minutes 分钟已完成 1m 涨幅均值的 accel_ratio 倍。
+    # 默认关闭（阈值=0）。秒级加速无需豁免：1s 持续放量必然触发 5s 阈值。
+    ACCEL_RISE_5S_MIN = Decimal("0.0")  # 豁免路径的最低 5s 涨幅
+    ACCEL_RATIO = Decimal("2.0")  # 当前分钟涨幅 / 前 N 分钟涨幅均值的倍率
+    ACCEL_PREV_MINUTES = 5  # 前窗口分钟数
+    ACCEL_PREV2_MINUTES = 5  # 加速对比的前置窗口分钟数
+    ACCEL_PREV_AVG_MIN = Decimal("0.02")  # 前窗口均值涨幅下限
+    ACCEL_PREV_RATIO = Decimal("1.5")  # 前窗口均值 / 前置窗口均值的倍率
 
     INVALID_SPIKE_ATR = Decimal("3.5")  # 失效价 spike_high 分支
     INVALID_PRIMARY_ATR = Decimal("2.0")  # 失效价主目标位分支
@@ -206,15 +230,36 @@ class DynamicSpikeShortStrategy:
         exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007",
         prior_high_lookback_minutes: int | None = None,
         entry_tier_mode: Literal["three-tier", "tier3-only"] = "three-tier",
+        reject_below_current: bool = False,
         rise_low_lookback_minutes: int = 0,
         min_rise_duration_minutes: int = 0,
+        box_duration_min_minutes: int = 0,
+        spike_avg_deviation_max_pct: float = 0,
+        spike_range_max_pct: float = 0,
         early_profit_unlock_ratio: Decimal | None = None,
         rise_5s_threshold: Decimal | None = None,
         max_rise_5s_percent: Decimal | None = None,
         max_rise_window_seconds: int = 5,
         max_rise_window_percent: Decimal | None = None,
+        accel_rise_5s_min: Decimal | None = None,
+        accel_ratio: Decimal | None = None,
+        accel_prev_minutes: int | None = None,
+        accel_prev2_minutes: int | None = None,
+        accel_prev_avg_min: Decimal | None = None,
+        accel_prev_ratio: Decimal | None = None,
         max_volume_multiple_5s: Decimal | None = None,
         prior_high_tolerance_percent: Decimal = Decimal("0"),
+        exit_strict_age_ms: int | None = None,
+        exit_flat_agreement: int | None = None,
+        time_risk_grace_ms: int = 0,
+        time_risk_grace_loss_ratio: Decimal = Decimal("0.01"),
+        strong_strict_age_ms: int | None = None,
+        weak_strict_age_ms: int | None = None,
+        strong_bucket_strict_age_ms: int | None = None,
+        weak_bucket_strict_age_ms: int | None = None,
+        profit_unlock_ratio: Decimal | None = None,
+        profit_drawdown_ratio: Decimal | None = None,
+        profit_drawdown_peak_ratio: Decimal | None = None,
     ):
         """
         Args:
@@ -234,6 +279,7 @@ class DynamicSpikeShortStrategy:
         if entry_tier_mode not in {"three-tier", "tier3-only"}:
             raise ValueError("entry_tier_mode must be three-tier or tier3-only")
         self.entry_tier_mode = entry_tier_mode
+        self.reject_below_current = bool(reject_below_current)
         if (rise_low_lookback_minutes <= 0) != (min_rise_duration_minutes <= 0):
             raise ValueError(
                 "rise_low_lookback_minutes and min_rise_duration_minutes "
@@ -245,6 +291,20 @@ class DynamicSpikeShortStrategy:
             )
         self.rise_low_lookback_minutes = int(rise_low_lookback_minutes)
         self.min_rise_duration_minutes = int(min_rise_duration_minutes)
+        if box_duration_min_minutes < 0:
+            raise ValueError("box_duration_min_minutes must not be negative")
+        self.box_duration_min_minutes = int(box_duration_min_minutes)
+        if spike_avg_deviation_max_pct < 0 or spike_range_max_pct < 0:
+            raise ValueError(
+                "spike_avg_deviation_max_pct and spike_range_max_pct must not be negative"
+            )
+        if (spike_avg_deviation_max_pct > 0) != (spike_range_max_pct > 0):
+            raise ValueError(
+                "spike_avg_deviation_max_pct and spike_range_max_pct "
+                "must both be zero or both be positive"
+            )
+        self.spike_avg_deviation_max_pct = float(spike_avg_deviation_max_pct)
+        self.spike_range_max_pct = float(spike_range_max_pct)
         if early_profit_unlock_ratio is not None:
             early_profit_unlock_ratio = Decimal(early_profit_unlock_ratio)
             if not Decimal("0") < early_profit_unlock_ratio < Decimal("1"):
@@ -255,6 +315,52 @@ class DynamicSpikeShortStrategy:
         )
         if self.rise_5s_threshold < 0:
             raise ValueError("rise_5s_threshold must not be negative")
+        self.accel_rise_5s_min = (
+            self.ACCEL_RISE_5S_MIN
+            if accel_rise_5s_min is None
+            else Decimal(accel_rise_5s_min)
+        )
+        self.accel_ratio = (
+            self.ACCEL_RATIO if accel_ratio is None else Decimal(accel_ratio)
+        )
+        self.accel_prev_minutes = (
+            self.ACCEL_PREV_MINUTES
+            if accel_prev_minutes is None
+            else int(accel_prev_minutes)
+        )
+        self.accel_prev2_minutes = (
+            self.ACCEL_PREV2_MINUTES
+            if accel_prev2_minutes is None
+            else int(accel_prev2_minutes)
+        )
+        self.accel_prev_avg_min = (
+            self.ACCEL_PREV_AVG_MIN
+            if accel_prev_avg_min is None
+            else Decimal(accel_prev_avg_min)
+        )
+        self.accel_prev_ratio = (
+            self.ACCEL_PREV_RATIO
+            if accel_prev_ratio is None
+            else Decimal(accel_prev_ratio)
+        )
+        if self.accel_rise_5s_min > 0 and (
+            self.accel_rise_5s_min > self.rise_5s_threshold
+        ):
+            raise ValueError(
+                "accel_rise_5s_min must not exceed rise_5s_threshold"
+            )
+        if self.accel_rise_5s_min < 0:
+            raise ValueError("accel_rise_5s_min must not be negative")
+        if self.accel_ratio <= 1:
+            raise ValueError("accel_ratio must be greater than 1")
+        if self.accel_prev_minutes < 1:
+            raise ValueError("accel_prev_minutes must be positive")
+        if self.accel_prev2_minutes < 1:
+            raise ValueError("accel_prev2_minutes must be positive")
+        if self.accel_prev_avg_min < 0:
+            raise ValueError("accel_prev_avg_min must not be negative")
+        if self.accel_prev_ratio < 1:
+            raise ValueError("accel_prev_ratio must be at least 1")
         self.max_rise_window_seconds = int(max_rise_window_seconds)
         if self.max_rise_window_seconds != max_rise_window_seconds:
             raise ValueError("max_rise_window_seconds must be an integer")
@@ -320,6 +426,45 @@ class DynamicSpikeShortStrategy:
         )
         if self.prior_high_lookback_minutes <= 0:
             raise ValueError("prior_high_lookback_minutes must be positive")
+        self.exit_strict_age_ms = (
+            CandidateV1Config.strict_age_ms
+            if exit_strict_age_ms is None
+            else int(exit_strict_age_ms)
+        )
+        if self.exit_strict_age_ms <= 0:
+            raise ValueError("exit_strict_age_ms must be positive")
+        if exit_flat_agreement is not None:
+            exit_flat_agreement = int(exit_flat_agreement)
+            if not 1 <= exit_flat_agreement <= 3:
+                raise ValueError("exit_flat_agreement must be between 1 and 3")
+        self.exit_flat_agreement = exit_flat_agreement
+        if time_risk_grace_ms < 0:
+            raise ValueError("time_risk_grace_ms must not be negative")
+        self.time_risk_grace_ms = int(time_risk_grace_ms)
+        if not 0 < time_risk_grace_loss_ratio <= 1:
+            raise ValueError("time_risk_grace_loss_ratio must be between 0 and 1")
+        self.time_risk_grace_loss_ratio = Decimal(str(time_risk_grace_loss_ratio))
+        for label, value in (
+            ("strong_strict_age_ms", strong_strict_age_ms),
+            ("weak_strict_age_ms", weak_strict_age_ms),
+            ("strong_bucket_strict_age_ms", strong_bucket_strict_age_ms),
+            ("weak_bucket_strict_age_ms", weak_bucket_strict_age_ms),
+        ):
+            if value is not None:
+                value = int(value)
+                if value <= 0:
+                    raise ValueError(f"{label} must be positive")
+            setattr(self, label, value)
+        for label, value in (
+            ("profit_unlock_ratio", profit_unlock_ratio),
+            ("profit_drawdown_ratio", profit_drawdown_ratio),
+            ("profit_drawdown_peak_ratio", profit_drawdown_peak_ratio),
+        ):
+            if value is not None:
+                value = Decimal(str(value))
+                if not Decimal("0") < value < Decimal("1"):
+                    raise ValueError(f"{label} must be between 0 and 1")
+            setattr(self, label, value)
         self._account = account
         self._trading_enabled = True
         self._execution_enabled = True
@@ -344,8 +489,35 @@ class DynamicSpikeShortStrategy:
         self._exit_requested = False
         self._campaign_origin_price: Decimal | None = None
         self._candidate_exit_state = SpikeExitPolicyState()
-        self._candidate_exit_config = CandidateV1Config()
+        self._candidate_exit_config = CandidateV1Config(
+            risk_start_ms=(
+                self.exit_strict_age_ms
+                if self.exit_flat_agreement is not None
+                else CandidateV1Config.risk_start_ms
+            ),
+            medium_age_ms=(
+                self.exit_strict_age_ms
+                if self.exit_flat_agreement is not None
+                else CandidateV1Config.medium_age_ms
+            ),
+            strict_age_ms=self.exit_strict_age_ms,
+            flat_momentum_agreement=self.exit_flat_agreement,
+            time_risk_grace_ms=self.time_risk_grace_ms,
+            time_risk_grace_loss_ratio=self.time_risk_grace_loss_ratio,
+            strong_strict_age_ms=self.strong_strict_age_ms,
+            weak_strict_age_ms=self.weak_strict_age_ms,
+            strong_bucket_strict_age_ms=self.strong_bucket_strict_age_ms,
+            weak_bucket_strict_age_ms=self.weak_bucket_strict_age_ms,
+            profit_unlock_ratio=self.profit_unlock_ratio,
+            profit_drawdown_ratio=self.profit_drawdown_ratio,
+            profit_drawdown_peak_ratio=self.profit_drawdown_peak_ratio,
+        )
         self._early_profit_risk_unlocked = False
+        self._candidate_peak_price: Decimal | None = None
+        self._candidate_peak_1m_price: Decimal | None = None
+        self._candidate_profit_unlocked = False
+        self._candidate_drawdown_armed = False
+        self._candidate_entry_bucket: str | None = None
         self._candidate_feature_config = CandidateFeatureConfig()
         self._candidate_features: CandidateFeatureSnapshot | None = None
         self._pending_rotation: SpikeSignal | None = None
@@ -433,6 +605,9 @@ class DynamicSpikeShortStrategy:
                         )
                 else:
                     self._campaign_origin_price = signal.origin_price
+                self._candidate_entry_bucket = self._entry_bucket(
+                    signal.rise_from_12h_low
+                )
                 self.refresh_candidate_features()
             self._record_audit(
                 event_time=fill.fill_time,
@@ -475,7 +650,12 @@ class DynamicSpikeShortStrategy:
         self._exit_requested = False
         self._campaign_origin_price = None
         self._candidate_exit_state = SpikeExitPolicyState()
+        self._candidate_entry_bucket = None
         self._early_profit_risk_unlocked = False
+        self._candidate_peak_price = None
+        self._candidate_peak_1m_price = None
+        self._candidate_profit_unlocked = False
+        self._candidate_drawdown_armed = False
         self._candidate_features = None
         self._pending_rotation = None
         self._rotation_exit_requested = False
@@ -490,6 +670,7 @@ class DynamicSpikeShortStrategy:
         origin_checked: bool = False,
         reduced_at_origin: bool = False,
         exit_requested: bool = False,
+        entry_bucket: str | None = None,
     ) -> None:
         """从持久化执行事实恢复当前持仓的退出计时状态。"""
         expected_prefix = f"spike_short:{self.symbol}:"
@@ -505,6 +686,7 @@ class DynamicSpikeShortStrategy:
         if self.exit_policy == "candidate-v1" and origin_price is None:
             raise ValueError("candidate-v1 recovery requires origin_price")
         self._campaign_origin_price = origin_price
+        self._candidate_entry_bucket = entry_bucket
         self._candidate_exit_state = SpikeExitPolicyState(
             origin_checked=origin_checked,
             reduced_at_origin=reduced_at_origin,
@@ -534,6 +716,11 @@ class DynamicSpikeShortStrategy:
             None,
         )
         return None if signal is None else signal.origin_price
+
+    def campaign_entry_bucket(self, campaign_id: str) -> str | None:
+        if self._campaign_id_for_timing == campaign_id:
+            return self._candidate_entry_bucket
+        return None
 
     def campaign_exit_state(self) -> tuple[bool, bool, bool] | None:
         if self.exit_policy != "candidate-v1" or self.first_fill_time is None:
@@ -638,6 +825,41 @@ class DynamicSpikeShortStrategy:
                         ),
                         "rise_low_time": signal.rise_low_time,
                         "rise_low_age_minutes": signal.rise_low_age_minutes,
+                        "box_upper_3d": (
+                            str(signal.box_upper_3d)
+                            if signal.box_upper_3d is not None
+                            else None
+                        ),
+                        "box_upper_7d": (
+                            str(signal.box_upper_7d)
+                            if signal.box_upper_7d is not None
+                            else None
+                        ),
+                        "box_lower_3d": (
+                            str(signal.box_lower_3d)
+                            if signal.box_lower_3d is not None
+                            else None
+                        ),
+                        "box_lower_7d": (
+                            str(signal.box_lower_7d)
+                            if signal.box_lower_7d is not None
+                            else None
+                        ),
+                        "box_breakthrough": (
+                            str(signal.box_breakthrough)
+                            if signal.box_breakthrough is not None
+                            else None
+                        ),
+                        "box_break_lower": (
+                            str(signal.box_break_lower)
+                            if signal.box_break_lower is not None
+                            else None
+                        ),
+                        "box_break_first_time": signal.box_break_first_time,
+                        "box_break_minutes": signal.box_break_minutes,
+                        "box_break_hours": signal.box_break_hours,
+                        "spike_avg_deviation_pct": signal.spike_avg_deviation_pct,
+                        "spike_range_pct": signal.spike_range_pct,
                         "origin_price": str(signal.origin_price),
                         "origin_floor": (
                             str(signal.origin_floor)
@@ -820,6 +1042,62 @@ class DynamicSpikeShortStrategy:
             (position.entry_price - mark_price) * position.quantity
             - position.total_commission
         )
+        if self._candidate_peak_price is None or mark_price < self._candidate_peak_price:
+            self._candidate_peak_price = mark_price
+        unlock_ratio = self._candidate_exit_config.profit_unlock_ratio
+        if (
+            not self._candidate_profit_unlocked
+            and unlock_ratio is not None
+            and self._candidate_peak_price is not None
+            and position.entry_price > 0
+            and (position.entry_price - self._candidate_peak_price)
+            / position.entry_price
+            >= unlock_ratio
+        ):
+            self._candidate_profit_unlocked = True
+        profit_drawdown = False
+        drawdown_ratio = self._candidate_exit_config.profit_drawdown_ratio
+        peak_ratio = self._candidate_exit_config.profit_drawdown_peak_ratio
+        last_1m_close = None
+        if self.klines_1m:
+            k = self.klines_1m[-1]
+            if k.open_time >= self.first_fill_time:
+                last_1m_close = k.close
+        if last_1m_close is not None:
+            if (
+                self._candidate_peak_1m_price is None
+                or last_1m_close < self._candidate_peak_1m_price
+            ):
+                self._candidate_peak_1m_price = last_1m_close
+        if (
+            drawdown_ratio is not None
+            and self._candidate_peak_1m_price is not None
+            and last_1m_close is not None
+        ):
+            if peak_ratio is not None:
+                if (
+                    not self._candidate_drawdown_armed
+                    and position.entry_price > 0
+                    and (position.entry_price - self._candidate_peak_1m_price)
+                    / position.entry_price
+                    >= peak_ratio
+                ):
+                    self._candidate_drawdown_armed = True
+                unlocked = self._candidate_drawdown_armed
+                peak_price = self._candidate_peak_1m_price
+                current_price = last_1m_close
+            else:
+                unlocked = (
+                    unlock_ratio is None or self._candidate_profit_unlocked
+                )
+                peak_price = self._candidate_peak_price
+                current_price = mark_price
+            profit_drawdown = (
+                unlocked
+                and peak_price is not None
+                and peak_price > 0
+                and (current_price - peak_price) / peak_price >= drawdown_ratio
+            )
         gross_return = (position.entry_price - mark_price) / position.entry_price
         if (
             not self._early_profit_risk_unlocked
@@ -849,6 +1127,9 @@ class DynamicSpikeShortStrategy:
             down_channel_5m=features.down_channel_5m,
             down_channel_15m=features.down_channel_15m,
             config=self._candidate_exit_config,
+            notional=self.total_notional,
+            profit_unlocked=self._candidate_profit_unlocked,
+            entry_bucket=self._candidate_entry_bucket,
         )
         observation = ExitObservation(
             event_time=event_time,
@@ -858,6 +1139,7 @@ class DynamicSpikeShortStrategy:
             decay_agreement=features.decay_agreement,
             time_risk=time_risk,
             momentum_risk=momentum_risk,
+            profit_drawdown=profit_drawdown,
             stable_breakout_5m=features.stable_breakout_5m,
             stable_breakout_15m=features.stable_breakout_15m,
         )
@@ -917,6 +1199,7 @@ class DynamicSpikeShortStrategy:
             else {
                 "time_risk": "candidate_time_risk_exit",
                 "momentum_risk": "candidate_momentum_exit",
+                "profit_drawdown": "candidate_profit_drawdown_exit",
             }.get(decision.reason, "candidate_trend_exit")
         )
         if not reduce_half:
@@ -1292,6 +1575,60 @@ class DynamicSpikeShortStrategy:
             for seconds in (5, 10, 15, 60)
         }
 
+    def _accel_exempt(self, bars: list[Bar1s], rise_5s: Decimal) -> bool:
+        """加速豁免：5s 涨幅不足但呈分钟级持续加速（蠕升）时放行。
+
+        条件：
+        - rise_5s >= accel_rise_5s_min；
+        - 前 accel_prev_minutes 分钟已完成 1m K 线涨幅均值 >=
+          accel_prev_avg_min，且 > accel_prev_ratio × 再前
+          accel_prev2_minutes 分钟涨幅均值（分钟级加速放大）；
+        - 当前分钟实时涨幅（本分钟首秒 close 至触发 Bar）>=
+          accel_ratio × 前窗口涨幅均值。
+
+        秒级加速无需豁免：1s 持续放量上涨必然同时满足 5s 涨幅阈值，
+        豁免只针对分钟级蠕升（每 5s 涨幅不足但分钟涨幅持续放大）。
+        """
+        if self.accel_rise_5s_min <= 0:
+            return False
+        if rise_5s < self.accel_rise_5s_min:
+            return False
+        current = bars[-1]
+        minute_start = current.timestamp - (current.timestamp % MS_PER_MINUTE)
+        minute_open = None
+        for bar in reversed(bars):
+            if bar.timestamp < minute_start:
+                minute_open = bar.close
+                break
+        if minute_open is None or minute_open <= 0:
+            return False
+        intrabar_rise = current.close / minute_open - Decimal("1")
+        if intrabar_rise < self.accel_rise_5s_min:
+            return False
+
+        prev_total = self.accel_prev_minutes + self.accel_prev2_minutes
+        prev_minutes = self._completed_1m_window(minute_start, prev_total + 1)
+        if len(prev_minutes) < prev_total + 1:
+            return False
+        rises = []
+        prev_close = prev_minutes[-(prev_total + 1)].close
+        for kline in prev_minutes[-(prev_total + 1):]:
+            if prev_close > 0:
+                rises.append(kline.close / prev_close - Decimal("1"))
+            prev_close = kline.close
+        if len(rises) != prev_total:
+            return False
+        earlier_rises = rises[: self.accel_prev2_minutes]
+        recent_rises = rises[self.accel_prev2_minutes:]
+        recent_avg = sum(recent_rises, Decimal("0")) / Decimal(len(recent_rises))
+        if recent_avg < self.accel_prev_avg_min:
+            return False
+        if self.accel_prev2_minutes > 0 and recent_avg <= self.accel_prev_ratio * (
+            sum(earlier_rises, Decimal("0")) / Decimal(len(earlier_rises))
+        ):
+            return False
+        return intrabar_rise >= self.accel_ratio * recent_avg
+
     def _detect_signal(self, bar: Bar1s) -> Optional[SpikeSignal]:
         """
         检测逼空信号。
@@ -1334,7 +1671,8 @@ class DynamicSpikeShortStrategy:
             else current.close / bar_5s_ago.close - Decimal("1")
         )
         if rise_5s < self.rise_5s_threshold:
-            return None
+            if not self._accel_exempt(bars, rise_5s):
+                return None
         rise_window_returns = self._rise_window_returns(bars, current)
         # 使用与基础触发一致的 5s 精确值，避免共享与非共享路径的数值语义漂移。
         rise_window_returns[5] = rise_5s
@@ -1366,6 +1704,7 @@ class DynamicSpikeShortStrategy:
             return None
         if current.close / low_12h - Decimal("1") < self.RISE_FROM_12H_LOW:
             return None
+        rise_from_12h_low = current.close / low_12h - Decimal("1")
 
         rise_low = None
         rise_low_time = None
@@ -1379,6 +1718,22 @@ class DynamicSpikeShortStrategy:
             rise_low, rise_low_time = rise_low_point
             rise_low_age_minutes = (minute_start - rise_low_time) // MS_PER_MINUTE
             if rise_low_age_minutes < self.min_rise_duration_minutes:
+                return None
+
+        # 5b. 箱体/通道突破时长过滤：现价须已站上突破线（3d/7d 上沿均值）
+        #     超过 box_duration_min_minutes 才允许入场（0=关闭）。
+        box_break = None
+        if self.box_duration_min_minutes > 0:
+            box_break = self._box_breakthrough(minute_start, current.close)
+            if box_break is None or box_break["box_break_minutes"] < self.box_duration_min_minutes:
+                return None
+
+        # 5c. 过早触发过滤：信号触发价相对前 30m 均价偏离度与 60m 极差
+        #     同时超阈值时判定为在脉冲顶部触发，做空接飞刀风险高（0=关闭）。
+        premature = None
+        if self.spike_avg_deviation_max_pct > 0 and self.spike_range_max_pct > 0:
+            premature = self._premature_spike_filter(minute_start, current.close)
+            if premature is not None and premature["rejected"]:
                 return None
 
         # 6. 起涨点（16 小时最低价）
@@ -1405,15 +1760,34 @@ class DynamicSpikeShortStrategy:
             return None
 
         # 9. 三档价格：spike_high - ATR × (1.15, 0.75, 0.35)
+        #    tier1（最低档）用于保护线检查，不随 tier_atr_shift 上移，避免放宽入场门槛
+        tier_atr_shift = self._entry_tier_atr_shift(rise_from_12h_low)
         tier_prices = [
-            spike_high - atr * (self.RETEST_ATR - Decimal(n - 1) * self.SPREAD_ATR)
+            spike_high
+            - atr
+            * (
+                self.RETEST_ATR
+                - Decimal(n - 1) * self.SPREAD_ATR
+                - (tier_atr_shift if n > 0 else Decimal("0"))
+            )
             for n in range(3)
         ]
 
-        # 10. 价格合理性：最低档不得低于 origin_floor，且必须高于触发价
+        # 10. 价格合理性：最低档不得低于 origin_floor。
+        #     reject_below_current=False（默认）时不再拦截"现价已高于
+        #     挂单档位"的信号：做空时现价高于挂单价是更优卖出价，
+        #     交给成交价模型（SELL 按触发 bar 的 1s 开盘价成交）处理。
+        #     仅当 reject_below_current=True 时恢复原拦截（低卖防护）。
         origin_floor = origin_price * (Decimal("1") + self.ORIGIN_MIN_RISE)
         lowest_tier = min(tier_prices)
-        if lowest_tier < origin_floor or lowest_tier <= current.close:
+        if lowest_tier < origin_floor:
+            return None
+        entry_tier = (
+            tier_prices[-1]
+            if self.entry_tier_mode == "tier3-only"
+            else lowest_tier
+        )
+        if self.reject_below_current and entry_tier <= current.close:
             return None
         allowed_prior_high = prior_high * (
             Decimal("1") - self.prior_high_tolerance_percent / Decimal("100")
@@ -1447,7 +1821,7 @@ class DynamicSpikeShortStrategy:
         # 这不会改变过滤判定，只避免把后续本会失败的半成品候选写入报告。
         entry_filters_pass, rejection_details = self._entry_filter_decision(
             current.timestamp,
-            rise_from_12h_low=current.close / low_12h - Decimal("1"),
+            rise_from_12h_low=rise_from_12h_low,
         )
         if not entry_filters_pass:
             if rejection_details is not None:
@@ -1460,7 +1834,7 @@ class DynamicSpikeShortStrategy:
                         median_volume_1s=median_volume,
                         volume_multiple_5s=volume_multiple_5s,
                         low_12h=low_12h,
-                        rise_from_12h_low=current.close / low_12h - Decimal("1"),
+                        rise_from_12h_low=rise_from_12h_low,
                         entry_context=entry_context,
                     ),
                     **rejection_details,
@@ -1502,7 +1876,7 @@ class DynamicSpikeShortStrategy:
                 median_volume_1s=median_volume,
                 volume_multiple_5s=volume_multiple_5s,
                 low_12h=low_12h,
-                rise_from_12h_low=current.close / low_12h - Decimal("1"),
+                rise_from_12h_low=rise_from_12h_low,
                 entry_context=entry_context,
             )
             return None
@@ -1541,6 +1915,21 @@ class DynamicSpikeShortStrategy:
             rise_low_time=rise_low_time,
             rise_low_age_minutes=rise_low_age_minutes,
             entry_context=entry_context,
+            box_upper_3d=box_break.get("box_upper_3d") if box_break else None,
+            box_upper_7d=box_break.get("box_upper_7d") if box_break else None,
+            box_lower_3d=box_break.get("box_lower_3d") if box_break else None,
+            box_lower_7d=box_break.get("box_lower_7d") if box_break else None,
+            box_breakthrough=box_break.get("box_breakthrough") if box_break else None,
+            box_break_lower=box_break.get("box_break_lower") if box_break else None,
+            box_break_first_time=box_break.get("box_break_first_time") if box_break else None,
+            box_break_minutes=box_break.get("box_break_minutes") if box_break else None,
+            box_break_hours=box_break.get("box_break_hours") if box_break else None,
+            spike_avg_deviation_pct=(
+                premature.get("spike_avg_deviation_pct") if premature else None
+            ),
+            spike_range_pct=(
+                premature.get("spike_range_pct") if premature else None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -1550,6 +1939,22 @@ class DynamicSpikeShortStrategy:
     def _entry_filters_pass(self, event_ms: int) -> bool:
         """版本策略可覆盖的入场过滤扩展点。"""
         return True
+
+    def _entry_tier_atr_shift(
+        self, rise_from_12h_low: Decimal | None
+    ) -> Decimal:
+        """按动能分组调整三档挂单价（ATR 系数偏移，正数上移挂单价）。
+
+        基类默认不调整；版本策略可按分组覆盖，供强势桶提高做空挂单价。
+        """
+        return Decimal("0")
+
+    def _entry_bucket(self, rise_from_12h_low: Decimal | None) -> str | None:
+        """按入场信号快照确定强弱桶（"strong"/"weak"），持仓期不变。
+
+        基类默认不分组；版本策略可按 rise_from_12h_low 覆盖。
+        """
+        return None
 
     def _entry_filter_decision(
         self,
@@ -1626,6 +2031,167 @@ class DynamicSpikeShortStrategy:
             ((k.high, k.open_time) for k in completed),
             key=lambda point: (point[0], point[1]),
         )
+
+    def _box_breakthrough(self, minute_start: int, current_close: Decimal) -> dict | None:
+        """
+        计算箱体/通道突破信息，用于突破时长入场过滤。
+
+        对 3d/7d 两个窗口分别：
+        - 用完整 1m K 聚合成 1h（high=max, low=min, close=末根），并排除信号
+          所在的当前 1h bar（避免同一小时内已发生的 spike 污染箱体/突破判定）
+        - log(high) 线性回归得到斜率；|slope|<3bps/bar 视为横盘，
+          上沿=Winsorized5% 箱体上沿、下沿=Winsorized5% 箱体下沿；
+          否则按上升/下降通道用回归线 ±1.5σ（上轨/下轨）
+        - 突破线 = 两窗口上沿的均值
+        - 突破时长 = 最近一次 1h 收盘跌破突破线后，重新站上至今的连续时长
+          （从最后一个 close<突破线的 bar 收盘时刻起算，即突破须仍在持续）
+
+        返回 dict 或 None（数据不足时返回 None）。
+        """
+        hour_ms = MS_PER_MINUTE * 60
+        current_hour_start = minute_start - (minute_start % hour_ms)
+        windows = []
+        for days in (3, 7):
+            window = self._completed_1m_window(
+                minute_start, days * 24 * 60
+            )
+            if not window:
+                return None
+            # 聚合为 1h，排除当前小时（信号所在 bar，可能已被 spike 污染）
+            by_hour: dict[int, list] = {}
+            for k in window:
+                if k.open_time >= current_hour_start:
+                    continue
+                hour = k.open_time - (k.open_time % hour_ms)
+                by_hour.setdefault(hour, []).append(k)
+            hours = sorted(by_hour)
+            highs = [max(k.high for k in by_hour[h]) for h in hours]
+            lows = [min(k.low for k in by_hour[h]) for h in hours]
+            if len(highs) < 40:
+                return None
+            windows.append((hours, highs, lows, by_hour))
+
+        # 分别计算两个窗口的上下沿
+        uppers = []
+        lowers = []
+        for hours, highs, lows, by_hour in windows:
+            band = self._box_band(highs, lows)
+            if band is None:
+                return None
+            uppers.append(band[0])
+            lowers.append(band[1])
+        breakthrough = sum(uppers) / Decimal(len(uppers))
+        box_lower = sum(lowers) / Decimal(len(lowers))
+
+        # 突破时长：从最后一个 1h 收盘 < 突破线的 bar 收盘时刻起算。
+        # 若窗口内从未跌破（收盘恒在突破线上方），从窗口起点起算。
+        last_break_hour = None
+        for hours, highs, lows, by_hour in windows:
+            for h in hours:
+                bar_close = by_hour[h][-1].close
+                if bar_close < breakthrough:
+                    if last_break_hour is None or h > last_break_hour:
+                        last_break_hour = h
+        if last_break_hour is None:
+            # 全程站上：以两窗口中最晚的起点起算
+            last_break_hour = min(hours[0] for hours, _, _, _ in windows)
+        break_start_time = last_break_hour + hour_ms
+        duration_minutes = (minute_start - break_start_time) // MS_PER_MINUTE
+        if duration_minutes < 0:
+            duration_minutes = 0
+        return {
+            "box_upper_3d": uppers[0],
+            "box_upper_7d": uppers[1],
+            "box_lower_3d": lowers[0],
+            "box_lower_7d": lowers[1],
+            "box_breakthrough": breakthrough,
+            "box_break_lower": box_lower,
+            "box_break_first_time": break_start_time,
+            "box_break_minutes": duration_minutes,
+            "box_break_hours": duration_minutes / 60,
+        }
+
+    def _premature_spike_filter(
+        self, minute_start: int, current_close: Decimal
+    ) -> dict | None:
+        """过早触发过滤：信号触发价相对前 30m 均价偏离度与 60m 价格极差。
+
+        偏离度 = current_close / 前 30m 1m close 均值 - 1（百分比）。
+        极差 = (max high - min low) / min low × 100（前 60m 已完成 1m K）。
+        两者都超过阈值时判定为"价格在瞬间脉冲顶部触发"，做空接飞刀风险高，拒绝。
+
+        返回 dict（含审计指标与判定）或 None（数据不足时，保守不拦截）。
+        """
+        window_30 = self._completed_1m_window(minute_start, 30)
+        window_60 = self._completed_1m_window(minute_start, 60)
+        if not window_30 or not window_60:
+            return None
+        avg_30 = sum(k.close for k in window_30) / Decimal(len(window_30))
+        if avg_30 <= 0:
+            return None
+        deviation_pct = float((current_close / avg_30 - Decimal("1")) * 100)
+        min_low = min(k.low for k in window_60)
+        max_high = max(k.high for k in window_60)
+        if min_low <= 0:
+            return None
+        range_pct = float((max_high / min_low - Decimal("1")) * 100)
+        rejected = (
+            deviation_pct >= self.spike_avg_deviation_max_pct
+            and range_pct >= self.spike_range_max_pct
+        )
+        return {
+            "spike_avg_deviation_pct": deviation_pct,
+            "spike_range_pct": range_pct,
+            "rejected": rejected,
+        }
+
+    def _box_band(self, highs: list, lows: list) -> tuple[Decimal, Decimal] | None:
+        """单窗口上下沿：|slope|<3bps/bar 视为横盘（Winsorized5% 上下沿），
+        否则按方向用回归线 ±1.5σ（上轨/下轨，对最新 1h 位置）。"""
+        import math as _math
+        n = len(highs)
+        if n < 10:
+            return None
+        log_h = [_math.log(float(h)) for h in highs]
+        x_vals = list(range(n))
+        x_mean = sum(x_vals) / n
+        y_mean = sum(log_h) / n
+        s_xy = sum((xi - x_mean) * (yi - y_mean) for xi, yi in zip(x_vals, log_h))
+        s_xx = sum((xi - x_mean) ** 2 for xi in x_vals)
+        if s_xx == 0:
+            return None
+        slope = s_xy / s_xx
+        intercept = y_mean - slope * x_mean
+        resid = [yi - (intercept + slope * xi) for xi, yi in zip(x_vals, log_h)]
+        sigma = _math.sqrt(sum(r * r for r in resid) / n)
+        slope_bps = slope * 10000
+        if abs(slope_bps) < 3:
+            # 横盘：Winsorized 5% 上下沿
+            return (
+                Decimal(str(self._winsorized_value(highs, "upper"))),
+                Decimal(str(self._winsorized_value(lows, "lower"))),
+            )
+        # 通道：回归线 ± 1.5σ 上下轨（对最新 1h 位置）
+        latest = intercept + slope * (n - 1)
+        return (
+            Decimal(str(_math.exp(latest + 1.5 * sigma))),
+            Decimal(str(_math.exp(latest - 1.5 * sigma))),
+        )
+
+    @staticmethod
+    def _winsorized_value(values: list, side: str) -> float:
+        """Winsorized 5% 值：side='upper' 用两端 5% 缩尾后均值；
+        side='lower' 同理。缩尾即把极端值替换为 5% 边界值。"""
+        import math as _math
+        vals = sorted(float(v) for v in values)
+        n = len(vals)
+        k = max(1, int(_math.floor(n * 0.05)))
+        if n <= 2 * k:
+            return float(sum(vals) / n)
+        low_clip = vals[k]
+        high_clip = vals[-k - 1]
+        clipped = [low_clip] * k + vals[k:-k] + [high_clip] * k
+        return sum(clipped) / len(clipped)
 
     def _spike_high(self, minute_start: int) -> Optional[Decimal]:
         point = self._spike_high_point(minute_start)
@@ -1868,6 +2434,13 @@ class DynamicSpikeBacktestStrategy:
             return None
         strategy = self.strategies.get(parts[1])
         return None if strategy is None else strategy.campaign_origin_price(campaign_id)
+
+    def campaign_entry_bucket(self, campaign_id: str) -> str | None:
+        parts = campaign_id.split(":")
+        if len(parts) != 3:
+            return None
+        strategy = self.strategies.get(parts[1])
+        return None if strategy is None else strategy.campaign_entry_bucket(campaign_id)
 
     def campaign_exit_state(
         self, symbol: str

@@ -28,9 +28,35 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
         group_rise_12h_threshold: float = 0.0,
         loose_consecutive_up_minutes: int = 0,
         loose_max_ls_ratio: float | None = None,
+        strong_tier_atr_shift: float = 0.0,
+        exit_strict_age_ms: int | None = None,
+        exit_flat_agreement: int | None = None,
+        time_risk_grace_ms: int = 0,
+        time_risk_grace_loss_ratio: Decimal = Decimal("0.01"),
+        strong_strict_age_ms: int | None = None,
+        weak_strict_age_ms: int | None = None,
+        strong_bucket_strict_age_ms: int | None = None,
+        weak_bucket_strict_age_ms: int | None = None,
+        profit_unlock_ratio: Decimal | None = None,
+        profit_drawdown_ratio: Decimal | None = None,
+        profit_drawdown_peak_ratio: Decimal | None = None,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            *args,
+            exit_strict_age_ms=exit_strict_age_ms,
+            exit_flat_agreement=exit_flat_agreement,
+            time_risk_grace_ms=time_risk_grace_ms,
+            time_risk_grace_loss_ratio=time_risk_grace_loss_ratio,
+            strong_strict_age_ms=strong_strict_age_ms,
+            weak_strict_age_ms=weak_strict_age_ms,
+            strong_bucket_strict_age_ms=strong_bucket_strict_age_ms,
+            weak_bucket_strict_age_ms=weak_bucket_strict_age_ms,
+            profit_unlock_ratio=profit_unlock_ratio,
+            profit_drawdown_ratio=profit_drawdown_ratio,
+            profit_drawdown_peak_ratio=profit_drawdown_peak_ratio,
+            **kwargs,
+        )
         if max_consecutive_up_minutes < 0:
             raise ValueError("max_consecutive_up_minutes must not be negative")
         self.max_consecutive_up_minutes = int(max_consecutive_up_minutes)
@@ -49,6 +75,8 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
             )
         if loose_max_ls_ratio is not None and loose_max_ls_ratio < 0:
             raise ValueError("loose_max_ls_ratio must not be negative")
+        if strong_tier_atr_shift < 0:
+            raise ValueError("strong_tier_atr_shift must not be negative")
         self.group_rise_12h_threshold = float(group_rise_12h_threshold)
         self.loose_consecutive_up_minutes = int(loose_consecutive_up_minutes)
         self.loose_max_ls_ratio = (
@@ -56,6 +84,42 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
             if loose_max_ls_ratio is not None
             else None
         )
+        self.strong_tier_atr_shift = float(strong_tier_atr_shift)
+        if exit_strict_age_ms is not None and exit_strict_age_ms <= 0:
+            raise ValueError("exit_strict_age_ms must be positive")
+        if exit_flat_agreement is not None and not 1 <= exit_flat_agreement <= 3:
+            raise ValueError("exit_flat_agreement must be between 1 and 3")
+        self.exit_strict_age_ms = (
+            int(exit_strict_age_ms) if exit_strict_age_ms is not None else None
+        )
+        self.exit_flat_agreement = (
+            int(exit_flat_agreement) if exit_flat_agreement is not None else None
+        )
+        if time_risk_grace_ms < 0:
+            raise ValueError("time_risk_grace_ms must not be negative")
+        if not 0 < time_risk_grace_loss_ratio <= 1:
+            raise ValueError("time_risk_grace_loss_ratio must be between 0 and 1")
+        self.time_risk_grace_ms = int(time_risk_grace_ms)
+        self.time_risk_grace_loss_ratio = Decimal(str(time_risk_grace_loss_ratio))
+        for label, value in (
+            ("strong_strict_age_ms", strong_strict_age_ms),
+            ("weak_strict_age_ms", weak_strict_age_ms),
+        ):
+            if value is not None:
+                value = int(value)
+                if value <= 0:
+                    raise ValueError(f"{label} must be positive")
+            setattr(self, label, value)
+        for label, value in (
+            ("profit_unlock_ratio", profit_unlock_ratio),
+            ("profit_drawdown_ratio", profit_drawdown_ratio),
+            ("profit_drawdown_peak_ratio", profit_drawdown_peak_ratio),
+        ):
+            if value is not None:
+                value = Decimal(str(value))
+                if not Decimal("0") < value < Decimal("1"):
+                    raise ValueError(f"{label} must be between 0 and 1")
+            setattr(self, label, value)
         self.metrics_series = list(metrics_series or [])
         self._metrics_idx = 0
 
@@ -70,6 +134,20 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
             and float(rise_from_12h_low) >= self.group_rise_12h_threshold
         )
         return True, "strong" if strong else "weak"
+
+    def _entry_tier_atr_shift(
+        self, rise_from_12h_low: Decimal | None
+    ) -> Decimal:
+        if self.strong_tier_atr_shift <= 0:
+            return Decimal("0")
+        grouped, bucket = self._group_bucket(rise_from_12h_low)
+        if grouped and bucket == "strong":
+            return Decimal(str(self.strong_tier_atr_shift))
+        return Decimal("0")
+
+    def _entry_bucket(self, rise_from_12h_low: Decimal | None) -> str | None:
+        grouped, bucket = self._group_bucket(rise_from_12h_low)
+        return bucket if grouped else None
 
     def _entry_filters_pass(self, event_ms: int) -> bool:
         return self._entry_filter_decision(event_ms)[0]
@@ -318,9 +396,17 @@ class V21:
     )
     supported_parameters = frozenset(
         {
+            "reject_below_current",
+            "box_duration_min_minutes",
+            "spike_avg_deviation_max_pct",
+            "spike_range_max_pct",
             "max_consecutive_up_minutes",
             "max_oi_change_pct",
             "max_ls_ratio",
+            "rise_5s_threshold",
+            "accel_rise_5s_min",
+            "accel_ratio",
+            "accel_prev_minutes",
             "max_rise_5s_percent",
             "max_rise_window_seconds",
             "max_rise_window_percent",
@@ -330,6 +416,18 @@ class V21:
             "group_rise_12h_threshold",
             "loose_consecutive_up_minutes",
             "loose_max_ls_ratio",
+            "strong_tier_atr_shift",
+            "exit_strict_age_ms",
+            "exit_flat_agreement",
+            "time_risk_grace_ms",
+            "time_risk_grace_loss_ratio",
+            "strong_strict_age_ms",
+            "weak_strict_age_ms",
+            "strong_bucket_strict_age_ms",
+            "weak_bucket_strict_age_ms",
+            "profit_unlock_ratio",
+            "profit_drawdown_ratio",
+            "profit_drawdown_peak_ratio",
         }
     )
     internal_parameters = frozenset({"metrics_series"})

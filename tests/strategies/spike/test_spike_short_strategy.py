@@ -1587,6 +1587,125 @@ class TestV21GroupedConsecutiveFilter:
         assert details["bucket"] == "weak"
         assert details["loose_max_ls_ratio"] == 2.0
 
+    def test_strong_tier_atr_shift_applies_to_strong_bucket(self):
+        strategy = self._strategy(
+            group_rise_12h_threshold=1.0,
+            strong_tier_atr_shift=0.20,
+        )
+        shift = strategy._entry_tier_atr_shift(Decimal("1.23"))
+        assert shift == Decimal("0.20")
+
+    def test_strong_tier_atr_shift_ignores_weak_bucket(self):
+        strategy = self._strategy(
+            group_rise_12h_threshold=1.0,
+            strong_tier_atr_shift=0.20,
+        )
+        shift = strategy._entry_tier_atr_shift(Decimal("0.27"))
+        assert shift == Decimal("0")
+
+    def test_strong_tier_atr_shift_zero_disabled(self):
+        strategy = self._strategy(
+            group_rise_12h_threshold=1.0,
+            strong_tier_atr_shift=0,
+        )
+        shift = strategy._entry_tier_atr_shift(Decimal("1.23"))
+        assert shift == Decimal("0")
+
+    def test_strong_tier_atr_shift_base_strategy_returns_zero(self):
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT", total_notional=Decimal("1000")
+        )
+        shift = strategy._entry_tier_atr_shift(Decimal("1.23"))
+        assert shift == Decimal("0")
+
+    def test_strong_tier_atr_shift_negative_is_rejected(self):
+        with pytest.raises(ValueError, match="strong_tier_atr_shift"):
+            self._strategy(
+                group_rise_12h_threshold=1.0,
+                strong_tier_atr_shift=-0.1,
+            )
+
+    def _strong_bucket_signal(self, shift: Decimal) -> SpikeSignal:
+        minute = 60_000
+        lookback_minutes = 7 * 24 * 60
+        minute_start = lookback_minutes * minute
+        low_open_time = minute_start - lookback_minutes * minute
+        strategy = SpikeV21Strategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            prior_high_lookback_minutes=6 * 60,
+            rise_low_lookback_minutes=lookback_minutes,
+            min_rise_duration_minutes=24 * 60,
+            group_rise_12h_threshold=Decimal("1.0"),
+            strong_tier_atr_shift=shift,
+        )
+        strategy.klines_1m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=index * minute,
+                close_time=(index + 1) * minute - 1,
+                available_time=(index + 1) * minute,
+                open=Decimal("100"),
+                high=Decimal("102"),
+                low=Decimal("80") if index * minute == low_open_time else Decimal("85"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            )
+            for index in range(lookback_minutes)
+        ]
+        strategy.klines_5m = [
+            Kline(
+                symbol="BTCUSDT",
+                interval="5m",
+                open_time=minute_start - (15 - index) * 5 * minute,
+                close_time=minute_start - (14 - index) * 5 * minute - 1,
+                available_time=minute_start - (14 - index) * 5 * minute,
+                open=Decimal("100"),
+                high=Decimal("102"),
+                low=Decimal("98"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            )
+            for index in range(15)
+        ]
+        closes = [Decimal("100")] * 56 + [
+            Decimal("166"), Decimal("168"), Decimal("170"),
+            Decimal("172"), Decimal("174"),
+        ]
+        strategy.bars_1s = [
+            Bar1s(
+                symbol="BTCUSDT",
+                timestamp=minute_start - (60 - index) * 1_000,
+                available_time=minute_start - (59 - index) * 1_000,
+                open=close,
+                high=Decimal("200") if index == 60 else close,
+                low=close,
+                close=close,
+                volume=Decimal("4") if index >= 56 else Decimal("1"),
+                trade_count=1,
+                vwap=close,
+            )
+            for index, close in enumerate(closes)
+        ]
+        signal = strategy._detect_signal(strategy.bars_1s[-1])
+        assert signal is not None
+        return signal
+
+    def test_strong_tier_atr_shift_keeps_protection_tier_fixed(self):
+        shift0 = self._strong_bucket_signal(Decimal("0"))
+        shift02 = self._strong_bucket_signal(Decimal("0.2"))
+
+        assert shift0.rise_from_12h_low >= Decimal("1.0")
+        assert shift0.tier_prices[0] == shift02.tier_prices[0]
+        assert shift02.tier_prices[1] == shift0.tier_prices[1] + Decimal("0.2") * shift0.atr
+        assert shift02.tier_prices[2] == shift0.tier_prices[2] + Decimal("0.2") * shift0.atr
+
+    def test_strong_tier_atr_shift_weak_bucket_tiers_unchanged(self):
+        shift0 = self._strong_bucket_signal(Decimal("0"))
+        assert shift0.tier_prices[0] < shift0.tier_prices[1] < shift0.tier_prices[2]
+        assert all(t < Decimal("200") for t in shift0.tier_prices)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
