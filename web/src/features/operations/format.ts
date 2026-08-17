@@ -62,7 +62,7 @@ export function pnlClass(value: string | number | null | undefined): string {
 
 export function sideLabel(value: string | null | undefined): string {
   const normalized = value?.toUpperCase()
-  if (normalized === 'BUY' || normalized === 'LONG') return '多 / BUY'
-  if (normalized === 'SELL' || normalized === 'SHORT') return '空 / SELL'
+  if (normalized === 'BUY' || normalized === 'LONG') return '买 / BUY'
+  if (normalized === 'SELL' || normalized === 'SHORT') return '卖 / SELL'
   return value || '—'
 }
