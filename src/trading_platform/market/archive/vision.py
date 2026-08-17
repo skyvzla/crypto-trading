@@ -708,7 +708,7 @@ def parse_kline_archive(
     timeframe: str,
     month: str,
 ) -> list[Candle]:
-    """Parse one native Binance Vision monthly kline ZIP using epoch values."""
+    """Parse one native Binance Vision daily or monthly kline ZIP."""
 
     normalized_symbol = symbol.strip().upper()
     member = f"{normalized_symbol}-{timeframe}-{month}.csv"
@@ -786,7 +786,7 @@ def download_history(
                     start_utc, end_utc
                 )
             else:
-                periods = _months(start_utc, end_utc)
+                periods = _kline_periods(start_utc, end_utc)
             for period in periods:
                 bounds = (symbol_availability or {}).get(symbol)
                 period_start, period_end = _period_bounds(period)
@@ -803,10 +803,14 @@ def download_history(
         task_started: float,
     ) -> DownloadResult:
         current, (symbol, timeframe, period) = job
-        monthly_seconds = timeframe == "1s" and not isinstance(period, date)
+        daily_period = isinstance(period, date)
+        monthly_seconds = timeframe == "1s" and not daily_period
         if isinstance(period, date):
             label = period.isoformat()
-            url = aggtrade_archive_url(symbol, label)
+            if timeframe == "1s":
+                url = aggtrade_archive_url(symbol, label)
+            else:
+                url = daily_kline_archive_url(symbol, timeframe, label)
         else:
             label = f"{period[0]:04d}-{period[1]:02d}"
             if monthly_seconds:
@@ -941,7 +945,7 @@ def download_history(
                         else:
                             rows += archive.upsert(_candles_from_arrow(table))
                 else:
-                    if isinstance(period, date):
+                    if isinstance(period, date) and timeframe == "1s":
                         candles = parse_aggtrade_archive(content, symbol, label)
                     else:
                         candles = parse_kline_archive(
@@ -951,7 +955,10 @@ def download_history(
                     # complete source partition rather than a requested slice.
                     if storage_check is not None:
                         storage_check()
-                    rows = archive.upsert(candles)
+                    if daily_period and timeframe != "1s":
+                        rows = archive.upsert(candles, partition_day=period.day)
+                    else:
+                        rows = archive.upsert(candles)
                 processing_seconds = time.monotonic() - processing_started
         except ArchiveNotFoundError:
             _notify(
@@ -1120,6 +1127,12 @@ def kline_archive_url(symbol: str, timeframe: str, month: str) -> str:
     )
 
 
+def daily_kline_archive_url(symbol: str, timeframe: str, day: str) -> str:
+    normalized = symbol.strip().upper()
+    filename = f"{normalized}-{timeframe}-{day}.zip"
+    return f"{VISION_ROOT}/daily/klines/{normalized}/{timeframe}/{filename}"
+
+
 def _require_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("download range must include a timezone")
@@ -1149,6 +1162,24 @@ def _aggtrade_periods(
         else:
             periods.extend(_days(slice_start, slice_end))
     return tuple(periods)
+
+
+def _kline_periods(
+    start: datetime, end: datetime
+) -> tuple[date | tuple[int, int], ...]:
+    periods: list[date | tuple[int, int]] = []
+    now = _utc_now()
+    for month in _months(start, end):
+        month_start, month_end = _period_bounds(month)
+        if month_end <= now:
+            periods.append(month)
+            continue
+        periods.extend(_days(max(start, month_start), min(end, month_end)))
+    return tuple(periods)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _relevant_days(

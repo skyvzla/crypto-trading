@@ -85,7 +85,9 @@ class ParquetCandleArchive:
             return None
         return pq.ParquetFile(target).metadata.num_rows
 
-    def upsert(self, candles: Iterable[Candle]) -> int:
+    def upsert(
+        self, candles: Iterable[Candle], *, partition_day: int | None = None
+    ) -> int:
         rows = list(candles)
         if not rows:
             return 0
@@ -95,7 +97,13 @@ class ParquetCandleArchive:
                 candle.timeframe,
                 candle.open_time_utc.year,
                 candle.open_time_utc.month,
-                candle.open_time_utc.day if candle.timeframe == "1s" else 0,
+                (
+                    partition_day
+                    if partition_day is not None
+                    else candle.open_time_utc.day
+                    if candle.timeframe == "1s"
+                    else 0
+                ),
             )
             for candle in rows
         }

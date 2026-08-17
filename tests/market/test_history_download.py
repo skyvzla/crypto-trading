@@ -24,6 +24,7 @@ from trading_platform.market.archive import (
     DownloadResult,
     ParquetCandleArchive,
     aggtrade_archive_url,
+    daily_kline_archive_url,
     create_duckdb_catalog,
     download_history,
     kline_archive_url,
@@ -54,6 +55,9 @@ def test_archive_urls_default_to_binance_s3_origin():
     )
     assert kline_archive_url("akeusdt", "1m", "2026-07") == (
         f"{expected_root}/monthly/klines/AKEUSDT/1m/AKEUSDT-1m-2026-07.zip"
+    )
+    assert daily_kline_archive_url("akeusdt", "1m", "2026-08-01") == (
+        f"{expected_root}/daily/klines/AKEUSDT/1m/AKEUSDT-1m-2026-08-01.zip"
     )
     assert monthly_aggtrade_archive_url("akeusdt", "2026-07") == (
         f"{expected_root}/monthly/aggTrades/AKEUSDT/"
@@ -673,6 +677,58 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
     ]
 
 
+def test_download_history_uses_daily_klines_for_partial_month(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        archive_vision,
+        "_utc_now",
+        lambda: datetime(2026, 8, 17, tzinfo=UTC),
+    )
+    requested: list[str] = []
+    payloads: dict[str, bytes] = {}
+    for day, timestamp in [(1, 1_785_542_400_000), (2, 1_785_628_800_000)]:
+        payload = BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr(
+                f"AKEUSDT-1d-2026-08-{day:02d}.csv",
+                f"{timestamp},10,12,9,11,20,{timestamp + 86_399_999},0,0,0,0,0\n",
+            )
+        payloads[f"2026-08-{day:02d}"] = payload.getvalue()
+
+    def fetch(url: str) -> bytes:
+        requested.append(url)
+        assert "/daily/klines/AKEUSDT/1d/" in url
+        filename = url.rsplit("/", 1)[-1]
+        label = filename.removeprefix("AKEUSDT-1d-").removesuffix(".zip")
+        if label not in payloads:
+            raise archive_vision.ArchiveNotFoundError(url)
+        return payloads[label]
+
+    with ParquetCandleArchive(tmp_path / "history") as archive:
+        results = download_history(
+            archive,
+            fetch=fetch,
+            symbols=["AKEUSDT"],
+            timeframes=["1d"],
+            start=datetime(2026, 8, 1, tzinfo=UTC),
+            end=datetime(2026, 8, 4, tzinfo=UTC),
+        )
+
+    assert [url.rsplit("/", 1)[-1] for url in requested] == [
+        "AKEUSDT-1d-2026-08-01.zip",
+        "AKEUSDT-1d-2026-08-02.zip",
+        "AKEUSDT-1d-2026-08-03.zip",
+    ]
+    assert [(item.period, item.rows, item.unavailable) for item in results] == [
+        ("2026-08-01", 1, False),
+        ("2026-08-02", 1, False),
+        ("2026-08-03", 0, True),
+    ]
+    assert (tmp_path / "history/AKEUSDT/1d/2026/08/01/candles.parquet").is_file()
+    assert (tmp_path / "history/AKEUSDT/1d/2026/08/02/candles.parquet").is_file()
+
+
 def test_http_fetcher_verifies_binance_checksum():
     content = b"verified archive"
     checksum = hashlib.sha256(content).hexdigest()
@@ -1140,6 +1196,7 @@ def test_load_allowed_symbols_uses_exchange_lifecycle_gate(monkeypatch):
     assert "delivery_date > NOW() + %s" in query
     assert cursor.execute.call_args.args[1] == (
         archive_cli.timedelta(days=15),
+        None,
         None,
     )
 
