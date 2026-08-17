@@ -250,7 +250,7 @@ class BacktestEngine:
         2. TTL 检查在价格检查之前
         3. 做空限价单：bar.high > order.price（严格穿透）
         4. 做多限价单：bar.low < order.price（严格穿透）
-        5. 成交价 = 挂单价
+        5. SELL 成交价 = max(挂单价, 触发 bar 开盘价)；BUY 成交价 = 挂单价
         6. 全部成交，不模拟部分成交
 
         Args:
@@ -297,7 +297,7 @@ class BacktestEngine:
 
     def _execute_fill(self, order: Order, event: Event) -> Fill | None:
         """
-        执行成交，采用保守假设
+        执行成交
 
         Args:
             order: 订单
@@ -306,8 +306,12 @@ class BacktestEngine:
         Returns:
             成交记录
         """
-        # 保守假设：按挂单价成交（而非触发价）
-        fill_price = order.price
+        # 成交价：SELL 限价单按触发成交的 1s bar 开盘价成交（不差于挂单价），
+        # 反映现价已高于挂单价时以更优市价卖出的情况；其余按挂单价（保守）。
+        if order.side == 'SELL':
+            fill_price = max(order.price, event.open)
+        else:
+            fill_price = order.price
         remaining_qty = order.quantity - order.filled_quantity
         fill_qty = remaining_qty
         if order.type == 'LIMIT':

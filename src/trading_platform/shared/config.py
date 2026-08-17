@@ -87,6 +87,8 @@ class BacktestConfig(BaseSettings):
     """回测配置"""
     model_config = SettingsConfigDict(env_prefix='BACKTEST_')
 
+    # Sweep 并发属于主机级运行配置，避免不同实验 TOML/命令覆盖并发规模。
+    workers: int = Field(default=13, gt=0)
     data_dir: str = 'data/market'
     output_dir: str = 'reports'
     maker_fee_rate: float = 0.0002  # 0.02%

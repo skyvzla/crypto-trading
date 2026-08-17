@@ -68,18 +68,37 @@ class SpikeBacktestSettings:
     prior_high_lookback_minutes: int
     rise_low_lookback_minutes: int
     min_rise_duration_minutes: int
+    box_duration_min_minutes: int
+    spike_avg_deviation_max_pct: float
+    spike_range_max_pct: float
     entry_tier_mode: str
+    reject_below_current: bool
     early_profit_unlock_ratio: Decimal | None
     max_consecutive_up_minutes: int
     group_rise_12h_threshold: float
     loose_consecutive_up_minutes: int
     loose_max_ls_ratio: float | None
+    strong_tier_atr_shift: float
+    exit_strict_age_ms: int
+    exit_flat_agreement: int | None
+    time_risk_grace_ms: int
+    time_risk_grace_loss_ratio: float
+    strong_strict_age_ms: int | None
+    weak_strict_age_ms: int | None
+    strong_bucket_strict_age_ms: int | None
+    weak_bucket_strict_age_ms: int | None
+    profit_unlock_ratio: Decimal | None
+    profit_drawdown_ratio: Decimal | None
+    profit_drawdown_peak_ratio: Decimal | None
     max_oi_change_pct: float
     max_ls_ratio: float
     rise_5s_threshold: Decimal
     max_rise_5s_percent: Decimal | None
     max_rise_window_seconds: int
     max_rise_window_percent: Decimal | None
+    accel_rise_5s_min: Decimal
+    accel_ratio: Decimal
+    accel_prev_minutes: int
     max_volume_multiple_5s: Decimal | None
     min_td_sell_setup_5m: int
     min_volume_multiple_5m: Decimal
@@ -189,6 +208,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="入场挂单模式；默认由策略声明决定",
     )
     parser.add_argument(
+        "--reject-below-current",
+        action="store_true",
+        default=False,
+        help="现价已高于挂单档位时拒绝信号（低卖防护）；默认关闭",
+    )
+    parser.add_argument(
+        "--box-duration-min-hours",
+        type=int,
+        default=None,
+        help="现价站上箱体/通道突破线（3d/7d 上沿均值）的最小小时数；"
+        "0/None 表示关闭该过滤",
+    )
+    parser.add_argument(
+        "--spike-avg-deviation-max-pct",
+        type=float,
+        default=0.0,
+        help="过早触发过滤：信号触发价相对前 30m 均价的偏离度阈值（%）；"
+        "0 关闭（需与 --spike-range-max-pct 同时设置）",
+    )
+    parser.add_argument(
+        "--spike-range-max-pct",
+        type=float,
+        default=0.0,
+        help="过早触发过滤：信号前 60m 价格极差阈值（%）；"
+        "0 关闭（需与 --spike-avg-deviation-max-pct 同时设置）",
+    )
+    parser.add_argument(
         "--profit-unlock-percent",
         type=Decimal,
         default=None,
@@ -219,6 +265,78 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="弱势/蓄力桶多空比上限；None 不放宽，0 表示弱势桶 LS 不限制",
     )
     parser.add_argument(
+        "--strong-tier-atr-shift",
+        type=float,
+        default=0.0,
+        help="强势桶三档挂单价 ATR 系数偏移；正数上移挂单价，0 不调整",
+    )
+    parser.add_argument(
+        "--exit-strict-age-ms",
+        type=int,
+        default=900000,
+        help="candidate-v1 时间止损阈值（ms）；单档模式同时作为风险启动时刻",
+    )
+    parser.add_argument(
+        "--exit-flat-agreement",
+        type=int,
+        default=None,
+        help="candidate-v1 单档动量一致要求（1-3）；None 保留默认 3/2/1 分档",
+    )
+    parser.add_argument(
+        "--time-risk-grace-ms",
+        type=int,
+        default=0,
+        help="candidate-v1 时间止损宽限期（ms）：浮亏低于阈值时延后止损；0 关闭",
+    )
+    parser.add_argument(
+        "--time-risk-grace-loss-ratio",
+        type=float,
+        default=0.01,
+        help="宽限期内相对名义本金的浮亏阈值（0-1）；浮亏超过该值立即止损",
+    )
+    parser.add_argument(
+        "--strong-strict-age-ms",
+        type=int,
+        default=None,
+        help="动量一致（decay_agreement>=1）时的 time_risk 止损时间（ms）；None 使用 exit-strict-age-ms",
+    )
+    parser.add_argument(
+        "--weak-strict-age-ms",
+        type=int,
+        default=None,
+        help="动量衰竭（decay_agreement<1）时的 time_risk 止损时间（ms）；None 使用 exit-strict-age-ms",
+    )
+    parser.add_argument(
+        "--strong-bucket-strict-age-ms",
+        type=int,
+        default=None,
+        help="静态强桶（入场 rise_from_12h_low>=group_rise_12h_threshold）的 time_risk 止损时间（ms）；None 关闭静态分档",
+    )
+    parser.add_argument(
+        "--weak-bucket-strict-age-ms",
+        type=int,
+        default=None,
+        help="静态弱桶（入场 rise_from_12h_low<group_rise_12h_threshold）的 time_risk 止损时间（ms）；None 关闭静态分档",
+    )
+    parser.add_argument(
+        "--profit-unlock-ratio",
+        type=float,
+        default=None,
+        help="浮盈解锁比例（0-1）：持仓浮盈相对名义本金达到该比例后，动量分档时间直接降到最低（忽略时间限制）；None 关闭",
+    )
+    parser.add_argument(
+        "--profit-drawdown-ratio",
+        type=float,
+        default=None,
+        help="浮盈回撤保护（0-1）：解锁后价格从持仓峰值回撤达到该比例立即止盈退出；None 关闭",
+    )
+    parser.add_argument(
+        "--profit-drawdown-peak-ratio",
+        type=float,
+        default=None,
+        help="回撤保护浮盈前置（0-1）：峰值浮盈达到该比例后才启用回撤保护（粘滞，不与弱化时间耦合）；None 回退到 unlock 语义",
+    )
+    parser.add_argument(
         "--max-oi-change-pct",
         type=float,
         default=0.0,
@@ -233,6 +351,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--rise-5s-threshold-percent", type=Decimal, default=None,
         help="5秒涨幅触发阈值（百分比）；默认使用策略声明值",
+    )
+    parser.add_argument(
+        "--accel-rise-5s-min-percent", type=Decimal, default=None,
+        help="加速豁免的最低 5 秒涨幅（百分比）；默认 0 表示关闭豁免",
+    )
+    parser.add_argument(
+        "--accel-ratio", type=Decimal, default=None,
+        help="加速豁免倍率：当前窗口平均每秒涨幅 / 前窗口；默认 2.0",
+    )
+    parser.add_argument(
+        "--accel-prev-minutes", type=int, default=None,
+        help="加速豁免前窗口分钟数；默认 10",
     )
     parser.add_argument(
         "--max-rise-5s-percent", type=Decimal, default=None,
@@ -329,10 +459,32 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
     if min_rise_duration_hours is None:
         min_rise_duration_hours = defaults.min_rise_duration_hours
     entry_tier_mode = args.entry_tier_mode or defaults.entry_tier_mode
+    reject_below_current = bool(args.reject_below_current)
+    box_duration_min_hours = args.box_duration_min_hours
+    if box_duration_min_hours is None:
+        box_duration_min_hours = getattr(defaults, "box_duration_min_hours", 0)
     rise_5s_threshold = (
         Decimal(str(args.rise_5s_threshold_percent)) / Decimal("100")
         if args.rise_5s_threshold_percent is not None else Decimal("0.05")
     )
+    accel_rise_5s_min = (
+        Decimal(str(args.accel_rise_5s_min_percent)) / Decimal("100")
+        if args.accel_rise_5s_min_percent is not None else Decimal("0")
+    )
+    if accel_rise_5s_min < 0:
+        raise ValueError("--accel-rise-5s-min-percent must not be negative")
+    if accel_rise_5s_min > rise_5s_threshold:
+        raise ValueError(
+            "--accel-rise-5s-min-percent must not exceed rise-5s-threshold-percent"
+        )
+    accel_ratio = (
+        args.accel_ratio if args.accel_ratio is not None else Decimal("2")
+    )
+    if accel_ratio <= 1:
+        raise ValueError("--accel-ratio must be greater than 1")
+    accel_prev_minutes = args.accel_prev_minutes or 10
+    if accel_prev_minutes < 1:
+        raise ValueError("--accel-prev-minutes must be positive")
     prior_high_tolerance_percent = (
         args.prior_high_tolerance_percent
         if args.prior_high_tolerance_percent is not None else Decimal("0")
@@ -390,6 +542,9 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         "max_oi_change_pct": args.max_oi_change_pct,
         "max_ls_ratio": args.max_ls_ratio,
         "rise_5s_threshold_percent": args.rise_5s_threshold_percent,
+        "accel_rise_5s_min": args.accel_rise_5s_min_percent,
+        "accel_ratio": args.accel_ratio,
+        "accel_prev_minutes": args.accel_prev_minutes,
         "max_rise_5s_percent": args.max_rise_5s_percent,
         "max_rise_window_percent": args.max_rise_window_percent,
         "max_rise_window_seconds": (
@@ -404,6 +559,28 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         "group_rise_12h_threshold": args.group_rise_12h_threshold,
         "loose_consecutive_up_minutes": args.loose_consecutive_up_minutes,
         "loose_max_ls_ratio": args.loose_max_ls_ratio,
+        "strong_tier_atr_shift": args.strong_tier_atr_shift,
+        "exit_strict_age_ms": (
+            args.exit_strict_age_ms
+            if 0 < args.exit_strict_age_ms != 900000
+            else None
+        ),
+        "exit_flat_agreement": (
+            args.exit_flat_agreement if args.exit_flat_agreement else None
+        ),
+        "time_risk_grace_ms": args.time_risk_grace_ms,
+        "time_risk_grace_loss_ratio": (
+            args.time_risk_grace_loss_ratio
+            if args.time_risk_grace_loss_ratio != 0.01
+            else None
+        ),
+        "strong_strict_age_ms": args.strong_strict_age_ms,
+        "weak_strict_age_ms": args.weak_strict_age_ms,
+        "strong_bucket_strict_age_ms": args.strong_bucket_strict_age_ms,
+        "weak_bucket_strict_age_ms": args.weak_bucket_strict_age_ms,
+        "profit_unlock_ratio": args.profit_unlock_ratio,
+        "profit_drawdown_ratio": args.profit_drawdown_ratio,
+        "profit_drawdown_peak_ratio": args.profit_drawdown_peak_ratio,
     }
     unsupported = sorted(
         key
@@ -434,6 +611,20 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         raise ValueError("rise lookback and minimum duration must both be zero or positive")
     if min_rise_duration_hours > rise_low_lookback_hours:
         raise ValueError("minimum rise duration must not exceed rise lookback")
+    if box_duration_min_hours < 0:
+        raise ValueError("--box-duration-min-hours must not be negative")
+    spike_avg_deviation_max_pct = args.spike_avg_deviation_max_pct
+    spike_range_max_pct = args.spike_range_max_pct
+    if spike_avg_deviation_max_pct < 0 or spike_range_max_pct < 0:
+        raise ValueError(
+            "--spike-avg-deviation-max-pct and --spike-range-max-pct "
+            "must not be negative"
+        )
+    if (spike_avg_deviation_max_pct > 0) != (spike_range_max_pct > 0):
+        raise ValueError(
+            "--spike-avg-deviation-max-pct and --spike-range-max-pct "
+            "must both be zero or both be positive"
+        )
     if (
         profit_unlock_percent is not None
         and not Decimal("0") < profit_unlock_percent < Decimal("100")
@@ -445,6 +636,7 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         args.warmup_hours,
         float(prior_high_lookback_hours),
         float(rise_low_lookback_hours),
+        float(box_duration_min_hours + 7 * 24) if box_duration_min_hours else 0.0,
     )
     bar1s_time_shift_ms = int(
         args.bar1s_time_shift_hours * Decimal("3600000")
@@ -460,7 +652,11 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         prior_high_lookback_minutes=prior_high_lookback_hours * 60,
         rise_low_lookback_minutes=rise_low_lookback_hours * 60,
         min_rise_duration_minutes=min_rise_duration_hours * 60,
+        box_duration_min_minutes=box_duration_min_hours * 60,
+        spike_avg_deviation_max_pct=spike_avg_deviation_max_pct,
+        spike_range_max_pct=spike_range_max_pct,
         entry_tier_mode=entry_tier_mode,
+        reject_below_current=reject_below_current,
         early_profit_unlock_ratio=(
             profit_unlock_percent / Decimal("100")
             if profit_unlock_percent is not None
@@ -470,12 +666,53 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         group_rise_12h_threshold=args.group_rise_12h_threshold,
         loose_consecutive_up_minutes=args.loose_consecutive_up_minutes,
         loose_max_ls_ratio=args.loose_max_ls_ratio,
+        strong_tier_atr_shift=args.strong_tier_atr_shift,
+        exit_strict_age_ms=(
+            args.exit_strict_age_ms if args.exit_strict_age_ms > 0 else 900000
+        ),
+        exit_flat_agreement=(
+            args.exit_flat_agreement if args.exit_flat_agreement else None
+        ),
+        time_risk_grace_ms=args.time_risk_grace_ms,
+        time_risk_grace_loss_ratio=Decimal(str(args.time_risk_grace_loss_ratio)),
+        strong_strict_age_ms=(
+            args.strong_strict_age_ms if args.strong_strict_age_ms else None
+        ),
+        weak_strict_age_ms=(
+            args.weak_strict_age_ms if args.weak_strict_age_ms else None
+        ),
+        strong_bucket_strict_age_ms=(
+            args.strong_bucket_strict_age_ms
+            if args.strong_bucket_strict_age_ms
+            else None
+        ),
+        weak_bucket_strict_age_ms=(
+            args.weak_bucket_strict_age_ms if args.weak_bucket_strict_age_ms else None
+        ),
+        profit_unlock_ratio=(
+            Decimal(str(args.profit_unlock_ratio))
+            if args.profit_unlock_ratio
+            else None
+        ),
+        profit_drawdown_ratio=(
+            Decimal(str(args.profit_drawdown_ratio))
+            if args.profit_drawdown_ratio
+            else None
+        ),
+        profit_drawdown_peak_ratio=(
+            Decimal(str(args.profit_drawdown_peak_ratio))
+            if args.profit_drawdown_peak_ratio
+            else None
+        ),
         max_oi_change_pct=args.max_oi_change_pct,
         max_ls_ratio=args.max_ls_ratio,
         rise_5s_threshold=rise_5s_threshold,
         max_rise_5s_percent=max_rise_5s_percent,
         max_rise_window_seconds=args.max_rise_window_seconds,
         max_rise_window_percent=max_rise_window_percent,
+        accel_rise_5s_min=accel_rise_5s_min,
+        accel_ratio=accel_ratio,
+        accel_prev_minutes=accel_prev_minutes,
         max_volume_multiple_5s=max_volume_multiple_5s,
         min_td_sell_setup_5m=min_td_sell_setup_5m,
         min_volume_multiple_5m=min_volume_multiple_5m,
@@ -568,13 +805,32 @@ def create_spike_engine(
             strategy_parameters={
                 key: value
                 for key, value in {
+                    "reject_below_current": settings.reject_below_current,
+                    "box_duration_min_minutes": settings.box_duration_min_minutes,
+                    "spike_avg_deviation_max_pct": settings.spike_avg_deviation_max_pct,
+                    "spike_range_max_pct": settings.spike_range_max_pct,
                     "max_consecutive_up_minutes": settings.max_consecutive_up_minutes,
                     "group_rise_12h_threshold": settings.group_rise_12h_threshold,
                     "loose_consecutive_up_minutes": settings.loose_consecutive_up_minutes,
                     "loose_max_ls_ratio": settings.loose_max_ls_ratio,
+                    "strong_tier_atr_shift": settings.strong_tier_atr_shift,
+                    "exit_strict_age_ms": settings.exit_strict_age_ms,
+                    "exit_flat_agreement": settings.exit_flat_agreement,
+                    "time_risk_grace_ms": settings.time_risk_grace_ms,
+                    "time_risk_grace_loss_ratio": settings.time_risk_grace_loss_ratio,
+                    "strong_strict_age_ms": settings.strong_strict_age_ms,
+                    "weak_strict_age_ms": settings.weak_strict_age_ms,
+                    "strong_bucket_strict_age_ms": settings.strong_bucket_strict_age_ms,
+                    "weak_bucket_strict_age_ms": settings.weak_bucket_strict_age_ms,
+                    "profit_unlock_ratio": settings.profit_unlock_ratio,
+                    "profit_drawdown_ratio": settings.profit_drawdown_ratio,
+                    "profit_drawdown_peak_ratio": settings.profit_drawdown_peak_ratio,
                     "max_oi_change_pct": settings.max_oi_change_pct,
                     "max_ls_ratio": settings.max_ls_ratio,
                     "rise_5s_threshold": settings.rise_5s_threshold,
+                    "accel_rise_5s_min": settings.accel_rise_5s_min,
+                    "accel_ratio": settings.accel_ratio,
+                    "accel_prev_minutes": settings.accel_prev_minutes,
                     "max_rise_5s_percent": settings.max_rise_5s_percent,
                     "max_rise_window_seconds": settings.max_rise_window_seconds,
                     "max_rise_window_percent": settings.max_rise_window_percent,

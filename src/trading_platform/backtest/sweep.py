@@ -42,6 +42,11 @@ from trading_platform.market.archive.index import (
 from trading_platform.market.archive.parquet import archive_root_from_catalog
 from trading_platform.backtest.loader import DEFAULT_CHUNK_HOURS
 from trading_platform.shared.progress import TaskDashboard
+from trading_platform.shared.config import BacktestConfig
+from trading_platform.backtest.process_lock import (
+    BacktestAlreadyRunning,
+    BacktestProcessLock,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +57,34 @@ PARAMETER_FLAGS = {
     "prior_high_lookback_hours": "--prior-high-lookback-hours",
     "rise_low_lookback_hours": "--rise-low-lookback-hours",
     "min_rise_duration_hours": "--min-rise-duration-hours",
+    "box_duration_min_hours": "--box-duration-min-hours",
+    "spike_avg_deviation_max_pct": "--spike-avg-deviation-max-pct",
+    "spike_range_max_pct": "--spike-range-max-pct",
     "entry_tier_mode": "--entry-tier-mode",
     "profit_unlock_percent": "--profit-unlock-percent",
     "max_consecutive_up_minutes": "--max-consecutive-up-minutes",
     "group_rise_12h_threshold": "--group-rise-12h-threshold",
     "loose_consecutive_up_minutes": "--loose-consecutive-up-minutes",
     "loose_max_ls_ratio": "--loose-max-ls-ratio",
+    "strong_tier_atr_shift": "--strong-tier-atr-shift",
+    "exit_strict_age_ms": "--exit-strict-age-ms",
+    "exit_flat_agreement": "--exit-flat-agreement",
+    "time_risk_grace_ms": "--time-risk-grace-ms",
+    "time_risk_grace_loss_ratio": "--time-risk-grace-loss-ratio",
+    "strong_strict_age_ms": "--strong-strict-age-ms",
+    "weak_strict_age_ms": "--weak-strict-age-ms",
+    "strong_bucket_strict_age_ms": "--strong-bucket-strict-age-ms",
+    "weak_bucket_strict_age_ms": "--weak-bucket-strict-age-ms",
+    "profit_unlock_ratio": "--profit-unlock-ratio",
+    "profit_drawdown_ratio": "--profit-drawdown-ratio",
+    "profit_drawdown_peak_ratio": "--profit-drawdown-peak-ratio",
     "max_oi_change_pct": "--max-oi-change-pct",
     "max_ls_ratio": "--max-ls-ratio",
     "rise_5s_threshold_percent": "--rise-5s-threshold-percent",
+    "accel_rise_5s_min_percent": "--accel-rise-5s-min-percent",
+    "accel_ratio": "--accel-ratio",
+    "accel_prev_minutes": "--accel-prev-minutes",
+    "reject_below_current": "--reject-below-current",
     "max_rise_5s_percent": "--max-rise-5s-percent",
     "max_rise_window_seconds": "--max-rise-window-seconds",
     "max_rise_window_percent": "--max-rise-window-percent",
@@ -83,6 +107,7 @@ ESTIMATED_PYTHON_EVENT_BYTES = 1_024
 ESTIMATED_DUCKDB_ROW_BYTES = 96
 WORKER_NON_DUCKDB_RESERVE_BYTES = 1024**3
 MIN_WORKER_MEMORY_BYTES = 2 * 1024**3
+BACKTEST_WORKERS_ENV = "BACKTEST_WORKERS"
 _SIGNAL_AUDIT_EVENT_TYPES = frozenset({"signal_triggered", "signal_rejected"})
 
 
@@ -177,7 +202,7 @@ def _allowed_symbols(dsn: str, *, freeze_days: int, strategy_id: str) -> set[str
             with connection.cursor() as cursor:
                 cursor.execute(
                     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
-                    (timedelta(days=freeze_days), strategy_id),
+                    (timedelta(days=freeze_days), strategy_id, strategy_id),
                 )
                 return {str(row[0]).strip().upper() for row in cursor.fetchall()}
     except psycopg.OperationalError as error:
@@ -342,11 +367,18 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
     new_listing_mark_days = float(universe.get("new_listing_mark_days", 30))
     if new_listing_mark_days < 0:
         raise ValueError("universe.new_listing_mark_days must be non-negative")
-    allowed = _allowed_symbols(
-        config.get("database_dsn") or _dsn_from_environment(),
-        freeze_days=int(universe.get("freeze_days", 15)),
-        strategy_id=str(universe.get("strategy_id", "spike_short")),
-    )
+    if universe.get("require_database_allowed", True):
+        allowed = _allowed_symbols(
+            config.get("database_dsn") or _dsn_from_environment(),
+            freeze_days=int(universe.get("freeze_days", 15)),
+            strategy_id=str(universe.get("strategy_id", "spike_short")),
+        )
+    else:
+        allowed = None
+        logger.warning(
+            "universe.require_database_allowed=false: 跳过主库 allowed 过滤，"
+            "仅用于离线回测"
+        )
     archive_scan_symbols = (
         requested if mode == "explicit"
         else anomaly_symbols if mode == "anomaly-report"
@@ -390,18 +422,20 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
     complete_archived = {
         symbol for symbol in coverage if coverage_status(symbol)[0]
     }
-    selected = sorted((candidates & allowed & complete_archived) - excluded)
+    selected = sorted(
+        (candidates & (allowed if allowed is not None else complete_archived) & complete_archived) - excluded
+    )
 
     rows = []
     report_symbols = candidates | excluded
-    if mode == "all-archived":
+    if mode == "all-archived" and allowed is not None:
         report_symbols |= allowed
-    if mode == "anomaly-report":
+    if mode == "anomaly-report" and allowed is not None:
         report_symbols |= allowed
     for symbol in sorted(report_symbols):
         timeframes = coverage.get(symbol, {})
         reasons = []
-        if symbol not in allowed:
+        if allowed is not None and symbol not in allowed:
             reasons.append("database_disabled_or_not_tradeable")
         if symbol not in archived:
             reasons.append("missing_1s_archive")
@@ -445,7 +479,9 @@ def resolve_universe(config: dict[str, Any]) -> tuple[list[str], list[dict[str, 
         data_incomplete = not complete
         rows.append({
             "symbol": symbol,
-            "database_allowed": symbol in allowed,
+            "database_allowed": (
+                True if allowed is None else symbol in allowed
+            ),
             "has_1s_archive": symbol in archived,
             "selected": symbol in selected,
             "exclude_reason": ";".join(reasons),
@@ -492,6 +528,17 @@ def _available_memory_bytes() -> int | None:
     except OSError:
         pass
     return None
+
+
+def _configured_worker_count() -> int:
+    """Read the fixed sweep worker count from the process environment."""
+
+    try:
+        return BacktestConfig().workers
+    except ValueError as error:
+        raise ValueError(
+            f"{BACKTEST_WORKERS_ENV} must be a positive integer"
+        ) from error
 
 
 def _worker_memory_plan(
@@ -575,16 +622,19 @@ def _symbol_worker_resources(
     if not enabled:
         if requested is None:
             raise ValueError(
-                "关闭内存限制时必须显式传递 --workers，避免无限制自动并发"
+                f"关闭内存限制时必须通过 {BACKTEST_WORKERS_ENV} 固定 worker 数，"
+                "不能使用 --workers"
             )
         if requested <= 0:
-            raise ValueError("--workers must be positive")
-        return min(requested, symbol_count), None, None
+            raise ValueError(f"{BACKTEST_WORKERS_ENV} must be positive")
+        return requested, None, None
 
     worker_memory_budget = str(execution.get("worker_memory_budget", "2GB"))
-    workers, duckdb_memory_limit = _symbol_worker_memory_plan(
+    # Keep the configured count even when there are fewer symbol tasks. The
+    # executor creates threads lazily, so this does not waste resources and
+    # makes the reported/scheduled worker count deterministic.
+    workers, duckdb_memory_limit = _worker_memory_plan(
         requested,
-        symbol_count,
         worker_memory_budget,
         int(execution.get("memory_budget_percent", 95)),
         available_memory_bytes=available_memory_bytes,
@@ -648,8 +698,14 @@ def _run_arguments(
         arguments.extend(["--metrics-root", str(metrics_root)])
     params = {**spec.params, **config.get("execution", {})}
     for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
-        if key in params and params[key] is not None:
-            arguments.extend([flag, str(params[key])])
+        if key not in params or params[key] is None:
+            continue
+        if isinstance(params[key], bool):
+            # 布尔开关：仅 True 时传 flag（如 --reject-below-current）
+            if params[key]:
+                arguments.append(flag)
+            continue
+        arguments.extend([flag, str(params[key])])
     return arguments
 
 
@@ -1437,12 +1493,6 @@ def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dynamic Spike 参数矩阵流式回测")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        help="强制 worker 数；内存不足时报错，不传时按可用内存自动计算",
-    )
-    parser.add_argument(
         "--persist-results",
         action="store_true",
         help="完成报告后将研究、报表和逐笔交易导入 PostgreSQL",
@@ -1454,7 +1504,11 @@ def _main(argv: list[str] | None = None) -> int:
     )
     execution = config.setdefault("execution", {})
     if "workers" in execution:
-        raise ValueError("worker 数请通过 --workers 传递，不要放在配置文件中")
+        raise ValueError(
+            f"worker 数请通过环境变量 {BACKTEST_WORKERS_ENV} 配置，"
+            "不要放在回测配置文件中"
+        )
+    configured_workers = _configured_worker_count()
     duckdb_threads = int(execution.get("duckdb_threads", 1))
     if duckdb_threads <= 0:
         raise ValueError("execution.duckdb_threads must be positive")
@@ -1493,16 +1547,10 @@ def _main(argv: list[str] | None = None) -> int:
     for spec in specs:
         specs_by_symbol.setdefault(spec.symbol, []).append(spec)
     workers, worker_memory_budget, actual_memory_limit = _symbol_worker_resources(
-        args.workers,
+        configured_workers,
         len(specs_by_symbol),
         execution,
     )
-    if args.workers is not None and workers != args.workers:
-        print(
-            f"请求 worker={args.workers}，但仅有 {len(specs_by_symbol)} 个"
-            f"交易对任务；实际启动 worker={workers}。",
-            flush=True,
-        )
     if actual_memory_limit is not None:
         execution["duckdb_memory_limit"] = actual_memory_limit
     else:
@@ -1749,10 +1797,14 @@ def _main(argv: list[str] | None = None) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        return _main(argv)
+        with BacktestProcessLock():
+            return _main(argv)
     except KeyboardInterrupt:
         print("回测已停止。", flush=True)
         return 130
+    except BacktestAlreadyRunning as error:
+        print(f"回测启动失败：{error}", file=sys.stderr, flush=True)
+        return 1
     except RuntimeError as error:
         if "Query interrupted" not in str(error):
             raise

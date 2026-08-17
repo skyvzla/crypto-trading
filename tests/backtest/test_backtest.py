@@ -603,7 +603,7 @@ class TestBacktestEngine(unittest.TestCase):
         fill = result.fills[0]
         self.assertEqual(fill.symbol, 'BTCUSDT')
         self.assertEqual(fill.side, 'SELL')
-        self.assertEqual(fill.price, Decimal('49990'))  # 挂单价
+        self.assertEqual(fill.price, Decimal('50000'))  # 触发 bar 开盘价（不差于挂单价 49990）
 
         # 验证订单状态
         order = result.orders[0]
@@ -615,11 +615,11 @@ class TestBacktestEngine(unittest.TestCase):
         position = result.positions[0]
         self.assertEqual(position.status, 'OPEN')
         self.assertIsNone(position.closed_at)
-        self.assertEqual(position.unrealized_pnl, Decimal('-0.110'))
+        self.assertEqual(position.unrealized_pnl, Decimal('-0.100'))
         summary = ResultAnalyzer(result).analyze()
         self.assertEqual(summary['positions']['open'], 1)
-        self.assertAlmostEqual(summary['pnl']['total_unrealized'], -0.11)
-        self.assertAlmostEqual(summary['pnl']['net_pnl'], -0.119998)
+        self.assertAlmostEqual(summary['pnl']['total_unrealized'], -0.10)
+        self.assertAlmostEqual(summary['pnl']['net_pnl'], -0.11)
 
     def test_ttl_expiration(self):
         """测试订单 TTL 过期"""
@@ -771,7 +771,7 @@ class TestBacktestEngine(unittest.TestCase):
         pos = result.positions[0]
         self.assertEqual(pos.symbol, 'BTCUSDT')
         self.assertEqual(pos.side, 'SHORT')
-        self.assertEqual(pos.entry_price, Decimal('49990'))
+        self.assertEqual(pos.entry_price, Decimal('50000'))  # SELL 按触发 bar 开盘价成交
 
 
 def run_tests():

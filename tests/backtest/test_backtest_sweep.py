@@ -1,5 +1,6 @@
 import json
 from io import StringIO
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -20,6 +21,7 @@ from trading_platform.backtest.sweep import (
     ChildProcessRegistry,
     _collect_signal_audit_events,
     _configure_duckdb_connection,
+    _configured_worker_count,
     _estimate_monthly_memory,
     _find_simultaneous_signals,
     _parameter_summary,
@@ -31,6 +33,10 @@ from trading_platform.backtest.sweep import (
     _write_tier3_only_projection_summary,
     _write_tier_fill_summary,
     expand_specs,
+)
+from trading_platform.backtest.process_lock import (
+    BacktestAlreadyRunning,
+    BacktestProcessLock,
 )
 from trading_platform.market.archive.index import build_archive_index
 
@@ -284,6 +290,60 @@ def test_main_handles_duckdb_query_interrupt_without_traceback(
 
     assert sweep.main([]) == 130
     assert "回测已停止" in capsys.readouterr().out
+
+
+def test_backtest_process_lock_rejects_second_owner_and_releases(tmp_path):
+    lock_path = tmp_path / "backtest.lock"
+    first = BacktestProcessLock(lock_path)
+    with first:
+        with pytest.raises(BacktestAlreadyRunning, match="already running"):
+            with BacktestProcessLock(lock_path):
+                pass
+
+    with BacktestProcessLock(lock_path):
+        pass
+
+
+def test_backtest_process_lock_is_released_when_owner_is_killed(tmp_path):
+    lock_path = tmp_path / "backtest.lock"
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    child_code = (
+        "from trading_platform.backtest.process_lock import BacktestProcessLock; "
+        "import time; "
+        f"lock=BacktestProcessLock({str(lock_path)!r}); "
+        "lock.__enter__(); time.sleep(60)"
+    )
+    child_env = dict(os.environ, PYTHONPATH=str(source_root))
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code],
+        env=child_env,
+    )
+    try:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                with BacktestProcessLock(lock_path):
+                    pass
+            except BacktestAlreadyRunning:
+                break
+            if time.monotonic() >= deadline:
+                pytest.fail("child process did not acquire backtest lock")
+            time.sleep(0.02)
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+    with BacktestProcessLock(lock_path):
+        pass
+
+
+def test_main_reports_already_running(monkeypatch, tmp_path, capsys):
+    lock_path = tmp_path / "backtest.lock"
+    monkeypatch.setenv("BACKTEST_LOCK_FILE", str(lock_path))
+    with BacktestProcessLock(lock_path):
+        assert sweep.main([]) == 1
+
+    assert "回测启动失败" in capsys.readouterr().err
 
 
 def test_sweep_closes_dashboard_when_worker_submission_fails(
@@ -587,6 +647,29 @@ def test_run_arguments_use_symbol_effective_start(tmp_path: Path):
 def test_worker_memory_budget_rejects_less_than_two_gb():
     with pytest.raises(ValueError, match="at least 2GB"):
         _worker_memory_plan(4, "1GB", 70)
+
+
+def test_backtest_workers_are_read_from_environment(monkeypatch):
+    monkeypatch.setenv("BACKTEST_WORKERS", "7")
+    assert _configured_worker_count() == 7
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "many"])
+def test_backtest_workers_environment_must_be_positive_integer(monkeypatch, value):
+    monkeypatch.setenv("BACKTEST_WORKERS", value)
+    with pytest.raises(ValueError, match="BACKTEST_WORKERS"):
+        _configured_worker_count()
+
+
+def test_fixed_worker_count_is_not_reduced_to_symbol_count():
+    workers, worker_budget, duckdb_limit = _symbol_worker_resources(
+        13,
+        2,
+        {"memory_limit_enabled": False},
+    )
+    assert workers == 13
+    assert worker_budget is None
+    assert duckdb_limit is None
 
 
 def test_worker_memory_budget_does_not_expand_duckdb_limit():
