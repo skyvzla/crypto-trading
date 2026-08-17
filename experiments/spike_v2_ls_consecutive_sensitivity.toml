@@ -1,8 +1,10 @@
-name = "spike-v2-grouped-ls-grid"
+# V21 风险敏感性：固定 LS=1.5，只扫描连阳阈值。
+# universe 复用上一轮报告的冻结交易对，不改变样本集合。
+name = "spike-v2-ls-consecutive-sensitivity"
 start = "2025-08-01T00:00:00+00:00"
 end = "2026-08-01T00:00:00+00:00"
 duckdb_path = "data/market/candles/candles.duckdb"
-output = "reports/spike-v2-grouped-ls-grid"
+output = "reports/spike-v2-ls-consecutive-sensitivity"
 metrics_root = "data/market/metrics"
 
 [universe]
@@ -33,12 +35,9 @@ min_rise_duration_hours = 24
 profit_unlock_percent = 1.5
 max_oi_change_pct = 0
 max_ls_ratio = 1.5
-max_consecutive_up_minutes = 4
 
 [matrix]
-group_rise_12h_threshold = [0.5, 1.0, 1.5]
-loose_consecutive_up_minutes = [0]
-loose_max_ls_ratio = [1.5, 0]
+max_consecutive_up_minutes = [0, 1, 2, 3, 4, 5, 6]
 
 [analysis]
 collision_tolerance_seconds = 1

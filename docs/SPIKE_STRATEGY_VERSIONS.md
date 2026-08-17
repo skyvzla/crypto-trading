@@ -65,6 +65,23 @@ v1 和 v2 均使用 `DynamicSpikeShortStrategy` 的同一套基础信号：
 
 OI / 多空比矩阵已完成全周期与时间切分复核。`max_ls_ratio=1.5` 仅保留为 v2 的离线研究候选，`max_oi_change_pct=15` 未通过时间切分的有效性检查，不纳入候选。候选依赖完整的 `profit_unlock_percent=1.5` 研究基线，不能改写 `V21` 的默认值或线上配置；详细证据、限制和升级门禁见 [Spike V2 指标过滤研究候选](research/SPIKE_V2_METRICS_LS_1_5_CANDIDATE.md)。
 
+### V2 深回撤保护候选
+
+`profit_drawdown_peak_ratio=0.20` + `profit_drawdown_ratio=0.10`（1m close
+粒度，粘滞 arm，峰值浮盈 ≥20% 后从峰值反弹 ≥10% 止盈）：全量 92 币验证
++527.3U，胜率 77.1% 不变，仅 2 笔命中（AKE/BANK 反弹 50%+ 才走的极端单）。
+登记为 D-027 replay/testnet 候选，不改写 `V21` 默认值或线上配置；详细证据
+见 [Spike V2 深回撤保护研究候选](research/SPIKE_V2_DEEP_DRAWDOWN_CANDIDATE.md)。
+
+### V2 静态强弱分桶候选
+
+入场按 `rise_from_12h_low >= 1.0` 静态定强弱桶，`strong_bucket_strict_age_ms`
+（强桶 25min）+ `weak_bucket_strict_age_ms`（弱桶 10min）：全量 92 币验证
++293.4U，超过全桶静态 25min（+214.5）；与每秒重评的动态 decay 分档
+（44% 笔强弱来回切换）解耦，无抖动。登记为 D-027 replay/testnet 候选，
+不改写 `V21` 默认值；详细证据见
+[Spike V2 退出候选合集](research/SPIKE_V2_DEEP_DRAWDOWN_CANDIDATE.md)。
+
 ## 可选实验维度
 
 ## v1.1 实验配置

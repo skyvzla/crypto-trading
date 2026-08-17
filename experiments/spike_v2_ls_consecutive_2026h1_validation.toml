@@ -1,0 +1,46 @@
+# 连阳阈值的时间切片验证。
+# 阈值 0/3/4/5 在 2025-12 XNY 风险事件后冻结，用 2026H1 检查收益稳定性。
+name = "spike-v2-ls-consecutive-2026h1-validation"
+start = "2026-02-01T00:00:00+00:00"
+end = "2026-08-01T00:00:00+00:00"
+duckdb_path = "data/market/candles/candles.duckdb"
+output = "reports/spike-v2-ls-consecutive-2026h1-validation"
+metrics_root = "data/market/metrics"
+
+[universe]
+mode = "anomaly-report"
+anomaly_report = "reports/spike-v2-consecutive-ls-audit/universe.csv"
+strategy_id = "spike_short"
+freeze_days = 15
+new_listing_mark_days = 30
+coverage_tolerance_hours = 24
+exclude_symbols = ["ZECUSDT"]
+
+[execution]
+memory_limit_enabled = false
+chunk_hours = 4320
+fetch_batch_size = 10000
+duckdb_threads = 1
+resume = true
+
+[fixed]
+strategy = "trading_platform.strategies.spike.v2_1:V21"
+total_notional = 1000
+exit_policy = "candidate-v1"
+warmup_hours = 168
+entry_tier_mode = "tier3-only"
+prior_high_lookback_hours = 6
+rise_low_lookback_hours = 168
+min_rise_duration_hours = 24
+profit_unlock_percent = 1.5
+max_oi_change_pct = 0
+max_ls_ratio = 1.5
+
+[matrix]
+max_consecutive_up_minutes = [0, 3, 4, 5]
+
+[analysis]
+collision_tolerance_seconds = 1
+pnl_split_usdt = 10
+breakout_windows_hours = [4, 6, 8, 12, 24]
+box_proximity_percentages = [1, 3, 5, 10]
