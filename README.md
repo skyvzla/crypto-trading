@@ -38,6 +38,10 @@ cp .env.example .env
 scripts/deploy.sh
 ```
 
+隔离测试编排使用独立且无持久化卷的 `trading_platform_pytest` PostgreSQL
+数据库。pytest 启动时会校验 `DB_DATABASE` 和 `LEDGER_TEST_DSN`，拒绝连接
+不带 `test` 或 `pytest` 标识的主库、开发库，避免污染手工联调数据。
+
 开发 API：行情层 `http://localhost:8000`，账本层 `http://localhost:8001`。
 前端开发服务器监听 `0.0.0.0:5173`，内网设备访问
 `http://<宿主机内网IP>:5173/#/backtests`；部署后可直接访问
