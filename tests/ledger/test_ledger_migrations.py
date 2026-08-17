@@ -118,6 +118,37 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
         ).fetchone()
     assert row == (9, 1, 9)
 
+@pytest.mark.asyncio
+async def test_web_performance_indexes_are_migrated(migration_db):
+    pool, schema = migration_db
+    await apply_migrations(pool, schema=schema)
+
+    async with pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                "SELECT indexname, indexdef FROM pg_indexes "
+                "WHERE schemaname = %s AND indexname IN "
+                "('idx_trades_account_exchange_time', "
+                "'idx_trades_campaign_performance') ORDER BY indexname",
+                (schema,),
+            )
+        ).fetchall()
+
+    assert [row[0] for row in rows] == [
+        "idx_trades_account_exchange_time",
+        "idx_trades_campaign_performance",
+    ]
+    definitions = {name: definition for name, definition in rows}
+    assert "account_id, exchange_time DESC" in definitions[
+        "idx_trades_account_exchange_time"
+    ]
+    assert "account_id, strategy_id, symbol, exchange_time DESC" in definitions[
+        "idx_trades_campaign_performance"
+    ]
+    assert "WHERE (campaign_id IS NOT NULL)" in definitions[
+        "idx_trades_campaign_performance"
+    ]
+
 
 @pytest.mark.asyncio
 async def test_changed_applied_migration_is_rejected(migration_db):

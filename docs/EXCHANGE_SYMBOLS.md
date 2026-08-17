@@ -62,3 +62,16 @@ Subcategory，因此关闭父分类会覆盖全部子分类；任意匹配分类
 - `GET|PUT /api/v1/strategy-category-admissions/...`
 - `GET /api/v1/symbol-global-admission-audit`
 - `GET /api/v1/strategy-category-admission-audit`
+
+## Web 页面职责
+
+Web 按以下边界使用同一份 PostgreSQL 数据：
+
+- **交易对管理**展示交易对事实、生命周期和全局准入开关；策略分类准入不在该页面维护。
+- **分类管理**以只读层级展示程序同步的 Category/Subcategory 及交易对关联，不提供人工
+  创建、重命名、移动、删除或关联编辑。
+- **策略风控**选择策略后维护 Category/Subcategory 的可选黑名单开关，并展示最终有效
+  交易池和审计记录；首期不热更新策略参数，也不配置高级风险限额。
+
+收益日历、绩效分析等消费准入结果和账本事实，不维护另一份交易对或分类关系。完整页面
+范围和交互见 [Web 功能与信息架构规划](WEB_PRODUCT_PLAN.md)。

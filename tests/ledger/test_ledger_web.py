@@ -21,10 +21,29 @@ async def test_ledger_web_shell_is_served_from_root():
         base_url="http://test",
     ) as client:
         page = await client.get("/")
+        history_pages = [
+            await client.get(path)
+            for path in (
+                "/overview",
+                "/calendar",
+                "/positions",
+                "/trades",
+                "/performance",
+                "/backtests/reports",
+                "/strategy-risk",
+                "/universe",
+                "/categories",
+            )
+        ]
         old_entry = await client.get("/ui/")
         missing_asset = await client.get("/assets/does-not-exist.js")
+        missing_api = await client.get("/api/v1/does-not-exist")
 
     assert page.status_code == 200
     assert '<div id="app">' in page.text
+    assert all(response.status_code == 200 for response in history_pages)
+    assert all('<div id="app">' in response.text for response in history_pages)
     assert old_entry.status_code == 404
     assert missing_asset.status_code == 404
+    assert missing_api.status_code == 404
+    assert missing_api.headers["content-type"].startswith("application/json")

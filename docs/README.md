@@ -6,10 +6,11 @@
 
 1. [Spike 决策记录](spike_trader/decisions.md)：已经确认的业务规则和待确认问题。
 2. [当前三层架构](ARCHITECTURE.md)：行情数据层、策略执行层、账本与 Web 控制层的职责边界。
-3. [项目完整实施计划](PROJECT_IMPLEMENTATION_PLAN.md)：功能状态、阶段、依赖、验收和风险门禁。
-4. [项目功能盘点](PROJECT_GAP_ANALYSIS.md)：当前源码与测试对应的实现快照。
-5. [AKEUSDT 2026 年 7 月对齐 Replay](AKEUSDT_2026_07_ALIGNED_REPLAY.md)：当前有效的逐笔结果与已定位问题。
-6. [Spike 策略版本说明](SPIKE_STRATEGY_VERSIONS.md)：v1、v2 基线与可选实验参数的差异。
+3. [Web 功能与信息架构规划](WEB_PRODUCT_PLAN.md)：已确认的菜单、页面职责、统计口径和实施边界。
+4. [项目完整实施计划](PROJECT_IMPLEMENTATION_PLAN.md)：功能状态、阶段、依赖、验收和风险门禁。
+5. [项目功能盘点](PROJECT_GAP_ANALYSIS.md)：当前源码与测试对应的实现快照。
+6. [AKEUSDT 2026 年 7 月对齐 Replay](AKEUSDT_2026_07_ALIGNED_REPLAY.md)：当前有效的逐笔结果与已定位问题。
+7. [Spike 策略版本说明](SPIKE_STRATEGY_VERSIONS.md)：v1、v2 基线与可选实验参数的差异。
 
 ## 文档规则
 

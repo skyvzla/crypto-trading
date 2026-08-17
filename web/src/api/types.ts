@@ -161,6 +161,294 @@ export interface LedgerFilters {
   symbol?: string
 }
 
+export interface PageParams {
+  limit?: number
+  offset?: number
+}
+
+export interface ExchangeSymbolQuery extends PageParams {
+  unclassified?: boolean
+}
+
+export interface OrderQuery extends LedgerFilters, PageParams {
+  status?: string
+  active_only?: boolean
+}
+
+export interface TradeQuery extends LedgerFilters, PageParams {
+  campaign_id?: string
+  start_date?: string
+  end_date?: string
+  timezone?: 'UTC' | 'Asia/Shanghai'
+}
+
+export interface CampaignQuery extends LedgerFilters, PageParams {
+  campaign_id?: string
+  start_date?: string
+  end_date?: string
+  timezone?: 'UTC' | 'Asia/Shanghai'
+}
+
+export interface PositionQuery extends LedgerFilters, PageParams {}
+
+export interface RuntimeStatusQuery extends PageParams {
+  account_id?: string
+  strategy_id?: string
+}
+
+export interface PnLQuery extends LedgerFilters {
+  account_id: string
+}
+
+export interface DailyPnLQuery extends LedgerFilters {
+  start_date: string
+  end_date: string
+  timezone?: 'UTC' | 'Asia/Shanghai'
+}
+
+export interface LedgerAccount {
+  account_id: string
+}
+
+export interface PerformanceQuery extends LedgerFilters {
+  account_id: string
+  start_date: string
+  end_date: string
+  timezone?: 'UTC' | 'Asia/Shanghai'
+}
+
+export interface AdmissionUpdate {
+  enabled: boolean
+  expected_version: number
+  updated_by: string
+  reason?: string | null
+}
+
+export interface LedgerOrder {
+  id: number
+  account_id: string
+  strategy_id: string
+  symbol: string
+  order_id: string
+  client_order_id: string
+  campaign_id: string | null
+  side: string
+  order_type: string
+  position_side: string | null
+  quantity: string
+  price: string | null
+  stop_price: string | null
+  status: string
+  filled_quantity: string
+  avg_fill_price: string | null
+  commission: string | null
+  commission_asset: string | null
+  created_at: string
+  updated_at: string
+  exchange_created_at: string | null
+  filled_at: string | null
+}
+
+export interface LedgerTrade {
+  id: number
+  account_id: string
+  strategy_id: string
+  symbol: string
+  trade_id: string
+  order_id: string
+  client_order_id: string
+  campaign_id: string | null
+  side: string
+  position_side: string | null
+  quantity: string
+  price: string
+  quote_quantity: string
+  commission: string
+  commission_asset: string
+  realized_pnl: string | null
+  is_maker: boolean
+  created_at: string
+  exchange_time: string
+}
+
+export interface LedgerPosition {
+  id: number
+  account_id: string
+  strategy_id: string
+  symbol: string
+  position_side: string
+  quantity: string
+  entry_price: string
+  mark_price: string | null
+  unrealized_pnl: string | null
+  liquidation_price: string | null
+  leverage: number | null
+  margin_type: string | null
+  isolated_margin: string | null
+  exchange_time: string | null
+  updated_at: string
+}
+
+export interface PnLSummary {
+  account_id: string
+  strategy_id: string | null
+  symbol: string | null
+  total_trades: number
+  total_commission: string
+  total_realized_pnl: string
+  total_unrealized_pnl: string
+  net_pnl: string
+  win_count: number
+  loss_count: number
+  win_rate: number
+  avg_win: string
+  avg_loss: string
+}
+
+export interface DailyPnL {
+  date: string
+  account_id: string | null
+  strategy_id: string | null
+  symbol: string | null
+  timezone: 'UTC' | 'Asia/Shanghai'
+  campaign_count: number
+  fill_count: number
+  trade_count: number
+  realized_trade_count: number
+  gross_realized_pnl: string
+  total_commission: string
+  commission_asset: string | null
+  net_pnl: string | null
+  funding_fee: string | null
+  net_pnl_scope: string
+}
+
+export interface PerformanceSummary {
+  account_id: string
+  strategy_id: string | null
+  symbol: string | null
+  start_date: string | null
+  end_date: string | null
+  timezone: string
+  total_trades: number
+  total_fills: number
+  win_count: number
+  loss_count: number
+  flat_count: number
+  win_rate: number
+  avg_win: string
+  avg_loss: string
+  payoff_ratio: string | null
+  expectancy: string
+  profit_factor: string | null
+  total_commission: string
+  total_realized_pnl: string
+  net_pnl: string
+  max_drawdown: string
+  candidate_campaigns: number
+  excluded_campaigns: number
+  unattributed_fills: number
+  metric_scope: string
+}
+
+export type PerformanceDimension = 'symbol' | 'category' | 'subcategory' | 'side' | 'exit_reason'
+
+export interface PerformanceBreakdownQuery extends PerformanceQuery {
+  group_by: PerformanceDimension
+  category_key?: string
+  subcategory_key?: string
+  side?: 'LONG' | 'SHORT'
+  exit_reason?: string
+}
+
+export interface PerformanceBreakdownItem {
+  dimension_key: string | null
+  dimension_label: string | null
+  total_trades: number
+  total_fills: number
+  win_count: number
+  loss_count: number
+  flat_count: number
+  win_rate: number
+  avg_win: string
+  avg_loss: string
+  payoff_ratio: string | null
+  expectancy: string
+  profit_factor: string | null
+  total_commission: string
+  total_realized_pnl: string
+  net_pnl: string
+  max_drawdown: string
+  candidate_campaigns: number
+  excluded_campaigns: number
+}
+
+export interface PerformanceBreakdownResponse {
+  account_id: string
+  strategy_id: string | null
+  symbol: string | null
+  category_key: string | null
+  subcategory_key: string | null
+  side: string | null
+  start_date: string
+  end_date: string
+  timezone: string
+  group_by: PerformanceDimension
+  dimension_available: boolean
+  dimension_note: string | null
+  available_dimensions: PerformanceDimension[]
+  items: PerformanceBreakdownItem[]
+  metric_scope: string
+}
+
+export interface CampaignPnL {
+  account_id: string
+  strategy_id: string
+  symbol: string
+  campaign_id: string
+  trade_count: number
+  sell_quantity: string
+  sell_avg_price: string | null
+  buy_quantity: string
+  buy_avg_price: string | null
+  total_commission: string
+  commission_asset: string | null
+  gross_realized_pnl: string
+  net_realized_pnl: string
+  remaining_quantity: string
+  has_open_quantity: boolean
+  acquired_at: string | null
+  first_fill_at: string
+  last_fill_at: string
+  closed_at: string | null
+  released_at: string | null
+  lifecycle_duration_ms: number | null
+}
+
+export interface CampaignSummary {
+  account_id: string
+  strategy_id: string
+  symbol: string
+  campaign_id: string
+  side: string | null
+  fill_count: number
+  sell_quantity: string
+  buy_quantity: string
+  total_commission: string | null
+  commission_asset: string | null
+  gross_realized_pnl: string
+  net_realized_pnl: string | null
+  first_fill_at: string
+  last_fill_at: string
+  closed_at: string | null
+  has_open_quantity: boolean
+  pnl_facts_complete: boolean
+}
+
+export interface CampaignPage extends Page<CampaignSummary> {
+  unattributed_fills: number
+}
+
 export interface ExchangeSymbol {
   symbol: string
   pair: string
@@ -187,6 +475,28 @@ export interface ExchangeCategory {
   parent_key: string | null
   active: boolean
   synced_at: string
+  symbol_count: number
+}
+
+export interface SymbolGlobalAdmission {
+  symbol: string
+  enabled: boolean
+  version: number
+  explicit: boolean
+  updated_at: string | null
+  updated_by: string | null
+  reason: string | null
+}
+
+export interface SymbolGlobalAdmissionAudit {
+  id: number
+  symbol: string
+  previous_enabled: boolean | null
+  enabled: boolean
+  version: number
+  changed_at: string
+  changed_by: string
+  reason: string | null
 }
 
 export interface StrategyCategoryAdmission {
@@ -197,6 +507,83 @@ export interface StrategyCategoryAdmission {
   updated_at: string
   updated_by: string
   reason: string | null
+}
+
+export interface StrategyCategoryAdmissionAudit {
+  id: number
+  strategy_id: string
+  category_key: string
+  previous_enabled: boolean | null
+  enabled: boolean
+  version: number
+  changed_at: string
+  changed_by: string
+  reason: string | null
+}
+
+export interface StrategyAuditEvent {
+  id: number
+  event_key: string
+  account_id: string
+  event_time: number
+  event_type: string
+  symbol: string
+  strategy_id: string
+  campaign_id: string | null
+  details: JsonObject
+  created_at: string
+}
+
+export interface StrategyRuntimeStatus {
+  account_id: string
+  strategy_id: string
+  instance_id: string
+  mode: string
+  status: string
+  effective_status: string
+  entry_enabled: boolean
+  halted: boolean
+  halt_reason: string | null
+  gate_conditions: JsonObject
+  started_at: string
+  heartbeat_at: string
+  stopped_at: string | null
+}
+
+export interface UniversePreviewItem {
+  symbol: string
+  effective: boolean
+  exclusion_reasons: string[]
+  blocked_category_keys: string[]
+}
+
+export interface UniversePreview {
+  strategy_id: string
+  freeze_days: number
+  total_symbols: number
+  effective_symbols: number
+  excluded_symbols: number
+  total: number
+  items: UniversePreviewItem[]
+  limit: number
+  offset: number
+}
+
+export interface UniversePreviewQuery extends PageParams {
+  freeze_days?: number
+  effective?: boolean
+}
+
+export interface ExchangeSymbolSyncStatus {
+  initialized: boolean
+  status: string
+  last_attempt_at: string | null
+  last_success_at: string | null
+  synced_symbols: number
+  last_error: string | null
+  stale: boolean
+  effective_universe_ready: boolean
+  max_age_hours: number
 }
 
 export type JsonValue = string | number | boolean | null | JsonValue[] | JsonObject

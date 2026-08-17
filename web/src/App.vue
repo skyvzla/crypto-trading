@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted, provide, ref } from 'vue'
-import { ArrowLeftRight, Bell, CalendarDays, ChartNoAxesCombined, Coins, FlaskConical, LayoutDashboard, ListChecks, Moon, Sun, Tags, WalletCards } from 'lucide-vue-next'
+import { ArrowLeftRight, Bell, ChartNoAxesCombined, FlaskConical, Gauge, LayoutDashboard, ListChecks, Moon, ShieldCheck, Sun, Tags, WalletCards } from 'lucide-vue-next'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { theme as antdTheme, type MenuProps } from 'ant-design-vue'
 import { useHealthStore } from '@/stores/health'
@@ -15,24 +15,59 @@ const providerTheme = computed(() => ({
 }))
 provide('isDarkTheme', isDarkTheme)
 
+function menuItem(key: string, label: string, to: string, icon: typeof LayoutDashboard) {
+  return {
+    key,
+    label: h(RouterLink, { to }, { default: () => label }),
+    icon: h(icon)
+  }
+}
+
 const sideMenuOptions: MenuProps['items'] = [
-  { key: 'overview', label: '运行总览', to: '/overview', icon: LayoutDashboard },
-  { key: 'calendar', label: '收益日历', to: '/calendar', icon: CalendarDays },
-  { key: 'positions', label: '持仓', to: '/positions', icon: WalletCards },
-  { key: 'trades', label: '成交与买卖点', to: '/trades', icon: ArrowLeftRight },
-  { key: 'stats', label: '胜率与盈亏比', to: '/stats', icon: ChartNoAxesCombined },
-  { key: 'symbols', label: '交易对统计', to: '/symbols', icon: Coins },
-  { key: 'backtests', label: '回测复盘', to: '/backtests', icon: FlaskConical },
-  { key: 'universe', label: '交易对管理', to: '/universe', icon: ListChecks },
-  { key: 'admissions', label: 'Subcategory 管理', to: '/admissions', icon: Tags },
-  { key: 'notifications', label: '通知中心', to: '/notifications', icon: Bell }
-].map((item) => ({
-  key: item.key,
-  label: h(RouterLink, { to: item.to }, { default: () => item.label }),
-  icon: item.icon ? h(item.icon) : undefined
-}))
+  {
+    type: 'group',
+    key: 'runtime-group',
+    label: '运行中心',
+    children: [
+      menuItem('overview', '运行总览', '/overview', LayoutDashboard),
+      menuItem('positions', '持仓与订单', '/positions', WalletCards),
+      menuItem('trades', '成交复盘', '/trades', ArrowLeftRight)
+    ]
+  },
+  {
+    type: 'group',
+    key: 'analysis-group',
+    label: '分析复盘',
+    children: [
+      menuItem('performance', '绩效分析', '/performance', ChartNoAxesCombined),
+      menuItem('backtests', '回测复盘', '/backtests', FlaskConical)
+    ]
+  },
+  {
+    type: 'group',
+    key: 'risk-group',
+    label: '策略与风控',
+    children: [menuItem('strategy-risk', '策略风控', '/strategy-risk', ShieldCheck)]
+  },
+  {
+    type: 'group',
+    key: 'data-group',
+    label: '基础数据',
+    children: [
+      menuItem('universe', '交易对管理', '/universe', ListChecks),
+      menuItem('categories', '分类管理', '/categories', Tags)
+    ]
+  },
+  {
+    type: 'group',
+    key: 'system-group',
+    label: '系统管理',
+    children: [menuItem('notifications', '通知中心', '/notifications', Bell)]
+  }
+]
 
 const activeKey = computed(() => String(route.name ?? '').startsWith('backtest') ? 'backtests' : String(route.name ?? ''))
+const pageTitle = computed(() => String(route.meta.title ?? '运行账本'))
 const healthLabel = computed(
   () =>
     ({
@@ -65,7 +100,7 @@ onMounted(() => {
 <template>
   <a-config-provider :theme="providerTheme">
     <a-layout has-sider class="app-layout">
-      <a-layout-sider collapsible breakpoint="md" class="app-sider">
+      <a-layout-sider collapsible breakpoint="md" :collapsed-width="56" class="app-sider">
         <div class="brand">
           <span class="brand-mark">TL</span>
           <span class="brand-name">Trade Ledger</span>
@@ -79,6 +114,11 @@ onMounted(() => {
       <a-layout class="app-body">
         <a-layout-header class="app-header">
           <div class="header-actions">
+            <div class="header-context">
+              <Gauge :size="15" />
+              <span>{{ pageTitle }}</span>
+              <i>LEDGER CONSOLE</i>
+            </div>
             <a-tooltip :title="isDarkTheme ? '切换浅色模式' : '切换深色模式'">
               <a-button type="text" shape="circle" class="theme-toggle" :aria-label="isDarkTheme ? '切换浅色模式' : '切换深色模式'" @click="toggleTheme">
                 <template #icon><Sun v-if="isDarkTheme" :size="17" /><Moon v-else :size="17" /></template>
@@ -120,8 +160,9 @@ onMounted(() => {
   width: 30px;
   height: 30px;
   border-radius: 6px;
-  background: var(--primary);
-  color: #fff;
+  border: 1px solid rgba(214, 168, 75, .72);
+  background: rgba(214, 168, 75, .12);
+  color: #e1ba68;
   font-weight: 700;
   font-size: 13px;
 }
@@ -149,12 +190,22 @@ onMounted(() => {
   background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
-.header-actions { display: flex; height: 100%; align-items: center; justify-content: flex-end; padding-inline: 20px; }
+.header-actions { display: flex; height: 100%; align-items: center; justify-content: space-between; padding-inline: 20px; }
+.header-context { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.header-context span { color: var(--text); font-weight: 600; }
+.header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: #b38732; font: 9px "IBM Plex Mono", monospace; font-style: normal; letter-spacing: 0; }
 .theme-toggle { color: var(--text); }
 .workspace {
+  --workspace-content-max-width: none;
   flex: 1;
   min-height: 0;
   padding: 20px 24px 32px;
   overflow: auto;
+}
+.side-menu :deep(.ant-menu-item-group-title) { padding-top: 17px; padding-bottom: 5px; color: rgba(214, 168, 75, .68); font: 9px "IBM Plex Mono", monospace; letter-spacing: 0; }
+.app-sider.ant-layout-sider-collapsed .side-menu :deep(.ant-menu-item-group-title) { height: 9px; padding: 8px 0 0; overflow: hidden; color: transparent; }
+@media (max-width: 640px) {
+  .header-context i { display: none; }
+  .workspace { padding-inline: 12px; }
 }
 </style>

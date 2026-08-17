@@ -6,8 +6,9 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
@@ -106,12 +107,27 @@ app.include_router(notification_router)
 # Vite 产物目录，相对进程工作目录解析（容器内为 /app）。
 # 未构建时跳过挂载，保证 API 与 dev server 模式下服务仍可启动。
 web_dist = Path(load_config()["ledger"]["web_dist"])
-if (web_dist / "index.html").is_file():
+web_index = web_dist / "index.html"
+if web_index.is_file():
     app.mount(
-        "/",
-        StaticFiles(directory=web_dist, html=True),
-        name="ledger-ui",
+        "/assets",
+        StaticFiles(directory=web_dist / "assets"),
+        name="ledger-ui-assets",
     )
+
+    @app.get("/", include_in_schema=False)
+    async def ledger_ui_root() -> FileResponse:
+        return FileResponse(web_index)
+
+    @app.get("/{client_path:path}", include_in_schema=False)
+    async def ledger_ui_history_fallback(client_path: str) -> FileResponse:
+        first_segment = client_path.partition("/")[0]
+        if (
+            first_segment in {"api", "assets", "ui"}
+            or Path(client_path).suffix
+        ):
+            raise HTTPException(status_code=404, detail="Not Found")
+        return FileResponse(web_index)
 else:
     logger.warning(
         "Web UI not built at %s; run 'npm run build' in web/ "

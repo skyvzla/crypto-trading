@@ -143,6 +143,674 @@ async def test_health_pagination_idempotency_and_pnl(ledger, client):
 
 
 @pytest.mark.asyncio
+async def test_web_order_activity_and_trade_calendar_filters_are_server_side(
+    ledger, client
+):
+    suffix = uuid4().hex[:10]
+    account = f"web-filter-{suffix}"
+    for status in ("NEW", "FILLED"):
+        await ledger.insert_order(
+            Order(
+                account_id=account,
+                strategy_id="s",
+                symbol="BTCUSDT",
+                order_id=f"order-{status.lower()}",
+                client_order_id=f"client-{status.lower()}-{suffix}",
+                side="BUY",
+                order_type="LIMIT",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                status=status,
+            )
+        )
+
+    for index, moment in enumerate(
+        (
+            datetime(2026, 8, 1, 15, 30, tzinfo=timezone.utc),
+            datetime(2026, 8, 1, 16, 30, tzinfo=timezone.utc),
+        ),
+        start=1,
+    ):
+        await ledger.insert_trade(
+            Trade(
+                account_id=account,
+                strategy_id="s",
+                symbol="BTCUSDT",
+                trade_id=f"trade-{index}",
+                order_id=f"trade-order-{index}",
+                client_order_id=f"trade-client-{index}-{suffix}",
+                side="BUY",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                quote_quantity=Decimal("100"),
+                commission=Decimal("0.1"),
+                commission_asset="USDT",
+                realized_pnl=Decimal("1"),
+                exchange_time=moment,
+            )
+        )
+
+    active = (
+        await client.get(
+            "/api/v1/orders",
+            params={"account_id": account, "active_only": True},
+        )
+    ).json()
+    assert active["total"] == 1
+    assert active["items"][0]["status"] == "NEW"
+
+    shanghai_day = (
+        await client.get(
+            "/api/v1/trades",
+            params={
+                "account_id": account,
+                "start_date": "2026-08-02",
+                "end_date": "2026-08-02",
+                "timezone": "Asia/Shanghai",
+            },
+        )
+    ).json()
+    assert shanghai_day["total"] == 1
+    assert shanghai_day["items"][0]["trade_id"] == "trade-2"
+
+    paged = (
+        await client.get(
+            "/api/v1/trades",
+            params={"account_id": account, "limit": 1, "offset": 1},
+        )
+    ).json()
+    assert paged["total"] == 2
+    assert paged["limit"] == 1
+    assert paged["offset"] == 1
+    assert len(paged["items"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_daily_pnl_timezone_boundaries_and_campaign_performance(
+    ledger, client
+):
+    suffix = uuid4().hex[:10]
+    account = f"web-{suffix}"
+    strategy = f"perf-{suffix}"
+
+    # Unattributed fills must never appear in the Campaign calendar.
+    for index, moment in enumerate(
+        (
+            datetime(2026, 8, 1, 15, 30, tzinfo=timezone.utc),
+            datetime(2026, 8, 1, 16, 30, tzinfo=timezone.utc),
+        ),
+        start=1,
+    ):
+        assert await ledger.insert_trade(
+            Trade(
+                account_id=account,
+                strategy_id=strategy,
+                symbol="TZUSDT",
+                trade_id=f"tz-{index}",
+                order_id=f"tz-order-{index}",
+                client_order_id=f"tz-client-{index}-{suffix}",
+                side="SELL",
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                quote_quantity=Decimal("100"),
+                commission=Decimal("0.1"),
+                commission_asset="USDT",
+                realized_pnl=Decimal(str(index)),
+                is_maker=False,
+                exchange_time=moment,
+            )
+        ) > 0
+
+    unattributed = await client.get(
+        "/api/v1/pnl/daily",
+        params={
+            "account_id": account,
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-02",
+        },
+    )
+    assert unattributed.status_code == 200
+    assert unattributed.json() == []
+
+    # Entry and close fall on different Shanghai dates.  Both commissions and
+    # the complete PnL must follow the BUY close onto the Shanghai close day.
+    for index, (side, realized, moment) in enumerate(
+        (
+            (
+                "SELL",
+                "2",
+                datetime(2026, 8, 1, 15, 30, tzinfo=timezone.utc),
+            ),
+            (
+                "BUY",
+                "0",
+                datetime(2026, 8, 1, 16, 30, tzinfo=timezone.utc),
+            ),
+        ),
+        start=1,
+    ):
+        assert await ledger.insert_trade(
+            Trade(
+                account_id=account,
+                strategy_id=strategy,
+                symbol="CALUSDT",
+                trade_id=f"calendar-{index}",
+                order_id=f"calendar-order-{index}",
+                client_order_id=f"calendar-client-{index}-{suffix}",
+                campaign_id="calendar-closed",
+                side=side,
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                quote_quantity=Decimal("100"),
+                commission=Decimal("0.1"),
+                commission_asset="USDT",
+                realized_pnl=Decimal(realized),
+                is_maker=False,
+                exchange_time=moment,
+            )
+        ) > 0
+
+    assert await ledger.insert_trade(
+        Trade(
+            account_id=account,
+            strategy_id=strategy,
+            symbol="OPENUSDT",
+            trade_id="calendar-open",
+            order_id="calendar-open-order",
+            client_order_id=f"calendar-open-client-{suffix}",
+            campaign_id="calendar-open",
+            side="SELL",
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+            quote_quantity=Decimal("100"),
+            commission=Decimal("0.1"),
+            commission_asset="USDT",
+            realized_pnl=Decimal("3"),
+            is_maker=False,
+            exchange_time=datetime(2026, 8, 1, 17, tzinfo=timezone.utc),
+        )
+    ) > 0
+
+    shanghai = (
+        await client.get(
+            "/api/v1/pnl/daily",
+            params={
+                "account_id": account,
+                "start_date": "2026-08-02",
+                "end_date": "2026-08-02",
+            },
+        )
+    ).json()
+    assert len(shanghai) == 1
+    assert shanghai[0]["date"] == "2026-08-02"
+    assert shanghai[0]["timezone"] == "Asia/Shanghai"
+    assert shanghai[0]["campaign_count"] == 1
+    assert shanghai[0]["fill_count"] == 2
+    assert shanghai[0]["trade_count"] == 2
+    assert shanghai[0]["realized_trade_count"] == 2
+    assert Decimal(shanghai[0]["gross_realized_pnl"]) == Decimal("2")
+    assert Decimal(shanghai[0]["total_commission"]) == Decimal("0.2")
+    assert Decimal(shanghai[0]["net_pnl"]) == Decimal("1.8")
+    assert shanghai[0]["funding_fee"] is None
+    assert "funding fee facts unavailable" in shanghai[0]["net_pnl_scope"]
+
+    utc = (
+        await client.get(
+            "/api/v1/pnl/daily",
+            params={
+                "account_id": account,
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-01",
+                "timezone": "UTC",
+            },
+        )
+    ).json()
+    assert len(utc) == 1
+    assert utc[0]["date"] == "2026-08-01"
+    assert utc[0]["timezone"] == "UTC"
+    assert utc[0]["campaign_count"] == 1
+    assert Decimal(utc[0]["net_pnl"]) == Decimal("1.8")
+
+    # Campaign metrics are calculated from complete round trips, not individual fills.
+    for campaign_id, side_values in {
+        "win": (("SELL", "6"), ("BUY", "0")),
+        "loss": (("SELL", "-4"), ("BUY", "0")),
+        "open": (("SELL", "3"),),
+    }.items():
+        for index, (side, realized) in enumerate(side_values, start=1):
+            moment = datetime(
+                2026, 8, 3, 12 + index, tzinfo=timezone.utc
+            )
+            assert await ledger.insert_trade(
+                Trade(
+                    account_id=account,
+                    strategy_id=strategy,
+                    symbol="PERFUSDT",
+                    trade_id=f"{campaign_id}-{index}",
+                    order_id=f"{campaign_id}-order-{index}",
+                    client_order_id=f"{campaign_id}-client-{index}-{suffix}",
+                    campaign_id=campaign_id,
+                    side=side,
+                    quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    quote_quantity=Decimal("100"),
+                    commission=Decimal("0.1"),
+                    commission_asset="USDT",
+                    realized_pnl=Decimal(realized),
+                    is_maker=False,
+                    exchange_time=moment,
+                )
+            ) > 0
+
+    # A partial exit has a BUY fill but is still an open Campaign.
+    for index, (side, quantity) in enumerate(
+        (("SELL", "2"), ("BUY", "1")), start=1
+    ):
+        assert await ledger.insert_trade(
+            Trade(
+                account_id=account,
+                strategy_id=strategy,
+                symbol="PERFUSDT",
+                trade_id=f"partial-{index}",
+                order_id=f"partial-order-{index}",
+                client_order_id=f"partial-client-{index}-{suffix}",
+                campaign_id="partial",
+                side=side,
+                quantity=Decimal(quantity),
+                price=Decimal("100"),
+                quote_quantity=Decimal(quantity) * Decimal("100"),
+                commission=Decimal("0.1"),
+                commission_asset="USDT",
+                realized_pnl=Decimal("0"),
+                is_maker=False,
+                exchange_time=datetime(
+                    2026, 8, 3, 12 + index, tzinfo=timezone.utc
+                ),
+            )
+        ) > 0
+
+    performance = (
+        await client.get(
+            "/api/v1/performance",
+            params={
+                "account_id": account,
+                "strategy_id": strategy,
+                "start_date": "2026-08-03",
+                "end_date": "2026-08-03",
+            },
+        )
+    ).json()
+    assert performance["total_trades"] == 2
+    assert performance["candidate_campaigns"] == 4
+    assert performance["excluded_campaigns"] == 2
+    assert performance["win_count"] == 1
+    assert performance["loss_count"] == 1
+    assert performance["timezone"] == "Asia/Shanghai"
+    assert Decimal(performance["net_pnl"]) == Decimal("1.6")
+
+    campaign_page = (
+        await client.get(
+            "/api/v1/campaigns",
+            params={
+                "account_id": account,
+                "strategy_id": strategy,
+                "start_date": "2026-08-03",
+                "end_date": "2026-08-03",
+                "limit": 1,
+            },
+        )
+    ).json()
+    assert campaign_page["total"] == 2
+    assert campaign_page["limit"] == 1
+    assert campaign_page["unattributed_fills"] == 0
+    assert len(campaign_page["items"]) == 1
+    assert campaign_page["items"][0]["pnl_facts_complete"] is True
+    assert campaign_page["items"][0]["closed_at"] is not None
+
+    all_campaigns = (
+        await client.get(
+            "/api/v1/campaigns",
+            params={
+                "account_id": account,
+                "strategy_id": strategy,
+                "limit": 10,
+            },
+        )
+    ).json()
+    assert all_campaigns["total"] == 6
+    assert all_campaigns["unattributed_fills"] == 2
+    assert sum(item["has_open_quantity"] for item in all_campaigns["items"]) == 3
+
+    win_fills = (
+        await client.get(
+            "/api/v1/trades",
+            params={
+                "account_id": account,
+                "strategy_id": strategy,
+                "campaign_id": "win",
+            },
+        )
+    ).json()
+    assert win_fills["total"] == 2
+    assert {item["campaign_id"] for item in win_fills["items"]} == {"win"}
+
+
+@pytest.mark.asyncio
+async def test_daily_pnl_aggregates_all_accounts_and_lists_account_ids(ledger, client):
+    suffix = uuid4().hex[:10]
+    accounts = [f"all-one-{suffix}", f"all-two-{suffix}"]
+    moment = datetime(
+        2200 + int(suffix[:2], 16),
+        1 + int(suffix[2:4], 16) % 12,
+        1 + int(suffix[4:6], 16) % 28,
+        8,
+        tzinfo=timezone.utc,
+    )
+    close_date = moment.date().isoformat()
+
+    for account, realized_pnl in zip(accounts, (Decimal("3"), Decimal("4"))):
+        campaign_id = f"all-{account}"
+        for index, (side, realized) in enumerate(
+            (("SELL", realized_pnl), ("BUY", Decimal("0"))), start=1
+        ):
+            assert await ledger.insert_trade(
+                Trade(
+                    account_id=account,
+                    strategy_id="all-accounts",
+                    symbol="ALLUSDT",
+                    trade_id=f"{campaign_id}-{index}",
+                    order_id=f"{campaign_id}-order-{index}",
+                    client_order_id=f"{campaign_id}-client-{index}",
+                    campaign_id=campaign_id,
+                    side=side,
+                    quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    quote_quantity=Decimal("100"),
+                    commission=Decimal("0.1"),
+                    commission_asset="USDT",
+                    realized_pnl=realized,
+                    is_maker=False,
+                    exchange_time=moment + timedelta(minutes=index),
+                )
+            ) > 0
+
+    response = await client.get(
+        "/api/v1/pnl/daily",
+        params={"start_date": close_date, "end_date": close_date},
+    )
+    assert response.status_code == 200
+    aggregate = response.json()
+    assert len(aggregate) == 1
+    assert aggregate[0]["date"] == close_date
+    assert aggregate[0]["account_id"] is None
+    assert aggregate[0]["campaign_count"] == 2
+    assert aggregate[0]["fill_count"] == 4
+    assert Decimal(aggregate[0]["gross_realized_pnl"]) == Decimal("7")
+    assert Decimal(aggregate[0]["total_commission"]) == Decimal("0.4")
+    assert Decimal(aggregate[0]["net_pnl"]) == Decimal("6.6")
+    assert aggregate[0]["commission_asset"] == "USDT"
+
+    account_page = await client.get("/api/v1/accounts", params={"limit": 1000})
+    assert account_page.status_code == 200
+    account_ids = [item["account_id"] for item in account_page.json()["items"]]
+    assert account_ids == sorted(account_ids)
+    assert set(accounts).issubset(account_ids)
+    assert len(account_ids) == len(set(account_ids))
+
+
+@pytest.mark.asyncio
+async def test_campaign_list_requires_balanced_close_and_compatible_fee_asset(
+    ledger, client
+):
+    suffix = uuid4().hex[:10]
+    account = f"campaign-facts-{suffix}"
+    strategy = "spike_short"
+    moment = datetime(2026, 8, 15, 8, tzinfo=timezone.utc)
+
+    async def insert_fill(
+        campaign_id: str,
+        side: str,
+        quantity: str,
+        commission: str,
+        commission_asset: str,
+        offset_seconds: int,
+    ) -> None:
+        assert await ledger.insert_trade(
+            Trade(
+                account_id=account,
+                strategy_id=strategy,
+                symbol="BTCUSDT",
+                trade_id=f"{campaign_id}-{side}-{offset_seconds}",
+                order_id=f"{campaign_id}-order-{side}-{offset_seconds}",
+                client_order_id=(
+                    f"{campaign_id}-client-{side}-{offset_seconds}-{suffix}"
+                ),
+                campaign_id=campaign_id,
+                side=side,
+                quantity=Decimal(quantity),
+                price=Decimal("100"),
+                quote_quantity=Decimal(quantity) * Decimal("100"),
+                commission=Decimal(commission),
+                commission_asset=commission_asset,
+                realized_pnl=Decimal("0"),
+                is_maker=False,
+                exchange_time=moment + timedelta(seconds=offset_seconds),
+            )
+        ) > 0
+
+    await insert_fill("overbought", "SELL", "1", "0.1", "USDT", 1)
+    await insert_fill("overbought", "BUY", "1.1", "0.1", "USDT", 2)
+    await insert_fill("mixed-fees", "SELL", "1", "0.1", "USDT", 3)
+    await insert_fill("mixed-fees", "BUY", "1", "0.01", "BNB", 4)
+
+    response = await client.get(
+        "/api/v1/campaigns",
+        params={"account_id": account, "strategy_id": strategy},
+    )
+    assert response.status_code == 200
+    items = {item["campaign_id"]: item for item in response.json()["items"]}
+
+    overbought = items["overbought"]
+    assert overbought["closed_at"] is None
+    assert overbought["has_open_quantity"] is True
+    assert overbought["pnl_facts_complete"] is False
+    assert overbought["net_realized_pnl"] is None
+
+    mixed_fees = items["mixed-fees"]
+    assert mixed_fees["closed_at"] is not None
+    assert mixed_fees["has_open_quantity"] is False
+    assert mixed_fees["commission_asset"] is None
+    assert mixed_fees["total_commission"] is None
+    assert mixed_fees["net_realized_pnl"] is None
+
+    closed_on_day = await client.get(
+        "/api/v1/campaigns",
+        params={
+            "account_id": account,
+            "strategy_id": strategy,
+            "start_date": "2026-08-15",
+            "end_date": "2026-08-15",
+        },
+    )
+    assert closed_on_day.status_code == 200
+    assert {
+        item["campaign_id"] for item in closed_on_day.json()["items"]
+    } == {"mixed-fees"}
+
+
+@pytest.mark.asyncio
+async def test_performance_breakdown_uses_complete_campaigns_and_synced_dimensions(
+    ledger, client
+):
+    suffix = uuid4().hex[:10].upper()
+    account = f"breakdown-{suffix}"
+    strategy = f"breakdown-{suffix.lower()}"
+    symbol = f"BD{suffix}USDT"
+    category_key = f"TEST:CATEGORY:{suffix}"
+    subcategory_key = f"TEST:SUBCATEGORY:{suffix}"
+
+    async with ledger.pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO exchange_symbols (
+                symbol, pair, contract_type, status, base_asset, quote_asset,
+                margin_asset, underlying_type, raw_metadata, active
+            ) VALUES (%s, %s, 'PERPETUAL', 'TRADING', %s, 'USDT', 'USDT',
+                'COIN', '{}'::jsonb, TRUE)
+            ON CONFLICT (symbol) DO NOTHING
+            """,
+            (symbol, symbol, symbol.removesuffix("USDT")),
+        )
+        await conn.execute(
+            """
+            INSERT INTO exchange_categories (
+                category_key, source, category_type, code, name, parent_key
+            ) VALUES (%s, 'TEST', 'CATEGORY', %s, %s, NULL),
+                     (%s, 'TEST', 'SUBCATEGORY', %s, %s, %s)
+            ON CONFLICT (category_key) DO NOTHING
+            """,
+            (
+                category_key,
+                suffix,
+                f"Category {suffix}",
+                subcategory_key,
+                suffix,
+                f"Subcategory {suffix}",
+                category_key,
+            ),
+        )
+        await conn.execute(
+            """
+            INSERT INTO exchange_symbol_categories (symbol, category_key, active)
+            VALUES (%s, %s, TRUE), (%s, %s, TRUE)
+            ON CONFLICT (symbol, category_key) DO UPDATE SET active = TRUE
+            """,
+            (symbol, category_key, symbol, subcategory_key),
+        )
+        await conn.commit()
+
+    campaigns = {
+        "cross-boundary": (
+            ("SELL", "6", datetime(2026, 8, 2, 23, tzinfo=timezone.utc)),
+            ("BUY", "0", datetime(2026, 8, 3, 1, tzinfo=timezone.utc)),
+        ),
+        "loss": (
+            ("SELL", "-4", datetime(2026, 8, 3, 2, tzinfo=timezone.utc)),
+            ("BUY", "0", datetime(2026, 8, 3, 3, tzinfo=timezone.utc)),
+        ),
+        "open": (("SELL", "3", datetime(2026, 8, 3, 4, tzinfo=timezone.utc)),),
+    }
+    for campaign_id, fills in campaigns.items():
+        for index, (fill_side, realized, moment) in enumerate(fills, start=1):
+            assert await ledger.insert_trade(
+                Trade(
+                    account_id=account,
+                    strategy_id=strategy,
+                    symbol=symbol,
+                    trade_id=f"{campaign_id}-{index}",
+                    order_id=f"{campaign_id}-order-{index}",
+                    client_order_id=f"{campaign_id}-client-{index}",
+                    campaign_id=campaign_id,
+                    side=fill_side,
+                    quantity=Decimal("1"),
+                    price=Decimal("100"),
+                    quote_quantity=Decimal("100"),
+                    commission=Decimal("0.1"),
+                    commission_asset="USDT",
+                    realized_pnl=Decimal(realized),
+                    is_maker=False,
+                    exchange_time=moment,
+                )
+            ) > 0
+
+    # Same symbol/strategy in another account must never enter this account's
+    # performance aggregate, even when the Campaign and time window match.
+    for index, (fill_side, realized) in enumerate(
+        (("SELL", "100"), ("BUY", "0")), start=1
+    ):
+        assert await ledger.insert_trade(
+            Trade(
+                account_id=f"other-{suffix}",
+                strategy_id=strategy,
+                symbol=symbol,
+                trade_id=f"other-account-{index}",
+                order_id=f"other-account-order-{index}",
+                client_order_id=f"other-account-client-{index}",
+                campaign_id="other-account-campaign",
+                side=fill_side,
+                quantity=Decimal("1"),
+                price=Decimal("100"),
+                quote_quantity=Decimal("100"),
+                commission=Decimal("0.1"),
+                commission_asset="USDT",
+                realized_pnl=Decimal(realized),
+                is_maker=False,
+                exchange_time=datetime(2026, 8, 3, 5 + index, tzinfo=timezone.utc),
+            )
+        ) > 0
+
+    base_params = {
+        "account_id": account,
+        "strategy_id": strategy,
+        "start_date": "2026-08-03",
+        "end_date": "2026-08-03",
+    }
+    symbol_rows = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={**base_params, "group_by": "symbol"},
+        )
+    ).json()
+    category_rows = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={**base_params, "group_by": "category"},
+        )
+    ).json()
+    subcategory_rows = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={**base_params, "group_by": "subcategory"},
+        )
+    ).json()
+    side_rows = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={**base_params, "group_by": "side"},
+        )
+    ).json()
+
+    for payload, key in (
+        (symbol_rows, symbol),
+        (category_rows, category_key),
+        (subcategory_rows, subcategory_key),
+        (side_rows, "SHORT"),
+    ):
+        assert payload["dimension_available"] is True
+        assert payload["timezone"] == "Asia/Shanghai"
+        assert len(payload["items"]) == 1
+        item = payload["items"][0]
+        assert item["dimension_key"] == key
+        assert item["total_trades"] == 2
+        assert item["candidate_campaigns"] == 3
+        assert item["excluded_campaigns"] == 1
+        assert Decimal(item["net_pnl"]) == Decimal("1.6")
+
+    filtered = (
+        await client.get(
+            "/api/v1/performance/breakdown",
+            params={
+                **base_params,
+                "group_by": "symbol",
+                "subcategory_key": subcategory_key,
+                "side": "SHORT",
+            },
+        )
+    ).json()
+    assert filtered["items"][0]["dimension_key"] == symbol
+
+
+@pytest.mark.asyncio
 async def test_strategy_audit_batch_is_atomic_idempotent_and_queryable(ledger, client):
     suffix = uuid4().hex[:10]
     account = f"a-{suffix}"
@@ -1080,14 +1748,87 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     assert any(
         item["symbol"] == symbol for item in symbols_response.json()["items"]
     )
+    unclassified_symbols_response = await client.get(
+        "/api/v1/exchange-symbols",
+        params={"unclassified": True, "limit": 1000},
+    )
+    assert unclassified_symbols_response.status_code == 200
+    unclassified_symbols = {
+        item["symbol"]
+        for item in unclassified_symbols_response.json()["items"]
+    }
+    # HFTUSDT has no Binance underlyingType and therefore no active assignment;
+    # the synchronized symbol with Category/Subcategory must not leak into it.
+    assert "HFTUSDT" in unclassified_symbols
+    assert symbol not in unclassified_symbols
+    async with ledger.pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO exchange_symbol_categories "
+            "(symbol, category_key, active) VALUES (%s, %s, FALSE) "
+            "ON CONFLICT (symbol, category_key) DO UPDATE SET active = FALSE",
+            ("HFTUSDT", category_by_code["COIN"].category_key),
+        )
+        await conn.commit()
+    inactive_assignment_response = await client.get(
+        "/api/v1/exchange-symbols",
+        params={"unclassified": True, "limit": 1000},
+    )
+    assert "HFTUSDT" in {
+        item["symbol"] for item in inactive_assignment_response.json()["items"]
+    }
     categories_response = await client.get("/api/v1/exchange-categories")
     assert categories_response.status_code == 200
     assert any(item["code"] == subtype for item in categories_response.json())
+    categories_page = await client.get(
+        "/api/v1/exchange-categories/page",
+        params={"active_only": False, "limit": 1, "offset": 1},
+    )
+    assert categories_page.status_code == 200
+    assert categories_page.json()["total"] >= 3
+    assert categories_page.json()["limit"] == 1
+    assert categories_page.json()["offset"] == 1
+    assert len(categories_page.json()["items"]) == 1
+    category_response = next(
+        item
+        for item in categories_response.json()
+        if item["code"] == subtype
+    )
+    assert category_response["symbol_count"] == 1
+    category_symbols_response = await client.get(
+        f"/api/v1/exchange-categories/{category_response['category_key']}/symbols",
+        params={"limit": 10},
+    )
+    assert category_symbols_response.status_code == 200
+    assert category_symbols_response.json()["total"] == 1
+    assert category_symbols_response.json()["items"][0]["symbol"] == symbol
+    category_symbols_tail = await client.get(
+        f"/api/v1/exchange-categories/{category_response['category_key']}/symbols",
+        params={"limit": 1, "offset": 1},
+    )
+    assert category_symbols_tail.status_code == 200
+    assert category_symbols_tail.json()["total"] == 1
+    assert category_symbols_tail.json()["offset"] == 1
+    assert category_symbols_tail.json()["items"] == []
+    sync_status_response = await client.get(
+        "/api/v1/exchange-symbol-sync/status"
+    )
+    assert sync_status_response.status_code == 200
+    assert sync_status_response.json()["status"] == "SUCCESS"
+    assert sync_status_response.json()["effective_universe_ready"] is True
     strategy_response = await client.get(
         f"/api/v1/strategy-category-admissions/{strategy_id}"
     )
     assert strategy_response.status_code == 200
     assert strategy_response.json()[0]["enabled"] is True
+    strategy_page = await client.get(
+        f"/api/v1/strategy-category-admissions/{strategy_id}/page",
+        params={"limit": 1, "offset": 1},
+    )
+    assert strategy_page.status_code == 200
+    assert strategy_page.json()["total"] == len(strategy_response.json())
+    assert strategy_page.json()["limit"] == 1
+    assert strategy_page.json()["offset"] == 1
+    assert len(strategy_page.json()["items"]) == 1
     global_audit = await client.get(
         "/api/v1/symbol-global-admission-audit", params={"symbol": symbol}
     )
@@ -1099,6 +1840,20 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     )
     assert category_audit.status_code == 200
     assert category_audit.json()["total"] == 6
+    preview_response = await client.get(
+        f"/api/v1/strategy-category-admissions/{strategy_id}/universe-preview",
+        params={"effective": True, "limit": 10},
+    )
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    # Previous sync snapshots remain as inactive facts and are intentionally
+    # included in the preview with an exclusion reason.
+    assert preview["total_symbols"] >= 2
+    assert preview["effective_symbols"] == 1
+    assert preview["excluded_symbols"] == preview["total_symbols"] - 1
+    assert preview["total"] == 1
+    assert preview["items"][0]["symbol"] == symbol
+    assert preview["items"][0]["effective"] is True
 
     hft = await ledger.get_exchange_symbol("hftusdt")
     assert hft is not None

@@ -70,7 +70,7 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 - Binance Futures testnet 公共行情短时 smoke 已真实接收 11 条完成 1s Bar 和一条新完成 1m Kline，
   Redis 交付及质量门禁均为 healthy；该结果不包含鉴权 REST 或订单执行；
 - 账本层已完成订单、成交、持仓 CRUD/PnL 查询、subcategory 准入审计、策略审计
-  （含按 Campaign 查询生命周期）及 Web V1；
+  （含按 Campaign 查询生命周期）及 Web 运行闭环；
 - D-010/D-011 准入服务已实现：按显式周期读取 PostgreSQL，关闭或数据源故障时禁止
   新信号，撤销 `NEW`/`PARTIALLY_FILLED` 入场单，保留退出单和已有仓位；未知提交继续
   fail-closed，解析为已知未终态后再撤销。真实 PostgreSQL 开关到策略撤单已通过组合测试；
@@ -173,7 +173,7 @@ walk-forward。每次策略评审必须先提供可追溯的逐轮事实：
 | 订单/成交/持仓与 Campaign 生命周期审计 | 完成 | 旧成交不猜测回填 | `campaign_id` 显式贯穿意图、WAL、User Stream、启动回补和账本；`/api/v1/campaigns/{campaign_id}/pnl` 返回实际卖出/买回均价、数量、USDT 手续费及净 PnL；事实不完整或方向矛盾时拒绝计算 |
 | FastAPI 查询 API | 完成 | 由内网边界限制访问 | 订单、成交、持仓、PnL、策略审计、策略运行状态分页查询和真实数据库健康检查已验证 |
 | subcategory 准入控制 | 部分完成 | 接入真实可交易池扫描器并外部验证 | 已接入 Spike 进程；乐观并发、追加审计、fail-closed 刷新和关闭撤单已通过真实 PostgreSQL 测试 |
-| Web 页面 | 完成 | 浏览器兼容性视觉验收 | V1 提供独立的账本健康和策略运行状态、账本、PnL 与 subcategory 控制 |
+| Web 页面 | 完成 | 浏览器兼容性视觉验收；资金费、权益时序、持仓时长和实盘 Campaign K 线等待权威接口 | 提供运行总览、独立收益日历、持仓与订单、成交复盘、Campaign 绩效、回测复盘、策略分类风控、交易对管理和只读分类管理 |
 | 权限与操作审计 | 部分完成 | 应用内身份和角色不实现；敏感操作范围待确认 | 所有控制变更可追责，访问由内网边界限制 |
 | 监控、告警、备份恢复 | 部分完成 | SLO、外部告警通道 | runtime heartbeat/API/Web、只读 soak、迁移校验和及 PostgreSQL 备份恢复演练已完成；报告保留失败进度且脱敏 |
 
@@ -257,15 +257,15 @@ disconnect、恢复对账、reconnected 和 listenKey 轮换，最终空仓空�
 退出条件：REST 超时不会重复下单；未知状态持续阻塞新增风险；进程重启后可恢复所有
 未终态轮次；本地状态以交易所订单、成交和仓位事实为准。
 
-### Phase 4：账本与 Web 最小闭环
+### Phase 4：账本与 Web 运行闭环
 
-**状态：部分完成**
+**状态：完成首期范围**
 
 交付物：数据库迁移、完整账本写入、查询 API、subcategory 控制、Web 交易池/账本/PnL/
 运行状态、控制审计。
 
 已完成订单/成交/持仓 CRUD、Binance 订单/成交回报与 `ACCOUNT_UPDATE` 仓位快照原子幂等入账、数据库聚合 PnL、
-分页查询、subcategory 乐观并发与追加审计、依赖健康检查和 Web V1；subcategory
+分页查询、subcategory 乐观并发与追加审计、依赖健康检查和 Web 运行闭环；subcategory
 fail-closed 轮询及关闭撤销未成交入场单已完成，User Stream 到 WAL、
 风险门禁和账本的组合回调已通过真实 PostgreSQL 验证，具体 Spike 进程已接入准入状态。
 Campaign 运行时权威状态保留在 Redis 原子租约中；其持久历史已由 PostgreSQL
@@ -273,7 +273,11 @@ Campaign 运行时权威状态保留在 Redis 原子租约中；其持久历史�
 状态表，避免与 Redis 运行态形成双写权威。新 Campaign 的订单和成交通过 WAL 中显式
 `campaign_id` 归属，并提供逐 Campaign 执行 PnL 查询；旧成交不按时间猜测回填。剩余：
 迁移 `0003` 已增加策略运行状态，Spike 每 5 秒写心跳，15 秒未更新显示为 `stale`；
-API/Web 已将账本健康与策略状态分离。应用内身份认证和角色不实现，访问由内网边界限制；敏感操作范围仍待确认。
+API/Web 已将账本健康与策略状态分离。Web 已按确认后的信息架构提供运行总览、独立收益日历、
+持仓与订单、成交复盘、Campaign 绩效、回测复盘、策略分类风控、交易对管理和只读分类管理。
+收益日历和绩效只使用已结束 Campaign，分类事实由程序同步，策略分类开关不再混入交易对管理。
+账本尚未提供资金费、权益时序、持仓开仓时间及按 Campaign 查询的实盘 K 线，页面明确显示
+不可用而不推测。应用内身份认证和角色不实现，访问由内网边界限制；敏感操作范围仍待确认。
 
 退出条件：控制变更和完整交易生命周期均可查询；并发修改不会静默覆盖；Web 不可绕过
 策略准入和风控；数据库或 Redis 故障时默认禁止新增风险。
@@ -350,7 +354,7 @@ git diff --check
 涉及 Redis/PostgreSQL/外部测试网的阶段必须增加服务级验证；不能用 mock 单元测试代替。
 每批完成后同步本文和功能差距文档，并建立独立 Git 提交。
 
-当前隔离 Compose 全量基线为 `800 passed, 1 skipped, 13 warnings`（13 个 pytest worker）。
+当前隔离 Compose 全量基线为 `841 passed, 1 skipped, 13 warnings`（13 个 pytest worker）。
 
 ## 8. 风险与停止条件
 

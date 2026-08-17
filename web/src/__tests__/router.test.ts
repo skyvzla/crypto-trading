@@ -14,10 +14,14 @@ describe('router', () => {
         'calendar',
         'positions',
         'trades',
+        'performance',
         'stats',
         'symbols',
         'universe',
         'admissions',
+        'strategy-risk',
+        'categories',
+        'notifications',
         'backtests',
         'backtest-reports',
         'backtest-report-detail',
@@ -46,6 +50,10 @@ describe('router', () => {
     expect(router.resolve('/backtests').href).toBe('#/backtests')
     expect(router.resolve('/positions').name).toBe('positions')
     expect(router.resolve('/stats').name).toBe('stats')
+    expect(router.resolve('/performance').name).toBe('performance')
+    expect(router.resolve('/strategy-risk').name).toBe('strategy-risk')
+    expect(router.resolve('/categories').name).toBe('categories')
+    expect(router.resolve('/notifications').name).toBe('notifications')
     expect(router.resolve('/backtests').name).toBe('backtests')
     expect(router.resolve('/backtests/r-1/reports').name).toBe('backtest-reports')
     expect(router.resolve('/backtests/r-1/reports/pnl_bucket').name).toBe('backtest-report-detail')
