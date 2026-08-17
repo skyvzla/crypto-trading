@@ -84,6 +84,7 @@ const activeKey = computed(() => {
   const name = String(route.name ?? '')
   if (name.startsWith('backtest')) return 'backtests'
   if (name.startsWith('notifications')) return 'notifications'
+  if (name === 'campaign-trade-detail') return 'trades'
   return name
 })
 const pageTitle = computed(() => String(route.meta.title ?? '运行账本'))

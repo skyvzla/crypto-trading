@@ -58,6 +58,21 @@ describe('api client', () => {
     expect(url).toContain('source=archive')
   })
 
+  it('allows Binance market candles without a backtest research', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ symbol: 'BTCUSDT', interval: '5m', source: 'binance', candles: [] })
+    } as Response)
+
+    await backtestApi.candles({
+      symbol: 'BTCUSDT', interval: '5m', start_ms: 1000, end_ms: 2000, source: 'binance'
+    })
+
+    const [url] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(url).toContain('source=binance')
+    expect(url).not.toContain('research_id=')
+  })
+
   it('put sends JSON body', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,

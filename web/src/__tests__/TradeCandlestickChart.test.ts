@@ -173,6 +173,43 @@ describe('TradeCandlestickChart', () => {
     expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖2', lineWidth: 1 }))
   })
 
+  it('按真实交易所时间逐笔标记账本买卖成交', async () => {
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 61 }, (_, index) => ({
+      time: start + index,
+      open: 1,
+      high: 1.2,
+      low: 0.9,
+      close: 1.1,
+      volume: 10
+    }))
+    mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        fillDisplay: 'all',
+        fillTimeSemantics: 'exchange',
+        trade: {
+          id: 'campaign-chart', symbol: 'AKEUSDT', side: 'SHORT',
+          entry_time: (start + 40) * 1000, entry_price: 1.1,
+          exit_time: (start + 50) * 1000, exit_price: 1, net_pnl: 1,
+          fills: [
+            { id: 'buy-1', time: (start + 40) * 1000, price: 1.1, side: 'BUY' },
+            { id: 'sell-1', time: (start + 41) * 1000, price: 1.15, side: 'SELL' },
+            { id: 'buy-2', time: (start + 50) * 1000, price: 1.05, side: 'BUY' }
+          ]
+        }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const markers = createSeriesMarkers.mock.calls.at(-1)?.[1] as Array<{ time: number; text: string }>
+    expect(markers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ time: start + 40, text: '买1' }),
+      expect.objectContaining({ time: start + 41, text: '卖1' }),
+      expect.objectContaining({ time: start + 50, text: '买2' })
+    ]))
+    expect(markers.some((marker) => marker.text === '退出')).toBe(false)
+  })
+
   it('成交价优先于同价限价，并以统一名称绘制未成交档位和极值标签', async () => {
     const start = 1_754_000_000
     mount(TradeCandlestickChart, {

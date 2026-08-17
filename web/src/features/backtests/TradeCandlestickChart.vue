@@ -18,9 +18,10 @@ import {
   type Time,
   type UTCTimestamp
 } from 'lightweight-charts'
-import type { BacktestCandle, BacktestTradeDetail, ChartOverlay } from '@/api/types'
+import type { BacktestCandle, ChartOverlay } from '@/api/types'
 import { timestampMs } from './format'
 import { getChartTheme } from './chartTheme'
+import type { TradeChartData, TradeChartFillDisplay, TradeChartFillTimeSemantics } from './tradeChart'
 
 interface PriceLineVisibility {
   signal?: boolean
@@ -32,9 +33,11 @@ interface PriceLineVisibility {
 
 const props = defineProps<{
   candles: BacktestCandle[]
-  trade: BacktestTradeDetail
+  trade: TradeChartData
   overlays?: ChartOverlay[]
   focusTime?: string | number | null
+  fillDisplay?: TradeChartFillDisplay
+  fillTimeSemantics?: TradeChartFillTimeSemantics
   indicators?: {
     volume?: boolean
     macd?: boolean
@@ -100,6 +103,10 @@ function triggerCandleSeconds(value: string | number | null | undefined): UTCTim
   const ms = timestampMs(value)
   // 回测以 1 秒 K 线收齐时作为 fill_time；图表 K 线以开盘时刻为坐标。
   return ms === null ? null : Math.floor((ms - 1_000) / 1_000) as UTCTimestamp
+}
+
+function fillCandleSeconds(value: string | number | null | undefined): UTCTimestamp | null {
+  return props.fillTimeSemantics === 'exchange' ? seconds(value) : triggerCandleSeconds(value)
 }
 
 function formatChartTime(value: number, includeSeconds = true): string {
@@ -333,19 +340,21 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     return matched as UTCTimestamp
   }
   const fillMarkerTime = (value: string | number | null | undefined): UTCTimestamp | null => {
-    const triggerTime = triggerCandleSeconds(value)
+    const triggerTime = fillCandleSeconds(value)
     return triggerTime === null ? null : markerTime(triggerTime * 1_000)
   }
 
   const isShort = String(props.trade.side || '').toLowerCase().includes('short') || String(props.trade.side || '').toLowerCase() === 'sell'
   const entrySideLabel = isShort ? '卖' : '买'
   const entryOrderSide = isShort ? 'sell' : 'buy'
-  const fills = (props.trade.fills || []).filter((fill) => fill.side?.toLowerCase() === entryOrderSide)
+  const allFills = props.trade.fills || []
+  const entryFills = allFills.filter((fill) => fill.side?.toLowerCase() === entryOrderSide)
+  const displayedFills = props.fillDisplay === 'all' ? allFills : entryFills
   const tierPrices = (props.trade.tier_prices || props.trade.orders?.map((item) => item.price) || []).slice(0, 3)
   const samePrice = (left: number, right: number) => Math.abs(left - right) <= Math.max(1e-12, Math.max(Math.abs(left), Math.abs(right)) * 1e-9)
   const lineVisibility = props.lineVisibility || {}
   const isLineVisible = (key: keyof PriceLineVisibility) => lineVisibility[key] !== false
-  const tierIsFilled = (price: number, index: number) => fills.some((fill) => fill.tier === index + 1 || samePrice(fill.price, price))
+  const tierIsFilled = (price: number, index: number) => entryFills.some((fill) => fill.tier === index + 1 || samePrice(fill.price, price))
   const tierForFill = (price: number, fallbackIndex: number) => {
     const index = tierPrices.findIndex((tierPrice) => samePrice(tierPrice, price))
     return index >= 0 ? index + 1 : fallbackIndex + 1
@@ -481,18 +490,41 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   const entryShape = isShort ? 'arrowDown' : 'arrowUp'
   const exitShape = isShort ? 'arrowUp' : 'arrowDown'
   const formatPrice = (value: number | undefined) => value == null ? '-' : Number(value).toFixed(pricePrecision)
+  const fillCounts = new Map<'buy' | 'sell', number>()
+  const displayedFillDetails = displayedFills.map((fill, index) => {
+    const fillSide = String(fill.side || '').toLowerCase()
+    const isBuy = fillSide === 'buy' || fillSide.includes('long')
+    const sideKey = isBuy ? 'buy' : 'sell'
+    const count = (fillCounts.get(sideKey) || 0) + 1
+    fillCounts.set(sideKey, count)
+    return {
+      fill,
+      label: props.fillDisplay === 'all'
+        ? `${isBuy ? '买' : '卖'}${count}`
+        : `${entrySideLabel}${tierForFill(fill.price, index)}`,
+      position: props.fillDisplay === 'all'
+        ? (isBuy ? 'belowBar' as const : 'aboveBar' as const)
+        : (entryPosition as 'aboveBar' | 'belowBar'),
+      shape: props.fillDisplay === 'all'
+        ? (isBuy ? 'arrowUp' as const : 'arrowDown' as const)
+        : (entryShape as 'arrowUp' | 'arrowDown'),
+      color: props.fillDisplay === 'all'
+        ? (isBuy ? palette.filled : palette.invalid)
+        : palette.filled
+    }
+  })
   extremaPricePrecision = pricePrecision
   extremaTextColor = palette.text
   if (signalTime) markers.push({ time: signalTime, position: entryPosition, color: palette.signal, shape: 'circle', text: '信号' })
-  for (const [index, fill] of fills.entries()) {
-    const time = fillMarkerTime(fill.time)
-    if (time) markers.push({ time, position: entryPosition, color: palette.filled, shape: entryShape, text: `${entrySideLabel}${tierForFill(fill.price, index)}` })
+  for (const detail of displayedFillDetails) {
+    const time = fillMarkerTime(detail.fill.time)
+    if (time) markers.push({ time, position: detail.position, color: detail.color, shape: detail.shape, text: detail.label })
   }
-  const firstFill = fills[0]
+  const firstFill = displayedFills[0] ?? entryFills[0]
   const entryTime = fillMarkerTime(firstFill?.time ?? props.trade.entry_time)
   if (entryTime && !markers.some((marker) => Number(marker.time) === Number(entryTime))) markers.push({ time: entryTime, position: entryPosition, color: '#1677ff', shape: entryShape, text: '首单' })
   const exitTime = fillMarkerTime(props.trade.exit_time)
-  if (exitTime) markers.push({ time: exitTime, position: exitPosition, color: props.trade.net_pnl >= 0 ? '#2ebd85' : '#f05252', shape: exitShape, text: '退出' })
+  if (props.fillDisplay !== 'all' && exitTime) markers.push({ time: exitTime, position: exitPosition, color: Number(props.trade.net_pnl || 0) >= 0 ? '#2ebd85' : '#f05252', shape: exitShape, text: '退出' })
   priceLines.forEach(({ price, title, color, style, lineWidth }) => {
     series.createPriceLine({ price, title, color, lineWidth, lineStyle: style, axisLabelVisible: true })
   })
@@ -509,9 +541,9 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     eventPrices.set(Number(time), current)
   }
   addEventPrice('信号价格', props.trade.signal_time, props.trade.signal_price, false, 10)
-  fills.forEach((fill, index) => addEventPrice(`${entrySideLabel}${tierForFill(fill.price, index)}`, fill.time, fill.price, true, 50))
+  displayedFillDetails.forEach(({ fill, label }) => addEventPrice(label, fill.time, fill.price, true, 50))
   addEventPrice('开仓均价', props.trade.entry_time, props.trade.average_entry_price ?? props.trade.entry_price, true, 30)
-  addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price, true, 50)
+  if (props.fillDisplay !== 'all') addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price, true, 50)
   const formatIndicatorValue = (value: number, format?: 'volume' | 'oscillator') => {
     if (format === 'volume') return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(value)
     if (format === 'oscillator') return Number(value).toFixed(4)
@@ -561,7 +593,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   }
   const initialFocusTime = Number(
     props.focusTime == null
-      ? triggerCandleSeconds(firstFill?.time ?? props.trade.entry_time) ?? seconds(props.trade.signal_time)
+      ? fillCandleSeconds(firstFill?.time ?? props.trade.entry_time) ?? seconds(props.trade.signal_time)
       : seconds(props.focusTime) ?? renderedBarTimes[Math.floor(renderedBarTimes.length / 2)]
   )
   let focusIndex = renderedBarTimes.findIndex((time) => time >= initialFocusTime)
@@ -615,7 +647,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
 }
 
 function focusEvent(value: string | number | null | undefined) {
-  const time = triggerCandleSeconds(value)
+  const time = fillCandleSeconds(value)
   if (!time || !chart || !props.candles.length) return
   const data = props.candles.map((bar) => Number(seconds(bar.time) || 0)).sort((a, b) => a - b)
   if (Number(time) < data[0] || Number(time) > data[data.length - 1]) return
@@ -656,9 +688,9 @@ async function updateChartData() {
   const focusArrived = !containsTime(renderedCandles, props.focusTime) && containsTime(nextData, props.focusTime)
   const eventTimes = [
     props.trade.signal_time,
-    triggerCandleSeconds(props.trade.entry_time),
-    triggerCandleSeconds(props.trade.exit_time),
-    ...(props.trade.fills || []).map((fill) => triggerCandleSeconds(fill.time))
+    fillCandleSeconds(props.trade.entry_time),
+    fillCandleSeconds(props.trade.exit_time),
+    ...(props.trade.fills || []).map((fill) => fillCandleSeconds(fill.time))
   ]
   const markerArrived = eventTimes.some((time) => !containsTime(renderedCandles, time) && containsTime(nextData, time))
   if (focusArrived || markerArrived) {

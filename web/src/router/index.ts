@@ -4,6 +4,7 @@ const Overview = () => import('@/views/OverviewView.vue')
 const Calendar = () => import('@/views/CalendarView.vue')
 const PositionsOrders = () => import('@/views/PositionsOrdersView.vue')
 const TradeReview = () => import('@/views/TradeReviewView.vue')
+const CampaignTradeDetail = () => import('@/views/CampaignTradeDetailView.vue')
 const Performance = () => import('@/views/PerformanceView.vue')
 const Universe = () => import('@/views/UniverseView.vue')
 const Categories = () => import('@/views/CategoryManagementView.vue')
@@ -42,6 +43,12 @@ const routes: RouteRecordRaw[] = [
     name: 'trades',
     component: TradeReview,
     meta: { title: '成交复盘', ready: true }
+  },
+  {
+    path: '/trades/campaigns/:campaignId',
+    name: 'campaign-trade-detail',
+    component: CampaignTradeDetail,
+    meta: { title: 'Campaign 成交', ready: true }
   },
   {
     path: '/performance',

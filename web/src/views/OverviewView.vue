@@ -5,6 +5,7 @@ import { Activity, CalendarDays, CircleAlert, Database, RadioTower, ShieldCheck 
 import { operationsApi } from '@/api/operations'
 import type { DailyPnL, Health, LedgerTrade, PnLSummary, StrategyRuntimeStatus } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
+import { campaignRoute } from '@/features/operations/campaignRoute'
 import FilterBar, { type OperationFilters } from '@/features/operations/FilterBar.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
@@ -111,6 +112,11 @@ function openDay(date: string) {
   void router.push({ path: '/trades', query: { ...query.value, date } })
 }
 
+function openRecentTrade(trade: LedgerTrade) {
+  const target = campaignRoute(trade)
+  void router.push(target || { name: 'trades', query: { ...query.value } })
+}
+
 onMounted(load)
 </script>
 
@@ -169,7 +175,7 @@ onMounted(load)
         <article class="data-card recent-card">
           <div class="data-card-heading"><div><h2>最近成交</h2><p>按账本返回顺序，最多 6 条</p></div><RouterLink :to="{ path: '/trades', query: query }" class="table-link">全部成交 →</RouterLink></div>
           <div v-if="recentTrades.length" class="recent-list">
-            <button v-for="trade in recentTrades" :key="trade.id" type="button" @click="router.push({ path: '/trades', query: { ...query, campaign_id: trade.campaign_id || undefined } })">
+            <button v-for="trade in recentTrades" :key="trade.id" type="button" @click="openRecentTrade(trade)">
               <div><strong>{{ trade.symbol }}</strong><span>{{ trade.side }} · {{ trade.quantity }}</span></div>
               <div><strong :class="pnlClass(trade.realized_pnl)">{{ formatMoney(trade.realized_pnl) }}</strong><time>{{ formatDateTime(trade.exchange_time) }}</time></div>
             </button>

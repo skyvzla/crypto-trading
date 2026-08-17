@@ -5,6 +5,7 @@ import { Button, Tag, type TableColumnsType, type TablePaginationConfig } from '
 import { operationsApi } from '@/api/operations'
 import type { LedgerOrder, LedgerPosition } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
+import { campaignRoute } from '@/features/operations/campaignRoute'
 import FilterBar, { type OperationFilters } from '@/features/operations/FilterBar.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import { asNumber, formatDateTime, formatMoney, pnlClass, sideLabel } from '@/features/operations/format'
@@ -80,6 +81,11 @@ const orderColumns: TableColumnsType<LedgerOrder> = [
 function openDetail(value: Detail) {
   detail.value = value
   detailOpen.value = true
+}
+
+function openCampaign(order: LedgerOrder) {
+  const target = campaignRoute(order)
+  if (target) void router.push(target)
 }
 
 async function load() {
@@ -180,7 +186,7 @@ onMounted(load)
           <a-descriptions-item label="已成交 / 剩余">{{ detail.item.filled_quantity }} / {{ formatMoney(Math.max(0, asNumber(detail.item.quantity) - asNumber(detail.item.filled_quantity)), 6) }}</a-descriptions-item>
           <a-descriptions-item label="创建 / 更新时间">{{ formatDateTime(detail.item.created_at) }} / {{ formatDateTime(detail.item.updated_at) }}</a-descriptions-item>
         </a-descriptions>
-        <a-button v-if="detail.item.campaign_id" class="drawer-link" type="primary" @click="router.push({ path: '/trades', query: { ...query, campaign_id: detail.item.campaign_id || undefined } })">查看该 Campaign 成交</a-button>
+        <a-button v-if="detail.item.campaign_id" class="drawer-link" type="primary" @click="openCampaign(detail.item)">查看该 Campaign 成交</a-button>
       </template>
     </a-drawer>
   </main>

@@ -6,6 +6,7 @@ import OverviewView from '@/views/OverviewView.vue'
 import CalendarView from '@/views/CalendarView.vue'
 import CategoryManagementView from '@/views/CategoryManagementView.vue'
 import PerformanceView from '@/views/PerformanceView.vue'
+import CampaignTradeDetailView from '@/views/CampaignTradeDetailView.vue'
 import TradeReviewView from '@/views/TradeReviewView.vue'
 import StrategyRiskView from '@/views/StrategyRiskView.vue'
 import UniverseView from '@/views/UniverseView.vue'
@@ -218,7 +219,7 @@ describe('operations views', () => {
     expect(wrapper.text()).not.toContain('0.11')
   })
 
-  it('marks open campaign PnL as a provisional realized amount', async () => {
+  it('opens Campaign detail with the complete ledger identity', async () => {
     await router.push('/trades?account_id=acct')
     vi.spyOn(operationsApi, 'campaigns').mockResolvedValue({
       items: [{ account_id: 'acct', strategy_id: 's', symbol: 'BTCUSDT', campaign_id: 'open', side: 'SHORT', fill_count: 2, sell_quantity: '2', buy_quantity: '1', total_commission: '0.2', commission_asset: 'USDT', gross_realized_pnl: '5', net_realized_pnl: null, first_fill_at: '2026-08-01T00:00:00Z', last_fill_at: '2026-08-01T00:01:00Z', closed_at: null, has_open_quantity: true, pnl_facts_complete: false }],
@@ -227,26 +228,65 @@ describe('operations views', () => {
       offset: 0,
       unattributed_fills: 0
     })
-    vi.spyOn(operationsApi, 'campaignPnl').mockResolvedValue({
-      account_id: 'acct', strategy_id: 's', symbol: 'BTCUSDT', campaign_id: 'open', trade_count: 2,
-      sell_quantity: '2', sell_avg_price: '100', buy_quantity: '1', buy_avg_price: '95',
-      total_commission: '0.2', commission_asset: 'USDT', gross_realized_pnl: '5', net_realized_pnl: '4.8',
-      remaining_quantity: '1', has_open_quantity: true, acquired_at: null,
-      first_fill_at: '2026-08-01T00:00:00Z', last_fill_at: '2026-08-01T00:01:00Z', closed_at: null,
-      released_at: null, lifecycle_duration_ms: null
-    })
-    vi.spyOn(operationsApi, 'strategyAuditEvents').mockResolvedValue({ items: [], total: 0, limit: 200, offset: 0 })
-    vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 1000, offset: 0 })
 
-    const wrapper = mount(TradeReviewView, { attachTo: document.body })
+    const wrapper = mount(TradeReviewView)
     await flushPromises()
     await wrapper.get('.campaign-button').trigger('click')
     await flushPromises()
 
-    expect(document.body.textContent).toContain('当前净已实现 PnL')
-    expect(document.body.textContent).toContain('仍有敞口')
-    expect(document.body.textContent).toContain('不是最终轮次收益')
-    wrapper.unmount()
+    expect(router.currentRoute.value.name).toBe('campaign-trade-detail')
+    expect(router.currentRoute.value.params.campaignId).toBe('open')
+    expect(router.currentRoute.value.query).toMatchObject({ account_id: 'acct', strategy_id: 's', symbol: 'BTCUSDT' })
+  })
+
+  it('loads Campaign detail and maps every ledger fill to the shared chart', async () => {
+    await router.push({
+      name: 'campaign-trade-detail',
+      params: { campaignId: 'campaign/1' },
+      query: { account_id: 'acct', strategy_id: 'spike-short', symbol: 'BTCUSDT' }
+    })
+    const campaignPnl = vi.spyOn(operationsApi, 'campaignPnl').mockResolvedValue({
+      account_id: 'acct', strategy_id: 'spike-short', symbol: 'BTCUSDT', campaign_id: 'campaign/1', trade_count: 3,
+      sell_quantity: '1', sell_avg_price: '100', buy_quantity: '1', buy_avg_price: '95',
+      total_commission: '0.2', commission_asset: 'USDT', gross_realized_pnl: '5', net_realized_pnl: '4.8',
+      remaining_quantity: '0', has_open_quantity: false, acquired_at: null,
+      first_fill_at: '2026-08-01T00:00:00Z', last_fill_at: '2026-08-01T00:02:00Z', closed_at: '2026-08-01T00:02:00Z',
+      released_at: null, lifecycle_duration_ms: 120000
+    })
+    const trades = vi.spyOn(operationsApi, 'trades').mockResolvedValue({
+      items: [
+        { id: 2, account_id: 'acct', strategy_id: 'spike-short', symbol: 'BTCUSDT', trade_id: 't-sell', order_id: 'o-sell', client_order_id: 'c-sell', campaign_id: 'campaign/1', side: 'SELL', position_side: 'SHORT', quantity: '1', price: '100', quote_quantity: '100', commission: '0.1', commission_asset: 'USDT', realized_pnl: null, is_maker: false, created_at: '2026-08-01T00:00:00Z', exchange_time: '2026-08-01T00:01:00Z' },
+        { id: 1, account_id: 'acct', strategy_id: 'spike-short', symbol: 'BTCUSDT', trade_id: 't-buy', order_id: 'o-buy', client_order_id: 'c-buy', campaign_id: 'campaign/1', side: 'BUY', position_side: 'SHORT', quantity: '1', price: '95', quote_quantity: '95', commission: '0.1', commission_asset: 'USDT', realized_pnl: '5', is_maker: false, created_at: '2026-08-01T00:00:00Z', exchange_time: '2026-08-01T00:00:00Z' }
+      ], total: 2, limit: 1000, offset: 0
+    })
+    vi.spyOn(operationsApi, 'strategyAuditEvents').mockResolvedValue({ items: [], total: 0, limit: 200, offset: 0 })
+    const wrapper = mount(CampaignTradeDetailView, {
+      global: {
+        stubs: {
+          TradeReplayChartPanel: {
+            name: 'TradeReplayChartPanel',
+            props: ['trade', 'mode', 'fillDisplay', 'fillTimeSemantics', 'exitLabel', 'strategyLines'],
+            template: '<div class="trade-replay-chart-panel-stub" />'
+          }
+        }
+      }
+    })
+    await flushPromises()
+
+    expect(campaignPnl).toHaveBeenCalledWith('campaign/1', { account_id: 'acct', strategy_id: 'spike-short' })
+    expect(trades).toHaveBeenCalledWith(expect.objectContaining({ account_id: 'acct', strategy_id: 'spike-short', symbol: 'BTCUSDT', campaign_id: 'campaign/1' }))
+    expect(wrapper.text()).toContain('已结束')
+    const chart = wrapper.getComponent({ name: 'TradeReplayChartPanel' })
+    expect(chart.props()).toMatchObject({ mode: 'market', fillDisplay: 'all', fillTimeSemantics: 'exchange', exitLabel: '最后成交', strategyLines: false })
+    expect(chart.props('trade')).toMatchObject({
+      side: 'BUY',
+      entry_time: '2026-08-01T00:00:00Z',
+      exit_time: '2026-08-01T00:01:00Z',
+      fills: [
+        expect.objectContaining({ side: 'BUY', time: '2026-08-01T00:00:00Z' }),
+        expect.objectContaining({ side: 'SELL', time: '2026-08-01T00:01:00Z' })
+      ]
+    })
   })
 
   it('defaults the calendar to the all-account aggregate and renders close-day counts', async () => {
