@@ -8,6 +8,147 @@ export interface Page<T> {
   offset: number
 }
 
+export type NotificationConnectorType = 'telegram' | 'webhook'
+export type NotificationSeverity = 'info' | 'warning' | 'critical'
+export type NotificationRoutingStatus = 'pending' | 'routed' | 'suppressed' | 'unrouted' | 'targeted'
+export type NotificationDeliveryStatus = 'pending' | 'sending' | 'retry' | 'sent' | 'dead'
+
+export interface NotificationConnector {
+  id: string
+  name: string
+  type: NotificationConnectorType
+  secret_ref: string | null
+  config: JsonObject
+  enabled: boolean
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface NotificationEndpoint {
+  id: string
+  connector_id: string
+  name: string
+  address: string
+  config: JsonObject
+  enabled: boolean
+  version: number
+  created_at: string
+  updated_at: string
+}
+
+export interface NotificationGroup {
+  id: string
+  name: string
+  description: string | null
+  enabled: boolean
+  version: number
+  endpoint_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface NotificationPolicy {
+  id: string
+  name: string
+  event_pattern: string
+  severity: NotificationSeverity
+  priority: number
+  suppress: boolean
+  enabled: boolean
+  version: number
+  group_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface NotificationEvent {
+  id: string
+  event_type: string
+  severity: NotificationSeverity
+  source: string
+  title: string
+  body: string
+  payload: JsonObject
+  idempotency_key: string
+  correlation_id: string | null
+  fingerprint: string | null
+  matched_policy_id: string | null
+  routing_status: NotificationRoutingStatus
+  occurred_at: string
+  expires_at: string | null
+  created_at: string
+}
+
+export interface NotificationDelivery {
+  id: string
+  event_id: string
+  endpoint_id: string
+  connector_snapshot: JsonObject
+  endpoint_snapshot: JsonObject
+  status: NotificationDeliveryStatus
+  attempt_count: number
+  next_attempt_at: string
+  lease_until: string | null
+  lease_owner: string | null
+  last_error: string | null
+  provider_message_id: string | null
+  created_at: string
+  updated_at: string
+  sent_at: string | null
+}
+
+export interface NotificationPublishResponse {
+  event: NotificationEvent
+  deliveries: NotificationDelivery[]
+  created: boolean
+}
+
+export interface NotificationOverview {
+  connectors: number
+  enabled_connectors: number
+  endpoints: number
+  enabled_endpoints: number
+  groups: number
+  policies: number
+  events: number
+  unrouted_events: number
+  deliveries: Record<NotificationDeliveryStatus, number>
+}
+
+export interface NotificationConnectorInput {
+  name: string
+  type: NotificationConnectorType
+  secret_ref?: string | null
+  config?: JsonObject
+  enabled: boolean
+}
+
+export interface NotificationEndpointInput {
+  connector_id: string
+  name: string
+  address: string
+  config?: JsonObject
+  enabled: boolean
+}
+
+export interface NotificationGroupInput {
+  name: string
+  description?: string | null
+  endpoint_ids: string[]
+  enabled: boolean
+}
+
+export interface NotificationPolicyInput {
+  name: string
+  event_pattern: string
+  severity: NotificationSeverity
+  priority: number
+  suppress: boolean
+  group_ids: string[]
+  enabled: boolean
+}
+
 export interface Health {
   status: string
   service: string

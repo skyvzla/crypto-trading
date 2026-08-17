@@ -22,6 +22,28 @@ services:
       timeout: 1s
       retries: 10
 
+  notification-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+    command:
+      - sh
+      - -ceu
+      - >-
+        python -m trading_platform.ledger.db.migrations migrate &&
+        python -m trading_platform.notifications --once --no-redis
+    environment:
+      PYTHONPATH: /app/src
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_DATABASE: trading_platform
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   test:
     build:
       context: .

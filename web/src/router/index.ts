@@ -10,6 +10,7 @@ const BacktestSymbolList = () => import('@/views/backtests/BacktestSymbolListVie
 const BacktestTradeList = () => import('@/views/backtests/BacktestTradeListView.vue')
 const BacktestTradeReplay = () => import('@/views/backtests/BacktestTradeReplayView.vue')
 const BacktestEquityReplay = () => import('@/views/backtests/BacktestEquityReplayView.vue')
+const Notifications = () => import('@/views/NotificationsView.vue')
 
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/overview' },
@@ -102,6 +103,12 @@ const routes: RouteRecordRaw[] = [
     name: 'admissions',
     component: Placeholder,
     meta: { title: 'Subcategory 管理', ready: false }
+  },
+  {
+    path: '/notifications',
+    name: 'notifications',
+    component: Notifications,
+    meta: { title: '通知中心', ready: true }
   },
   { path: '/:pathMatch(.*)*', redirect: '/overview' }
 ]

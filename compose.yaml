@@ -110,6 +110,40 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  notification-worker:
+    image: trading_platform-ledger
+    build: *app_build
+    command: ["python", "-m", "trading_platform.notifications", "--poll-interval", "5"]
+    init: true
+    # Connector secret_ref values resolve from this optional file or Docker
+    # secrets mounted at /run/secrets. The web UI never stores secret values.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_DATABASE: ${DB_DATABASE:-trading_platform}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-1}
+      NOTIFICATION_REDIS_URL: redis://redis:6379/1
+      NOTIFICATION_BRIDGE_LOOKBACK_SECONDS: ${NOTIFICATION_BRIDGE_LOOKBACK_SECONDS:-900}
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+    depends_on:
+      ledger-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
   symbol-sync:
     image: trading_platform-ledger
     build: *app_build

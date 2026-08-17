@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted, provide, ref } from 'vue'
-import { ArrowLeftRight, CalendarDays, ChartNoAxesCombined, Coins, FlaskConical, LayoutDashboard, ListChecks, Moon, Sun, Tags, WalletCards } from 'lucide-vue-next'
+import { ArrowLeftRight, Bell, CalendarDays, ChartNoAxesCombined, Coins, FlaskConical, LayoutDashboard, ListChecks, Moon, Sun, Tags, WalletCards } from 'lucide-vue-next'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { theme as antdTheme, type MenuProps } from 'ant-design-vue'
 import { useHealthStore } from '@/stores/health'
@@ -24,7 +24,8 @@ const sideMenuOptions: MenuProps['items'] = [
   { key: 'symbols', label: '交易对统计', to: '/symbols', icon: Coins },
   { key: 'backtests', label: '回测复盘', to: '/backtests', icon: FlaskConical },
   { key: 'universe', label: '交易对管理', to: '/universe', icon: ListChecks },
-  { key: 'admissions', label: 'Subcategory 管理', to: '/admissions', icon: Tags }
+  { key: 'admissions', label: 'Subcategory 管理', to: '/admissions', icon: Tags },
+  { key: 'notifications', label: '通知中心', to: '/notifications', icon: Bell }
 ].map((item) => ({
   key: item.key,
   label: h(RouterLink, { to: item.to }, { default: () => item.label }),

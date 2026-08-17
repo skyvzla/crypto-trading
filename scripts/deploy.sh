@@ -23,5 +23,5 @@ docker compose build
 docker compose up -d --wait postgres redis
 docker compose run --rm --no-deps ledger \
   python -m trading_platform.ledger.db.migrations migrate
-docker compose up -d --wait market ledger
+docker compose up -d --wait market ledger notification-worker
 docker compose ps
