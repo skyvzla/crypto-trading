@@ -3,6 +3,7 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, typ
 import { AreaSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts'
 import type { EquityPoint, EquityReplayRow } from './equityReplay'
 import { formatNumber, formatPercent, formatTime } from './format'
+import { getChartTheme } from './chartTheme'
 
 const props = defineProps<{ points: EquityPoint[] }>()
 const host = ref<HTMLElement | null>(null)
@@ -19,18 +20,18 @@ const pointRows = computed(() => new Map(
 function render() {
   if (!host.value) return
   chart?.remove()
-  const dark = isDarkTheme.value
+  const palette = getChartTheme(isDarkTheme.value)
   chart = createChart(host.value, {
     width: host.value.clientWidth,
     height: host.value.clientHeight,
-    layout: { background: { type: ColorType.Solid, color: dark ? '#111827' : '#ffffff' }, textColor: dark ? '#94a8c1' : '#64748b' },
-    grid: { vertLines: { color: dark ? '#263243' : '#edf1f6' }, horzLines: { color: dark ? '#263243' : '#edf1f6' } },
-    rightPriceScale: { borderColor: dark ? '#41536b' : '#cbd5e1' },
-    timeScale: { borderColor: dark ? '#41536b' : '#cbd5e1', timeVisible: true, secondsVisible: false },
+    layout: { background: { type: ColorType.Solid, color: palette.background }, textColor: palette.axisText },
+    grid: { vertLines: { color: palette.grid }, horzLines: { color: palette.grid } },
+    rightPriceScale: { borderColor: palette.border },
+    timeScale: { borderColor: palette.border, timeVisible: true, secondsVisible: false },
     localization: { priceFormatter: (value: number) => `${formatNumber(value, 2)} U` }
   })
   series = chart.addSeries(AreaSeries, {
-    lineColor: '#16a34a', topColor: 'rgba(22, 163, 74, .28)', bottomColor: 'rgba(22, 163, 74, .02)', lineWidth: 2,
+    lineColor: palette.areaLine, topColor: palette.areaTop, bottomColor: palette.areaBottom, lineWidth: 2,
     crosshairMarkerVisible: true, crosshairMarkerRadius: 5, priceLineVisible: false
   })
   series.setData(props.points.map((point) => ({ time: Math.floor(point.time / 1000) as UTCTimestamp, value: point.value })))

@@ -24,5 +24,5 @@ defineProps<{
 <style scoped>
 .metric-link { display:block; color:inherit; text-decoration:none; }
 .metric-link .metric-tile { height:100%; transition:border-color .15s ease, transform .15s ease; }
-.metric-link:hover .metric-tile,.metric-link:focus-visible .metric-tile { border-color:#b38732; transform:translateY(-1px); }
+.metric-link:hover .metric-tile,.metric-link:focus-visible .metric-tile { border-color:var(--color-gold); transform:translateY(-1px); }
 </style>

@@ -11,7 +11,21 @@ const themeMode = ref<'light' | 'dark'>('light')
 const isDarkTheme = computed(() => themeMode.value === 'dark')
 const providerTheme = computed(() => ({
   algorithm: isDarkTheme.value ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
-  token: { colorPrimary: '#3b82f6', borderRadius: 6, fontFamily: '"IBM Plex Sans", "Noto Sans SC", sans-serif' }
+  token: {
+    colorPrimary: '#3b82f6',
+    colorInfo: '#2563eb',
+    colorSuccess: '#059669',
+    colorWarning: '#d97706',
+    colorError: '#dc2626',
+    borderRadius: 6,
+    fontSize: 16,
+    fontFamily: 'var(--font-family-sans)'
+  },
+  components: {
+    Menu: {
+      fontSize: 14
+    }
+  }
 }))
 provide('isDarkTheme', isDarkTheme)
 
@@ -66,7 +80,12 @@ const sideMenuOptions: MenuProps['items'] = [
   }
 ]
 
-const activeKey = computed(() => String(route.name ?? '').startsWith('backtest') ? 'backtests' : String(route.name ?? ''))
+const activeKey = computed(() => {
+  const name = String(route.name ?? '')
+  if (name.startsWith('backtest')) return 'backtests'
+  if (name.startsWith('notifications')) return 'notifications'
+  return name
+})
 const pageTitle = computed(() => String(route.meta.title ?? '运行账本'))
 const healthLabel = computed(
   () =>
@@ -140,8 +159,9 @@ onMounted(() => {
 
 <style scoped lang="scss">
 .app-sider {
-  --sider-text-color: rgba(255, 255, 255, 0.65);
-  --sider-border-color: rgba(255, 255, 255, 0.12);
+  --sider-text-color: rgba(255, 255, 255, .65);
+  --sider-border-color: rgba(255, 255, 255, .12);
+  --menu-group-font-size: 9px;
 }
 .brand {
   display: flex;
@@ -160,15 +180,15 @@ onMounted(() => {
   width: 30px;
   height: 30px;
   border-radius: 6px;
-  border: 1px solid rgba(214, 168, 75, .72);
-  background: rgba(214, 168, 75, .12);
-  color: #e1ba68;
+  border: 1px solid color-mix(in srgb, var(--color-gold) 72%, transparent);
+  background: color-mix(in srgb, var(--color-gold) 12%, transparent);
+  color: color-mix(in srgb, var(--color-gold) 72%, white);
   font-weight: 700;
-  font-size: 13px;
+  font-size: var(--font-size-sm);
 }
 .brand-name {
   color: var(--sider-text-color);
-  font-size: 15px;
+  font-size: var(--font-size-md);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -183,7 +203,7 @@ onMounted(() => {
   padding: 16px 18px;
   border-top: 1px solid var(--sider-border-color);
   color: var(--sider-text-color);
-  font-size: 12px;
+  font-size: var(--font-size-sm);
 }
 .app-header {
   padding: 0;
@@ -191,9 +211,9 @@ onMounted(() => {
   border-bottom: 1px solid var(--line);
 }
 .header-actions { display: flex; height: 100%; align-items: center; justify-content: space-between; padding-inline: 20px; }
-.header-context { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.header-context { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--font-size-sm); }
 .header-context span { color: var(--text); font-weight: 600; }
-.header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: #b38732; font: 9px "IBM Plex Mono", monospace; font-style: normal; letter-spacing: 0; }
+.header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: var(--color-gold); font: var(--font-size-xs) var(--font-family-mono); font-style: normal; letter-spacing: 0; }
 .theme-toggle { color: var(--text); }
 .workspace {
   --workspace-content-max-width: none;
@@ -202,10 +222,21 @@ onMounted(() => {
   padding: 20px 24px 32px;
   overflow: auto;
 }
-.side-menu :deep(.ant-menu-item-group-title) { padding-top: 17px; padding-bottom: 5px; color: rgba(214, 168, 75, .68); font: 9px "IBM Plex Mono", monospace; letter-spacing: 0; }
-.app-sider.ant-layout-sider-collapsed .side-menu :deep(.ant-menu-item-group-title) { height: 9px; padding: 8px 0 0; overflow: hidden; color: transparent; }
+.side-menu :deep(.ant-menu-item-group-title) { padding-top: 17px; padding-bottom: 5px; color: color-mix(in srgb, var(--color-gold) 68%, transparent); font: var(--menu-group-font-size) var(--font-family-mono); letter-spacing: 0; }
+.app-sider.ant-layout-sider-collapsed .side-menu :deep(.ant-menu-item-group-title) { height: var(--menu-group-font-size); padding: 8px 0 0; overflow: hidden; color: transparent; }
 @media (max-width: 640px) {
   .header-context i { display: none; }
   .workspace { padding-inline: 12px; }
+}
+@media (max-width: 767px) {
+  .app-sider { flex: 0 0 56px !important; width: 56px !important; min-width: 56px !important; max-width: 56px !important; }
+  .app-sider .brand { justify-content: center; padding-inline: 0; }
+  .app-sider .brand-name,
+  .app-sider .rail-status span,
+  .app-sider .side-menu :deep(.ant-menu-title-content),
+  .app-sider .side-menu :deep(.ant-menu-item-group-title) { display: none; }
+  .app-sider .side-menu :deep(.ant-menu-item) { padding-inline: 20px !important; }
+  .app-sider :deep(.ant-layout-sider-trigger) { display: none; }
+  .rail-status { justify-content: center; padding-inline: 0; }
 }
 </style>

@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { notificationApi } from '@/api/client'
+import App from '@/App.vue'
 import NotificationsView from '@/views/NotificationsView.vue'
 import { router } from '@/router'
 
@@ -63,6 +64,10 @@ describe('notification API', () => {
 describe('notification route and view', () => {
   it('resolves the notification route', () => {
     expect(router.resolve('/notifications').name).toBe('notifications')
+    expect(router.resolve('/notifications/connectors').name).toBe('notifications-connectors')
+    expect(router.resolve('/notifications/groups').name).toBe('notifications-groups')
+    expect(router.resolve('/notifications/policies').name).toBe('notifications-policies')
+    expect(router.resolve('/notifications/activity?tab=deliveries').name).toBe('notifications-activity')
   })
 
   it('loads the workbench and opens the connector form from the channel view', async () => {
@@ -72,8 +77,9 @@ describe('notification route and view', () => {
 
     expect(wrapper.text()).toContain('通知中心')
     expect(wrapper.text()).toContain('投递状态')
-    await wrapper.get('button[role="tab"]:nth-child(2)').trigger('click')
+    await wrapper.findAll('[role="tab"]')[1].trigger('click')
     await flushPromises()
+    expect(router.currentRoute.value.name).toBe('notifications-connectors')
     expect(wrapper.text()).toContain('连接器与端点')
     expect(wrapper.text()).toContain('ops-bot')
     const addConnector = wrapper.findAll('button').find((node) => node.text().includes('添加连接器'))
@@ -81,5 +87,30 @@ describe('notification route and view', () => {
     await addConnector!.trigger('click')
     expect(document.body.textContent).toContain('新建连接器')
     expect(document.body.textContent).toContain('密钥引用')
+    wrapper.unmount()
+  })
+
+  it('closes open dialogs when leaving the cached notification workspace', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input)))
+    const removeTargetRoute = router.addRoute({
+      path: '/notification-test-target',
+      name: 'notification-test-target',
+      component: { render: () => null }
+    })
+    await router.push('/notifications/connectors')
+    const wrapper = mount(App, { attachTo: document.body })
+    await flushPromises()
+
+    const addConnector = wrapper.findAll('button').find((node) => node.text().includes('添加连接器'))
+    expect(addConnector).toBeDefined()
+    await addConnector!.trigger('click')
+    await flushPromises()
+    expect(document.querySelector('.ant-modal-wrap')).not.toBeNull()
+
+    await router.push('/notification-test-target')
+    await flushPromises()
+    expect((document.querySelector('.ant-modal') as HTMLElement).style.display).toBe('none')
+    wrapper.unmount()
+    removeTargetRoute()
   })
 })

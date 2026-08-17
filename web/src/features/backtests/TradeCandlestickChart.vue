@@ -20,6 +20,7 @@ import {
 } from 'lightweight-charts'
 import type { BacktestCandle, BacktestTradeDetail, ChartOverlay } from '@/api/types'
 import { timestampMs } from './format'
+import { getChartTheme } from './chartTheme'
 
 interface PriceLineVisibility {
   signal?: boolean
@@ -279,9 +280,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   const pricePrecision = chartPricePrecision(data)
   const priceFormat = { type: 'price' as const, precision: pricePrecision, minMove: 10 ** -pricePrecision }
   const candleSpacing = data.length > 1 ? Number(data[1].time) - Number(data[0].time) : 60
-  const palette = isDarkTheme.value
-    ? { background: '#111827', text: '#d7e0ee', grid: '#263243', border: '#41536b', up: '#34d399', down: '#fb7185', signal: '#fbbf24', filled: '#fb923c', pending: '#60a5fa', average: '#e2e8f0', invalid: '#f87171' }
-    : { background: '#ffffff', text: '#334155', grid: '#e2e8f0', border: '#cbd5e1', up: '#059669', down: '#e11d48', signal: '#b45309', filled: '#ea580c', pending: '#2563eb', average: '#1e293b', invalid: '#dc2626' }
+  const palette = getChartTheme(isDarkTheme.value)
   chart = createChart(host.value, {
     width: host.value.clientWidth,
     height: Math.max(420, host.value.clientHeight),
@@ -708,7 +707,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .chart-shell { position: relative; }
 .candlestick-host { position: relative; width: 100%; height: calc(100% - 8px); }
-.extrema-price-label { position: absolute; z-index: 5; font: 11px/1.2 "JetBrains Mono", monospace; pointer-events: none; transform: translateX(-50%); white-space: nowrap; }
+.extrema-price-label { position: absolute; z-index: 5; font: var(--font-size-xs)/1.2 var(--font-family-mono); pointer-events: none; transform: translateX(-50%); white-space: nowrap; }
 .chart-hover-label {
   position: absolute;
   z-index: 2;
@@ -719,7 +718,7 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   background: var(--chart-overlay);
   color: var(--text);
-  font: 11px/1.45 "JetBrains Mono", monospace;
+  font: var(--font-size-xs)/1.45 var(--font-family-mono);
   pointer-events: none;
 }
 .hover-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 19px; white-space: nowrap; }
@@ -736,7 +735,7 @@ onBeforeUnmount(() => {
   border-radius: 3px;
   border: 1px solid var(--chart-grid);
   background: var(--chart-overlay);
-  font: 11px/1.3 "JetBrains Mono", monospace;
+  font: var(--font-size-xs)/1.3 var(--font-family-mono);
   pointer-events: none;
 }
 .chart-height-resizer {

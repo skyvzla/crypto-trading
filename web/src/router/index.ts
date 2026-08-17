@@ -109,12 +109,11 @@ const routes: RouteRecordRaw[] = [
     component: Categories,
     meta: { title: '分类管理', ready: true }
   },
-  {
-    path: '/notifications',
-    name: 'notifications',
-    component: Notifications,
-    meta: { title: '通知中心', ready: true }
-  },
+  { path: '/notifications', name: 'notifications', component: Notifications, meta: { title: '通知中心', ready: true } },
+  { path: '/notifications/connectors', name: 'notifications-connectors', component: Notifications, meta: { title: '连接器与端点', ready: true } },
+  { path: '/notifications/groups', name: 'notifications-groups', component: Notifications, meta: { title: '职责组', ready: true } },
+  { path: '/notifications/policies', name: 'notifications-policies', component: Notifications, meta: { title: '路由策略', ready: true } },
+  { path: '/notifications/activity', name: 'notifications-activity', component: Notifications, meta: { title: '事件与投递', ready: true } },
   { path: '/stats', name: 'stats', redirect: '/performance' },
   { path: '/symbols', name: 'symbols', redirect: '/performance' },
   { path: '/admissions', name: 'admissions', redirect: '/categories' },
