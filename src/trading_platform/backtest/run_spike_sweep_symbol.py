@@ -38,6 +38,24 @@ class SharedProviderGroup:
     provider: SharedFeatureProvider
 
 
+def _export_research_trades(plan: SymbolRunPlan) -> None:
+    """研究模式：把策略内的逐笔成交明细（含退出原因/MAE）导出到 run 目录。"""
+    records = getattr(plan.engine.strategy, "drain_trade_records", None)
+    if records is None:
+        return
+    rows = records()
+    if not rows:
+        return
+    import csv as _csv
+
+    path = plan.settings.output_path / "research_trades.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = _csv.DictWriter(stream, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def _event_matches_plan(event: Event, plan: SymbolRunPlan) -> bool:
     if isinstance(event, Bar1s):
         return (
@@ -153,6 +171,8 @@ def _run_shift_group(plans: list[SymbolRunPlan]) -> set[str]:
             continue
         try:
             result = plan.engine.finish()
+            if getattr(plan.args, "research", False):
+                _export_research_trades(plan)
             save_backtest_result(result, plan.settings.output_path)
         except Exception as error:
             failed.add(plan.run_id)

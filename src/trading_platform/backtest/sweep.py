@@ -52,6 +52,17 @@ logger = logging.getLogger(__name__)
 
 PARAMETER_FLAGS = {
     "strategy": "--strategy",
+    "research": "--research",
+    "th_v": "--th-v",
+    "th_e": "--th-e",
+    "th_r": "--th-r",
+    "atr_min": "--atr-min",
+    "premium_mult": "--premium-mult",
+    "premium_floor": "--premium-floor",
+    "premium_cap": "--premium-cap",
+    "stop_pct": "--stop-pct",
+    "stop_check_ms": "--stop-check-ms",
+    "model_json": "--model-json",
     "total_notional": "--total-notional",
     "exit_policy": "--exit-policy",
     "prior_high_lookback_hours": "--prior-high-lookback-hours",

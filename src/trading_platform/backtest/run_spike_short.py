@@ -179,6 +179,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="显式修正历史 1s 数据时间偏移；默认 0，不自动推断",
     )
     parser.add_argument(
+        "--research",
+        action="store_true",
+        default=False,
+        help="研究模式：三高/atr 过滤 + 动态溢价挂单 + 止损 + 4h 持有",
+    )
+    parser.add_argument("--th-v", type=float, default=0.0, help="研究：vwap_dev_5m 过滤阈值")
+    parser.add_argument("--th-e", type=float, default=0.0, help="研究：ema_ratio_5m 过滤阈值")
+    parser.add_argument("--th-r", type=float, default=0.0, help="研究：roc_5m 过滤阈值")
+    parser.add_argument("--atr-min", type=float, default=0.0, help="研究：atr_ratio_5m 过滤阈值")
+    parser.add_argument("--premium-mult", type=float, default=0.7, help="研究：预测冲高溢价倍数")
+    parser.add_argument("--premium-floor", type=float, default=3.0, help="研究：溢价下限(%)")
+    parser.add_argument("--premium-cap", type=float, default=35.0, help="研究：溢价上限(%)")
+    parser.add_argument("--stop-pct", type=float, default=8.0, help="研究：止损幅度(%)")
+    parser.add_argument("--stop-check-ms", type=int, default=900000, help="研究：止损检查时点(ms)，0=入场后逐bar")
+    parser.add_argument("--model-json", default=None, help="研究：模型权重 JSON（默认 research/up_premium_model.py）")
+    parser.add_argument(
         "--strategy",
         default=DEFAULT_STRATEGY,
         help="策略声明路径，格式为 module:attribute",
@@ -781,6 +797,56 @@ def create_spike_engine(
     if args.exit_policy == "legacy-script":
         strategy = LegacyScriptExitSpikeBacktestStrategy(
             symbols=[args.symbol], total_notional=args.total_notional
+        )
+    elif args.research:
+        from trading_platform.strategies.spike.research_premium import (
+            ResearchParams,
+            ResearchPremiumBacktestStrategy,
+        )
+
+        params = ResearchParams(
+            triple_high_thresholds={
+                "vwap_dev_5m": args.th_v,
+                "ema_ratio_5m": args.th_e,
+                "roc_5m": args.th_r,
+            },
+            atr_min=args.atr_min,
+            premium_mult=args.premium_mult,
+            premium_floor_pct=args.premium_floor,
+            premium_cap_pct=args.premium_cap,
+            stop_loss_pct=args.stop_pct,
+            stop_check_after_ms=args.stop_check_ms,
+            hold_ms=4 * 3600 * 1000,
+        )
+        if args.model_json:
+            import json as _json
+
+            model = _json.loads(Path(args.model_json).read_text(encoding="utf-8"))
+            params.model_mean = model["mean"]
+            params.model_std = model["std"]
+            params.model_coefs = model["coefs"]
+            params.model_intercept = float(model["intercept"])
+        else:
+            from trading_platform.research.up_premium_model import (
+                COEFS,
+                FEATURES as MODEL_FEATURES,
+                INTERCEPT,
+                MEAN,
+                STD,
+            )
+
+            params.model_mean = {
+                f: float(v) for f, v in zip(MODEL_FEATURES, MEAN)
+            }
+            params.model_std = {f: float(v) for f, v in zip(MODEL_FEATURES, STD)}
+            params.model_coefs = {
+                f: float(v) for f, v in zip(MODEL_FEATURES, COEFS)
+            }
+            params.model_intercept = float(INTERCEPT)
+        strategy = ResearchPremiumBacktestStrategy(
+            symbols=[args.symbol],
+            total_notional=args.total_notional,
+            research_params=params,
         )
     else:
         strategy_class = settings.strategy_definition.strategy_class
