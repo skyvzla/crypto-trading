@@ -52,7 +52,7 @@ exit_strict_age_ms = 900000
 
 ## 已有证据（全量 92 币，828 runs）
 
-`experiments/spike-v2-grouped-exit-deep-drawdown-full.toml` →
+`configs/spike-v2-grouped-exit-deep-drawdown-full.toml` →
 `reports/spike-v2-grouped-exit-deep-drawdown-full`，13 workers：
 
 | 组合 | 净收益 U | 笔数 | 胜率 | Δ净 |
@@ -112,7 +112,7 @@ weak_bucket_strict_age_ms   = 600000    # 弱桶 10min
 
 ### 已有证据（全量 92 币，368 runs）
 
-`experiments/spike-v2-grouped-exit-bucket-full.toml` →
+`configs/spike-v2-grouped-exit-bucket-full.toml` →
 `reports/spike-v2-grouped-exit-bucket-full`：
 
 | 强桶 | 弱桶 | 净收益 U | 胜率 | Δ净 |

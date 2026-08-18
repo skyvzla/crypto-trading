@@ -173,6 +173,8 @@ class SpikeSignal:
     # 过早触发过滤审计字段：信号触发价相对前 30m 均价的偏离、前 60m 价格极差
     spike_avg_deviation_pct: float | None = None
     spike_range_pct: float | None = None
+    # VWAP 偏离过滤审计字段：信号触发价相对前 100m 聚合 20 根 5m VWAP 的偏离
+    spike_vwap_deviation_pct: float | None = None
 
 
 class DynamicSpikeShortStrategy:
@@ -236,6 +238,7 @@ class DynamicSpikeShortStrategy:
         box_duration_min_minutes: int = 0,
         spike_avg_deviation_max_pct: float = 0,
         spike_range_max_pct: float = 0,
+        spike_vwap_deviation_max_pct: float = 0,
         early_profit_unlock_ratio: Decimal | None = None,
         rise_5s_threshold: Decimal | None = None,
         max_rise_5s_percent: Decimal | None = None,
@@ -305,6 +308,9 @@ class DynamicSpikeShortStrategy:
             )
         self.spike_avg_deviation_max_pct = float(spike_avg_deviation_max_pct)
         self.spike_range_max_pct = float(spike_range_max_pct)
+        if spike_vwap_deviation_max_pct < 0:
+            raise ValueError("spike_vwap_deviation_max_pct must not be negative")
+        self.spike_vwap_deviation_max_pct = float(spike_vwap_deviation_max_pct)
         if early_profit_unlock_ratio is not None:
             early_profit_unlock_ratio = Decimal(early_profit_unlock_ratio)
             if not Decimal("0") < early_profit_unlock_ratio < Decimal("1"):
@@ -860,6 +866,7 @@ class DynamicSpikeShortStrategy:
                         "box_break_hours": signal.box_break_hours,
                         "spike_avg_deviation_pct": signal.spike_avg_deviation_pct,
                         "spike_range_pct": signal.spike_range_pct,
+                        "spike_vwap_deviation_pct": signal.spike_vwap_deviation_pct,
                         "origin_price": str(signal.origin_price),
                         "origin_floor": (
                             str(signal.origin_floor)
@@ -1736,6 +1743,14 @@ class DynamicSpikeShortStrategy:
             if premature is not None and premature["rejected"]:
                 return None
 
+        # 5d. VWAP 偏离过滤：触发价相对前 100m 聚合 20 根 5m VWAP 偏离超阈值
+        #     判定为追顶触发，15m 内继续冲高概率高（0=关闭）。
+        vwap_dev = None
+        if self.spike_vwap_deviation_max_pct > 0:
+            vwap_dev = self._vwap_deviation_filter(minute_start, current.close)
+            if vwap_dev is not None and vwap_dev["rejected"]:
+                return None
+
         # 6. 起涨点（16 小时最低价）
         origin_price = self._min_low_1m(minute_start, self.ORIGIN_MINUTES)
         if origin_price is None or origin_price <= 0:
@@ -1929,6 +1944,9 @@ class DynamicSpikeShortStrategy:
             ),
             spike_range_pct=(
                 premature.get("spike_range_pct") if premature else None
+            ),
+            spike_vwap_deviation_pct=(
+                vwap_dev.get("spike_vwap_deviation_pct") if vwap_dev else None
             ),
         )
 
@@ -2142,6 +2160,47 @@ class DynamicSpikeShortStrategy:
         return {
             "spike_avg_deviation_pct": deviation_pct,
             "spike_range_pct": range_pct,
+            "rejected": rejected,
+        }
+
+    def _vwap_deviation_filter(
+        self, minute_start: int, current_close: Decimal
+    ) -> dict | None:
+        """VWAP 偏离过滤：信号触发价相对前 100m 聚合的 20 根 5m VWAP 偏离。
+
+        研究（spike_signal_shortterm_metrics.csv）显示 vwap_dev_5m 是最强
+        单指标入场过滤：>9% 的信号 15m 内追顶风险高（止损率 47% vs 20%），
+        9 笔大亏单（<-50U）vwap_dev 全部 >9。偏离越大 = 开仓点位越晚。
+
+        返回 dict（含审计指标与判定）或 None（数据不足时，保守不拦截）。
+        """
+        window = self._completed_1m_window(minute_start, 100)
+        if not window or len(window) < 100:
+            return None
+        by_5m: dict[int, list[Kline]] = {}
+        for k in window:
+            bucket = k.open_time - (k.open_time % (5 * MS_PER_MINUTE))
+            by_5m.setdefault(bucket, []).append(k)
+        o5 = [g[0].open for g in sorted(by_5m.values(), key=lambda g: g[0].open_time)]
+        h5 = [max(g, key=lambda k: k.high).high for g in sorted(by_5m.values(), key=lambda g: g[0].open_time)]
+        l5 = [min(g, key=lambda k: k.low).low for g in sorted(by_5m.values(), key=lambda g: g[0].open_time)]
+        c5 = [g[-1].close for g in sorted(by_5m.values(), key=lambda g: g[0].open_time)]
+        v5 = [sum(k.volume for k in g) for g in sorted(by_5m.values(), key=lambda g: g[0].open_time)]
+        if len(c5) < 20:
+            return None
+        typical = [
+            (o + h + l + c) / Decimal(4)
+            for o, h, l, c in zip(o5[-20:], h5[-20:], l5[-20:], c5[-20:])
+        ]
+        vol = [Decimal(v) for v in v5[-20:]]
+        denom = sum(vol)
+        if denom <= 0:
+            return None
+        vwap = sum(t * vol[i] for i, t in enumerate(typical)) / denom
+        deviation_pct = float((current_close / vwap - Decimal("1")) * 100)
+        rejected = deviation_pct >= self.spike_vwap_deviation_max_pct
+        return {
+            "spike_vwap_deviation_pct": deviation_pct,
             "rejected": rejected,
         }
 

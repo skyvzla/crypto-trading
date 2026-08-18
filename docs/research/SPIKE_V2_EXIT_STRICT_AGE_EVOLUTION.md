@@ -54,7 +54,7 @@ strong_tier_atr_shift = 0.2
 
 ### 3.1 子集网格（17 币，119 runs）
 
-`experiments/spike-v2-grouped-exit-time-grid.toml` → `reports/spike-v2-grouped-exit-time-grid`
+`configs/spike-v2-grouped-exit-time-grid.toml` → `reports/spike-v2-grouped-exit-time-grid`
 
 | strict_age | Δ净（子集） |
 | ---: | ---: |
@@ -68,7 +68,7 @@ strong_tier_atr_shift = 0.2
 
 ### 3.2 全量网格（92 币，368 runs）
 
-`experiments/spike-v2-grouped-exit-time-full.toml` → `reports/spike-v2-grouped-exit-time-full`
+`configs/spike-v2-grouped-exit-time-full.toml` → `reports/spike-v2-grouped-exit-time-full`
 
 | strict_age | 净收益 U | Δ净 |
 | ---: | ---: | ---: |
@@ -145,7 +145,7 @@ time_risk 到点后若浮亏小于阈值则继续持有一段时间。全链路�
 
 ### 6.2 子集 smoke（13 币，156 runs）
 
-`experiments/spike-v2-grouped-exit-dynamic-smoke.toml` → `reports/spike-v2-grouped-exit-dynamic-smoke`
+`configs/spike-v2-grouped-exit-dynamic-smoke.toml` → `reports/spike-v2-grouped-exit-dynamic-smoke`
 
 | 组合 | Δ净 |
 | ---: | ---: |
@@ -160,7 +160,7 @@ time_risk 到点后若浮亏小于阈值则继续持有一段时间。全链路�
 
 ### 6.3 全量验证（92 币，552 runs）
 
-`experiments/spike-v2-grouped-exit-dynamic-full.toml` → `reports/spike-v2-grouped-exit-dynamic-full`
+`configs/spike-v2-grouped-exit-dynamic-full.toml` → `reports/spike-v2-grouped-exit-dynamic-full`
 
 | 组合 | 净收益 U | 胜率 | Δ净 |
 | ---: | ---: | ---: | ---: |
@@ -183,7 +183,7 @@ BANANAS 等在 25min 时继续改善）。
 
 ### 7.1 静态分桶实测（2026-08，92 币 368 runs）
 
-`experiments/spike-v2-grouped-exit-bucket-full.toml` → `reports/spike-v2-grouped-exit-bucket-full`：
+`configs/spike-v2-grouped-exit-bucket-full.toml` → `reports/spike-v2-grouped-exit-bucket-full`：
 
 | 强桶 | 弱桶 | 净收益 U | 胜率 | Δ净 |
 | ---: | ---: | ---: | ---: | ---: |
@@ -212,11 +212,11 @@ group_rise_12h_threshold` 定桶（快照不变），传入 `candidate_v1_risks`
   `tests/backtest/test_spike_sweep_symbol.py`
 - 复现命令（全量）：`rm -rf <output> && nohup env PYTHONPATH=src python3
   -m trading_platform.backtest.sweep --config <toml> --workers 13 > /tmp/log 2>&1 &`
-- 配置：`experiments/spike-v2-grouped-exit-time-full.toml`（全桶网格）、
-  `experiments/spike-v2-grouped-exit-dynamic-full.toml`（动态）、
-  `experiments/spike-v2-grouped-exit-bucket-full.toml`（静态分桶，2026-08）、
-  `experiments/spike-v2-grouped-exit-time-smoke.toml`/`-dynamic-smoke.toml`/`-bucket-smoke.toml`（子集）、
-  `experiments/spike-v2-grouped-exit-grace-subset.toml`（已弃）
+- 配置：`configs/spike-v2-grouped-exit-time-full.toml`（全桶网格）、
+  `configs/spike-v2-grouped-exit-dynamic-full.toml`（动态）、
+  `configs/spike-v2-grouped-exit-bucket-full.toml`（静态分桶，2026-08）、
+  `configs/spike-v2-grouped-exit-time-smoke.toml`/`-dynamic-smoke.toml`/`-bucket-smoke.toml`（子集）、
+  `configs/spike-v2-grouped-exit-grace-subset.toml`（已弃）
 - 报告：`reports/spike-v2-grouped-exit-time-full/`、`-dynamic-full/`、
   `-bucket-full/`、`-bucket-smoke/`、`-time-grid/`、`-dynamic-smoke/`、
   `-grace-subset/`、`spike-v2-grouped-exit-time/`
@@ -283,7 +283,7 @@ required=2、>=15min required=1）。
 
 ### 10.1 13 币 smoke 结果（粘滞版，468 runs 完成）
 
-`experiments/spike-v2-grouped-exit-profit-unlock-smoke.toml`：36 组合笛卡尔积
+`configs/spike-v2-grouped-exit-profit-unlock-smoke.toml`：36 组合笛卡尔积
 （unlock ∈ {0,0.05,0.10,0.20,0.05,0.20}，dd ∈ {0,0,0,0,0.005,0.01}，0=关闭），
 13 币；汇总先按 `(unlock,dd,symbol)` 取均值再按组合求和（直接 sum 会因
 重复 run 虚高）。基线（0/0）：**1580.39U / 22 笔 / 胜率 38.6%**。
@@ -338,7 +338,7 @@ required=1 在 15min 后已让动量单及时退出。
   改用 1m close 后与离线模拟口径一致，才复现正收益
 - 单测：arm 后回撤触发/需先 arm 再回撤/不弱化动量分档
 
-13 币 smoke（`experiments/spike-v2-grouped-exit-deep-drawdown-smoke.toml`，
+13 币 smoke（`configs/spike-v2-grouped-exit-deep-drawdown-smoke.toml`，
 325 runs，peak=0.20 + dd∈{0.08,0.10,0.12,0.15} 及纯 dd 对照）：
 
 | peak | dd | 净收益U | vs 基线 |
@@ -361,7 +361,7 @@ required=1 在 15min 后已让动量单及时退出。
 
 ### 10.3 全量 92 币验证（828 runs 完成）——确认跑赢基线
 
-`experiments/spike-v2-grouped-exit-deep-drawdown-full.toml`（anomaly-report
+`configs/spike-v2-grouped-exit-deep-drawdown-full.toml`（anomaly-report
 universe，92 币，3 组合 = 基线 + peak20%/dd10% + peak20%/dd12%）：
 
 | peak | dd | 净收益U | 笔数 | 胜率 | vs 基线 |
