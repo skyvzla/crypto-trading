@@ -1,0 +1,39 @@
+name = "spike-research-premium"
+start = "2025-08-01T00:00:00+00:00"
+end = "2026-08-01T00:00:00+00:00"
+duckdb_path = "data/market/candles/candles.duckdb"
+output = "reports/spike-research-premium"
+
+[universe]
+mode = "explicit"
+require_database_allowed = false
+symbols = [
+  "BULLAUSDT", "ESPORTSUSDT", "SIRENUSDT", "RAVEUSDT", "AGTUSDT",
+  "NAORISUSDT", "FHEUSDT", "AIOTUSDT", "PUMPBTCUSDT", "TRADOORUSDT",
+  "ZEREBROUSDT", "SYNUSDT", "TAIKOUSDT", "TRUTHUSDT", "GUNUSDT",
+  "SAGAUSDT", "NEIROUSDT", "STBLUSDT", "2ZUSDT", "PROVEUSDT",
+]
+
+[execution]
+memory_limit_enabled = false
+chunk_hours = 720
+fetch_batch_size = 5000
+duckdb_threads = 1
+resume = true
+
+[fixed]
+research = true
+total_notional = 100
+warmup_hours = 30
+th_v = 8.39
+th_e = 1.064
+th_r = 9.45
+atr_min = 0.0
+premium_mult = 0.7
+premium_floor = 3.0
+premium_cap = 35.0
+model_json = "reports/up_premium_model_trigger.json"
+
+[matrix]
+stop_check_ms = [900000, 0]
+stop_pct = [8, 12, 999]
