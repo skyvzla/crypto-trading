@@ -110,6 +110,31 @@ async def test_sync_persists_only_campaign_symbol_funding_rows():
 
 
 @pytest.mark.asyncio
+async def test_sync_rejects_non_usdt_funding_before_persistence():
+    client = SimpleNamespace(
+        get_income_history=AsyncMock(
+            return_value=[{**_income(1), "asset": "BUSD"}]
+        )
+    )
+    store = SimpleNamespace(
+        upsert_income_history=AsyncMock(),
+        funding_fee_total=AsyncMock(),
+    )
+    start_at = datetime(2026, 8, 20, 8, tzinfo=UTC)
+
+    with pytest.raises(IncomeHistorySyncError, match="non-USDT asset"):
+        await FundingIncomeSync(client, store).sync_funding_fee_total(
+            account_id="spike-testnet",
+            symbol="BTCUSDT",
+            start_at=start_at,
+            end_at=start_at + timedelta(hours=1),
+        )
+
+    store.upsert_income_history.assert_not_awaited()
+    store.funding_fee_total.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_sync_fails_closed_when_binance_repeats_a_full_page():
     repeated = [_income(1), _income(2)]
     client = SimpleNamespace(

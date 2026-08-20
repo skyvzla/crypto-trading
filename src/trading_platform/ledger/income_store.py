@@ -83,6 +83,7 @@ class IncomeStore:
                     "FROM account_income_events "
                     "WHERE account_id = %s AND symbol = %s "
                     "AND income_type = 'FUNDING_FEE' "
+                    "AND asset = 'USDT' "
                     "AND event_time >= %s AND event_time < %s",
                     (account_id, symbol, start_at, end_at),
                 )

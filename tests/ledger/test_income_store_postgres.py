@@ -206,12 +206,13 @@ async def test_funding_total_filters_type_symbol_and_half_open_window(income_sto
         symbol: str = "BTCUSDT",
         income_type: str = "FUNDING_FEE",
         amount: str = "-0.1",
+        asset: str = "USDT",
     ) -> dict[str, object]:
         return {
             "symbol": symbol,
             "incomeType": income_type,
             "income": amount,
-            "asset": "USDT",
+            "asset": asset,
             "time": int(moment.timestamp() * 1000),
             "tranId": tran_id,
         }
@@ -223,6 +224,7 @@ async def test_funding_total_filters_type_symbol_and_half_open_window(income_sto
             row(2, moment=end_at, amount="-9"),
             row(3, moment=start_at, symbol="ETHUSDT", amount="-8"),
             row(4, moment=start_at, income_type="COMMISSION", amount="-7"),
+            row(5, moment=start_at, asset="BUSD", amount="-6"),
         ],
     )
 

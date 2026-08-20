@@ -88,6 +88,10 @@ class FundingIncomeSync:
                 if row.get("symbol") == symbol
                 and row.get("incomeType") == "FUNDING_FEE"
             ]
+            if any(row.get("asset") != "USDT" for row in rows):
+                raise IncomeHistorySyncError(
+                    "USDT funding history returned a non-USDT asset"
+                )
             await self.store.upsert_income_history(
                 account_id=account_id,
                 rows=rows,
