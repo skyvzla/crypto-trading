@@ -1,16 +1,17 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
-import { Activity, CalendarDays, CircleAlert, Database, RadioTower, ShieldCheck } from 'lucide-vue-next'
+import { Activity, CalendarDays, CircleAlert, Database, RadioTower, ShieldCheck, WalletCards } from 'lucide-vue-next'
+import { ApiError } from '@/api/client'
 import { operationsApi } from '@/api/operations'
-import type { DailyPnL, Health, LedgerTrade, PnLSummary, StrategyRuntimeStatus } from '@/api/types'
+import type { DailyPnL, Health, LedgerTrade, PnLSummary, StrategyCapitalStatus, StrategyRuntimeStatus } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
 import { campaignRoute } from '@/features/operations/campaignRoute'
 import FilterBar, { type OperationFilters } from '@/features/operations/FilterBar.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import PnlCalendar from '@/features/operations/PnlCalendar.vue'
-import { asNumber, formatDateTime, formatMoney, pnlClass } from '@/features/operations/format'
+import { asNumber, formatDateTime, formatMoney, formatPercent, pnlClass } from '@/features/operations/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -31,6 +32,8 @@ const error = ref<string | null>(null)
 const refreshedAt = ref<string | null>(null)
 const health = ref<Health | null>(null)
 const runtimes = ref<StrategyRuntimeStatus[]>([])
+const capital = ref<StrategyCapitalStatus | null>(null)
+const capitalNotFound = ref(false)
 const positionsTotal = ref<number | null>(null)
 const activeOrdersTotal = ref<number | null>(null)
 const recentTrades = ref<LedgerTrade[]>([])
@@ -55,13 +58,22 @@ const losingDays = computed(() => daily.value.filter((item) => asNumber(item.net
 const runtimeModes = computed(() => [...new Set(runtimes.value.map((item) => item.mode))])
 const unhealthyRuntimes = computed(() => runtimes.value.filter((item) => item.effective_status !== 'running'))
 const blockedRuntimes = computed(() => runtimes.value.filter((item) => !item.entry_enabled || item.halted))
+const capitalGate = computed(() => {
+  if (!capital.value) return null
+  if (capital.value.capital_breached) return { label: '资金越界', color: 'red' }
+  if (asNumber(capital.value.trading_capital) <= asNumber(capital.value.minimum)) {
+    return { label: '停止开仓', color: 'gold' }
+  }
+  return { label: '允许开仓', color: 'green' }
+})
 
 async function load() {
   loading.value = true
   error.value = null
   try {
     const accountId = filters.value.account_id.trim()
-    const [healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult, pnlResult] = await Promise.allSettled([
+    const strategyId = filters.value.strategy_id.trim()
+    const [healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult, pnlResult, capitalResult] = await Promise.allSettled([
       operationsApi.health(),
       operationsApi.runtimeStatus({ ...query.value, limit: 100 }),
       operationsApi.positions({ ...query.value, limit: 1 }),
@@ -75,9 +87,13 @@ async function load() {
       }),
       accountId
         ? operationsApi.pnl({ account_id: accountId, ...query.value })
+        : Promise.resolve(null),
+      accountId && strategyId
+        ? operationsApi.capitalStatus({ account_id: accountId, strategy_id: strategyId })
         : Promise.resolve(null)
     ])
     unavailableSources.value = []
+    capitalNotFound.value = false
     health.value = healthResult.status === 'fulfilled' ? healthResult.value : null
     if (healthResult.status === 'rejected') unavailableSources.value.push('账本健康')
     runtimes.value = runtimeResult.status === 'fulfilled' ? runtimeResult.value.items : []
@@ -92,6 +108,14 @@ async function load() {
     if (dailyResult.status === 'rejected') unavailableSources.value.push('当月已实现收益')
     pnl.value = pnlResult.status === 'fulfilled' ? pnlResult.value : null
     if (accountId && pnlResult.status === 'rejected') unavailableSources.value.push('当前浮动收益')
+    capital.value = capitalResult.status === 'fulfilled' ? capitalResult.value : null
+    if (accountId && strategyId && capitalResult.status === 'rejected') {
+      if (capitalResult.reason instanceof ApiError && capitalResult.reason.status === 404) {
+        capitalNotFound.value = true
+      } else {
+        unavailableSources.value.push('策略资金')
+      }
+    }
     if ([healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult].every((item) => item.status === 'rejected')) {
       throw new Error('运行数据接口均不可用')
     }
@@ -162,6 +186,36 @@ onMounted(load)
         <MetricTile label="活动订单" :value="activeOrdersTotal == null ? '读取失败' : String(activeOrdersTotal)" hint="NEW + PARTIALLY_FILLED" :tone="activeOrdersTotal == null || activeOrdersTotal > 0 ? 'warning' : 'neutral'" :to="{ path: '/positions', query: { ...query, tab: 'active' } }" />
       </section>
 
+      <section class="capital-card" aria-label="策略资金状态">
+        <header class="capital-heading">
+          <div class="capital-title">
+            <WalletCards :size="19" />
+            <div>
+              <h2>策略资金状态</h2>
+              <p v-if="capital"><span>{{ capital.account_id }}</span> / <span>{{ capital.strategy_id }}</span></p>
+              <p v-else>账户级交易池与储备池</p>
+            </div>
+          </div>
+          <a-tag v-if="capitalGate" :color="capitalGate.color">{{ capitalGate.label }}</a-tag>
+        </header>
+        <div v-if="capital" class="capital-grid">
+          <div class="capital-primary"><span>可交易资金</span><strong>{{ formatMoney(capital.trading_capital) }} <small>USDT</small></strong></div>
+          <div><span>账户资金</span><strong>{{ formatMoney(capital.account_capital) }} <small>USDT</small></strong></div>
+          <div><span>储备资金</span><strong>{{ formatMoney(capital.reserve_capital) }} <small>USDT</small></strong></div>
+          <div><span>停止开仓阈值</span><strong>{{ formatMoney(capital.minimum) }} <small>USDT</small></strong></div>
+          <div><span>盈利复投比例</span><strong>{{ formatPercent(capital.profit_reinvest_ratio, 0) }}</strong></div>
+          <div><span>资金越界</span><strong :class="capital.capital_breached ? 'value-negative' : 'value-positive'">{{ capital.capital_breached ? '是' : '否' }}</strong></div>
+          <div><span>状态版本</span><strong>v{{ capital.version }}</strong></div>
+          <div><span>更新时间</span><strong class="capital-time">{{ formatDateTime(capital.updated_at) }}</strong></div>
+        </div>
+        <div v-else class="capital-empty">
+          <CircleAlert :size="16" />
+          <span v-if="capitalNotFound">此账户与策略尚未初始化资金状态</span>
+          <span v-else-if="unavailableSources.includes('策略资金')">策略资金状态读取失败</span>
+          <span v-else>选择账户和策略后查看资金状态</span>
+        </div>
+      </section>
+
       <section class="two-column overview-panels">
         <article class="data-card calendar-card">
           <div class="data-card-heading">
@@ -193,12 +247,22 @@ onMounted(load)
 .health-node.ok { border-left-color:var(--color-success); }.health-node.bad { border-left-color:var(--color-danger); }.health-node.unknown { border-left-color:var(--color-warning); }
 .health-node svg { flex:0 0 auto; color:var(--muted); }.health-node span,.health-node strong { display:block; }.health-node span { color:var(--muted); font-size:var(--font-size-xs); }.health-node strong { margin-top:4px; font-size:var(--font-size-sm); }
 .partial-failure { margin-bottom:12px; }.overview-metrics { margin-bottom:14px; }.overview-panels { margin-top:4px; }
+.capital-card { margin-bottom:14px; overflow:hidden; border:1px solid var(--line); border-left:3px solid var(--color-gold); border-radius:6px; background:var(--surface); }
+.capital-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:58px; padding:10px 14px; border-bottom:1px solid var(--line); }
+.capital-title { display:flex; align-items:center; gap:9px; min-width:0; }.capital-title > svg { flex:0 0 auto; color:var(--color-gold); }
+.capital-title h2 { margin:0; font-size:var(--font-size-md); }.capital-title p { margin:3px 0 0; color:var(--muted); font:var(--font-size-xs)/1.35 var(--font-family-mono); overflow-wrap:anywhere; }
+.capital-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); }
+.capital-grid > div { min-width:0; padding:12px 14px; border-right:1px solid var(--line); border-bottom:1px solid var(--line); }
+.capital-grid > div:nth-child(4n) { border-right:0; }.capital-grid > div:nth-last-child(-n+4) { border-bottom:0; }.capital-grid > .capital-primary { background:var(--surface-hover); }
+.capital-grid span,.capital-grid strong { display:block; }.capital-grid span { margin-bottom:5px; color:var(--muted); font-size:var(--font-size-xs); }
+.capital-grid strong { overflow-wrap:anywhere; font:600 var(--font-size-md)/1.3 var(--font-family-mono); }.capital-grid small { color:var(--muted); font-size:10px; font-weight:500; }
+.capital-grid .capital-time { font-size:var(--font-size-xs); line-height:1.45; }.capital-empty { display:flex; align-items:center; justify-content:center; gap:7px; min-height:82px; padding:14px; color:var(--muted); font-size:var(--font-size-sm); }
 .data-card-heading h2 { display:flex; align-items:center; gap:6px; }
 .recent-list button { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; min-height:59px; padding:9px 13px; border:0; border-bottom:1px solid var(--line); background:transparent; color:var(--text); text-align:left; cursor:pointer; }
 .recent-list button:last-child { border-bottom:0; }.recent-list button:hover { background:var(--surface-hover); }.recent-list button > div:last-child { text-align:right; }
 .recent-list strong,.recent-list span,.recent-list time { display:block; }.recent-list strong { font:var(--font-size-sm) var(--font-family-mono); }.recent-list span,.recent-list time { margin-top:3px; color:var(--muted); font-size:var(--font-size-xs); }
 .inline-empty { display:flex; align-items:center; justify-content:center; gap:7px; min-height:100px; padding:12px; color:var(--muted); font-size:var(--font-size-xs); }
 .calendar-card .inline-empty { min-height:auto; padding:0 12px 12px; }
-@media (max-width: 1000px) { .health-rail { grid-template-columns:repeat(2,minmax(0,1fr)); } }
-@media (max-width: 560px) { .health-rail { grid-template-columns:1fr; } }
+@media (max-width: 1000px) { .health-rail,.capital-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.capital-grid > div { border-bottom:1px solid var(--line); }.capital-grid > div:nth-child(2n) { border-right:0; }.capital-grid > div:nth-last-child(-n+2) { border-bottom:0; } }
+@media (max-width: 560px) { .health-rail { grid-template-columns:1fr; }.capital-grid { grid-template-columns:1fr; }.capital-grid > div { border-right:0; border-bottom:1px solid var(--line) !important; }.capital-grid > div:last-child { border-bottom:0 !important; } }
 </style>

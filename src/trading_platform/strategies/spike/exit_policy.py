@@ -138,10 +138,18 @@ def candidate_v1_risks(
     weak_bucket_strict_age_ms 时按静态桶分档，优先于动态 decay 分档。
     """
     alive = decay_agreement is not None and decay_agreement >= 1
-    if entry_bucket == "strong" and config.strong_bucket_strict_age_ms is not None:
-        strict_age = config.strong_bucket_strict_age_ms
-    elif entry_bucket == "weak" and config.weak_bucket_strict_age_ms is not None:
-        strict_age = config.weak_bucket_strict_age_ms
+    if entry_bucket == "strong":
+        strict_age = (
+            config.strict_age_ms
+            if config.strong_bucket_strict_age_ms is None
+            else config.strong_bucket_strict_age_ms
+        )
+    elif entry_bucket == "weak":
+        strict_age = (
+            config.strict_age_ms
+            if config.weak_bucket_strict_age_ms is None
+            else config.weak_bucket_strict_age_ms
+        )
     else:
         strict_age = (
             config.strong_strict_age_ms

@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
 
@@ -62,6 +63,43 @@ def _rules() -> BinanceSymbolRuleBook:
             )
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_user_stream_terminal_fact_wins_over_late_rest_submit_response(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    submit_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    async def post_order(**_kwargs):
+        submit_started.set()
+        await release_response.wait()
+        return {"status": "NEW", "orderId": 42}
+
+    executor = BinanceOrderExecutor(
+        Mock(post_order=AsyncMock(side_effect=post_order)),
+        wal,
+        account_id="account-1",
+        risk_guard=RiskGuard("account-1", RiskConfig()),
+    )
+    submit = asyncio.create_task(executor.submit(_intent("cid-concurrent")))
+    await asyncio.wait_for(submit_started.wait(), timeout=1)
+
+    stream_record = executor.handle_order_trade_update(
+        {
+            "c": "cid-concurrent",
+            "s": "BTCUSDT",
+            "X": "FILLED",
+            "i": 42,
+        }
+    )
+    release_response.set()
+    result = await submit
+
+    assert stream_record is not None
+    assert stream_record.status == "FILLED"
+    assert result.status == "FILLED"
+    assert wal.recover_latest()["cid-concurrent"].status == "FILLED"
 
 
 @pytest.mark.asyncio

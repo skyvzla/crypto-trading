@@ -11,7 +11,7 @@ from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 
 
-def _account(tmp_path):
+def _account(tmp_path, *, required_cross_margin_symbols=()):
     rest = Mock(
         cancel_order=AsyncMock(),
         query_order=AsyncMock(return_value=None),
@@ -26,6 +26,7 @@ def _account(tmp_path):
         strategy_id="spike_short",
         risk_guard=risk,
         now_ms=lambda: 2_000,
+        required_cross_margin_symbols=required_cross_margin_symbols,
     ), rest, wal, risk
 
 
@@ -41,6 +42,81 @@ def _intent(client_order_id="cid-1"):
         trigger_reason="spike_tier1",
         campaign_id="spike_short:BTCUSDT:1000",
     )
+
+
+def _position_snapshot(
+    symbol="BTCUSDT", *, amount="0", margin_type="cross", update_time=1_000
+):
+    snapshot = {
+        "symbol": symbol,
+        "positionAmt": amount,
+        "entryPrice": "100" if Decimal(amount) else "0",
+        "unRealizedProfit": "0",
+        "positionSide": "BOTH",
+        "updateTime": update_time,
+    }
+    if margin_type is not None:
+        snapshot["marginType"] = margin_type
+    return snapshot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("margin_type", [None, "isolated"])
+async def test_managed_symbol_snapshot_requires_explicit_cross_margin(
+    tmp_path, margin_type
+):
+    account, rest, _, _ = _account(
+        tmp_path, required_cross_margin_symbols=("BTCUSDT",)
+    )
+    rest.get_position_risk.return_value = [
+        _position_snapshot(margin_type=margin_type)
+    ]
+
+    with pytest.raises(RuntimeError, match="cross margin"):
+        await account.refresh_positions()
+
+    assert account.get_position("BTCUSDT") is None
+
+
+@pytest.mark.asyncio
+async def test_required_cross_margin_snapshot_must_include_every_managed_symbol(
+    tmp_path,
+):
+    account, rest, _, _ = _account(
+        tmp_path, required_cross_margin_symbols=("BTCUSDT",)
+    )
+    rest.get_position_risk.return_value = [_position_snapshot("ETHUSDT")]
+
+    with pytest.raises(RuntimeError, match="missing managed symbols: BTCUSDT"):
+        await account.refresh_positions()
+
+
+@pytest.mark.asyncio
+async def test_non_managed_live_position_must_also_use_cross_margin(tmp_path):
+    account, rest, _, _ = _account(tmp_path)
+    rest.get_position_risk.return_value = [
+        _position_snapshot("ETHUSDT", amount="-1", margin_type="isolated")
+    ]
+
+    with pytest.raises(RuntimeError, match="ETHUSDT.*cross margin"):
+        await account.refresh_positions()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("margin_type", ["cross", "CROSSED"])
+async def test_cross_margin_snapshot_is_accepted_for_managed_symbol(
+    tmp_path, margin_type
+):
+    account, rest, _, _ = _account(
+        tmp_path, required_cross_margin_symbols=("BTCUSDT",)
+    )
+    rest.get_position_risk.return_value = [
+        _position_snapshot(amount="-1", margin_type=margin_type)
+    ]
+
+    await account.refresh_positions()
+
+    assert account.get_position("BTCUSDT") is not None
 
 
 def test_order_projection_restores_explicit_reduce_only_contract(tmp_path):
@@ -433,6 +509,7 @@ async def test_rest_position_snapshot_cannot_confirm_stream_fill(tmp_path):
             "entryPrice": "101",
             "unRealizedProfit": "0",
             "positionSide": "BOTH",
+            "marginType": "cross",
             "updateTime": 2_001,
         }
     ]

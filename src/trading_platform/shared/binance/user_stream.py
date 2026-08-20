@@ -69,8 +69,11 @@ class UserDataStream:
         self._keepalive_task: asyncio.Task | None = None
         self._ws_thread: asyncio.Task | None = None
         self._reconnect_task: Future | None = None
-        self._scheduled_futures: set[Future] = set()
-        self._scheduled_futures_lock = threading.Lock()
+        self._callback_queue: asyncio.Queue[tuple[str, dict[str, Any]]] | None = None
+        self._callback_worker: asyncio.Task | None = None
+        self._callback_in_flight = False
+        self._callback_schedule_lock = threading.Lock()
+        self._accept_callback_enqueues = True
         self._loop: asyncio.AbstractEventLoop | None = None
         self._connected_event: asyncio.Event | None = None
         self._fatal_event = asyncio.Event()
@@ -85,7 +88,9 @@ class UserDataStream:
             logger.warning("User Data Stream already running")
             return
 
-        self._running = True
+        with self._callback_schedule_lock:
+            self._running = True
+        self._accept_callback_enqueues = True
         self._loop = asyncio.get_running_loop()
         self._connected_event = asyncio.Event()
         self._fatal_event = asyncio.Event()
@@ -114,7 +119,10 @@ class UserDataStream:
         ):
             return
 
-        self._running = False
+        # Linearize stop against the websocket thread: callbacks authorized before
+        # this boundary are already posted to the loop; later messages are rejected.
+        with self._callback_schedule_lock:
+            self._running = False
         self._mark_disconnected()
 
         if self._reconnect_task and not self._reconnect_task.done():
@@ -198,6 +206,7 @@ class UserDataStream:
             self._connected_event = asyncio.Event()
         self._mark_disconnected()
 
+        self._ensure_callback_worker()
         ws_url = f"{self.ws_base_url}/ws/{self.listen_key}"
 
         def on_message(ws, message):
@@ -212,10 +221,10 @@ class UserDataStream:
                     # executionReport 事件
                     order_data = data.get('o', {})
                     if self.on_execution_report:
-                        self._schedule(self._handle_execution_report(order_data))
+                        self._schedule_callback("execution_report", order_data)
                 elif event_type == 'ACCOUNT_UPDATE':
                     if self.on_account_update:
-                        self._schedule(self._handle_account_update(data))
+                        self._schedule_callback("account_update", data)
                 else:
                     logger.debug(f"Unknown event type: {event_type}")
 
@@ -383,30 +392,87 @@ class UserDataStream:
         self._mark_disconnected()
         self._schedule_reconnect()
 
-    def _schedule(self, coro) -> None:
-        """将 websocket-client 线程中的协程安全投递到主事件循环。"""
-        loop = self._loop
-        if not self._running or not loop or loop.is_closed():
-            coro.close()
-            return
-        try:
-            future = asyncio.run_coroutine_threadsafe(coro, loop)
-            with self._scheduled_futures_lock:
-                self._scheduled_futures.add(future)
-            future.add_done_callback(self._scheduled_callback_done)
-        except RuntimeError:
-            coro.close()
+    def _schedule_callback(self, kind: str, payload: dict[str, Any]) -> None:
+        """按 websocket 接收顺序把业务事件安全投递到主事件循环。"""
+        with self._callback_schedule_lock:
+            loop = self._loop
+            if not self._running or not loop or loop.is_closed():
+                return
+            try:
+                loop.call_soon_threadsafe(self._enqueue_callback, kind, payload)
+            except RuntimeError:
+                logger.warning("User Data Stream callback loop is unavailable")
 
-    def _scheduled_callback_done(self, future: Future) -> None:
-        with self._scheduled_futures_lock:
-            self._scheduled_futures.discard(future)
-        if future.cancelled():
+    def _ensure_callback_worker(self) -> None:
+        if self._callback_queue is None:
+            self._callback_queue = asyncio.Queue()
+        worker = self._callback_worker
+        if worker is not None and not worker.done():
+            return
+        if self._fatal_exception is not None:
+            return
+        worker = asyncio.create_task(
+            self._callback_loop(), name="binance-user-stream-callbacks"
+        )
+        self._callback_worker = worker
+        worker.add_done_callback(self._callback_worker_done)
+
+    def _enqueue_callback(self, kind: str, payload: dict[str, Any]) -> None:
+        if not self._accept_callback_enqueues:
+            return
+        if self._fatal_exception is not None:
+            logger.error(
+                "Rejected User Data Stream %s after callback worker failure", kind
+            )
+            return
+        self._ensure_callback_worker()
+        assert self._callback_queue is not None
+        self._callback_queue.put_nowait((kind, payload))
+
+    async def _callback_loop(self) -> None:
+        assert self._callback_queue is not None
+        while True:
+            kind, payload = await self._callback_queue.get()
+            self._callback_in_flight = True
+            try:
+                if kind == "execution_report":
+                    await self._handle_execution_report(payload)
+                elif kind == "account_update":
+                    await self._handle_account_update(payload)
+                else:
+                    raise RuntimeError(
+                        f"unknown User Data Stream callback kind: {kind}"
+                    )
+            finally:
+                self._callback_in_flight = False
+                self._callback_queue.task_done()
+
+    def _callback_worker_done(self, task: asyncio.Task) -> None:
+        if task is not self._callback_worker or task.cancelled():
             return
         try:
-            future.result()
+            task.result()
         except BaseException as exc:
-            logger.error("Scheduled User Data Stream callback failed", exc_info=True)
+            discarded = self._discard_queued_callbacks()
+            logger.error(
+                "User Data Stream callback worker failed; discarded %d queued events",
+                discarded,
+                exc_info=True,
+            )
             self._record_fatal(exc)
+
+    def _discard_queued_callbacks(self) -> int:
+        queue = self._callback_queue
+        if queue is None:
+            return 0
+        discarded = 0
+        while True:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return discarded
+            queue.task_done()
+            discarded += 1
 
     def _record_fatal(self, exc: BaseException) -> None:
         loop = self._loop
@@ -417,25 +483,34 @@ class UserDataStream:
             loop.call_soon_threadsafe(self._fatal_event.set)
 
     async def _drain_scheduled_callbacks(self) -> None:
-        with self._scheduled_futures_lock:
-            futures = tuple(self._scheduled_futures)
-        if not futures:
-            return
-        wrapped = [asyncio.wrap_future(future) for future in futures]
-        _, pending = await asyncio.wait(
-            wrapped, timeout=self.callback_drain_timeout_seconds
-        )
-        if not pending:
-            return
-        logger.error(
-            "Timed out draining %d User Data Stream callbacks", len(pending)
-        )
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        raise TimeoutError(
-            f"timed out draining {len(pending)} User Data Stream callbacks"
-        )
+        # 先让 websocket 线程已投递的 call_soon 回调进入 FIFO。
+        await asyncio.sleep(0)
+        self._accept_callback_enqueues = False
+        queue = self._callback_queue
+        worker = self._callback_worker
+        drain_error: TimeoutError | None = None
+        if queue is not None:
+            try:
+                await asyncio.wait_for(
+                    queue.join(), timeout=self.callback_drain_timeout_seconds
+                )
+            except TimeoutError:
+                pending = queue.qsize() + int(self._callback_in_flight)
+                logger.error(
+                    "Timed out draining %d User Data Stream callbacks", pending
+                )
+                drain_error = TimeoutError(
+                    f"timed out draining {pending} User Data Stream callbacks"
+                )
+        if worker is not None and not worker.done():
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        self._discard_queued_callbacks()
+        self._callback_worker = None
+        self._callback_queue = None
+        self._callback_in_flight = False
+        if drain_error is not None:
+            raise drain_error
 
     def _log_scheduled_error(self, future: Future) -> None:
         if future.cancelled():

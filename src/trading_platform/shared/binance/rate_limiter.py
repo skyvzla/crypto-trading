@@ -101,6 +101,7 @@ ENDPOINT_WEIGHTS: dict[tuple[str, str], int] = {
     ('GET', '/fapi/v2/account'): 5,
     ('GET', '/fapi/v2/positionRisk'): 5,
     ('GET', '/fapi/v1/openOrders'): 40,
+    ('GET', '/fapi/v1/income'): 30,
     ('POST', '/fapi/v1/listenKey'): 1,
     ('PUT', '/fapi/v1/listenKey'): 1,
     ('DELETE', '/fapi/v1/listenKey'): 1,

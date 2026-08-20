@@ -27,6 +27,8 @@ import type {
   PositionQuery,
   RuntimeStatusQuery,
   StrategyAuditEvent,
+  StrategyCapitalStatus,
+  StrategyCapitalStatusQuery,
   StrategyCategoryAdmission,
   StrategyCategoryAdmissionAudit,
   StrategyRuntimeStatus,
@@ -60,6 +62,9 @@ export const operationsApi = {
 
   runtimeStatus: (query: RuntimeStatusQuery = {}) =>
     api.get<Page<StrategyRuntimeStatus>>('/strategy-runtime-status', { ...query }),
+
+  capitalStatus: (query: StrategyCapitalStatusQuery) =>
+    api.get<StrategyCapitalStatus>('/strategy-capital-status', { ...query }),
 
   accounts: (query: PageParams = {}) =>
     api.get<Page<LedgerAccount>>('/accounts', { ...query }),

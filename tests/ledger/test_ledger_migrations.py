@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from psycopg import sql
 from psycopg.errors import UndefinedColumn
 
 from trading_platform.ledger.db.migrations import (
+    MIGRATIONS_DIR,
     MigrationError,
     apply_migrations,
     load_migrations,
@@ -52,11 +54,42 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
     first = await apply_migrations(pool, schema=schema)
     second = await apply_migrations(pool, schema=schema)
 
-    assert first.current_version == 9
-    assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9)
-    assert second.current_version == 9
+    current_version = len(load_migrations())
+    assert first.current_version == current_version
+    assert first.applied_versions == tuple(range(1, current_version + 1))
+    assert second.current_version == current_version
     assert second.applied_versions == ()
-    assert await verify_current(pool, schema=schema) == 9
+    assert await verify_current(pool, schema=schema) == current_version
+
+    async with pool.connection() as conn:
+        tables = await (
+            await conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name IN "
+                "('strategy_capital_state', 'strategy_capital_events', "
+                "'account_income_events') "
+                "ORDER BY table_name",
+                (schema,),
+            )
+        ).fetchall()
+    assert tables == [
+        ("account_income_events",),
+        ("strategy_capital_events",),
+        ("strategy_capital_state",),
+    ]
+
+    async with pool.connection() as conn:
+        indexes = await (
+            await conn.execute(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE schemaname = %s "
+                "AND indexname = "
+                "'idx_account_income_events_account_symbol_time'",
+                (schema,),
+            )
+        ).fetchall()
+    assert len(indexes) == 1
+    assert "account_id, symbol, event_time DESC" in indexes[0][0]
 
 
 @pytest.mark.asyncio
@@ -90,8 +123,85 @@ async def test_existing_schema_is_adopted_without_losing_rows(migration_db):
                 ("existing",),
             )
         ).fetchone()
-    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9)
+    current_version = len(load_migrations())
+    assert result.applied_versions == tuple(range(1, current_version + 1))
     assert count == (1,)
+
+
+@pytest.mark.asyncio
+async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
+    migration_db, tmp_path
+):
+    pool, schema = migration_db
+    old_migrations = tmp_path / "migrations"
+    old_migrations.mkdir()
+    for source in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if source.name.startswith("0012_"):
+            continue
+        shutil.copy(source, old_migrations / source.name)
+    await apply_migrations(pool, schema=schema, directory=old_migrations)
+
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            for index, values in enumerate(
+                (
+                    ("INITIALIZED", "0", "50", "50", "50", "50", "100", "100"),
+                    ("CAPITAL_BREACH", "-110", "50", "0", "50", "-10", "100", "-10"),
+                    ("PROFIT_SETTLED", "2", "0", "1", "-10", "-9", "-10", "-8"),
+                ),
+                start=1,
+            ):
+                await conn.execute(
+                    """
+                    INSERT INTO strategy_capital_events (
+                        id, account_id, strategy_id, idempotency_key,
+                        event_type, net_pnl,
+                        trading_capital_before, trading_capital_after,
+                        reserve_capital_before, reserve_capital_after,
+                        account_capital_before, account_capital_after,
+                        reinvested_profit, reserve_consumed,
+                        occurred_at, created_at
+                    ) VALUES (
+                        %s, 'upgrade-account', 'spike_short', %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        0, 0, %s, %s
+                    )
+                    """,
+                    (
+                        uuid4(),
+                        f"upgrade-{index}",
+                        *values,
+                        f"2026-08-20 00:0{index}:00+00",
+                        f"2026-08-20 00:0{index}:00+00",
+                    ),
+                )
+
+    result = await apply_migrations(pool, schema=schema)
+
+    assert result.applied_versions == (12,)
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            facts = await (
+                await conn.execute(
+                    """
+                    SELECT capital_breached_before, capital_breached_after
+                    FROM strategy_capital_events
+                    WHERE account_id = 'upgrade-account'
+                    ORDER BY created_at
+                    """
+                )
+            ).fetchall()
+    assert facts == [(False, False), (False, True), (True, True)]
 
 
 @pytest.mark.asyncio
@@ -105,7 +215,7 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
 
     assert sorted((first.applied_versions, second.applied_versions)) == [
         (),
-        (1, 2, 3, 4, 5, 6, 7, 8, 9),
+        tuple(range(1, len(load_migrations()) + 1)),
     ]
     async with pool.connection() as conn:
         row = await (
@@ -116,7 +226,8 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
                 ).format(sql.Identifier(schema))
             )
         ).fetchone()
-    assert row == (9, 1, 9)
+    current_version = len(load_migrations())
+    assert row == (current_version, 1, current_version)
 
 @pytest.mark.asyncio
 async def test_web_performance_indexes_are_migrated(migration_db):

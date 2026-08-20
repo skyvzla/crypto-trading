@@ -306,12 +306,13 @@ def test_backtest_process_lock_rejects_second_owner_and_releases(tmp_path):
 
 def test_backtest_process_lock_is_released_when_owner_is_killed(tmp_path):
     lock_path = tmp_path / "backtest.lock"
+    ready_path = tmp_path / "lock-acquired"
     source_root = Path(__file__).resolve().parents[2] / "src"
     child_code = (
         "from trading_platform.backtest.process_lock import BacktestProcessLock; "
-        "import time; "
+        "from pathlib import Path; import time; "
         f"lock=BacktestProcessLock({str(lock_path)!r}); "
-        "lock.__enter__(); time.sleep(60)"
+        f"lock.__enter__(); Path({str(ready_path)!r}).touch(); time.sleep(60)"
     )
     child_env = dict(os.environ, PYTHONPATH=str(source_root))
     child = subprocess.Popen(
@@ -319,13 +320,10 @@ def test_backtest_process_lock_is_released_when_owner_is_killed(tmp_path):
         env=child_env,
     )
     try:
-        deadline = time.monotonic() + 5
-        while True:
-            try:
-                with BacktestProcessLock(lock_path):
-                    pass
-            except BacktestAlreadyRunning:
-                break
+        deadline = time.monotonic() + 10
+        while not ready_path.exists():
+            if child.poll() is not None:
+                pytest.fail("child process exited before acquiring backtest lock")
             if time.monotonic() >= deadline:
                 pytest.fail("child process did not acquire backtest lock")
             time.sleep(0.02)
@@ -986,13 +984,16 @@ def test_child_process_registry_terminates_running_subprocess():
     assert time.monotonic() - started < 2
 
 
-def test_streamed_symbol_process_can_be_terminated_without_hanging():
+def test_streamed_symbol_process_can_be_terminated_without_hanging(tmp_path):
+    ready_path = tmp_path / "child-started"
     process = subprocess.Popen(
         [
             sys.executable,
             "-u",
             "-c",
-            "import time; print('started', flush=True); time.sleep(60)",
+            "from pathlib import Path; import time; "
+            f"print('started', flush=True); Path({str(ready_path)!r}).touch(); "
+            "time.sleep(60)",
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -1005,7 +1006,13 @@ def test_streamed_symbol_process_can_be_terminated_without_hanging():
         output = pool.submit(
             _stream_process_output, process, symbol="AKEUSDT"
         )
-        time.sleep(0.1)
+        deadline = time.monotonic() + 10
+        while not ready_path.exists():
+            if process.poll() is not None:
+                pytest.fail("child process exited before signaling readiness")
+            if time.monotonic() >= deadline:
+                pytest.fail("child process did not signal readiness")
+            time.sleep(0.02)
         registry.terminate_all()
         stdout, stderr = output.result(timeout=2)
 

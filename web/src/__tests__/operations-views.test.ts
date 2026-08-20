@@ -81,6 +81,39 @@ describe('operations views', () => {
     expect(dailyPnl).toHaveBeenCalledWith(expect.objectContaining({ account_id: 'acct' }))
   })
 
+  it('shows the selected strategy capital pools and entry gate status', async () => {
+    await router.push('/overview?account_id=acct&strategy_id=spike_short')
+    vi.spyOn(operationsApi, 'health').mockResolvedValue({ status: 'healthy', service: 'ledger', timestamp: '2026-08-16T00:00:00Z' })
+    vi.spyOn(operationsApi, 'runtimeStatus').mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
+    vi.spyOn(operationsApi, 'pnl').mockResolvedValue({
+      account_id: 'acct', strategy_id: 'spike_short', symbol: null, total_trades: 0,
+      total_commission: '0', total_realized_pnl: '0', total_unrealized_pnl: '0',
+      net_pnl: '0', win_count: 0, loss_count: 0, win_rate: 0, avg_win: '0', avg_loss: '0'
+    })
+    vi.spyOn(operationsApi, 'positions').mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0 })
+    vi.spyOn(operationsApi, 'orders').mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0 })
+    vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 6, offset: 0 })
+    vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([])
+    const capitalStatus = vi.spyOn(operationsApi, 'capitalStatus').mockResolvedValue({
+      account_id: 'acct', strategy_id: 'spike_short', account_capital: '112',
+      trading_capital: '56', reserve_capital: '56', minimum: '10',
+      profit_reinvest_ratio: '0.5', capital_breached: false, version: 4,
+      updated_at: '2026-08-20T08:30:00Z'
+    })
+
+    const wrapper = mount(OverviewView)
+    await flushPromises()
+
+    expect(capitalStatus).toHaveBeenCalledWith({ account_id: 'acct', strategy_id: 'spike_short' })
+    expect(wrapper.text()).toContain('策略资金状态')
+    expect(wrapper.text()).toContain('可交易资金')
+    expect(wrapper.text()).toContain('56.00 USDT')
+    expect(wrapper.text()).toContain('盈利复投比例')
+    expect(wrapper.text()).toContain('50%')
+    expect(wrapper.text()).toContain('允许开仓')
+    expect(wrapper.text()).toContain('v4')
+  })
+
   it('shows a retry control when the account directory cannot be read', async () => {
     vi.mocked(operationsApi.accounts).mockRejectedValue(new Error('unavailable'))
 

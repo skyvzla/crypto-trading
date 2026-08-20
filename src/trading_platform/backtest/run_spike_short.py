@@ -15,6 +15,10 @@ from trading_platform.backtest.loader import MetricsDataLoader
 from trading_platform.backtest.result import ResultAnalyzer
 from trading_platform.backtest.runner import load_symbol_rules
 from trading_platform.shared.config import BacktestConfig
+from trading_platform.strategies.spike.capital import CapitalPolicyConfig
+from trading_platform.strategies.spike.capital_replay import (
+    CapitalManagedSpikeStrategy,
+)
 from trading_platform.strategies.spike.legacy_research import (
     LegacyScriptExitSpikeBacktestStrategy,
 )
@@ -72,6 +76,7 @@ class SpikeBacktestSettings:
     spike_avg_deviation_max_pct: float
     spike_range_max_pct: float
     entry_tier_mode: str
+    capital_config: CapitalPolicyConfig | None
     reject_below_current: bool
     early_profit_unlock_ratio: Decimal | None
     max_consecutive_up_minutes: int
@@ -141,8 +146,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--total-notional",
         type=Decimal,
-        required=True,
-        help="Total notional allocated to each signal",
+        default=None,
+        help="旧固定资金模式的每轮名义金额；动态资金模式不需要",
+    )
+    parser.add_argument(
+        "--initial-account-capital",
+        type=Decimal,
+        default=None,
+        help="动态资金池的初始账户资金；与 --initial-trading-capital 同时提供",
+    )
+    parser.add_argument(
+        "--initial-trading-capital",
+        type=Decimal,
+        default=None,
+        help="动态资金池的初始可交易资金",
+    )
+    parser.add_argument(
+        "--profit-reinvest-ratio",
+        type=Decimal,
+        default=Decimal("0.5"),
+        help="盈利进入可交易资金池的比例（0..1）",
+    )
+    parser.add_argument(
+        "--minimum-trading-capital",
+        type=Decimal,
+        default=Decimal("0"),
+        help="可交易资金低于或等于该值时停止新开仓",
     )
     parser.add_argument(
         "--duckdb-path",
@@ -219,7 +248,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--entry-tier-mode",
-        choices=("three-tier", "tier3-only"),
+        choices=("three-tier", "tier3-only", "single-entry"),
         default=None,
         help="入场挂单模式；默认由策略声明决定",
     )
@@ -453,7 +482,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
-    if args.total_notional <= 0:
+    if args.total_notional is not None and args.total_notional <= 0:
         raise ValueError("--total-notional must be positive")
     start_ms = _timestamp_ms(args.start)
     end_ms = _timestamp_ms(args.end)
@@ -475,6 +504,36 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
     if min_rise_duration_hours is None:
         min_rise_duration_hours = defaults.min_rise_duration_hours
     entry_tier_mode = args.entry_tier_mode or defaults.entry_tier_mode
+    initial_capitals = (
+        args.initial_account_capital,
+        args.initial_trading_capital,
+    )
+    if (initial_capitals[0] is None) != (initial_capitals[1] is None):
+        raise ValueError(
+            "--initial-account-capital and --initial-trading-capital "
+            "must be provided together"
+        )
+    capital_config = None
+    if initial_capitals[0] is not None:
+        capital_config = CapitalPolicyConfig(
+            initial_account_capital=initial_capitals[0],
+            initial_trading_capital=initial_capitals[1],
+            profit_reinvest_ratio=args.profit_reinvest_ratio,
+            minimum_trading_capital=args.minimum_trading_capital,
+        )
+    if capital_config is None and args.total_notional is None:
+        raise ValueError(
+            "--total-notional or both dynamic capital values are required"
+        )
+    if entry_tier_mode == "single-entry" and capital_config is None:
+        raise ValueError(
+            "single-entry requires --initial-account-capital and "
+            "--initial-trading-capital"
+        )
+    if capital_config is not None and (
+        args.research or args.exit_policy == "legacy-script"
+    ):
+        raise ValueError("dynamic capital is only supported by the active Spike strategy")
     reject_below_current = bool(args.reject_below_current)
     box_duration_min_hours = args.box_duration_min_hours
     if box_duration_min_hours is None:
@@ -672,6 +731,7 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         spike_avg_deviation_max_pct=spike_avg_deviation_max_pct,
         spike_range_max_pct=spike_range_max_pct,
         entry_tier_mode=entry_tier_mode,
+        capital_config=capital_config,
         reject_below_current=reject_below_current,
         early_profit_unlock_ratio=(
             profit_unlock_percent / Decimal("100")
@@ -852,9 +912,14 @@ def create_spike_engine(
         strategy_class = settings.strategy_definition.strategy_class
         if settings.prior_high_lookback_minutes == 0:
             strategy_class = no_prior_high_strategy_class(strategy_class)
+        initial_notional = (
+            settings.capital_config.initial_trading_capital
+            if settings.capital_config is not None
+            else args.total_notional
+        )
         strategy = DynamicSpikeBacktestStrategy(
             symbols=[args.symbol],
-            total_notional=args.total_notional,
+            total_notional=initial_notional,
             exit_policy=(
                 "candidate-v1"
                 if args.exit_policy == "candidate-v1"
@@ -914,6 +979,10 @@ def create_spike_engine(
                 )
             },
         )
+        if settings.capital_config is not None:
+            strategy = CapitalManagedSpikeStrategy(
+                strategy, settings.capital_config
+            )
     return BacktestEngine(
         events=events,
         strategy=strategy,

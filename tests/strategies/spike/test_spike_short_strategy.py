@@ -804,6 +804,52 @@ class TestDynamicSpikeShortStrategy:
         assert intents[0].trigger_reason == "spike_tier3"
         assert intents[0].client_order_id.endswith("_e3")
 
+    def test_single_entry_places_full_notional_at_fixed_original_third_price(self):
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            entry_tier_mode="single-entry",
+        )
+        signal = SpikeSignal(
+            signal_time=1_000,
+            trigger_price=Decimal("100"),
+            spike_high=Decimal("120"),
+            origin_price=Decimal("90"),
+            atr=Decimal("10"),
+            # 保留历史三档快照；新模式的唯一入场价不受旧档位偏移影响。
+            tier_prices=[Decimal("108.5"), Decimal("114.5"), Decimal("118.5")],
+            tier_weights=list(strategy.TIER_WEIGHTS),
+            invalid_price=Decimal("155"),
+            active_time=2_000,
+            expire_time=182_000,
+        )
+        strategy.active_signals.append(signal)
+
+        def bar_at(timestamp: int) -> Bar1s:
+            return Bar1s(
+                symbol="BTCUSDT",
+                timestamp=timestamp,
+                available_time=timestamp + 1_000,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+                trade_count=1,
+                vwap=Decimal("100"),
+            )
+
+        assert strategy._manage_signals(bar_at(1_000)) == []
+        intents = strategy._manage_signals(bar_at(2_000))
+
+        assert len(intents) == 1
+        assert intents[0].price == Decimal("116.50")
+        assert intents[0].quantity * intents[0].price == Decimal("1000")
+        assert intents[0].trigger_reason == "spike_entry"
+        assert intents[0].client_order_id.endswith("_e3")
+        assert intents[0].ttl_ms == 180_000
+        assert strategy._manage_signals(bar_at(3_000)) == []
+
     def test_signal_invalidation_cancels_through_account_interface(self):
         class FakeAccount:
             def __init__(self):

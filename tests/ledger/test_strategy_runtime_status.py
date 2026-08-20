@@ -9,7 +9,11 @@ import pytest
 from fastapi import FastAPI
 
 from trading_platform.ledger.api.routes import router
-from trading_platform.ledger.db.migrations import apply_migrations, verify_current
+from trading_platform.ledger.db.migrations import (
+    apply_migrations,
+    load_migrations,
+    verify_current,
+)
 from trading_platform.ledger.db.models import (
     LedgerDB,
     StrategyRuntimeStatus,
@@ -27,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 async def ledger():
     pool = await create_connection_pool(os.environ["LEDGER_TEST_DSN"], 1, 4)
     await apply_migrations(pool)
-    assert await verify_current(pool) == 9
+    assert await verify_current(pool) == load_migrations()[-1].version
     yield LedgerDB(pool)
     await pool.close()
 

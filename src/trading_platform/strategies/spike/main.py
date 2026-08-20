@@ -23,6 +23,8 @@ from trading_platform.ledger.db.models import (
     StrategyRuntimeStatus,
     create_connection_pool,
 )
+from trading_platform.ledger.income_store import IncomeStore
+from trading_platform.ledger.income_sync import FundingIncomeSync
 from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.binance.rest_client import BinanceRestClient
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
@@ -50,8 +52,11 @@ from trading_platform.strategies.spike.live import (
     SpikeExecutionCoordinator,
     SpikeLiveSettings,
     SpikeRuntimeCallbacks,
+    campaign_store_key,
     require_one_way_position_mode,
 )
+from trading_platform.strategies.spike.capital import CapitalPolicy
+from trading_platform.strategies.spike.capital_store import CapitalSnapshot, CapitalStore
 from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
@@ -68,6 +73,7 @@ logger = logging.getLogger(__name__)
 BAR_STREAM_STALE_SECONDS = 10.0
 RUNTIME_HEARTBEAT_SECONDS = 5.0
 EXCHANGE_RULE_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
+MARKET_EVENT_QUEUE_MAXSIZE = 1_024
 
 
 def _snapshot_from_database(
@@ -87,13 +93,20 @@ def _snapshot_from_database(
 def require_viable_entry_notional(
     total_notional: Decimal,
     rules: BinanceSymbolRules,
+    *,
+    entry_tier_mode: str = "three-tier",
 ) -> None:
-    """拒绝任何确定会低于交易所最小名义金额的三档配置。"""
-    smallest_tier = total_notional * min(DynamicSpikeShortStrategy.TIER_WEIGHTS)
-    if smallest_tier <= rules.min_notional:
+    """拒绝任何确定会低于交易所最小名义金额的入场配置。"""
+    entry_notional = (
+        total_notional
+        if entry_tier_mode == "single-entry"
+        else total_notional * min(DynamicSpikeShortStrategy.TIER_WEIGHTS)
+    )
+    if entry_notional <= rules.min_notional:
+        label = "entry notional" if entry_tier_mode == "single-entry" else "smallest entry tier"
         raise ValueError(
-            f"{rules.symbol} smallest entry tier must exceed min notional: "
-            f"{smallest_tier} <= {rules.min_notional}"
+            f"{rules.symbol} {label} must exceed min notional: "
+            f"{entry_notional} <= {rules.min_notional}"
         )
 
 
@@ -134,6 +147,11 @@ class SpikeLiveProcess:
         self._stop = asyncio.Event()
         self._stack = AsyncExitStack()
         self._tasks: list[asyncio.Task] = []
+        self._market_events: asyncio.Queue[Bar1s | Kline] = asyncio.Queue(
+            maxsize=MARKET_EVENT_QUEUE_MAXSIZE
+        )
+        self._market_event_queue_overflowed = False
+        self._queued_execution_started = False
         self._last_kline: dict[tuple[str, str], int] = {}
         self._last_bar_received_monotonic: dict[str, float] = {}
         self._last_bar_trade_id: dict[str, int] = {}
@@ -150,6 +168,8 @@ class SpikeLiveProcess:
         self.execution_lease: PostgresExecutionLease | None = None
         self.db: LedgerDB | None = None
         self.execution_rest: BinanceRestClient | None = None
+        self.capital_store: CapitalStore | None = None
+        self.capital_snapshot: CapitalSnapshot | None = None
         self.exchange_symbol_snapshot: ExchangeSymbolSnapshot | None = None
         self._exchange_rules_synced_monotonic: float | None = None
         self.instance_id = uuid4().hex
@@ -177,6 +197,15 @@ class SpikeLiveProcess:
             await self.coordinator.restore_campaign_gate()
             await self.runtime.start()
             await self.coordinator.account.refresh_positions()
+            recovery_allowed = bool(
+                self.coordinator._owned_campaign_id
+                or self.coordinator.account.symbols_with_live_risk()
+            )
+            if self.capital_snapshot is not None:
+                await self._reconcile_capital_wallet(
+                    self.capital_snapshot,
+                    recovery_allowed=recovery_allowed,
+                )
             await self._refresh_exchange_symbol_admission()
             await self.coordinator.reconcile_entry_expirations()
             self.coordinator.validate_recovered_campaign()
@@ -187,28 +216,39 @@ class SpikeLiveProcess:
                 await self.coordinator.maybe_release_campaign(symbol)
             self._restore_execution_gate()
 
+            execution_worker = self.coordinator.start_execution_worker()
+            self._tasks.append(execution_worker)
+            self._queued_execution_started = True
+            self.gate.set_condition("event_queue", True)
+
             await self._register_market_subscriptions()
             await self._start_bar_consumer()
             await self._warm_strategy_history()
             await self._refresh_market_gate(require_ready=True)
             await self.admission.on_universe_scan()
-            await self.coordinator._flush_cancellations()
+            await self.coordinator.request_cancellation_flush()
 
             self._tasks.extend(
                 [
-                asyncio.create_task(self._kline_loop(), name="spike-kline-loop"),
-                asyncio.create_task(
-                    self._market_watchdog_loop(), name="spike-market-watchdog"
-                ),
-                asyncio.create_task(self._safety_scan_loop(), name="spike-safety-scan"),
-                asyncio.create_task(
-                    self._execution_stream_fatal_loop(),
-                    name="spike-execution-stream-fatal",
-                ),
-                asyncio.create_task(
-                    self._submit_unknown_fatal_loop(),
-                    name="spike-submit-unknown-fatal",
-                ),
+                    asyncio.create_task(self._kline_loop(), name="spike-kline-loop"),
+                    asyncio.create_task(
+                        self._market_watchdog_loop(), name="spike-market-watchdog"
+                    ),
+                    asyncio.create_task(
+                        self._safety_scan_loop(), name="spike-safety-scan"
+                    ),
+                    asyncio.create_task(
+                        self._execution_stream_fatal_loop(),
+                        name="spike-execution-stream-fatal",
+                    ),
+                    asyncio.create_task(
+                        self._submit_unknown_fatal_loop(),
+                        name="spike-submit-unknown-fatal",
+                    ),
+                    asyncio.create_task(
+                        self._entry_expiry_fatal_loop(),
+                        name="spike-entry-expiry-fatal",
+                    ),
                 ]
             )
             await self._publish_runtime_status()
@@ -261,6 +301,7 @@ class SpikeLiveProcess:
         if self.gate is not None:
             self.gate.set_condition("execution", False)
             self.gate.set_condition("market", False)
+            self.gate.set_condition("event_queue", False)
         if self.runtime_callbacks is not None:
             self.runtime_callbacks.abort_startup_recovery()
         for task in self._tasks:
@@ -268,6 +309,7 @@ class SpikeLiveProcess:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        self._queued_execution_started = False
         errors: list[BaseException] = []
         if self.coordinator is not None:
             try:
@@ -299,6 +341,20 @@ class SpikeLiveProcess:
         if errors:
             raise BaseExceptionGroup("Spike shutdown failed", errors)
 
+    async def _initialize_capital(self, pool: Any) -> CapitalSnapshot:
+        self.capital_store = CapitalStore(pool)
+        return await self.capital_store.initialize(
+            account_id=self.settings.account_id,
+            strategy_id=STRATEGY_ID,
+            config=self.settings.formal_capital_config,
+        )
+
+    @staticmethod
+    def _build_funding_source(
+        rest: BinanceRestClient, pool: Any
+    ) -> FundingIncomeSync:
+        return FundingIncomeSync(rest, IncomeStore(pool))
+
     async def _build_resources(self) -> None:
         pool = await create_connection_pool(self.database.dsn)
         self._stack.push_async_callback(pool.close)
@@ -307,6 +363,8 @@ class SpikeLiveProcess:
         self._stack.push_async_callback(self.execution_lease.release)
         db = LedgerDB(pool)
         self.db = db
+        self.capital_snapshot = await self._initialize_capital(pool)
+        trading_capital = self.capital_snapshot.state.trading_capital
 
         self.redis = redis.Redis(
             host=self.redis_config.host,
@@ -334,14 +392,10 @@ class SpikeLiveProcess:
         risk = RiskGuard(
             self.settings.account_id,
             RiskConfig(
-                max_position_value_usdt=Decimal(
-                    str(self.strategy_config.risk_max_position_value_usdt)
-                ),
+                max_position_value_usdt=trading_capital,
                 max_symbols=self.strategy_config.risk_max_symbols,
             ),
         )
-        if self.settings.total_notional > risk.config.max_position_value_usdt:
-            raise ValueError("total_notional exceeds process risk limit")
         wal = OrderWAL(self.settings.wal_path)
         initial_symbol_snapshot = _snapshot_from_database(
             self.settings.symbols,
@@ -362,27 +416,32 @@ class SpikeLiveProcess:
         )
         symbol_rules = self._build_symbol_rule_book(execution_exchange_info)
         self._exchange_rules_synced_monotonic = asyncio.get_running_loop().time()
-        for symbol in initial_symbol_snapshot.allowed_symbols:
-            require_viable_entry_notional(
-                self.settings.total_notional,
-                symbol_rules.get(symbol),
-            )
+        if CapitalPolicy(self.capital_snapshot.config).can_open(
+            self.capital_snapshot.state
+        ):
+            for symbol in initial_symbol_snapshot.allowed_symbols:
+                require_viable_entry_notional(
+                    trading_capital,
+                    symbol_rules.get(symbol),
+                    entry_tier_mode=self.settings.entry_tier_mode,
+                )
         account = BinanceStrategyAccount(
             rest,
             wal,
             account_id=self.settings.account_id,
             strategy_id=STRATEGY_ID,
             risk_guard=risk,
+            required_cross_margin_symbols=self.settings.symbols,
         )
         strategy = DynamicSpikeBacktestStrategy(
             self.settings.symbols,
-            self.settings.total_notional,
+            trading_capital,
             account=account,
             exit_policy=self.settings.exit_policy,
             prior_high_lookback_minutes=(
                 self.strategy_definition.defaults.prior_high_lookback_hours * 60
             ),
-            entry_tier_mode=self.strategy_definition.defaults.entry_tier_mode,
+            entry_tier_mode=self.settings.entry_tier_mode,
             rise_low_lookback_minutes=(
                 self.strategy_definition.defaults.rise_low_lookback_hours * 60
             ),
@@ -415,19 +474,31 @@ class SpikeLiveProcess:
             "subcategory",
             "campaign",
             "exchange_symbols",
+            "event_queue",
+            "capital",
         ):
             self.gate.set_condition(condition, False)
+        funding_source = self._build_funding_source(rest, pool)
         self.coordinator = SpikeExecutionCoordinator(
             strategy=strategy,
             account=account,
             executor=executor,
-            campaign_store=RedisCampaignStore(self.redis),
+            campaign_store=RedisCampaignStore(
+                self.redis,
+                key=campaign_store_key(self.settings.account_id, STRATEGY_ID),
+            ),
             risk_guard=risk,
             gate=self.gate,
             account_id=self.settings.account_id,
             trade_source=db,
             audit_sink=lambda events: db.insert_strategy_audit_events(
                 events, account_id=self.settings.account_id
+            ),
+            capital_store=self.capital_store,
+            funding_source=funding_source,
+            capital_admission_refresh=lambda snapshot: self._reconcile_capital_wallet(
+                snapshot,
+                recovery_allowed=True,
             ),
         )
         self.admission = SubcategoryAdmissionService(
@@ -467,7 +538,7 @@ class SpikeLiveProcess:
         self.runtime.user_stream.on_execution_report = callbacks.handle_execution_report
         self.runtime.user_stream.on_account_update = callbacks.handle_account_update
         self.runtime.user_stream.on_disconnect = self._on_execution_stream_disconnected
-        self.runtime.on_recovered = self._restore_execution_gate
+        self.runtime.on_recovered = self._recover_execution_after_reconnect
 
     def _on_execution_stream_disconnected(self) -> None:
         if self.gate is not None:
@@ -495,6 +566,14 @@ class SpikeLiveProcess:
         self._mark_runtime_fatal("SUBMIT_UNKNOWN resolution attempts exhausted")
         await self._try_publish_fatal_status()
         raise RuntimeError("SUBMIT_UNKNOWN recovery failed") from exc
+
+    async def _entry_expiry_fatal_loop(self) -> None:
+        assert self.coordinator is not None
+        exc = await self.coordinator.wait_expiry_fatal()
+        reason = f"entry expiry task failed: {type(exc).__name__}"
+        self._mark_runtime_fatal(reason)
+        await self._try_publish_fatal_status()
+        raise RuntimeError("entry expiry task failed") from exc
 
     async def _runtime_heartbeat_loop(self) -> None:
         while True:
@@ -547,7 +626,7 @@ class SpikeLiveProcess:
             safety_ready = all(
                 gates.get(name, False)
                 for name in ("execution", "market", "bar_stream")
-            )
+            ) and gates.get("event_queue", True)
             status = "running" if safety_ready and not halted else "degraded"
         accepted = await self.db.upsert_strategy_runtime_status(
             StrategyRuntimeStatus(
@@ -582,6 +661,7 @@ class SpikeLiveProcess:
                 (self.execution_lease is None or self.execution_lease.held)
                 and self.runtime.user_stream.connected
                 and not self.coordinator.risk_guard.halted
+                and not self.coordinator.expiry_failed
                 and not self.coordinator.account.has_unresolved_orders()
             )
         except Exception:
@@ -589,6 +669,87 @@ class SpikeLiveProcess:
             ready = False
         self.gate.set_condition("execution", ready)
         return ready
+
+    async def _recover_execution_after_reconnect(self) -> bool:
+        """重连后以交易所仓位和钱包事实重新决定执行与资金准入。"""
+
+        if (
+            self.coordinator is None
+            or self.capital_store is None
+            or self.capital_snapshot is None
+        ):
+            return self._restore_execution_gate()
+        await self.coordinator.account.refresh_positions()
+        snapshot = await self.capital_store.get_state(
+            account_id=self.settings.account_id,
+            strategy_id=STRATEGY_ID,
+        )
+        if snapshot is None:
+            raise RuntimeError("persisted capital state disappeared")
+        recovery_allowed = bool(
+            self.coordinator._owned_campaign_id
+            or self.coordinator.account.symbols_with_live_risk()
+        )
+        await self._reconcile_capital_wallet(
+            snapshot,
+            recovery_allowed=recovery_allowed,
+        )
+        return self._restore_execution_gate()
+
+    async def _reconcile_capital_wallet(
+        self,
+        snapshot: CapitalSnapshot,
+        *,
+        recovery_allowed: bool,
+    ) -> bool:
+        """空仓严格核对钱包；持仓恢复只关闭开仓，不阻断退出。"""
+
+        if self.execution_rest is None or self.gate is None:
+            raise RuntimeError("capital wallet reconciliation is unavailable")
+        self.capital_snapshot = snapshot
+        wallet_capital: Decimal | None = None
+        reason = "wallet capital is unavailable"
+        try:
+            response = await self.execution_rest.get_account()
+            raw_wallet = response.get("totalWalletBalance")
+            wallet_capital = Decimal(str(raw_wallet))
+            if not wallet_capital.is_finite() or wallet_capital < 0:
+                raise ValueError("invalid totalWalletBalance")
+            sufficient = wallet_capital >= snapshot.state.account_capital
+            policy_ready = CapitalPolicy(snapshot.config).can_open(snapshot.state)
+            enabled = sufficient and policy_ready
+            reason = (
+                "ok"
+                if enabled
+                else (
+                    "wallet capital is insufficient"
+                    if not sufficient
+                    else "trading capital reached its minimum"
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            enabled = False
+
+        self.gate.set_condition("capital", enabled)
+        if not enabled:
+            logger.error(
+                "Spike capital admission closed: %s (wallet=%s required=%s)",
+                reason,
+                wallet_capital,
+                snapshot.state.account_capital,
+            )
+            if self.coordinator is not None:
+                await self.coordinator.record_capital_admission(
+                    enabled=False,
+                    wallet_capital=wallet_capital,
+                    required_capital=snapshot.state.account_capital,
+                    reason=reason,
+                )
+            if not recovery_allowed:
+                raise RuntimeError(reason)
+        return enabled
 
     async def _register_market_subscriptions(self) -> None:
         assert self.http is not None
@@ -708,19 +869,28 @@ class SpikeLiveProcess:
     async def _start_bar_consumer(self) -> None:
         """订阅 Redis 后才允许等待依赖消费者存在的市场质量门禁。"""
         ready = asyncio.Event()
+        strategy_task = asyncio.create_task(
+            self._strategy_event_loop(), name="spike-strategy-event-loop"
+        )
+        self._tasks.append(strategy_task)
         task = asyncio.create_task(self._bar_loop(ready), name="spike-bar-loop")
         self._tasks.append(task)
         waiter = asyncio.create_task(ready.wait(), name="spike-bar-ready")
         try:
             done, _ = await asyncio.wait(
-                {task, waiter},
+                {strategy_task, task, waiter},
                 timeout=10,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if waiter not in done:
+                if strategy_task in done:
+                    strategy_task.result()
                 if task in done:
                     task.result()
                 raise RuntimeError("bar consumer did not become ready")
+            if strategy_task.done():
+                strategy_task.result()
+                raise RuntimeError("strategy event loop stopped during startup")
             if task.done():
                 task.result()
                 raise RuntimeError("bar consumer stopped during startup")
@@ -744,7 +914,7 @@ class SpikeLiveProcess:
                     raise RuntimeError(
                         f"unexpected bar symbol on managed subscription: {bar.symbol}"
                     )
-                await self._handle_live_bar(bar)
+                await self._enqueue_market_event(bar)
         except asyncio.CancelledError:
             raise
         except BaseException:
@@ -753,6 +923,54 @@ class SpikeLiveProcess:
             raise
         finally:
             await pubsub.aclose()
+
+    async def _enqueue_market_event(self, event: Bar1s | Kline) -> None:
+        """正常路径不等待策略；满载时关闭入场并背压，保证事件不丢。"""
+
+        try:
+            self._market_events.put_nowait(event)
+            return
+        except asyncio.QueueFull:
+            pass
+        if not self._market_event_queue_overflowed:
+            self._market_event_queue_overflowed = True
+            assert self.gate is not None
+            assert self.coordinator is not None
+            self.gate.set_condition("event_queue", False)
+            self.coordinator.close_entry_pipeline(
+                "market event queue full",
+                symbol=event.symbol,
+                event_time=event.available_time,
+            )
+            logger.error(
+                "%s 行情事件队列已满，关闭入场并保留背压事件",
+                event.symbol,
+            )
+        await self._market_events.put(event)
+
+    async def _strategy_event_loop(self) -> None:
+        """按实际入队顺序串行更新策略状态，网络执行由独立 worker 处理。"""
+
+        while True:
+            event = await self._market_events.get()
+            try:
+                if isinstance(event, Bar1s):
+                    await self._handle_live_bar(event)
+                else:
+                    assert self.coordinator is not None
+                    if self._queued_execution_started:
+                        await self.coordinator.on_kline_queued(event)
+                    else:
+                        await self.coordinator.on_kline(event)
+            finally:
+                self._market_events.task_done()
+
+    async def _deliver_bar1s(self, bar: Bar1s) -> None:
+        assert self.coordinator is not None
+        if self._queued_execution_started:
+            await self.coordinator.on_bar1s_queued(bar)
+        else:
+            await self.coordinator.on_bar1s(bar)
 
     async def _handle_live_bar(self, bar: Bar1s) -> None:
         """校验逐币种水位，必要时回放缺口，然后交给策略串行处理。"""
@@ -769,7 +987,7 @@ class SpikeLiveProcess:
             await self._fail_bar_continuity(bar.symbol, "missing or invalid watermark")
             self._last_bar_trade_id.pop(bar.symbol, None)
             self._bar_continuity_streak[bar.symbol] = 0
-            await self.coordinator.on_bar1s(bar)
+            await self._deliver_bar1s(bar)
             return
 
         if previous_id is not None and last_id <= previous_id:
@@ -790,14 +1008,14 @@ class SpikeLiveProcess:
                     bar.symbol, previous_id + 1, first_id - 1
                 )
             for recovered_bar in recovered:
-                await self.coordinator.on_bar1s(recovered_bar)
+                await self._deliver_bar1s(recovered_bar)
             self._bar_continuity_streak[bar.symbol] = 0
 
         self._last_bar_trade_id[bar.symbol] = last_id
         self._bar_continuity_streak[bar.symbol] = (
             self._bar_continuity_streak.get(bar.symbol, 0) + 1
         )
-        await self.coordinator.on_bar1s(bar)
+        await self._deliver_bar1s(bar)
         self._refresh_bar_continuity_gate()
 
     async def _fail_bar_continuity(self, symbol: str, reason: str) -> None:
@@ -908,7 +1126,7 @@ class SpikeLiveProcess:
                     key = (symbol, interval)
                     if kline.close_time <= self._last_kline.get(key, -1):
                         continue
-                    await self.coordinator.on_kline(kline)
+                    await self._enqueue_market_event(kline)
                     self._last_kline[key] = kline.close_time
             await asyncio.sleep(1)
 
@@ -932,10 +1150,21 @@ class SpikeLiveProcess:
             await self._register_market_subscriptions()
             await self._refresh_market_gate()
             await self.admission.on_universe_scan()
-            await self.coordinator._flush_cancellations()
+            await self.coordinator.request_cancellation_flush()
             await self.coordinator.restore_campaign_gate()
             self.coordinator.validate_recovered_campaign()
             await self.coordinator.reconcile_entry_expirations()
+            if self.capital_store is not None:
+                snapshot = await self.capital_store.get_state(
+                    account_id=self.settings.account_id,
+                    strategy_id=STRATEGY_ID,
+                )
+                if snapshot is None:
+                    raise RuntimeError("persisted capital state disappeared")
+                await self._reconcile_capital_wallet(
+                    snapshot,
+                    recovery_allowed=True,
+                )
             if self.runtime is not None and self.runtime.is_running:
                 if self.coordinator.account.has_unresolved_orders():
                     self.gate.set_condition("execution", False)
@@ -1035,7 +1264,7 @@ class SpikeLiveProcess:
             current - self._last_bar_received_monotonic.get(symbol, float("-inf"))
             <= BAR_STREAM_STALE_SECONDS
             for symbol in self._market_symbols()
-        )
+        ) and not self._market_event_queue_overflowed
         self.gate.set_condition("bar_stream", ready)
         return ready
 
