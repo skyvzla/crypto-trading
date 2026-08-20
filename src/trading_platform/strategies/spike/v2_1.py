@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
+
+import numpy as np
 
 from trading_platform.strategies.spike.definition import (
     SpikeDataRequirements,
@@ -10,7 +13,15 @@ from trading_platform.strategies.spike.definition import (
 )
 from trading_platform.strategies.spike.entry_features import entry_context_features
 from trading_platform.strategies.spike.v2 import V2
-from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
+from trading_platform.shared.events import OrderIntent
+from trading_platform.strategies.spike.short import (
+    DynamicSpikeShortStrategy,
+    build_exit_client_order_id,
+)
+from trading_platform.strategies.spike.scoring import (
+    compute_score,
+    premium_pct as premium_pct_value,
+)
 
 
 class SpikeV21Strategy(DynamicSpikeShortStrategy):
@@ -40,6 +51,17 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
         profit_unlock_ratio: Decimal | None = None,
         profit_drawdown_ratio: Decimal | None = None,
         profit_drawdown_peak_ratio: Decimal | None = None,
+        entry_premium_mult: float = 0.0,
+        entry_premium_floor: float = 3.0,
+        entry_premium_cap: float = 35.0,
+        entry_premium_model: str | None = None,
+        entry_scoring_enabled: bool = False,
+        entry_scoring_threshold: float = 0.5,
+        entry_scoring_config: str | None = None,
+        entry_premium_base_pct: float = 1.0,
+        oi_stop_enabled: bool = False,
+        oi_stop_oi_rise_pct: float = 5.0,
+        oi_stop_loss_pct: float = 3.0,
         **kwargs,
     ):
         super().__init__(
@@ -120,6 +142,62 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
                 if not Decimal("0") < value < Decimal("1"):
                     raise ValueError(f"{label} must be between 0 and 1")
             setattr(self, label, value)
+        if entry_premium_mult < 0:
+            raise ValueError("entry_premium_mult must not be negative")
+        self.entry_premium_mult = float(entry_premium_mult)
+        self.entry_premium_floor = float(entry_premium_floor)
+        self.entry_premium_cap = float(entry_premium_cap)
+        if not 0 <= self.entry_premium_floor < self.entry_premium_cap:
+            raise ValueError(
+                "entry_premium_floor must be non-negative and below entry_premium_cap"
+            )
+        if entry_premium_base_pct < 0:
+            raise ValueError("entry_premium_base_pct must not be negative")
+        self.entry_premium_base_pct = float(entry_premium_base_pct)
+        self.entry_scoring_enabled = bool(entry_scoring_enabled)
+        self.entry_scoring_threshold = float(entry_scoring_threshold)
+        if not 0 <= self.entry_scoring_threshold <= 1:
+            raise ValueError("entry_scoring_threshold must be between 0 and 1")
+        self.oi_stop_enabled = bool(oi_stop_enabled)
+        self.oi_stop_oi_rise_pct = float(oi_stop_oi_rise_pct)
+        self.oi_stop_loss_pct = float(oi_stop_loss_pct)
+        if self.oi_stop_oi_rise_pct < 0:
+            raise ValueError("oi_stop_oi_rise_pct must not be negative")
+        if self.oi_stop_loss_pct < 0:
+            raise ValueError("oi_stop_loss_pct must not be negative")
+        self._oi_stop_checked = False
+        self._oi_stop_campaign: int | None = None
+        self._scoring_config: dict | None = None
+        if entry_scoring_config:
+            import json as _json
+
+            self._scoring_config = _json.loads(
+                Path(entry_scoring_config).read_text(encoding="utf-8")
+            )
+        self._premium_model: dict[str, object] | None = None
+        if self.entry_premium_mult > 0:
+            if entry_premium_model:
+                import json as _json
+
+                self._premium_model = _json.loads(
+                    Path(entry_premium_model).read_text(encoding="utf-8")
+                )
+            else:
+                from trading_platform.research.up_premium_model import (
+                    COEFS,
+                    FEATURES,
+                    INTERCEPT,
+                    MEAN,
+                    STD,
+                )
+
+                self._premium_model = {
+                    "features": list(FEATURES),
+                    "mean": {f: float(v) for f, v in zip(FEATURES, MEAN)},
+                    "std": {f: float(v) for f, v in zip(FEATURES, STD)},
+                    "coefs": {f: float(v) for f, v in zip(FEATURES, COEFS)},
+                    "intercept": float(INTERCEPT),
+                }
         self.metrics_series = list(metrics_series or [])
         self._metrics_idx = 0
 
@@ -144,6 +222,90 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
         if grouped and bucket == "strong":
             return Decimal(str(self.strong_tier_atr_shift))
         return Decimal("0")
+
+    def _entry_scored_decision(
+        self,
+        *,
+        spike_high: Decimal,
+        atr: Decimal,
+        tier_atr_shift: Decimal,
+        bar: Bar1s,
+        origin_price: Decimal,
+        minute_start: int,
+        rise_from_12h_low: Decimal | None,
+    ) -> tuple[str, float, float] | None:
+        """评分准入决策：低于阈值拒绝信号。
+
+        返回 (rejection_reason, score, threshold) 表示拒绝；None 表示通过。
+        评分未启用时恒返回 None。
+        """
+        if not self.entry_scoring_enabled or self._scoring_config is None:
+            return None
+        feats = self._entry_scoring_features(bar, origin_price)
+        if feats is None:
+            return None
+        score = compute_score(feats, self._scoring_config)
+        threshold = self.entry_scoring_threshold
+        if score < threshold:
+            return ("entry_scoring_threshold", score, threshold)
+        return None
+
+    def _entry_tier_prices(
+        self,
+        *,
+        spike_high: Decimal,
+        atr: Decimal,
+        tier_atr_shift: Decimal,
+        bar: Bar1s,
+        origin_price: Decimal,
+        minute_start: int,
+        rise_from_12h_low: Decimal | None,
+        scored: tuple[str, float, float] | None = None,
+    ) -> list[Decimal] | None:
+        """动态溢价单档挂单：触发价 × (1 + 溢价)。
+
+        溢价 = base + S × 模型预测冲高% × mult（S 为评分）。
+        entry_premium_mult=0 时关闭，回退默认 spike_high−ATR 三档。
+        特征不足或模型缺失时同样回退默认三档。
+        """
+        if self.entry_premium_mult <= 0 or self._premium_model is None:
+            return None
+        feats = self._entry_scoring_features(bar, origin_price)
+        if feats is None:
+            return None
+        model = self._premium_model
+        features = model["features"]
+        mean = model["mean"]
+        std = model["std"]
+        coefs = model["coefs"]
+        pred = float(model["intercept"])
+        for name in features:
+            x = feats.get(name)
+            if x is None or not np.isfinite(x):
+                return None
+            pred += coefs[name] * (x - mean[name]) / std[name]
+        score = 1.0
+        if self._scoring_config is not None:
+            score = compute_score(feats, self._scoring_config)
+        premium_pct = premium_pct_value(
+            score,
+            predicted_up_pct=pred,
+            mult=self.entry_premium_mult,
+            base_pct=self.entry_premium_base_pct,
+            cap_pct=self.entry_premium_cap,
+        )
+        limit = bar.close * (Decimal("1") + Decimal(str(premium_pct)) / Decimal("100"))
+        return [limit, limit, limit]
+
+    def _entry_scoring_features(
+        self, bar: Bar1s, origin_price: Decimal
+    ) -> dict[str, float] | None:
+        """触发时点评分特征（与 research_premium 同一口径，实时可算）。"""
+        from trading_platform.strategies.spike.research_premium import (
+            compute_trigger_features,
+        )
+
+        return compute_trigger_features(self, bar, origin_price)
 
     def _entry_bucket(self, rise_from_12h_low: Decimal | None) -> str | None:
         grouped, bucket = self._group_bucket(rise_from_12h_low)
@@ -319,6 +481,97 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
     def _metrics_blocked(self, event_ms: int) -> bool:
         return self._metrics_rejection_details(event_ms) is not None
 
+    def _oi_stop_decision(self, event_ms: int, mark_price: Decimal) -> list:
+        """OI 止损：插针后首个有效 5m OI 点相对基准点升幅超阈值且浮亏达标。
+
+        时间对齐（5m 粒度）：
+        - 基准点 = signal_time 前最近 available_ms 的 OI 点（如 30:00）
+        - 确认点 = signal_time 后第一个 available_ms 的 OI 点（如 35:00）
+        - 仅当 event_ms >= 确认点 available_ms（数据可见）时评估一次。
+        """
+        if (
+            not self.oi_stop_enabled
+            or self.first_fill_time is None
+            or self._account is None
+            or not self.metrics_series
+        ):
+            return []
+        position = self._account.get_position(self.symbol)
+        if position is None or position.side != "SHORT" or position.quantity <= 0:
+            return []
+        campaign_id = self._campaign_id_for_timing or ""
+        prefix = f"spike_short:{self.symbol}:"
+        if not campaign_id.startswith(prefix):
+            return []
+        try:
+            signal_time = int(campaign_id[len(prefix):])
+        except ValueError:
+            return []
+        if self._oi_stop_campaign != signal_time:
+            self._oi_stop_campaign = signal_time
+            self._oi_stop_checked = False
+        if self._oi_stop_checked:
+            return []
+        base_oi = None
+        confirm = None
+        for ms, oi, _ls in self.metrics_series:
+            if ms <= signal_time:
+                base_oi = (ms, float(oi))
+            elif confirm is None and oi is not None:
+                confirm = (ms, float(oi))
+                break
+        if base_oi is None or confirm is None or base_oi[1] <= 0:
+            return []
+        if event_ms < confirm[0]:
+            return []
+        self._oi_stop_checked = True
+        d_oi = (confirm[1] - base_oi[1]) / base_oi[1] * 100.0
+        if d_oi <= self.oi_stop_oi_rise_pct:
+            return []
+        entry = float(position.entry_price)
+        if entry <= 0:
+            return []
+        loss_pct = (float(mark_price) - entry) / entry * 100.0
+        if loss_pct < self.oi_stop_loss_pct:
+            return []
+        self._exit_requested = True
+        self._record_audit(
+            event_time=event_ms,
+            event_type="candidate_oi_stop_exit_requested",
+            campaign_id=campaign_id,
+            details={
+                "base_ms": base_oi[0],
+                "confirm_ms": confirm[0],
+                "d_oi_pct": round(d_oi, 3),
+                "loss_pct": round(loss_pct, 3),
+                "mark_price": str(mark_price),
+            },
+        )
+        return [
+            OrderIntent(
+                symbol=self.symbol,
+                side="BUY",
+                price=mark_price,
+                quantity=position.quantity,
+                client_order_id=build_exit_client_order_id(
+                    self.symbol, event_ms, "c"
+                ),
+                order_type="MARKET",
+                reduce_only=True,
+                strategy_id="spike_short",
+                trigger_reason="candidate_oi_stop_exit",
+            )
+        ]
+
+    def _manage_candidate_exit(
+        self, event_time: int, mark_price: Decimal
+    ) -> list[OrderIntent]:
+        """先评估 OI 止损（优先级最高），命中则直接退出。"""
+        oi_stop_intent = self._oi_stop_decision(event_time, mark_price)
+        if oi_stop_intent:
+            return oi_stop_intent
+        return super()._manage_candidate_exit(event_time, mark_price)
+
     def _metrics_rejection_details(
         self, event_ms: int, rise_from_12h_low: Decimal | None = None
     ) -> dict[str, object] | None:
@@ -400,6 +653,7 @@ class V21:
             "box_duration_min_minutes",
             "spike_avg_deviation_max_pct",
             "spike_range_max_pct",
+            "spike_vwap_deviation_max_pct",
             "max_consecutive_up_minutes",
             "max_oi_change_pct",
             "max_ls_ratio",
@@ -428,6 +682,17 @@ class V21:
             "profit_unlock_ratio",
             "profit_drawdown_ratio",
             "profit_drawdown_peak_ratio",
+            "entry_premium_mult",
+            "entry_premium_floor",
+            "entry_premium_cap",
+            "entry_premium_model",
+            "entry_scoring_enabled",
+            "entry_scoring_threshold",
+            "entry_scoring_config",
+            "entry_premium_base_pct",
+            "oi_stop_enabled",
+            "oi_stop_oi_rise_pct",
+            "oi_stop_loss_pct",
         }
     )
     internal_parameters = frozenset({"metrics_series"})

@@ -1,0 +1,55 @@
+name = "spike-v2.2-db-full-scored-m0"
+start = "2025-08-01T00:00:00+00:00"
+end = "2026-08-01T00:00:00+00:00"
+duckdb_path = "data/market/candles/candles.duckdb"
+output = "reports/spike-v2.2-db-full-scored-m0"
+metrics_root = "data/market/metrics"
+
+[universe]
+mode = "database"
+require_database_allowed = true
+freeze_days = 15
+strategy_id = "spike_short"
+
+[execution]
+memory_limit_enabled = false
+chunk_hours = 4320
+fetch_batch_size = 10000
+duckdb_threads = 1
+resume = true
+
+[fixed]
+strategy = "trading_platform.strategies.spike.v2_2:V22"
+total_notional = 1000
+exit_policy = "candidate-v1"
+warmup_hours = 168
+entry_tier_mode = "tier3-only"
+reject_below_current = true
+spike_vwap_deviation_max_pct = 0.0
+prior_high_lookback_hours = 6
+rise_low_lookback_hours = 168
+min_rise_duration_hours = 24
+profit_unlock_percent = 1.5
+max_oi_change_pct = 0
+max_ls_ratio = 1.5
+max_consecutive_up_minutes = 4
+group_rise_12h_threshold = 1.0
+loose_consecutive_up_minutes = 0
+strong_tier_atr_shift = 0.2
+strong_bucket_strict_age_ms = 1500000
+weak_bucket_strict_age_ms = 0
+profit_drawdown_peak_ratio = 0.20
+profit_drawdown_ratio = 0.10
+entry_scoring_enabled = true
+entry_scoring_threshold = 0.3
+entry_scoring_config = "reports/scoring_config_default.json"
+entry_premium_mult = 0.0
+entry_premium_base_pct = 1.0
+entry_premium_floor = 3.0
+entry_premium_cap = 35.0
+
+[analysis]
+collision_tolerance_seconds = 1
+pnl_split_usdt = 10
+breakout_windows_hours = [4, 6, 8, 12, 24]
+box_proximity_percentages = [1, 3, 5, 10]

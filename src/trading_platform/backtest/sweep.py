@@ -71,6 +71,7 @@ PARAMETER_FLAGS = {
     "box_duration_min_hours": "--box-duration-min-hours",
     "spike_avg_deviation_max_pct": "--spike-avg-deviation-max-pct",
     "spike_range_max_pct": "--spike-range-max-pct",
+    "spike_vwap_deviation_max_pct": "--spike-vwap-deviation-max-pct",
     "entry_tier_mode": "--entry-tier-mode",
     "profit_unlock_percent": "--profit-unlock-percent",
     "max_consecutive_up_minutes": "--max-consecutive-up-minutes",
@@ -96,6 +97,17 @@ PARAMETER_FLAGS = {
     "accel_ratio": "--accel-ratio",
     "accel_prev_minutes": "--accel-prev-minutes",
     "reject_below_current": "--reject-below-current",
+    "entry_premium_mult": "--entry-premium-mult",
+    "entry_premium_floor": "--entry-premium-floor",
+    "entry_premium_cap": "--entry-premium-cap",
+    "entry_premium_model": "--entry-premium-model",
+    "entry_scoring_enabled": "--entry-scoring-enabled",
+    "entry_scoring_threshold": "--entry-scoring-threshold",
+    "entry_scoring_config": "--entry-scoring-config",
+    "entry_premium_base_pct": "--entry-premium-base-pct",
+    "oi_stop_enabled": "--oi-stop-enabled",
+    "oi_stop_oi_rise_pct": "--oi-stop-oi-rise-pct",
+    "oi_stop_loss_pct": "--oi-stop-loss-pct",
     "max_rise_5s_percent": "--max-rise-5s-percent",
     "max_rise_window_seconds": "--max-rise-window-seconds",
     "max_rise_window_percent": "--max-rise-window-percent",
@@ -213,7 +225,7 @@ def _allowed_symbols(dsn: str, *, freeze_days: int, strategy_id: str) -> set[str
             with connection.cursor() as cursor:
                 cursor.execute(
                     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
-                    (timedelta(days=freeze_days), strategy_id, strategy_id),
+                    (timedelta(days=freeze_days), strategy_id),
                 )
                 return {str(row[0]).strip().upper() for row in cursor.fetchall()}
     except psycopg.OperationalError as error:

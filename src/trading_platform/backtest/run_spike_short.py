@@ -75,9 +75,21 @@ class SpikeBacktestSettings:
     box_duration_min_minutes: int
     spike_avg_deviation_max_pct: float
     spike_range_max_pct: float
+    spike_vwap_deviation_max_pct: float
     entry_tier_mode: str
     capital_config: CapitalPolicyConfig | None
     reject_below_current: bool
+    entry_premium_mult: float
+    entry_premium_floor: float
+    entry_premium_cap: float
+    entry_premium_model: str | None
+    entry_scoring_enabled: bool
+    entry_scoring_threshold: float
+    entry_scoring_config: str | None
+    entry_premium_base_pct: float
+    oi_stop_enabled: bool
+    oi_stop_oi_rise_pct: float
+    oi_stop_loss_pct: float
     early_profit_unlock_ratio: Decimal | None
     max_consecutive_up_minutes: int
     group_rise_12h_threshold: float
@@ -259,6 +271,70 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="现价已高于挂单档位时拒绝信号（低卖防护）；默认关闭",
     )
     parser.add_argument(
+        "--entry-premium-mult",
+        type=float,
+        default=0.0,
+        help="动态溢价挂单倍数（0=关闭，回退默认 spike_high−ATR 三档）",
+    )
+    parser.add_argument(
+        "--entry-premium-floor",
+        type=float,
+        default=3.0,
+        help="动态溢价挂单下限（%），仅 entry-premium-mult>0 时生效",
+    )
+    parser.add_argument(
+        "--entry-premium-cap",
+        type=float,
+        default=35.0,
+        help="动态溢价挂单上限（%），仅 entry-premium-mult>0 时生效",
+    )
+    parser.add_argument(
+        "--entry-premium-model",
+        default=None,
+        help="动态溢价模型权重 JSON 路径；默认使用 research/up_premium_model.py 内置权重",
+    )
+    parser.add_argument(
+        "--entry-scoring-enabled",
+        action="store_true",
+        default=False,
+        help="启用评分准入（低于阈值拒绝信号）",
+    )
+    parser.add_argument(
+        "--entry-scoring-threshold",
+        type=float,
+        default=0.5,
+        help="评分准入阈值（0~1）",
+    )
+    parser.add_argument(
+        "--entry-scoring-config",
+        default=None,
+        help="评分配置 JSON 路径（维度+权重+边界+准入阈值）",
+    )
+    parser.add_argument(
+        "--entry-premium-base-pct",
+        type=float,
+        default=1.0,
+        help="动态溢价基础%（S=0 时的最低溢价）",
+    )
+    parser.add_argument(
+        "--oi-stop-enabled",
+        action="store_true",
+        default=False,
+        help="启用 OI 止损：插针后首个有效 5m OI 点升幅超阈值且浮亏达标时平仓",
+    )
+    parser.add_argument(
+        "--oi-stop-oi-rise-pct",
+        type=float,
+        default=5.0,
+        help="OI 止损：确认 OI 点相对基准点升幅阈值（%）",
+    )
+    parser.add_argument(
+        "--oi-stop-loss-pct",
+        type=float,
+        default=3.0,
+        help="OI 止损：确认点时刻浮亏阈值（%）",
+    )
+    parser.add_argument(
         "--box-duration-min-hours",
         type=int,
         default=None,
@@ -278,6 +354,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=0.0,
         help="过早触发过滤：信号前 60m 价格极差阈值（%）；"
         "0 关闭（需与 --spike-avg-deviation-max-pct 同时设置）",
+    )
+    parser.add_argument(
+        "--spike-vwap-deviation-max-pct",
+        type=float,
+        default=0.0,
+        help="VWAP 偏离过滤：信号触发价相对前 100m 聚合 20 根 5m VWAP "
+        "偏离阈值（%）；0 关闭",
     )
     parser.add_argument(
         "--profit-unlock-percent",
@@ -690,6 +773,9 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         raise ValueError("--box-duration-min-hours must not be negative")
     spike_avg_deviation_max_pct = args.spike_avg_deviation_max_pct
     spike_range_max_pct = args.spike_range_max_pct
+    spike_vwap_deviation_max_pct = args.spike_vwap_deviation_max_pct
+    if spike_vwap_deviation_max_pct < 0:
+        raise ValueError("--spike-vwap-deviation-max-pct must not be negative")
     if spike_avg_deviation_max_pct < 0 or spike_range_max_pct < 0:
         raise ValueError(
             "--spike-avg-deviation-max-pct and --spike-range-max-pct "
@@ -730,9 +816,21 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         box_duration_min_minutes=box_duration_min_hours * 60,
         spike_avg_deviation_max_pct=spike_avg_deviation_max_pct,
         spike_range_max_pct=spike_range_max_pct,
+        spike_vwap_deviation_max_pct=spike_vwap_deviation_max_pct,
         entry_tier_mode=entry_tier_mode,
         capital_config=capital_config,
         reject_below_current=reject_below_current,
+        entry_premium_mult=args.entry_premium_mult,
+        entry_premium_floor=args.entry_premium_floor,
+        entry_premium_cap=args.entry_premium_cap,
+        entry_premium_model=args.entry_premium_model,
+        entry_scoring_enabled=args.entry_scoring_enabled,
+        entry_scoring_threshold=args.entry_scoring_threshold,
+        entry_scoring_config=args.entry_scoring_config,
+        entry_premium_base_pct=args.entry_premium_base_pct,
+        oi_stop_enabled=args.oi_stop_enabled,
+        oi_stop_oi_rise_pct=args.oi_stop_oi_rise_pct,
+        oi_stop_loss_pct=args.oi_stop_loss_pct,
         early_profit_unlock_ratio=(
             profit_unlock_percent / Decimal("100")
             if profit_unlock_percent is not None
@@ -937,9 +1035,21 @@ def create_spike_engine(
                 key: value
                 for key, value in {
                     "reject_below_current": settings.reject_below_current,
+                    "entry_premium_mult": settings.entry_premium_mult,
+                    "entry_premium_floor": settings.entry_premium_floor,
+                    "entry_premium_cap": settings.entry_premium_cap,
+                    "entry_premium_model": settings.entry_premium_model,
+                    "entry_scoring_enabled": settings.entry_scoring_enabled,
+                    "entry_scoring_threshold": settings.entry_scoring_threshold,
+                    "entry_scoring_config": settings.entry_scoring_config,
+                    "entry_premium_base_pct": settings.entry_premium_base_pct,
+                    "oi_stop_enabled": settings.oi_stop_enabled,
+                    "oi_stop_oi_rise_pct": settings.oi_stop_oi_rise_pct,
+                    "oi_stop_loss_pct": settings.oi_stop_loss_pct,
                     "box_duration_min_minutes": settings.box_duration_min_minutes,
                     "spike_avg_deviation_max_pct": settings.spike_avg_deviation_max_pct,
                     "spike_range_max_pct": settings.spike_range_max_pct,
+                    "spike_vwap_deviation_max_pct": settings.spike_vwap_deviation_max_pct,
                     "max_consecutive_up_minutes": settings.max_consecutive_up_minutes,
                     "group_rise_12h_threshold": settings.group_rise_12h_threshold,
                     "loose_consecutive_up_minutes": settings.loose_consecutive_up_minutes,
