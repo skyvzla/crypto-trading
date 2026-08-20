@@ -99,6 +99,14 @@ class MemoryCampaignStore:
         return False
 
 
+class ReleasingMemoryCampaignStore(MemoryCampaignStore):
+    async def release(self, campaign_id):
+        if self.active is None or self.active.campaign_id != campaign_id:
+            return False
+        self.active = None
+        return True
+
+
 def coordinator_for(strategy, executor, *, queue=None, account=None):
     gate = CompositeEntryGate(strategy)
     for name in ("execution", "market", "campaign"):
@@ -154,13 +162,57 @@ async def test_slow_submit_does_not_block_strategy_event_ingestion_and_fifo_wins
     )
 
     assert submitted == ["BTCUSDT"]
-    assert coordinator.execution_queue.qsize == 1
+    # 第二个同批信号在入队阶段即被首个 Campaign 排除，不能在首单释放后复活。
+    assert coordinator.execution_queue.qsize == 0
+    assert coordinator._pending_audit_events[-1].event_type == (
+        "signal_skipped_overlap"
+    )
 
     release_submit.set()
     await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
     assert submitted == ["BTCUSDT"]
     await coordinator.stop_execution_worker()
     assert worker_task.done()
+
+
+@pytest.mark.asyncio
+async def test_skipped_simultaneous_signal_cannot_reopen_after_fast_release():
+    submitted = []
+
+    async def submit(intent, **_kwargs):
+        submitted.append(intent.symbol)
+        return Mock(status="NEW")
+
+    strategy = IntentStrategy(
+        {
+            "BTCUSDT": [entry("BTCUSDT", 1_000)],
+            "ETHUSDT": [entry("ETHUSDT", 2_000)],
+        }
+    )
+    account = Mock(
+        iter_orders=Mock(return_value=()),
+        flush_cancellations=AsyncMock(return_value=()),
+        has_pending_cancellations=False,
+        has_open_position=Mock(return_value=False),
+        has_pending_position_update=Mock(return_value=False),
+        all_orders_terminal=Mock(return_value=True),
+    )
+    coordinator, _ = coordinator_for(
+        strategy,
+        Mock(submit=AsyncMock(side_effect=submit)),
+        account=account,
+    )
+    coordinator.campaign_store = ReleasingMemoryCampaignStore()
+
+    await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
+    await coordinator.on_bar1s_queued(bar("ETHUSDT", 2))
+    coordinator.start_execution_worker()
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+
+    assert submitted == ["BTCUSDT"]
+    assert coordinator._owned_campaign_id is None
+    assert coordinator.execution_queue.qsize == 0
+    await coordinator.stop_execution_worker()
 
 
 @pytest.mark.asyncio
@@ -218,10 +270,13 @@ async def test_full_entry_execution_queue_closes_entries_but_keeps_exit():
             "BNBUSDT": [exit_intent("BNBUSDT")],
         }
     )
+    queue = ExecutionQueue(max_pending_entries=1)
+    queued_entry = entry("BTCUSDT", 500)
+    queue.put_nowait("entry", intent=queued_entry, event_time=500)
     coordinator, gate = coordinator_for(
         strategy,
         Mock(submit=AsyncMock(return_value=Mock(status="NEW"))),
-        queue=ExecutionQueue(max_pending_entries=1),
+        queue=queue,
         account=account,
     )
 
@@ -233,6 +288,7 @@ async def test_full_entry_execution_queue_closes_entries_but_keeps_exit():
     account.cancel_order.assert_called_once_with("entry-order")
     jobs = [await coordinator.execution_queue.get() for _ in range(3)]
     assert [job.kind for job in jobs] == ["exit", "cancel", "entry"]
+    assert jobs[-1].intent == queued_entry
     for _ in jobs:
         coordinator.execution_queue.task_done()
 

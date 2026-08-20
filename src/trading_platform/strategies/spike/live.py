@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, NoReturn, Protocol
 
@@ -29,6 +30,9 @@ from trading_platform.strategies.spike.execution_queue import (
     ExecutionQueue,
     ExecutionWorker,
 )
+from trading_platform.strategies.spike.capital import CapitalPolicy, CapitalPolicyConfig
+from trading_platform.strategies.spike.capital_store import CapitalSnapshot
+from trading_platform.strategies.spike.signal_arbiter import SignalArbiter
 from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     parse_entry_client_order_id,
@@ -37,11 +41,19 @@ from trading_platform.strategies.universe import DEFAULT_DELISTING_FREEZE_DAYS
 
 
 STRATEGY_ID = "spike_short"
-ENTRY_REASONS = {"spike_tier1", "spike_tier2", "spike_tier3"}
+ENTRY_REASONS = {"spike_entry", "spike_tier1", "spike_tier2", "spike_tier3"}
 LIVE_CONFIRMATION = "I_UNDERSTAND_LIVE_ORDERS_ARE_REAL"
 
 
 logger = logging.getLogger(__name__)
+
+
+def campaign_store_key(account_id: str, strategy_id: str) -> str:
+    """账户和策略共同定义唯一 Campaign 命名空间。"""
+
+    if not account_id or not strategy_id:
+        raise ValueError("account_id and strategy_id are required")
+    return f"trading_platform:campaign:{account_id}:{strategy_id}:active"
 
 
 def require_one_way_position_mode(response: dict[str, Any]) -> None:
@@ -64,7 +76,14 @@ class SpikeLiveSettings(BaseSettings):
     account_id: str
     dedicated_strategy_account: bool = True
     symbols: list[str]
-    total_notional: Decimal
+    total_notional: Decimal | None = None
+    initial_account_capital: Decimal | None = None
+    initial_trading_capital: Decimal | None = None
+    profit_reinvest_ratio: Decimal | None = None
+    minimum_trading_capital: Decimal | None = None
+    entry_tier_mode: Literal["three-tier", "tier3-only", "single-entry"] = (
+        "single-entry"
+    )
     wal_path: str = "data/wal/spike_short.jsonl"
     subcategory: str = "spike"
     poll_interval_seconds: float = 5.0
@@ -86,8 +105,29 @@ class SpikeLiveSettings(BaseSettings):
             raise ValueError("Spike requires a dedicated strategy account")
         if not self.symbols or any(not symbol.endswith("USDT") for symbol in self.symbols):
             raise ValueError("at least one USDT symbol is required")
-        if self.total_notional <= 0:
-            raise ValueError("total_notional must be positive")
+        formal = (
+            self.initial_account_capital,
+            self.initial_trading_capital,
+            self.profit_reinvest_ratio,
+            self.minimum_trading_capital,
+        )
+        if any(value is not None for value in formal):
+            if any(value is None for value in formal):
+                raise ValueError(
+                    "capital policy fields must be configured together"
+                )
+            CapitalPolicyConfig(
+                initial_account_capital=formal[0],
+                initial_trading_capital=formal[1],
+                profit_reinvest_ratio=formal[2],
+                minimum_trading_capital=formal[3],
+            )
+        elif self.total_notional is None or self.total_notional <= 0:
+            raise ValueError(
+                "formal capital policy or positive total_notional is required"
+            )
+        if self.entry_tier_mode != "single-entry":
+            raise ValueError("Spike live entry_tier_mode must be single-entry")
         if self.poll_interval_seconds != 5 or self.max_poll_attempts != 12:
             raise ValueError("SUBMIT_UNKNOWN recovery is frozen at 5s x 12")
         if self.delisting_freeze_days < 0:
@@ -99,6 +139,27 @@ class SpikeLiveSettings(BaseSettings):
                 "live mode requires the latest exit policy to be calibrated and frozen"
             )
         return self
+
+    @property
+    def capital_config(self) -> CapitalPolicyConfig:
+        if self.initial_account_capital is not None:
+            return CapitalPolicyConfig(
+                initial_account_capital=self.initial_account_capital,
+                initial_trading_capital=self.initial_trading_capital,
+                profit_reinvest_ratio=self.profit_reinvest_ratio,
+                minimum_trading_capital=self.minimum_trading_capital,
+            )
+        assert self.total_notional is not None
+        return CapitalPolicyConfig(
+            initial_account_capital=self.total_notional,
+            initial_trading_capital=self.total_notional,
+            profit_reinvest_ratio=Decimal("1"),
+            minimum_trading_capital=Decimal("0"),
+        )
+
+    @property
+    def initial_order_notional(self) -> Decimal:
+        return self.capital_config.initial_trading_capital
 
 
 class CompositeEntryGate:
@@ -158,6 +219,32 @@ class CampaignTradeSource(Protocol):
     ) -> list[Any]:
         ...
 
+    async def get_campaign_pnl(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        campaign_id: str,
+    ) -> Any | None:
+        ...
+
+
+class CapitalSettlementStore(Protocol):
+    async def settle(self, **kwargs: Any) -> Any:
+        ...
+
+
+class CampaignFundingSource(Protocol):
+    async def sync_funding_fee_total(
+        self,
+        *,
+        account_id: str,
+        symbol: str,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> Decimal:
+        ...
+
 
 class SpikeExecutionCoordinator:
     """串行处理市场事件、Campaign 互斥、风险检查与可靠订单提交。"""
@@ -176,6 +263,12 @@ class SpikeExecutionCoordinator:
         audit_sink: AuditSink | None = None,
         now_ms: Callable[[], int] | None = None,
         execution_queue: ExecutionQueue | None = None,
+        capital_store: CapitalSettlementStore | None = None,
+        funding_source: CampaignFundingSource | None = None,
+        capital_admission_refresh: Callable[
+            [CapitalSnapshot], Awaitable[bool]
+        ]
+        | None = None,
     ):
         self.strategy = strategy
         self.account = account
@@ -186,10 +279,16 @@ class SpikeExecutionCoordinator:
         self.account_id = account_id
         self.trade_source = trade_source
         self.audit_sink = audit_sink
+        self.capital_store = capital_store
+        self.funding_source = funding_source
+        self.capital_admission_refresh = capital_admission_refresh
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._lock = asyncio.Lock()
+        self._campaign_lock = asyncio.Lock()
         self._owned_campaign_id: str | None = None
         self._owned_campaign_lease: CampaignLease | None = None
+        self._submissions_inflight = 0
+        self._signal_arbiter = SignalArbiter()
         self._expiry_tasks: dict[str, asyncio.Task] = {}
         self._pending_audit_events: tuple[StrategyAuditEvent, ...] = ()
         self._audit_lock = asyncio.Lock()
@@ -227,6 +326,7 @@ class SpikeExecutionCoordinator:
         if lease.strategy_id == STRATEGY_ID and lease.symbol in self.strategy.strategies:
             self._owned_campaign_id = lease.campaign_id
             self._owned_campaign_lease = lease
+            self._signal_arbiter.restore_active(lease.campaign_id)
             self._queue_campaign_audit(
                 "campaign_recovered",
                 lease,
@@ -557,7 +657,13 @@ class SpikeExecutionCoordinator:
         if cancellation_requested:
             await self._flush_cancellations()
 
-    async def _execute(self, intents: list[OrderIntent], *, event_time: int) -> bool:
+    async def _execute(
+        self,
+        intents: list[OrderIntent],
+        *,
+        event_time: int,
+        require_arbitrated: bool = False,
+    ) -> bool:
         symbol_allowed = getattr(self.strategy, "is_symbol_entry_enabled", None)
         entries = [
             intent
@@ -566,27 +672,58 @@ class SpikeExecutionCoordinator:
             and (not callable(symbol_allowed) or symbol_allowed(intent.symbol))
         ]
         exits = [intent for intent in intents if intent.reduce_only]
+        approved_entries: list[OrderIntent] = []
         if entries and self.gate.enabled:
             campaign_id = self._campaign_id(entries[0])
-            if not await self._acquire_campaign(campaign_id, entries[0].symbol, event_time):
-                self.gate.set_condition("campaign", False)
-            else:
-                total_value = sum(intent.price * intent.quantity for intent in entries)
-                allowed, reason = self.risk_guard.check_can_open(
-                    entries[0].symbol, total_value
-                )
-                if not allowed:
-                    self.risk_guard.block_symbol(
-                        entries[0].symbol, f"entry rejected:{reason}"
-                    )
+            async with self._campaign_lock:
+                if (
+                    require_arbitrated
+                    and self._signal_arbiter.active_campaign_id != campaign_id
+                ):
+                    entries = []
+                elif not await self._acquire_campaign(
+                    campaign_id, entries[0].symbol, event_time
+                ):
+                    self.gate.set_condition("campaign", False)
+                    if self._signal_arbiter.active_campaign_id == campaign_id:
+                        self._signal_arbiter.release(campaign_id)
                 else:
-                    for intent in entries:
-                        await self._submit(intent)
+                    total_value = sum(
+                        intent.price * intent.quantity for intent in entries
+                    )
+                    allowed, reason = self.risk_guard.check_can_open(
+                        entries[0].symbol, total_value
+                    )
+                    if not allowed:
+                        self.risk_guard.block_symbol(
+                            entries[0].symbol, f"entry rejected:{reason}"
+                        )
+                    else:
+                        approved_entries = entries
+                        self._submissions_inflight += len(approved_entries)
+        try:
+            for intent in approved_entries:
+                await self._submit(intent)
+        finally:
+            if approved_entries:
+                async with self._campaign_lock:
+                    self._submissions_inflight -= len(approved_entries)
+
+        approved_exits: list[OrderIntent] = []
         for intent in exits:
             if not self.gate.condition("execution"):
                 self.risk_guard.halt("exit blocked while execution facts are unavailable")
                 return False
-            await self._submit(intent)
+            approved_exits.append(intent)
+        if approved_exits:
+            async with self._campaign_lock:
+                self._submissions_inflight += len(approved_exits)
+            try:
+                for intent in approved_exits:
+                    await self._submit(intent)
+            finally:
+                async with self._campaign_lock:
+                    self._submissions_inflight -= len(approved_exits)
         return True
 
     def _enqueue_intents(
@@ -608,21 +745,48 @@ class SpikeExecutionCoordinator:
                 "exit", intent=intent, event_time=event_time
             )
             queued += 1
+        campaigns: dict[str, list[OrderIntent]] = {}
         for intent in entries:
+            campaigns.setdefault(self._campaign_id(intent), []).append(intent)
+        for campaign_id, campaign_entries in campaigns.items():
             if not self.gate.enabled:
                 continue
-            try:
-                self.execution_queue.put_nowait(
-                    "entry", intent=intent, event_time=event_time
-                )
-            except asyncio.QueueFull:
-                self.close_entry_pipeline(
-                    "entry execution queue full",
-                    symbol=intent.symbol,
-                    event_time=event_time,
+            symbol, signal_time = parse_entry_client_order_id(
+                campaign_entries[0].client_order_id,
+                expected_symbol=campaign_entries[0].symbol,
+            ) or ("", -1)
+            candidate = self._signal_arbiter.enqueue(
+                symbol=symbol,
+                campaign_id=campaign_id,
+                signal_time=signal_time,
+                received_at=event_time,
+            )
+            result = self._signal_arbiter.arbitrate(now_ms=event_time)[0]
+            if result.status != "acquired":
+                self._pending_audit_events += (
+                    StrategyAuditEvent(
+                        event_time=event_time,
+                        event_type=f"signal_{result.status}",
+                        symbol=candidate.symbol,
+                        strategy_id=STRATEGY_ID,
+                        campaign_id=candidate.campaign_id,
+                        details={"arrival_sequence": candidate.arrival_sequence},
+                    ),
                 )
                 continue
-            queued += 1
+            for intent in campaign_entries:
+                try:
+                    self.execution_queue.put_nowait(
+                        "entry", intent=intent, event_time=event_time
+                    )
+                except asyncio.QueueFull:
+                    self.close_entry_pipeline(
+                        "entry execution queue full",
+                        symbol=intent.symbol,
+                        event_time=event_time,
+                    )
+                    continue
+                queued += 1
         return queued
 
     def _enqueue_maintenance(self, *, event_time: int) -> None:
@@ -670,7 +834,9 @@ class SpikeExecutionCoordinator:
             else:
                 assert job.intent is not None
                 execution_complete = await self._execute(
-                    [job.intent], event_time=job.event_time
+                    [job.intent],
+                    event_time=job.event_time,
+                    require_arbitrated=job.kind == "entry",
                 )
                 if execution_complete and job.intent.reduce_only:
                     await self._persist_exit_state(job.intent.symbol)
@@ -773,6 +939,10 @@ class SpikeExecutionCoordinator:
         return acquired
 
     async def _persist_exit_state(self, symbol: str) -> None:
+        async with self._campaign_lock:
+            await self._persist_exit_state_locked(symbol)
+
+    async def _persist_exit_state_locked(self, symbol: str) -> None:
         lease = self._owned_campaign_lease
         if lease is None or lease.symbol != symbol:
             return
@@ -816,35 +986,136 @@ class SpikeExecutionCoordinator:
         )
 
     async def maybe_release_campaign(self, symbol: str) -> bool:
-        campaign_id = self._owned_campaign_id
-        if campaign_id is None:
-            return False
-        if self.account.has_open_position(symbol):
-            return False
-        # An execution report can precede ACCOUNT_UPDATE. Keep the Campaign
-        # lease until the position fact confirms the fill, even if the WAL is
-        # already terminal.
-        has_pending_position_update = getattr(
-            self.account, "has_pending_position_update", None
-        )
-        if has_pending_position_update is not None and has_pending_position_update(symbol):
-            return False
-        if not self.account.all_orders_terminal(symbol):
-            return False
-        released = await self.campaign_store.release(campaign_id)
-        if released:
+        async with self._campaign_lock:
+            campaign_id = self._owned_campaign_id
             lease = self._owned_campaign_lease
-            self._owned_campaign_id = None
-            self._owned_campaign_lease = None
-            self.gate.set_condition("campaign", True)
-            if lease is not None:
+            if campaign_id is None:
+                return False
+            if lease is None:
+                if self.capital_store is not None:
+                    return False
+                lease = CampaignLease(
+                    campaign_id,
+                    STRATEGY_ID,
+                    symbol,
+                    self._now_ms(),
+                )
+            if lease.symbol != symbol:
+                return False
+            if self._submissions_inflight:
+                return False
+            if self.account.has_open_position(symbol):
+                return False
+            # An execution report can precede ACCOUNT_UPDATE. Keep the Campaign
+            # lease until the position fact confirms the fill, even if the WAL is
+            # already terminal.
+            has_pending_position_update = getattr(
+                self.account, "has_pending_position_update", None
+            )
+            if (
+                has_pending_position_update is not None
+                and has_pending_position_update(symbol)
+            ):
+                return False
+            if not self.account.all_orders_terminal(symbol):
+                return False
+            await self._settle_campaign(lease)
+            released = await self.campaign_store.release(campaign_id)
+            if released:
+                self._owned_campaign_id = None
+                self._owned_campaign_lease = None
+                if self._signal_arbiter.active_campaign_id == campaign_id:
+                    self._signal_arbiter.release(campaign_id)
+                self.gate.set_condition("campaign", True)
                 self._queue_campaign_audit(
                     "campaign_released",
                     lease,
                     event_time=self._now_ms(),
                 )
                 await self._publish_audit()
-        return released
+            return released
+
+    async def _settle_campaign(self, lease: CampaignLease) -> None:
+        if self.capital_store is None:
+            return
+        if self.trade_source is None:
+            raise RuntimeError("Campaign PnL source is unavailable")
+        summary = await self.trade_source.get_campaign_pnl(
+            account_id=self.account_id,
+            strategy_id=STRATEGY_ID,
+            campaign_id=lease.campaign_id,
+        )
+        # A Campaign whose entry never filled has no capital fact to settle.
+        if summary is None:
+            return
+        self.gate.set_condition("capital", False)
+        if (
+            summary.campaign_id != lease.campaign_id
+            or summary.symbol != lease.symbol
+            or summary.has_open_quantity
+            or summary.closed_at is None
+        ):
+            raise RuntimeError("Campaign PnL is not a complete closed fact")
+        if self.funding_source is None:
+            raise RuntimeError("Campaign funding source is unavailable")
+        start_at = datetime.fromtimestamp(lease.started_at_ms / 1_000, tz=UTC)
+        end_at = summary.closed_at + timedelta(milliseconds=1)
+        funding = await self.funding_source.sync_funding_fee_total(
+            account_id=self.account_id,
+            symbol=lease.symbol,
+            start_at=start_at,
+            end_at=end_at,
+        )
+        result = await self.capital_store.settle(
+            account_id=self.account_id,
+            strategy_id=STRATEGY_ID,
+            idempotency_key=lease.campaign_id,
+            campaign_id=lease.campaign_id,
+            net_pnl=summary.net_realized_pnl + funding,
+            occurred_at=summary.closed_at,
+        )
+        snapshot = result.snapshot
+        for strategy in self.strategy.strategies.values():
+            strategy.total_notional = snapshot.state.trading_capital
+        self.risk_guard.config.max_position_value_usdt = (
+            snapshot.state.trading_capital
+        )
+        can_open = CapitalPolicy(snapshot.config).can_open(snapshot.state)
+        if self.capital_admission_refresh is not None:
+            can_open = bool(await self.capital_admission_refresh(snapshot)) and can_open
+        self.gate.set_condition("capital", can_open)
+
+    async def record_capital_admission(
+        self,
+        *,
+        enabled: bool,
+        wallet_capital: Decimal | None,
+        required_capital: Decimal,
+        reason: str,
+    ) -> None:
+        lease = self._owned_campaign_lease
+        self._pending_audit_events += (
+            StrategyAuditEvent(
+                event_time=self._now_ms(),
+                event_type="capital_admission_changed",
+                symbol=(
+                    lease.symbol
+                    if lease is not None
+                    else next(iter(self.strategy.strategies))
+                ),
+                strategy_id=STRATEGY_ID,
+                campaign_id=None if lease is None else lease.campaign_id,
+                details={
+                    "enabled": enabled,
+                    "wallet_capital": (
+                        None if wallet_capital is None else str(wallet_capital)
+                    ),
+                    "required_capital": str(required_capital),
+                    "reason": reason,
+                },
+            ),
+        )
+        await self._publish_audit()
 
     async def stop(self) -> None:
         await self.stop_execution_worker()

@@ -156,6 +156,21 @@ class BinanceOrderExecutor:
                 error=f"submit_timeout:{type(exc).__name__}",
             )
 
+        # User Stream can report NEW/PARTIALLY_FILLED/FILLED before the REST
+        # request task resumes.  Its later WAL row is the newer exchange fact;
+        # never append the older submit response over it.
+        latest = self.wal.recover_latest().get(intent.client_order_id)
+        if latest is not None and latest.record_type != "intent":
+            response_order_id = response.get("orderId")
+            if (
+                response_order_id is not None
+                and latest.exchange_order_id is not None
+                and str(response_order_id) != latest.exchange_order_id
+            ):
+                self._block_unknown(latest)
+                raise ValueError("REST and User Stream order ids differ")
+            return latest
+
         try:
             return self.wal.record_exchange_status(
                 intent_record,

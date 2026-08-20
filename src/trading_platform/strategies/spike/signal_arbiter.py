@@ -91,3 +91,12 @@ class SignalArbiter:
         if not campaign_id or campaign_id != self._active_campaign_id:
             raise ValueError("only the active Campaign can be released")
         self._active_campaign_id = None
+
+    def restore_active(self, campaign_id: str) -> None:
+        """启动恢复时以 Redis 已确认的 Campaign 重建本地互斥状态。"""
+
+        if not campaign_id:
+            raise ValueError("campaign_id is required")
+        if self._active_campaign_id not in {None, campaign_id}:
+            raise ValueError("a different Campaign is already active")
+        self._active_campaign_id = campaign_id

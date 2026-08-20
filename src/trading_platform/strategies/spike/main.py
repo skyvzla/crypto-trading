@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import signal
 import time
@@ -50,8 +51,11 @@ from trading_platform.strategies.spike.live import (
     SpikeExecutionCoordinator,
     SpikeLiveSettings,
     SpikeRuntimeCallbacks,
+    campaign_store_key,
     require_one_way_position_mode,
 )
+from trading_platform.strategies.spike.capital import CapitalPolicy
+from trading_platform.strategies.spike.capital_store import CapitalSnapshot, CapitalStore
 from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     DynamicSpikeShortStrategy,
@@ -88,13 +92,20 @@ def _snapshot_from_database(
 def require_viable_entry_notional(
     total_notional: Decimal,
     rules: BinanceSymbolRules,
+    *,
+    entry_tier_mode: str = "three-tier",
 ) -> None:
-    """拒绝任何确定会低于交易所最小名义金额的三档配置。"""
-    smallest_tier = total_notional * min(DynamicSpikeShortStrategy.TIER_WEIGHTS)
-    if smallest_tier <= rules.min_notional:
+    """拒绝任何确定会低于交易所最小名义金额的入场配置。"""
+    entry_notional = (
+        total_notional
+        if entry_tier_mode == "single-entry"
+        else total_notional * min(DynamicSpikeShortStrategy.TIER_WEIGHTS)
+    )
+    if entry_notional <= rules.min_notional:
+        label = "entry notional" if entry_tier_mode == "single-entry" else "smallest entry tier"
         raise ValueError(
-            f"{rules.symbol} smallest entry tier must exceed min notional: "
-            f"{smallest_tier} <= {rules.min_notional}"
+            f"{rules.symbol} {label} must exceed min notional: "
+            f"{entry_notional} <= {rules.min_notional}"
         )
 
 
@@ -156,6 +167,8 @@ class SpikeLiveProcess:
         self.execution_lease: PostgresExecutionLease | None = None
         self.db: LedgerDB | None = None
         self.execution_rest: BinanceRestClient | None = None
+        self.capital_store: CapitalStore | None = None
+        self.capital_snapshot: CapitalSnapshot | None = None
         self.exchange_symbol_snapshot: ExchangeSymbolSnapshot | None = None
         self._exchange_rules_synced_monotonic: float | None = None
         self.instance_id = uuid4().hex
@@ -183,6 +196,15 @@ class SpikeLiveProcess:
             await self.coordinator.restore_campaign_gate()
             await self.runtime.start()
             await self.coordinator.account.refresh_positions()
+            recovery_allowed = bool(
+                self.coordinator._owned_campaign_id
+                or self.coordinator.account.symbols_with_live_risk()
+            )
+            if self.capital_snapshot is not None:
+                await self._reconcile_capital_wallet(
+                    self.capital_snapshot,
+                    recovery_allowed=recovery_allowed,
+                )
             await self._refresh_exchange_symbol_admission()
             await self.coordinator.reconcile_entry_expirations()
             self.coordinator.validate_recovered_campaign()
@@ -312,6 +334,27 @@ class SpikeLiveProcess:
         if errors:
             raise BaseExceptionGroup("Spike shutdown failed", errors)
 
+    async def _initialize_capital(self, pool: Any) -> CapitalSnapshot:
+        self.capital_store = CapitalStore(pool)
+        return await self.capital_store.initialize(
+            account_id=self.settings.account_id,
+            strategy_id=STRATEGY_ID,
+            config=self.settings.capital_config,
+        )
+
+    @staticmethod
+    def _build_funding_source(rest: BinanceRestClient, pool: Any) -> Any:
+        income_store_module = importlib.import_module(
+            "trading_platform.ledger.income_store"
+        )
+        income_sync_module = importlib.import_module(
+            "trading_platform.ledger.income_sync"
+        )
+        return income_sync_module.FundingIncomeSync(
+            rest,
+            income_store_module.IncomeStore(pool),
+        )
+
     async def _build_resources(self) -> None:
         pool = await create_connection_pool(self.database.dsn)
         self._stack.push_async_callback(pool.close)
@@ -320,6 +363,8 @@ class SpikeLiveProcess:
         self._stack.push_async_callback(self.execution_lease.release)
         db = LedgerDB(pool)
         self.db = db
+        self.capital_snapshot = await self._initialize_capital(pool)
+        trading_capital = self.capital_snapshot.state.trading_capital
 
         self.redis = redis.Redis(
             host=self.redis_config.host,
@@ -347,14 +392,10 @@ class SpikeLiveProcess:
         risk = RiskGuard(
             self.settings.account_id,
             RiskConfig(
-                max_position_value_usdt=Decimal(
-                    str(self.strategy_config.risk_max_position_value_usdt)
-                ),
+                max_position_value_usdt=trading_capital,
                 max_symbols=self.strategy_config.risk_max_symbols,
             ),
         )
-        if self.settings.total_notional > risk.config.max_position_value_usdt:
-            raise ValueError("total_notional exceeds process risk limit")
         wal = OrderWAL(self.settings.wal_path)
         initial_symbol_snapshot = _snapshot_from_database(
             self.settings.symbols,
@@ -375,11 +416,15 @@ class SpikeLiveProcess:
         )
         symbol_rules = self._build_symbol_rule_book(execution_exchange_info)
         self._exchange_rules_synced_monotonic = asyncio.get_running_loop().time()
-        for symbol in initial_symbol_snapshot.allowed_symbols:
-            require_viable_entry_notional(
-                self.settings.total_notional,
-                symbol_rules.get(symbol),
-            )
+        if CapitalPolicy(self.capital_snapshot.config).can_open(
+            self.capital_snapshot.state
+        ):
+            for symbol in initial_symbol_snapshot.allowed_symbols:
+                require_viable_entry_notional(
+                    trading_capital,
+                    symbol_rules.get(symbol),
+                    entry_tier_mode=self.settings.entry_tier_mode,
+                )
         account = BinanceStrategyAccount(
             rest,
             wal,
@@ -389,13 +434,13 @@ class SpikeLiveProcess:
         )
         strategy = DynamicSpikeBacktestStrategy(
             self.settings.symbols,
-            self.settings.total_notional,
+            trading_capital,
             account=account,
             exit_policy=self.settings.exit_policy,
             prior_high_lookback_minutes=(
                 self.strategy_definition.defaults.prior_high_lookback_hours * 60
             ),
-            entry_tier_mode=self.strategy_definition.defaults.entry_tier_mode,
+            entry_tier_mode=self.settings.entry_tier_mode,
             rise_low_lookback_minutes=(
                 self.strategy_definition.defaults.rise_low_lookback_hours * 60
             ),
@@ -429,19 +474,30 @@ class SpikeLiveProcess:
             "campaign",
             "exchange_symbols",
             "event_queue",
+            "capital",
         ):
             self.gate.set_condition(condition, False)
+        funding_source = self._build_funding_source(rest, pool)
         self.coordinator = SpikeExecutionCoordinator(
             strategy=strategy,
             account=account,
             executor=executor,
-            campaign_store=RedisCampaignStore(self.redis),
+            campaign_store=RedisCampaignStore(
+                self.redis,
+                key=campaign_store_key(self.settings.account_id, STRATEGY_ID),
+            ),
             risk_guard=risk,
             gate=self.gate,
             account_id=self.settings.account_id,
             trade_source=db,
             audit_sink=lambda events: db.insert_strategy_audit_events(
                 events, account_id=self.settings.account_id
+            ),
+            capital_store=self.capital_store,
+            funding_source=funding_source,
+            capital_admission_refresh=lambda snapshot: self._reconcile_capital_wallet(
+                snapshot,
+                recovery_allowed=True,
             ),
         )
         self.admission = SubcategoryAdmissionService(
@@ -603,6 +659,61 @@ class SpikeLiveProcess:
             ready = False
         self.gate.set_condition("execution", ready)
         return ready
+
+    async def _reconcile_capital_wallet(
+        self,
+        snapshot: CapitalSnapshot,
+        *,
+        recovery_allowed: bool,
+    ) -> bool:
+        """空仓严格核对钱包；持仓恢复只关闭开仓，不阻断退出。"""
+
+        if self.execution_rest is None or self.gate is None:
+            raise RuntimeError("capital wallet reconciliation is unavailable")
+        self.capital_snapshot = snapshot
+        wallet_capital: Decimal | None = None
+        reason = "wallet capital is unavailable"
+        try:
+            response = await self.execution_rest.get_account()
+            raw_wallet = response.get("totalWalletBalance")
+            wallet_capital = Decimal(str(raw_wallet))
+            if not wallet_capital.is_finite() or wallet_capital < 0:
+                raise ValueError("invalid totalWalletBalance")
+            sufficient = wallet_capital >= snapshot.state.account_capital
+            policy_ready = CapitalPolicy(snapshot.config).can_open(snapshot.state)
+            enabled = sufficient and policy_ready
+            reason = (
+                "ok"
+                if enabled
+                else (
+                    "wallet capital is insufficient"
+                    if not sufficient
+                    else "trading capital reached its minimum"
+                )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            enabled = False
+
+        self.gate.set_condition("capital", enabled)
+        if not enabled:
+            logger.error(
+                "Spike capital admission closed: %s (wallet=%s required=%s)",
+                reason,
+                wallet_capital,
+                snapshot.state.account_capital,
+            )
+            if self.coordinator is not None:
+                await self.coordinator.record_capital_admission(
+                    enabled=False,
+                    wallet_capital=wallet_capital,
+                    required_capital=snapshot.state.account_capital,
+                    reason=reason,
+                )
+            if not recovery_allowed:
+                raise RuntimeError(reason)
+        return enabled
 
     async def _register_market_subscriptions(self) -> None:
         assert self.http is not None
