@@ -11,13 +11,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from trading_platform.backtest.engine import BacktestEngine, Event
-from trading_platform.backtest.funding import FundingIncomeEvent
 from trading_platform.backtest.loader import BacktestDataLoader
 from trading_platform.backtest.strategy_definition import SharedFeatureProvider
 from trading_platform.backtest.run_spike_short import (
     SpikeBacktestSettings,
     create_spike_engine,
-    load_funding_events,
     load_metrics_series,
     parse_args as parse_run_args,
     resolve_settings,
@@ -196,7 +194,6 @@ def run_symbol_task(task: dict[str, Any]) -> int:
     metrics_cache: dict[
         tuple[str, str], list[tuple[int, float, float]]
     ] = {}
-    funding_cache: dict[tuple[object, ...], list[FundingIncomeEvent]] = {}
     for item in task.get("runs", []):
         args = parse_run_args(item["arguments"])
         settings = resolve_settings(args)
@@ -208,27 +205,15 @@ def run_symbol_task(task: dict[str, Any]) -> int:
                     args.metrics_root, args.symbol
                 )
             preloaded_metrics_series = metrics_cache[metrics_key]
-        engine_kwargs: dict[str, object] = {}
-        if preloaded_metrics_series is not None:
-            engine_kwargs["preloaded_metrics_series"] = preloaded_metrics_series
-        if settings.capital_config is not None:
-            funding_key = (
-                settings.funding_duckdb_path,
-                settings.funding_account_id,
-                args.symbol,
-                settings.start_ms,
-                settings.end_ms,
+        engine = (
+            create_spike_engine(
+                args,
+                settings,
+                events=(),
+                preloaded_metrics_series=preloaded_metrics_series,
             )
-            if funding_key not in funding_cache:
-                loaded_funding = load_funding_events(
-                    settings, args.symbol
-                )
-                if loaded_funding is None:
-                    raise RuntimeError("dynamic capital funding input was not loaded")
-                funding_cache[funding_key] = loaded_funding
-            engine_kwargs["preloaded_funding_events"] = funding_cache[funding_key]
-        engine = create_spike_engine(
-            args, settings, events=(), **engine_kwargs
+            if preloaded_metrics_series is not None
+            else create_spike_engine(args, settings, events=())
         )
         plan = SymbolRunPlan(
             run_id=str(item["run_id"]),
