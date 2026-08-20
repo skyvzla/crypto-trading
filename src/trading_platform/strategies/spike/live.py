@@ -315,6 +315,11 @@ class SpikeExecutionCoordinator:
 
     async def restore_campaign_gate(self) -> None:
         """恢复 Redis 互斥事实；不依据本地状态猜测或删除已有 lease。"""
+
+        async with self._campaign_lock:
+            await self._restore_campaign_gate_locked()
+
+    async def _restore_campaign_gate_locked(self) -> None:
         previous_campaign_id = self._owned_campaign_id
         lease = await self.campaign_store.get_active()
         if lease is None:

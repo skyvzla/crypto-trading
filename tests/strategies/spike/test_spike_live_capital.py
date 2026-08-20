@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from trading_platform.shared.events import OrderIntent
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.campaign_store import CampaignLease
+from trading_platform.strategies.admission import SubcategoryAdmissionService
 from trading_platform.strategies.spike.capital import (
     CapitalPolicyConfig,
     CapitalState,
@@ -467,6 +468,43 @@ def test_spike_entry_reason_is_part_of_live_admission():
     from trading_platform.strategies.spike.live import ENTRY_REASONS
 
     assert "spike_entry" in ENTRY_REASONS
+
+
+@pytest.mark.asyncio
+async def test_closed_subcategory_cancels_single_entry_but_preserves_exit():
+    from trading_platform.strategies.spike.live import ENTRY_REASONS
+
+    single_entry = Mock(
+        order_id="entry-1",
+        strategy_id="spike_short",
+        trigger_reason="spike_entry",
+        status="NEW",
+    )
+    reduce_only_exit = Mock(
+        order_id="exit-1",
+        strategy_id="spike_short",
+        trigger_reason="candidate_time_risk_exit",
+        status="NEW",
+    )
+    account = Mock(
+        iter_orders=Mock(return_value=(single_entry, reduce_only_exit)),
+        cancel_order=Mock(return_value=True),
+    )
+    gate = Mock(set_entry_enabled=Mock())
+    admission = SubcategoryAdmissionService(
+        source=Mock(is_subcategory_enabled=AsyncMock(return_value=False)),
+        gate=gate,
+        account=account,
+        subcategory="spike",
+        strategy_id="spike_short",
+        entry_trigger_reasons=ENTRY_REASONS,
+    )
+
+    result = await admission.on_universe_scan()
+
+    gate.set_entry_enabled.assert_called_once_with(False)
+    account.cancel_order.assert_called_once_with("entry-1")
+    assert result.cancelled_order_ids == ("entry-1",)
 
 
 def _entry(symbol, signal_time):

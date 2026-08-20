@@ -1138,6 +1138,17 @@ class SpikeLiveProcess:
             await self.coordinator.restore_campaign_gate()
             self.coordinator.validate_recovered_campaign()
             await self.coordinator.reconcile_entry_expirations()
+            if self.capital_store is not None:
+                snapshot = await self.capital_store.get_state(
+                    account_id=self.settings.account_id,
+                    strategy_id=STRATEGY_ID,
+                )
+                if snapshot is None:
+                    raise RuntimeError("persisted capital state disappeared")
+                await self._reconcile_capital_wallet(
+                    snapshot,
+                    recovery_allowed=True,
+                )
             if self.runtime is not None and self.runtime.is_running:
                 if self.coordinator.account.has_unresolved_orders():
                     self.gate.set_condition("execution", False)
