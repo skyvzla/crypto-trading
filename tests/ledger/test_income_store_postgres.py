@@ -12,7 +12,7 @@ import pytest
 
 from trading_platform.ledger.db.migrations import apply_migrations
 from trading_platform.ledger.db.models import create_connection_pool
-from trading_platform.ledger.income_store import IncomeStore
+from trading_platform.ledger.income_store import IncomeFactConflictError, IncomeStore
 from trading_platform.ledger.income_sync import FundingIncomeSync
 
 
@@ -119,6 +119,75 @@ async def test_replayed_income_row_is_idempotent(income_store):
 
     assert await income_store.funding_fee_total(
         account_id="spike-idempotent",
+        symbol="BTCUSDT",
+        start_at=occurred_at - timedelta(seconds=1),
+        end_at=occurred_at + timedelta(seconds=1),
+    ) == Decimal("-0.125")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"income": "-9"},
+        {"symbol": "ETHUSDT"},
+        {"asset": "BUSD"},
+        {"time": int(datetime(2026, 8, 20, 9, tzinfo=UTC).timestamp() * 1000)},
+    ],
+)
+async def test_reused_income_identity_with_different_fact_is_rejected(
+    income_store, change
+):
+    occurred_at = datetime(2026, 8, 20, 8, tzinfo=UTC)
+    original = {
+        "symbol": "BTCUSDT",
+        "incomeType": "FUNDING_FEE",
+        "income": "-0.125",
+        "asset": "USDT",
+        "time": int(occurred_at.timestamp() * 1000),
+        "tranId": 323456789,
+    }
+    await income_store.upsert_income_history(
+        account_id="spike-conflict", rows=[original]
+    )
+
+    with pytest.raises(IncomeFactConflictError, match="different fact"):
+        await income_store.upsert_income_history(
+            account_id="spike-conflict", rows=[{**original, **change}]
+        )
+
+    assert await income_store.funding_fee_total(
+        account_id="spike-conflict",
+        symbol="BTCUSDT",
+        start_at=occurred_at - timedelta(seconds=1),
+        end_at=occurred_at + timedelta(seconds=1),
+    ) == Decimal("-0.125")
+
+
+@pytest.mark.asyncio
+async def test_income_conflict_rolls_back_the_whole_page(income_store):
+    occurred_at = datetime(2026, 8, 20, 8, tzinfo=UTC)
+    original = {
+        "symbol": "BTCUSDT",
+        "incomeType": "FUNDING_FEE",
+        "income": "-0.125",
+        "asset": "USDT",
+        "time": int(occurred_at.timestamp() * 1000),
+        "tranId": 423456789,
+    }
+    await income_store.upsert_income_history(
+        account_id="spike-page-conflict", rows=[original]
+    )
+    new_row = {**original, "tranId": 423456790, "income": "1"}
+
+    with pytest.raises(IncomeFactConflictError):
+        await income_store.upsert_income_history(
+            account_id="spike-page-conflict",
+            rows=[new_row, {**original, "income": "-9"}],
+        )
+
+    assert await income_store.funding_fee_total(
+        account_id="spike-page-conflict",
         symbol="BTCUSDT",
         start_at=occurred_at - timedelta(seconds=1),
         end_at=occurred_at + timedelta(seconds=1),

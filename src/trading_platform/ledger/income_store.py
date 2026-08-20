@@ -11,6 +11,10 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 
+class IncomeFactConflictError(RuntimeError):
+    """A Binance transaction identity was reused for different immutable facts."""
+
+
 class IncomeStore:
     """Idempotently persist Binance income rows and aggregate funding fees."""
 
@@ -23,11 +27,12 @@ class IncomeStore:
             %(asset)s, %(amount)s, %(event_time)s, %(raw)s
         )
         ON CONFLICT (account_id, income_type, transaction_id) DO UPDATE
-        SET symbol = EXCLUDED.symbol,
-            asset = EXCLUDED.asset,
-            amount = EXCLUDED.amount,
-            event_time = EXCLUDED.event_time,
-            raw = EXCLUDED.raw
+        SET raw = account_income_events.raw
+        WHERE account_income_events.symbol = EXCLUDED.symbol
+          AND account_income_events.asset = EXCLUDED.asset
+          AND account_income_events.amount = EXCLUDED.amount
+          AND account_income_events.event_time = EXCLUDED.event_time
+        RETURNING transaction_id
     """
 
     def __init__(self, pool: AsyncConnectionPool) -> None:
@@ -48,7 +53,12 @@ class IncomeStore:
         async with self.pool.connection() as connection:
             async with connection.transaction():
                 async with connection.cursor() as cursor:
-                    await cursor.executemany(self._UPSERT, parameters)
+                    for parameter in parameters:
+                        await cursor.execute(self._UPSERT, parameter)
+                        if await cursor.fetchone() is None:
+                            raise IncomeFactConflictError(
+                                "income transaction identity belongs to a different fact"
+                            )
         return len(parameters)
 
     async def funding_fee_total(

@@ -6,6 +6,7 @@ import pytest
 import redis.asyncio as redis
 
 from trading_platform.strategies.campaign_store import CampaignLease, RedisCampaignStore
+from trading_platform.strategies.spike.live import campaign_store_key
 
 
 @pytest.fixture
@@ -47,6 +48,24 @@ async def test_campaign_store_allows_only_one_global_campaign(real_redis):
         assert await store.get_active() == lease()
     finally:
         await store.release("campaign-1")
+
+
+async def test_spike_campaign_is_unique_per_account_and_isolated_between_accounts(
+    real_redis,
+):
+    suffix = uuid.uuid4().hex
+    first_key = campaign_store_key(f"account-a-{suffix}", "spike_short")
+    second_key = campaign_store_key(f"account-b-{suffix}", "spike_short")
+    first = RedisCampaignStore(real_redis, key=first_key)
+    same_account = RedisCampaignStore(real_redis, key=first_key)
+    other_account = RedisCampaignStore(real_redis, key=second_key)
+    try:
+        assert await first.acquire(lease("account-a-campaign")) is True
+        assert await same_account.acquire(lease("overlap")) is False
+        assert await other_account.acquire(lease("account-b-campaign")) is True
+    finally:
+        await first.release("account-a-campaign")
+        await other_account.release("account-b-campaign")
 
 
 async def test_campaign_release_requires_owner(real_redis):

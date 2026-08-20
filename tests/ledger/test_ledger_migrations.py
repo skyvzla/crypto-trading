@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import shutil
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from psycopg import sql
 from psycopg.errors import UndefinedColumn
 
 from trading_platform.ledger.db.migrations import (
+    MIGRATIONS_DIR,
     MigrationError,
     apply_migrations,
     load_migrations,
@@ -124,6 +126,82 @@ async def test_existing_schema_is_adopted_without_losing_rows(migration_db):
     current_version = len(load_migrations())
     assert result.applied_versions == tuple(range(1, current_version + 1))
     assert count == (1,)
+
+
+@pytest.mark.asyncio
+async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
+    migration_db, tmp_path
+):
+    pool, schema = migration_db
+    old_migrations = tmp_path / "migrations"
+    old_migrations.mkdir()
+    for source in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if source.name.startswith("0012_"):
+            continue
+        shutil.copy(source, old_migrations / source.name)
+    await apply_migrations(pool, schema=schema, directory=old_migrations)
+
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            for index, values in enumerate(
+                (
+                    ("INITIALIZED", "0", "50", "50", "50", "50", "100", "100"),
+                    ("CAPITAL_BREACH", "-110", "50", "0", "50", "-10", "100", "-10"),
+                    ("PROFIT_SETTLED", "2", "0", "1", "-10", "-9", "-10", "-8"),
+                ),
+                start=1,
+            ):
+                await conn.execute(
+                    """
+                    INSERT INTO strategy_capital_events (
+                        id, account_id, strategy_id, idempotency_key,
+                        event_type, net_pnl,
+                        trading_capital_before, trading_capital_after,
+                        reserve_capital_before, reserve_capital_after,
+                        account_capital_before, account_capital_after,
+                        reinvested_profit, reserve_consumed,
+                        occurred_at, created_at
+                    ) VALUES (
+                        %s, 'upgrade-account', 'spike_short', %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s,
+                        0, 0, %s, %s
+                    )
+                    """,
+                    (
+                        uuid4(),
+                        f"upgrade-{index}",
+                        *values,
+                        f"2026-08-20 00:0{index}:00+00",
+                        f"2026-08-20 00:0{index}:00+00",
+                    ),
+                )
+
+    result = await apply_migrations(pool, schema=schema)
+
+    assert result.applied_versions == (12,)
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            facts = await (
+                await conn.execute(
+                    """
+                    SELECT capital_breached_before, capital_breached_after
+                    FROM strategy_capital_events
+                    WHERE account_id = 'upgrade-account'
+                    ORDER BY created_at
+                    """
+                )
+            ).fetchall()
+    assert facts == [(False, False), (False, True), (True, True)]
 
 
 @pytest.mark.asyncio
