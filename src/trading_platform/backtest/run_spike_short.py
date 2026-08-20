@@ -9,6 +9,10 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from trading_platform.backtest.engine import BacktestEngine, Event
+from trading_platform.backtest.funding import (
+    FundingIncomeDataLoader,
+    FundingIncomeEvent,
+)
 from trading_platform.backtest.loader import BacktestDataLoader
 from trading_platform.backtest.loader import DEFAULT_CHUNK_HOURS
 from trading_platform.backtest.loader import MetricsDataLoader
@@ -112,6 +116,8 @@ class SpikeBacktestSettings:
     requires_bar1s: bool
     execution_timeframe: str
     duckdb_path: str
+    funding_duckdb_path: Path | None
+    funding_account_id: str | None
     output_path: Path
 
 
@@ -127,6 +133,35 @@ def load_metrics_series(
         return MetricsDataLoader(metrics_root, symbol=symbol).load()
     except (FileNotFoundError, RuntimeError, ValueError):
         return []
+
+
+def load_funding_events(
+    settings: SpikeBacktestSettings,
+    symbol: str,
+) -> list[FundingIncomeEvent] | None:
+    """为动态资金回测加载完整 funding 窗口；固定资金模式无需该输入。"""
+
+    if settings.capital_config is None:
+        if (
+            settings.funding_duckdb_path is not None
+            or settings.funding_account_id is not None
+        ):
+            raise ValueError(
+                "funding input is only supported with dynamic capital settings"
+            )
+        return None
+    if settings.funding_duckdb_path is None or settings.funding_account_id is None:
+        raise ValueError(
+            "dynamic capital requires --funding-duckdb-path and "
+            "--funding-account-id"
+        )
+    return FundingIncomeDataLoader(
+        settings.funding_duckdb_path,
+        account_id=settings.funding_account_id,
+        symbols=[symbol],
+        start_ms=settings.start_ms,
+        end_ms=settings.end_ms,
+    ).load()
 
 
 def _timestamp_ms(value: str) -> int:
@@ -177,6 +212,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--duckdb-path",
         required=True,
         help="只读 DuckDB candles 归档路径",
+    )
+    parser.add_argument(
+        "--funding-duckdb-path",
+        type=Path,
+        default=None,
+        help=(
+            "动态资金回测的只读 income 快照；需包含 account_income_events "
+            "和 account_income_coverage"
+        ),
+    )
+    parser.add_argument(
+        "--funding-account-id",
+        default=None,
+        help="income 快照中的账户 ID；动态资金回测必填",
     )
     parser.add_argument(
         "--output",
@@ -809,6 +858,12 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         requires_bar1s="1s" in definition.data_requirements.market_timeframes,
         execution_timeframe=definition.data_requirements.execution_timeframe,
         duckdb_path=args.duckdb_path,
+        funding_duckdb_path=args.funding_duckdb_path,
+        funding_account_id=(
+            args.funding_account_id.strip()
+            if args.funding_account_id is not None
+            else None
+        ),
         output_path=Path(args.output),
     )
 
@@ -819,6 +874,7 @@ def create_spike_engine(
     events: Iterable[Event],
     *,
     preloaded_metrics_series: list[tuple[int, float, float]] | None = None,
+    preloaded_funding_events: list[FundingIncomeEvent] | None = None,
 ) -> BacktestEngine:
     config = BacktestConfig(
         data_dir=settings.duckdb_path,
@@ -981,7 +1037,9 @@ def create_spike_engine(
         )
         if settings.capital_config is not None:
             strategy = CapitalManagedSpikeStrategy(
-                strategy, settings.capital_config
+                strategy,
+                settings.capital_config,
+                funding_events=preloaded_funding_events,
             )
     return BacktestEngine(
         events=events,
@@ -1003,7 +1061,8 @@ def main() -> None:
     args = parse_args()
     try:
         settings = resolve_settings(args)
-    except ValueError as error:
+        funding_events = load_funding_events(settings, args.symbol)
+    except (FileNotFoundError, ValueError) as error:
         print(f"Error: {error}", file=sys.stderr)
         raise SystemExit(2) from error
     warmup_hours = (
@@ -1049,6 +1108,7 @@ def main() -> None:
         args,
         settings,
         events=events,
+        preloaded_funding_events=funding_events,
     ).run()
     summary = save_backtest_result(result, settings.output_path)
 

@@ -64,6 +64,10 @@ PARAMETER_FLAGS = {
     "stop_check_ms": "--stop-check-ms",
     "model_json": "--model-json",
     "total_notional": "--total-notional",
+    "initial_account_capital": "--initial-account-capital",
+    "initial_trading_capital": "--initial-trading-capital",
+    "profit_reinvest_ratio": "--profit-reinvest-ratio",
+    "minimum_trading_capital": "--minimum-trading-capital",
     "exit_policy": "--exit-policy",
     "prior_high_lookback_hours": "--prior-high-lookback-hours",
     "rise_low_lookback_hours": "--rise-low-lookback-hours",
@@ -680,6 +684,8 @@ def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
             ),
             "end": config.get("end"),
             "duckdb_path": config.get("duckdb_path"),
+            "funding_duckdb_path": config.get("funding_duckdb_path"),
+            "funding_account_id": config.get("funding_account_id"),
         }, sort_keys=True, default=str)
         digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
         specs.append(RunSpec(f"{digest}_{symbol}", symbol, params))
@@ -707,6 +713,12 @@ def _run_arguments(
     metrics_root = config.get("metrics_root")
     if metrics_root:
         arguments.extend(["--metrics-root", str(metrics_root)])
+    funding_duckdb_path = config.get("funding_duckdb_path")
+    funding_account_id = config.get("funding_account_id")
+    if funding_duckdb_path:
+        arguments.extend(["--funding-duckdb-path", str(funding_duckdb_path)])
+    if funding_account_id:
+        arguments.extend(["--funding-account-id", str(funding_account_id)])
     params = {**spec.params, **config.get("execution", {})}
     for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
         if key not in params or params[key] is None:

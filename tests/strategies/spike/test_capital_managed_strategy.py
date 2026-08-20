@@ -1,6 +1,9 @@
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pytest
+
+from trading_platform.backtest.funding import FundingIncomeEvent
 from trading_platform.shared.events import Bar1s, Fill
 from trading_platform.strategies.spike.capital import CapitalPolicyConfig
 from trading_platform.strategies.spike.capital_replay import CapitalManagedSpikeStrategy
@@ -28,7 +31,14 @@ class StrategyStub:
         self.fills.append(fill)
 
 
-def fill(side: str, price: str, quantity: str, commission: str) -> Fill:
+def fill(
+    side: str,
+    price: str,
+    quantity: str,
+    commission: str,
+    *,
+    fill_time: int = 1_000,
+) -> Fill:
     return Fill(
         fill_id=f"{side}-{price}",
         order_id=f"{side}-{price}",
@@ -38,12 +48,14 @@ def fill(side: str, price: str, quantity: str, commission: str) -> Fill:
         quantity=Decimal(quantity),
         commission=Decimal(commission),
         commission_asset="USDT",
-        fill_time=1_000,
+        fill_time=fill_time,
         is_maker=True,
     )
 
 
-def managed() -> tuple[CapitalManagedSpikeStrategy, StrategyStub]:
+def managed(
+    funding_events=(),
+) -> tuple[CapitalManagedSpikeStrategy, StrategyStub]:
     delegate = StrategyStub()
     strategy = CapitalManagedSpikeStrategy(
         delegate,
@@ -53,6 +65,7 @@ def managed() -> tuple[CapitalManagedSpikeStrategy, StrategyStub]:
             profit_reinvest_ratio="0.5",
             minimum_trading_capital="100",
         ),
+        funding_events=funding_events,
     )
     return strategy, delegate
 
@@ -110,3 +123,77 @@ def test_partial_exits_and_funding_settle_once_after_full_close():
     assert strategy.settlements[0].net_pnl == Decimal("75.0")
     assert strategy.capital_state.trading_capital == Decimal("537.50")
     assert strategy.capital_state.reserve_capital == Decimal("537.50")
+
+
+def test_scheduled_funding_uses_symbol_and_inclusive_campaign_boundaries():
+    strategy, _ = managed(
+        [
+            FundingIncomeEvent(1, "BTCUSDT", 999, Decimal("100")),
+            FundingIncomeEvent(2, "btcusdt", 1_000, Decimal("-2")),
+            FundingIncomeEvent(3, "BTCUSDT", 1_500, Decimal("1")),
+            FundingIncomeEvent(4, "BTCUSDT", 2_000, Decimal("-3")),
+            FundingIncomeEvent(5, "BTCUSDT", 2_001, Decimal("100")),
+            FundingIncomeEvent(6, "ETHUSDT", 1_500, Decimal("100")),
+        ]
+    )
+
+    strategy.on_fill(fill("SELL", "100", "5", "1", fill_time=1_000))
+    strategy.on_fill(fill("BUY", "90", "2", "0.5", fill_time=1_800))
+    assert strategy.settlements == []
+    strategy.on_fill(fill("BUY", "80", "3", "0.5", fill_time=2_000))
+
+    assert strategy.settlements[0].net_pnl == Decimal("74.0")
+    assert strategy.capital_state.trading_capital == Decimal("537.00")
+
+
+def test_duplicate_funding_fact_is_counted_once():
+    duplicate = FundingIncomeEvent(7, "BTCUSDT", 1_500, Decimal("-4"))
+    strategy, _ = managed([duplicate, duplicate])
+
+    strategy.on_fill(fill("SELL", "100", "1", "0", fill_time=1_000))
+    strategy.on_fill(fill("BUY", "90", "1", "0", fill_time=2_000))
+
+    assert strategy.settlements[0].net_pnl == Decimal("6")
+
+
+def test_boundary_funding_fact_cannot_be_consumed_by_two_campaigns():
+    strategy, _ = managed(
+        [FundingIncomeEvent(7, "BTCUSDT", 2_000, Decimal("5"))]
+    )
+    strategy.on_fill(fill("SELL", "100", "1", "0", fill_time=1_000))
+    strategy.on_fill(fill("BUY", "90", "1", "0", fill_time=2_000))
+    strategy.on_fill(fill("SELL", "100", "1", "0", fill_time=2_000))
+    strategy.on_fill(fill("BUY", "90", "1", "0", fill_time=3_000))
+
+    assert [item.net_pnl for item in strategy.settlements] == [
+        Decimal("15"),
+        Decimal("10"),
+    ]
+
+
+def test_missing_funding_input_fails_before_delegate_fill_state_changes():
+    delegate = StrategyStub()
+    strategy = CapitalManagedSpikeStrategy(
+        delegate,
+        CapitalPolicyConfig(
+            initial_account_capital="1000",
+            initial_trading_capital="500",
+            profit_reinvest_ratio="0.5",
+            minimum_trading_capital="100",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="requires a complete funding input"):
+        strategy.on_fill(fill("SELL", "100", "1", "0"))
+
+    assert delegate.fills == []
+
+
+def test_conflicting_funding_fact_is_rejected():
+    with pytest.raises(ValueError, match="transaction 7 has conflicting facts"):
+        managed(
+            [
+                FundingIncomeEvent(7, "BTCUSDT", 1_500, Decimal("-4")),
+                FundingIncomeEvent(7, "BTCUSDT", 1_500, Decimal("-5")),
+            ]
+        )
