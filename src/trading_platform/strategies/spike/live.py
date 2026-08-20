@@ -296,16 +296,22 @@ class SpikeExecutionCoordinator:
         self._execution_worker = ExecutionWorker(
             self.execution_queue, self._handle_execution_job
         )
+        self._execution_worker_running = False
         self._maintenance_queued = False
         self._entry_pipeline_close_reason: str | None = None
 
     def start_execution_worker(self) -> asyncio.Task[None]:
         """启动唯一账户执行 worker，并把任务交给进程监督。"""
 
-        return self._execution_worker.start()
+        task = self._execution_worker.start()
+        self._execution_worker_running = True
+        return task
 
     async def stop_execution_worker(self) -> None:
-        await self._execution_worker.stop()
+        try:
+            await self._execution_worker.stop()
+        finally:
+            self._execution_worker_running = False
 
     async def restore_campaign_gate(self) -> None:
         """恢复 Redis 互斥事实；不依据本地状态猜测或删除已有 lease。"""
@@ -588,7 +594,7 @@ class SpikeExecutionCoordinator:
                     self._expire_order(order.client_order_id, remaining_seconds)
                 )
         if cancel_due:
-            await self._flush_cancellations()
+            await self.request_cancellation_flush(event_time=now_ms)
 
     async def update_exchange_symbol_admission(
         self,
@@ -630,7 +636,7 @@ class SpikeExecutionCoordinator:
                         or cancellation_requested
                     )
             if cancellation_requested:
-                await self._flush_cancellations()
+                await self.request_cancellation_flush()
 
     async def reconcile_exchange_symbol_admission(self) -> None:
         """Recheck orders that just changed from unknown to a cancellable state."""
@@ -655,7 +661,7 @@ class SpikeExecutionCoordinator:
                     or cancellation_requested
                 )
         if cancellation_requested:
-            await self._flush_cancellations()
+            await self.request_cancellation_flush()
 
     async def _execute(
         self,
@@ -676,10 +682,36 @@ class SpikeExecutionCoordinator:
         if entries and self.gate.enabled:
             campaign_id = self._campaign_id(entries[0])
             async with self._campaign_lock:
+                expire_time_getter = getattr(
+                    self.strategy, "campaign_entry_expire_time", None
+                )
+                expires_at = (
+                    expire_time_getter(campaign_id)
+                    if callable(expire_time_getter)
+                    else None
+                )
+                now_ms = self._now_ms()
                 if (
                     require_arbitrated
                     and self._signal_arbiter.active_campaign_id != campaign_id
                 ):
+                    entries = []
+                elif require_arbitrated and callable(expire_time_getter) and (
+                    expires_at is None or expires_at <= now_ms
+                ):
+                    status = "stale" if expires_at is not None else "invalid"
+                    self._pending_audit_events += (
+                        StrategyAuditEvent(
+                            event_time=now_ms,
+                            event_type=f"signal_skipped_{status}",
+                            symbol=entries[0].symbol,
+                            strategy_id=STRATEGY_ID,
+                            campaign_id=campaign_id,
+                            details={"stage": "execution_queue"},
+                        ),
+                    )
+                    if self._signal_arbiter.active_campaign_id == campaign_id:
+                        self._signal_arbiter.release(campaign_id)
                     entries = []
                 elif not await self._acquire_campaign(
                     campaign_id, entries[0].symbol, event_time
@@ -699,7 +731,12 @@ class SpikeExecutionCoordinator:
                             entries[0].symbol, f"entry rejected:{reason}"
                         )
                     else:
-                        approved_entries = entries
+                        approved_entries = [
+                            replace(intent, ttl_ms=expires_at - now_ms)
+                            if expires_at is not None
+                            else intent
+                            for intent in entries
+                        ]
                         self._submissions_inflight += len(approved_entries)
         try:
             for intent in approved_entries:
@@ -842,8 +879,17 @@ class SpikeExecutionCoordinator:
                     await self._persist_exit_state(job.intent.symbol)
                 await self._flush_cancellations()
             await self._publish_audit()
-            if job.intent is not None:
-                await self.maybe_release_campaign(job.intent.symbol)
+            release_symbol = (
+                job.intent.symbol
+                if job.intent is not None
+                else (
+                    None
+                    if self._owned_campaign_lease is None
+                    else self._owned_campaign_lease.symbol
+                )
+            )
+            if release_symbol is not None:
+                await self.maybe_release_campaign(release_symbol)
         except asyncio.CancelledError:
             raise
         except BaseException:
@@ -894,8 +940,7 @@ class SpikeExecutionCoordinator:
             )
             if order is not None and order.status in {"NEW", "PARTIALLY_FILLED"}:
                 self.account.cancel_order(order.order_id)
-                await self._flush_cancellations()
-                await self.maybe_release_campaign(order.symbol)
+                await self.request_cancellation_flush(event_time=self._now_ms())
         finally:
             self._expiry_tasks.pop(client_order_id, None)
 
@@ -1150,6 +1195,16 @@ class SpikeExecutionCoordinator:
         refresh_positions = getattr(self.account, "refresh_positions", None)
         if cancelled and callable(refresh_positions):
             await refresh_positions()
+
+    async def request_cancellation_flush(self, *, event_time: int | None = None) -> None:
+        """worker 运行后所有撤单 REST 统一进入优先级执行队列。"""
+
+        if self._execution_worker_running:
+            self._enqueue_maintenance(
+                event_time=self._now_ms() if event_time is None else event_time
+            )
+            return
+        await self._flush_cancellations()
 
     async def _publish_audit(self) -> bool:
         if self.audit_sink is None:

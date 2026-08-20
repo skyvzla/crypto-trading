@@ -82,6 +82,15 @@ class IntentStrategy:
         return []
 
 
+class LiveSignalIntentStrategy(IntentStrategy):
+    def __init__(self, intents_by_symbol, expires_at_by_campaign):
+        super().__init__(intents_by_symbol)
+        self.expires_at_by_campaign = expires_at_by_campaign
+
+    def campaign_entry_expire_time(self, campaign_id):
+        return self.expires_at_by_campaign.get(campaign_id)
+
+
 class MemoryCampaignStore:
     def __init__(self):
         self.active = None
@@ -216,6 +225,54 @@ async def test_skipped_simultaneous_signal_cannot_reopen_after_fast_release():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("expires_at", "expected_event"),
+    [(2_500, "signal_skipped_stale"), (None, "signal_skipped_invalid")],
+)
+async def test_queued_entry_is_rejected_when_signal_expires_or_is_invalidated(
+    expires_at, expected_event
+):
+    campaign_id = "spike_short:BTCUSDT:1000"
+    strategy = LiveSignalIntentStrategy(
+        {"BTCUSDT": [entry("BTCUSDT", 1_000)]},
+        {campaign_id: expires_at} if expires_at is not None else {},
+    )
+    executor = Mock(submit=AsyncMock(return_value=Mock(status="NEW")))
+    coordinator, _ = coordinator_for(strategy, executor)
+    coordinator._now_ms = lambda: 3_000
+
+    await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
+    coordinator.start_execution_worker()
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+
+    executor.submit.assert_not_awaited()
+    assert coordinator.campaign_store.active is None
+    assert coordinator._signal_arbiter.active_campaign_id is None
+    assert coordinator._pending_audit_events[-1].event_type == expected_event
+    await coordinator.stop_execution_worker()
+
+
+@pytest.mark.asyncio
+async def test_queued_entry_uses_remaining_signal_ttl_at_submit_time():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    strategy = LiveSignalIntentStrategy(
+        {"BTCUSDT": [entry("BTCUSDT", 1_000)]},
+        {campaign_id: 5_000},
+    )
+    executor = Mock(submit=AsyncMock(return_value=Mock(status="NEW")))
+    coordinator, _ = coordinator_for(strategy, executor)
+    coordinator._now_ms = lambda: 3_000
+
+    await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
+    coordinator.start_execution_worker()
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+
+    submitted = executor.submit.await_args.args[0]
+    assert submitted.ttl_ms == 2_000
+    await coordinator.stop_execution_worker()
+
+
+@pytest.mark.asyncio
 async def test_execution_worker_submits_exit_before_earlier_entry():
     submitted = []
 
@@ -289,6 +346,45 @@ async def test_full_entry_execution_queue_closes_entries_but_keeps_exit():
     jobs = [await coordinator.execution_queue.get() for _ in range(3)]
     assert [job.kind for job in jobs] == ["exit", "cancel", "entry"]
     assert jobs[-1].intent == queued_entry
+    for _ in jobs:
+        coordinator.execution_queue.task_done()
+
+
+@pytest.mark.asyncio
+async def test_live_cancellation_is_queued_behind_exit_and_ahead_of_entry():
+    open_entry = Mock(
+        reduce_only=False,
+        status="NEW",
+        order_id="entry-order",
+        symbol="BTCUSDT",
+    )
+    account = Mock(
+        iter_orders=Mock(return_value=(open_entry,)),
+        cancel_order=Mock(return_value=True),
+        flush_cancellations=AsyncMock(return_value=("entry-order",)),
+        has_pending_cancellations=True,
+        has_open_position=Mock(return_value=True),
+        all_orders_terminal=Mock(return_value=False),
+    )
+    strategy = IntentStrategy({"BTCUSDT": []})
+    coordinator, _ = coordinator_for(
+        strategy,
+        Mock(submit=AsyncMock(return_value=Mock(status="NEW"))),
+        account=account,
+    )
+    coordinator._execution_worker_running = True
+    coordinator.execution_queue.put_nowait(
+        "entry", intent=entry("BTCUSDT", 1_000), event_time=1_000
+    )
+    coordinator.execution_queue.put_nowait(
+        "exit", intent=exit_intent("BTCUSDT"), event_time=2_000
+    )
+
+    await coordinator.cancel_open_entry_orders()
+
+    account.flush_cancellations.assert_not_awaited()
+    jobs = [await coordinator.execution_queue.get() for _ in range(3)]
+    assert [job.kind for job in jobs] == ["exit", "cancel", "entry"]
     for _ in jobs:
         coordinator.execution_queue.task_done()
 

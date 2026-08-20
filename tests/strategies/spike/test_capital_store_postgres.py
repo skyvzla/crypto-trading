@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.parse
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -272,6 +272,73 @@ async def test_reused_idempotency_key_with_different_fact_fails_closed(capital_s
         account_id="account-conflict", strategy_id="spike-short"
     ) == applied.snapshot
 
+
+@pytest.mark.asyncio
+async def test_historical_retry_preserves_original_breach_facts(capital_store):
+    config = CapitalPolicyConfig("100", "50", "0.5", "10")
+    await capital_store.initialize(
+        account_id="account-historical-retry",
+        strategy_id="spike_short",
+        config=config,
+    )
+    first_time = datetime(2026, 8, 20, 9, 45, tzinfo=UTC)
+    first = await capital_store.settle(
+        account_id="account-historical-retry",
+        strategy_id="spike_short",
+        idempotency_key="campaign-first:closed",
+        campaign_id="campaign-first",
+        net_pnl="-10",
+        occurred_at=first_time,
+    )
+    await capital_store.settle(
+        account_id="account-historical-retry",
+        strategy_id="spike_short",
+        idempotency_key="campaign-breach:closed",
+        campaign_id="campaign-breach",
+        net_pnl="-100",
+        occurred_at=datetime(2026, 8, 20, 9, 50, tzinfo=UTC),
+    )
+
+    replay = await capital_store.settle(
+        account_id="account-historical-retry",
+        strategy_id="spike_short",
+        idempotency_key="campaign-first:closed",
+        campaign_id="campaign-first",
+        net_pnl="-10",
+        occurred_at=first_time,
+    )
+
+    assert replay.applied is False
+    assert replay.settlement == first.settlement
+    assert replay.snapshot.state.capital_breached is True
+
+
+@pytest.mark.asyncio
+async def test_reused_idempotency_key_with_different_time_fails_closed(capital_store):
+    await capital_store.initialize(
+        account_id="account-time-conflict",
+        strategy_id="spike_short",
+        config=CapitalPolicyConfig("100", "50", "0.5", "10"),
+    )
+    occurred_at = datetime(2026, 8, 20, 9, 55, tzinfo=UTC)
+    await capital_store.settle(
+        account_id="account-time-conflict",
+        strategy_id="spike_short",
+        idempotency_key="campaign-time:closed",
+        campaign_id="campaign-time",
+        net_pnl="1",
+        occurred_at=occurred_at,
+    )
+
+    with pytest.raises(CapitalSettlementConflictError):
+        await capital_store.settle(
+            account_id="account-time-conflict",
+            strategy_id="spike_short",
+            idempotency_key="campaign-time:closed",
+            campaign_id="campaign-time",
+            net_pnl="1",
+            occurred_at=occurred_at + timedelta(milliseconds=1),
+        )
 
 @pytest.mark.asyncio
 async def test_initialize_rejects_configuration_drift(capital_store):

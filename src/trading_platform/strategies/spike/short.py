@@ -2524,6 +2524,24 @@ class DynamicSpikeBacktestStrategy:
         strategy = self.strategies.get(parts[1])
         return None if strategy is None else strategy.campaign_entry_bucket(campaign_id)
 
+    def campaign_entry_expire_time(self, campaign_id: str) -> int | None:
+        """返回仍然有效的待入场 Campaign 绝对过期时间。"""
+
+        parts = campaign_id.split(":")
+        if len(parts) != 3:
+            return None
+        strategy = self.strategies.get(parts[1])
+        if strategy is None:
+            return None
+        return next(
+            (
+                signal.expire_time
+                for signal in strategy.active_signals
+                if strategy._campaign_id(signal) == campaign_id
+            ),
+            None,
+        )
+
     def campaign_exit_state(
         self, symbol: str
     ) -> tuple[bool, bool, bool] | None:

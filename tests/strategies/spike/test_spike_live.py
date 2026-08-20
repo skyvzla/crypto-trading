@@ -672,9 +672,10 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
         reconcile_entry_expirations=AsyncMock(),
         validate_recovered_campaign=Mock(),
         restore_campaign_timing=AsyncMock(),
-        maybe_release_campaign=AsyncMock(),
-        _flush_cancellations=AsyncMock(),
-        start_execution_worker=Mock(
+            maybe_release_campaign=AsyncMock(),
+            _flush_cancellations=AsyncMock(),
+            request_cancellation_flush=AsyncMock(),
+            start_execution_worker=Mock(
             side_effect=lambda: asyncio.create_task(blocker.wait())
         ),
         stop=AsyncMock(),

@@ -99,23 +99,19 @@ def _require_timestamp(value: datetime) -> datetime:
     return value
 
 
-def _settlement_from_event(
-    row: dict[str, Any], *, current_state: CapitalState
-) -> CapitalSettlement:
+def _settlement_from_event(row: dict[str, Any]) -> CapitalSettlement:
     event_type = row["event_type"]
-    before_breached = current_state.capital_breached and event_type != "CAPITAL_BREACH"
-    after_breached = before_breached or event_type == "CAPITAL_BREACH"
     before = CapitalState(
         account_capital=row["account_capital_before"],
         trading_capital=row["trading_capital_before"],
         reserve_capital=row["reserve_capital_before"],
-        capital_breached=before_breached,
+        capital_breached=row["capital_breached_before"],
     )
     after = CapitalState(
         account_capital=row["account_capital_after"],
         trading_capital=row["trading_capital_after"],
         reserve_capital=row["reserve_capital_after"],
-        capital_breached=after_breached,
+        capital_breached=row["capital_breached_after"],
     )
     return CapitalSettlement(
         net_pnl=row["net_pnl"],
@@ -223,10 +219,12 @@ class CapitalStore:
                             trading_capital_before, trading_capital_after,
                             reserve_capital_before, reserve_capital_after,
                             account_capital_before, account_capital_after,
-                            reinvested_profit, reserve_consumed, occurred_at
+                            reinvested_profit, reserve_consumed,
+                            capital_breached_before, capital_breached_after,
+                            occurred_at
                         ) VALUES (
                             %s, %s, %s, %s, 'INITIALIZED', 0,
-                            %s, %s, %s, %s, %s, %s, 0, 0, %s
+                            %s, %s, %s, %s, %s, %s, 0, 0, FALSE, FALSE, %s
                         )
                         """,
                         (
@@ -288,7 +286,9 @@ class CapitalStore:
                            trading_capital_before, trading_capital_after,
                            reserve_capital_before, reserve_capital_after,
                            account_capital_before, account_capital_after,
-                           reinvested_profit, reserve_consumed, occurred_at
+                           reinvested_profit, reserve_consumed,
+                           capital_breached_before, capital_breached_after,
+                           occurred_at
                     FROM strategy_capital_events
                     WHERE account_id = %s AND strategy_id = %s
                       AND idempotency_key = %s
@@ -300,6 +300,7 @@ class CapitalStore:
                         event["event_type"] == "INITIALIZED"
                         or event["net_pnl"] != requested_pnl
                         or event["campaign_id"] != campaign_id
+                        or event["occurred_at"] != occurred_at
                     ):
                         raise CapitalSettlementConflictError(
                             "idempotency key belongs to a different settlement"
@@ -308,9 +309,7 @@ class CapitalStore:
                         idempotency_key=idempotency_key,
                         campaign_id=campaign_id,
                         occurred_at=event["occurred_at"],
-                        settlement=_settlement_from_event(
-                            event, current_state=current.state
-                        ),
+                        settlement=_settlement_from_event(event),
                         snapshot=current,
                         applied=False,
                     )
@@ -323,10 +322,12 @@ class CapitalStore:
                         trading_capital_before, trading_capital_after,
                         reserve_capital_before, reserve_capital_after,
                         account_capital_before, account_capital_after,
-                        reinvested_profit, reserve_consumed, occurred_at
+                        reinvested_profit, reserve_consumed,
+                        capital_breached_before, capital_breached_after,
+                        occurred_at
                     ) VALUES (
                         %s, %s, %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                     )
                     """,
                     (
@@ -345,6 +346,8 @@ class CapitalStore:
                         settlement.state_after.account_capital,
                         settlement.reinvested_profit,
                         settlement.reserve_consumed,
+                        settlement.state_before.capital_breached,
+                        settlement.state_after.capital_breached,
                         occurred_at,
                     ),
                 )

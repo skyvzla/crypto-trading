@@ -225,7 +225,7 @@ class SpikeLiveProcess:
             await self._warm_strategy_history()
             await self._refresh_market_gate(require_ready=True)
             await self.admission.on_universe_scan()
-            await self.coordinator._flush_cancellations()
+            await self.coordinator.request_cancellation_flush()
 
             self._tasks.extend(
                 [
@@ -1114,7 +1114,7 @@ class SpikeLiveProcess:
             await self._register_market_subscriptions()
             await self._refresh_market_gate()
             await self.admission.on_universe_scan()
-            await self.coordinator._flush_cancellations()
+            await self.coordinator.request_cancellation_flush()
             await self.coordinator.restore_campaign_gate()
             self.coordinator.validate_recovered_campaign()
             await self.coordinator.reconcile_entry_expirations()
