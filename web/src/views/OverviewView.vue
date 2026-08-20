@@ -206,7 +206,7 @@ onMounted(load)
           <div><span>盈利复投比例</span><strong>{{ formatPercent(capital.profit_reinvest_ratio, 0) }}</strong></div>
           <div><span>资金越界</span><strong :class="capital.capital_breached ? 'value-negative' : 'value-positive'">{{ capital.capital_breached ? '是' : '否' }}</strong></div>
           <div><span>状态版本</span><strong>v{{ capital.version }}</strong></div>
-          <div><span>最近结算</span><strong class="capital-time">{{ formatDateTime(capital.updated_at) }}</strong></div>
+          <div><span>更新时间</span><strong class="capital-time">{{ formatDateTime(capital.updated_at) }}</strong></div>
         </div>
         <div v-else class="capital-empty">
           <CircleAlert :size="16" />
