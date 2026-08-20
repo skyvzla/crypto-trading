@@ -52,11 +52,27 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
     first = await apply_migrations(pool, schema=schema)
     second = await apply_migrations(pool, schema=schema)
 
-    assert first.current_version == 9
-    assert first.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9)
-    assert second.current_version == 9
+    current_version = len(load_migrations())
+    assert first.current_version == current_version
+    assert first.applied_versions == tuple(range(1, current_version + 1))
+    assert second.current_version == current_version
     assert second.applied_versions == ()
-    assert await verify_current(pool, schema=schema) == 9
+    assert await verify_current(pool, schema=schema) == current_version
+
+    async with pool.connection() as conn:
+        tables = await (
+            await conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name IN "
+                "('strategy_capital_state', 'strategy_capital_events') "
+                "ORDER BY table_name",
+                (schema,),
+            )
+        ).fetchall()
+    assert tables == [
+        ("strategy_capital_events",),
+        ("strategy_capital_state",),
+    ]
 
 
 @pytest.mark.asyncio
@@ -90,7 +106,8 @@ async def test_existing_schema_is_adopted_without_losing_rows(migration_db):
                 ("existing",),
             )
         ).fetchone()
-    assert result.applied_versions == (1, 2, 3, 4, 5, 6, 7, 8, 9)
+    current_version = len(load_migrations())
+    assert result.applied_versions == tuple(range(1, current_version + 1))
     assert count == (1,)
 
 
@@ -105,7 +122,7 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
 
     assert sorted((first.applied_versions, second.applied_versions)) == [
         (),
-        (1, 2, 3, 4, 5, 6, 7, 8, 9),
+        tuple(range(1, len(load_migrations()) + 1)),
     ]
     async with pool.connection() as conn:
         row = await (
@@ -116,7 +133,8 @@ async def test_concurrent_runners_apply_each_version_once(migration_db):
                 ).format(sql.Identifier(schema))
             )
         ).fetchone()
-    assert row == (9, 1, 9)
+    current_version = len(load_migrations())
+    assert row == (current_version, 1, current_version)
 
 @pytest.mark.asyncio
 async def test_web_performance_indexes_are_migrated(migration_db):
