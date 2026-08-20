@@ -64,15 +64,30 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
             await conn.execute(
                 "SELECT table_name FROM information_schema.tables "
                 "WHERE table_schema = %s AND table_name IN "
-                "('strategy_capital_state', 'strategy_capital_events') "
+                "('strategy_capital_state', 'strategy_capital_events', "
+                "'account_income_events') "
                 "ORDER BY table_name",
                 (schema,),
             )
         ).fetchall()
     assert tables == [
+        ("account_income_events",),
         ("strategy_capital_events",),
         ("strategy_capital_state",),
     ]
+
+    async with pool.connection() as conn:
+        indexes = await (
+            await conn.execute(
+                "SELECT indexdef FROM pg_indexes "
+                "WHERE schemaname = %s "
+                "AND indexname = "
+                "'idx_account_income_events_account_symbol_time'",
+                (schema,),
+            )
+        ).fetchall()
+    assert len(indexes) == 1
+    assert "account_id, symbol, event_time DESC" in indexes[0][0]
 
 
 @pytest.mark.asyncio

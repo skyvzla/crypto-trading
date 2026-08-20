@@ -352,6 +352,47 @@ class BinanceRestClient:
             raise RuntimeError("invalid Binance account trades response")
         return result
 
+    async def get_income_history(
+        self,
+        *,
+        symbol: str | None = None,
+        income_type: str | None = None,
+        start_time: int | None = None,
+        end_time: int | None = None,
+        page: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        """查询账户收入历史，包括资金费等账户事实。"""
+        if symbol is not None and not symbol.strip():
+            raise ValueError("symbol must not be blank")
+        if income_type is not None and not income_type.strip():
+            raise ValueError("income_type must not be blank")
+        if not 1 <= limit <= 1000:
+            raise ValueError("limit must be between 1 and 1000")
+        if page is not None and page < 1:
+            raise ValueError("page must be positive")
+        if start_time is not None and start_time < 0:
+            raise ValueError("start_time must be non-negative")
+        if end_time is not None and end_time < 0:
+            raise ValueError("end_time must be non-negative")
+        if start_time is not None and end_time is not None and start_time > end_time:
+            raise ValueError("start_time must not be after end_time")
+        params: dict[str, Any] = {"limit": limit}
+        if symbol is not None:
+            params["symbol"] = symbol
+        if income_type is not None:
+            params["incomeType"] = income_type
+        if start_time is not None:
+            params["startTime"] = start_time
+        if end_time is not None:
+            params["endTime"] = end_time
+        if page is not None:
+            params["page"] = page
+        result = await self._request("GET", "/fapi/v1/income", params)
+        if not isinstance(result, list):
+            raise RuntimeError("invalid Binance income history response")
+        return result
+
     async def get_agg_trades(
         self,
         symbol: str,
