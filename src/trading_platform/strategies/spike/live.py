@@ -141,14 +141,22 @@ class SpikeLiveSettings(BaseSettings):
         return self
 
     @property
+    def formal_capital_config(self) -> CapitalPolicyConfig:
+        if self.initial_account_capital is None:
+            raise ValueError(
+                "Spike process requires all four formal capital policy fields"
+            )
+        return CapitalPolicyConfig(
+            initial_account_capital=self.initial_account_capital,
+            initial_trading_capital=self.initial_trading_capital,
+            profit_reinvest_ratio=self.profit_reinvest_ratio,
+            minimum_trading_capital=self.minimum_trading_capital,
+        )
+
+    @property
     def capital_config(self) -> CapitalPolicyConfig:
         if self.initial_account_capital is not None:
-            return CapitalPolicyConfig(
-                initial_account_capital=self.initial_account_capital,
-                initial_trading_capital=self.initial_trading_capital,
-                profit_reinvest_ratio=self.profit_reinvest_ratio,
-                minimum_trading_capital=self.minimum_trading_capital,
-            )
+            return self.formal_capital_config
         assert self.total_notional is not None
         return CapitalPolicyConfig(
             initial_account_capital=self.total_notional,

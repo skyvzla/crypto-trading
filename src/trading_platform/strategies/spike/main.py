@@ -340,7 +340,7 @@ class SpikeLiveProcess:
         return await self.capital_store.initialize(
             account_id=self.settings.account_id,
             strategy_id=STRATEGY_ID,
-            config=self.settings.capital_config,
+            config=self.settings.formal_capital_config,
         )
 
     @staticmethod

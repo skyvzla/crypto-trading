@@ -105,6 +105,23 @@ def test_legacy_total_notional_remains_a_complete_compatibility_configuration():
     assert settings.initial_order_notional == Decimal("20")
 
 
+@pytest.mark.asyncio
+async def test_live_process_rejects_legacy_capital_before_database_initialization():
+    settings = SpikeLiveSettings(
+        account_id="account-a", symbols=["BTCUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="account-a"),
+    )
+
+    with pytest.raises(ValueError, match="all four formal capital policy fields"):
+        await process._initialize_capital(Mock())
+
+
 def test_partial_formal_capital_configuration_is_rejected():
     with pytest.raises(ValidationError, match="must be configured together"):
         SpikeLiveSettings(
