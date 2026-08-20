@@ -26,6 +26,7 @@ from trading_platform.ledger.db.models import (
 from trading_platform.shared.symbol_universe_query import (
     SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS,
 )
+from trading_platform.strategies.spike.capital_store import CapitalStore
 
 
 class OrderResponse(BaseModel):
@@ -278,6 +279,19 @@ class StrategyRuntimeStatusResponse(BaseModel):
     started_at: datetime
     heartbeat_at: datetime
     stopped_at: Optional[datetime] = None
+
+
+class StrategyCapitalStatusResponse(BaseModel):
+    account_id: str
+    strategy_id: str
+    account_capital: Decimal
+    trading_capital: Decimal
+    reserve_capital: Decimal
+    minimum: Decimal
+    profit_reinvest_ratio: Decimal
+    capital_breached: bool
+    version: int
+    updated_at: datetime
 
 
 class AdmissionRequest(BaseModel):
@@ -1483,6 +1497,37 @@ async def list_strategy_runtime_status(
         values["effective_status"] = effective_status
         responses.append(StrategyRuntimeStatusResponse.model_validate(values))
     return Page(items=responses, total=total, limit=limit, offset=offset)
+
+
+@router.get(
+    "/strategy-capital-status",
+    response_model=StrategyCapitalStatusResponse,
+)
+async def get_strategy_capital_status(
+    account_id: str = Query(..., min_length=1, max_length=64),
+    strategy_id: str = Query(..., min_length=1, max_length=128),
+    db: LedgerDB = Depends(get_db),
+) -> StrategyCapitalStatusResponse:
+    """读取一个账户/策略唯一对应的持久化资金状态。"""
+
+    snapshot = await CapitalStore(db.pool).get_state(
+        account_id=account_id,
+        strategy_id=strategy_id,
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="capital state not found")
+    return StrategyCapitalStatusResponse(
+        account_id=snapshot.account_id,
+        strategy_id=snapshot.strategy_id,
+        account_capital=snapshot.state.account_capital,
+        trading_capital=snapshot.state.trading_capital,
+        reserve_capital=snapshot.state.reserve_capital,
+        minimum=snapshot.config.minimum_trading_capital,
+        profit_reinvest_ratio=snapshot.config.profit_reinvest_ratio,
+        capital_breached=snapshot.state.capital_breached,
+        version=snapshot.version,
+        updated_at=snapshot.updated_at,
+    )
 
 
 @router.get("/health")

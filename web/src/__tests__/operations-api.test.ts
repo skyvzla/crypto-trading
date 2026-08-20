@@ -74,6 +74,22 @@ describe('operationsApi', () => {
     })
   })
 
+  it('queries one strategy capital state by account and strategy identity', async () => {
+    mockJson({ account_id: 'account/a', strategy_id: 'spike_short' })
+
+    await operationsApi.capitalStatus({
+      account_id: 'account/a',
+      strategy_id: 'spike_short'
+    })
+
+    const url = requestedUrl()
+    expect(url.pathname).toBe('/api/v1/strategy-capital-status')
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      account_id: 'account/a',
+      strategy_id: 'spike_short'
+    })
+  })
+
   it('passes campaign-level performance filters without inventing defaults', async () => {
     mockJson({ total_trades: 0 })
 

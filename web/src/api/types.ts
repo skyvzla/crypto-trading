@@ -196,6 +196,11 @@ export interface RuntimeStatusQuery extends PageParams {
   strategy_id?: string
 }
 
+export interface StrategyCapitalStatusQuery {
+  account_id: string
+  strategy_id: string
+}
+
 export interface PnLQuery extends LedgerFilters {
   account_id: string
 }
@@ -548,6 +553,19 @@ export interface StrategyRuntimeStatus {
   started_at: string
   heartbeat_at: string
   stopped_at: string | null
+}
+
+export interface StrategyCapitalStatus {
+  account_id: string
+  strategy_id: string
+  account_capital: string
+  trading_capital: string
+  reserve_capital: string
+  minimum: string
+  profit_reinvest_ratio: string
+  capital_breached: boolean
+  version: number
+  updated_at: string
 }
 
 export interface UniversePreviewItem {
