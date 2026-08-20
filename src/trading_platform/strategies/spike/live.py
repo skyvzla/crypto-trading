@@ -298,6 +298,8 @@ class SpikeExecutionCoordinator:
         self._submissions_inflight = 0
         self._signal_arbiter = SignalArbiter()
         self._expiry_tasks: dict[str, asyncio.Task] = {}
+        self._expiry_fatal_event = asyncio.Event()
+        self._expiry_fatal_exception: BaseException | None = None
         self._pending_audit_events: tuple[StrategyAuditEvent, ...] = ()
         self._audit_lock = asyncio.Lock()
         self.execution_queue = execution_queue or ExecutionQueue()
@@ -320,6 +322,17 @@ class SpikeExecutionCoordinator:
             await self._execution_worker.stop()
         finally:
             self._execution_worker_running = False
+
+    async def wait_expiry_fatal(self) -> BaseException:
+        """等待任一 TTL 撤单任务失败，供进程统一监督。"""
+
+        await self._expiry_fatal_event.wait()
+        assert self._expiry_fatal_exception is not None
+        return self._expiry_fatal_exception
+
+    @property
+    def expiry_failed(self) -> bool:
+        return self._expiry_fatal_exception is not None
 
     async def restore_campaign_gate(self) -> None:
         """恢复 Redis 互斥事实；不依据本地状态猜测或删除已有 lease。"""
@@ -603,8 +616,8 @@ class SpikeExecutionCoordinator:
                 continue
             task = self._expiry_tasks.get(order.client_order_id)
             if task is None or task.done():
-                self._expiry_tasks[order.client_order_id] = asyncio.create_task(
-                    self._expire_order(order.client_order_id, remaining_seconds)
+                self._schedule_expiry_task(
+                    order.client_order_id, remaining_seconds
                 )
         if cancel_due:
             await self.request_cancellation_flush(event_time=now_ms)
@@ -1001,9 +1014,32 @@ class SpikeExecutionCoordinator:
         if intent.ttl_ms is not None and intent.ttl_ms > 0:
             task = self._expiry_tasks.get(intent.client_order_id)
             if task is None or task.done():
-                self._expiry_tasks[intent.client_order_id] = asyncio.create_task(
-                    self._expire_order(intent.client_order_id, intent.ttl_ms / 1000)
+                self._schedule_expiry_task(
+                    intent.client_order_id, intent.ttl_ms / 1000
                 )
+
+    def _schedule_expiry_task(
+        self, client_order_id: str, delay_seconds: float
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(
+            self._supervise_expiry(client_order_id, delay_seconds),
+            name=f"spike-entry-expiry:{client_order_id}",
+        )
+        self._expiry_tasks[client_order_id] = task
+        return task
+
+    async def _supervise_expiry(
+        self, client_order_id: str, delay_seconds: float
+    ) -> None:
+        try:
+            await self._expire_order(client_order_id, delay_seconds)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            if self._expiry_fatal_exception is None:
+                self._expiry_fatal_exception = exc
+                self.gate.set_condition("execution", False)
+                self._expiry_fatal_event.set()
 
     async def _expire_order(self, client_order_id: str, delay_seconds: float) -> None:
         try:

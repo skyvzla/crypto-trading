@@ -230,19 +230,25 @@ class SpikeLiveProcess:
 
             self._tasks.extend(
                 [
-                asyncio.create_task(self._kline_loop(), name="spike-kline-loop"),
-                asyncio.create_task(
-                    self._market_watchdog_loop(), name="spike-market-watchdog"
-                ),
-                asyncio.create_task(self._safety_scan_loop(), name="spike-safety-scan"),
-                asyncio.create_task(
-                    self._execution_stream_fatal_loop(),
-                    name="spike-execution-stream-fatal",
-                ),
-                asyncio.create_task(
-                    self._submit_unknown_fatal_loop(),
-                    name="spike-submit-unknown-fatal",
-                ),
+                    asyncio.create_task(self._kline_loop(), name="spike-kline-loop"),
+                    asyncio.create_task(
+                        self._market_watchdog_loop(), name="spike-market-watchdog"
+                    ),
+                    asyncio.create_task(
+                        self._safety_scan_loop(), name="spike-safety-scan"
+                    ),
+                    asyncio.create_task(
+                        self._execution_stream_fatal_loop(),
+                        name="spike-execution-stream-fatal",
+                    ),
+                    asyncio.create_task(
+                        self._submit_unknown_fatal_loop(),
+                        name="spike-submit-unknown-fatal",
+                    ),
+                    asyncio.create_task(
+                        self._entry_expiry_fatal_loop(),
+                        name="spike-entry-expiry-fatal",
+                    ),
                 ]
             )
             await self._publish_runtime_status()
@@ -561,6 +567,14 @@ class SpikeLiveProcess:
         await self._try_publish_fatal_status()
         raise RuntimeError("SUBMIT_UNKNOWN recovery failed") from exc
 
+    async def _entry_expiry_fatal_loop(self) -> None:
+        assert self.coordinator is not None
+        exc = await self.coordinator.wait_expiry_fatal()
+        reason = f"entry expiry task failed: {type(exc).__name__}"
+        self._mark_runtime_fatal(reason)
+        await self._try_publish_fatal_status()
+        raise RuntimeError("entry expiry task failed") from exc
+
     async def _runtime_heartbeat_loop(self) -> None:
         while True:
             await asyncio.sleep(RUNTIME_HEARTBEAT_SECONDS)
@@ -647,6 +661,7 @@ class SpikeLiveProcess:
                 (self.execution_lease is None or self.execution_lease.held)
                 and self.runtime.user_stream.connected
                 and not self.coordinator.risk_guard.halted
+                and not self.coordinator.expiry_failed
                 and not self.coordinator.account.has_unresolved_orders()
             )
         except Exception:

@@ -1134,6 +1134,37 @@ async def test_submit_unknown_attempt_exhaustion_halts_process_fail_closed():
 
 
 @pytest.mark.asyncio
+async def test_entry_expiry_failure_halts_process_and_publishes_fatal_status():
+    settings = SpikeLiveSettings(
+        account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
+    )
+    process = SpikeLiveProcess(
+        settings,
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    failure = RuntimeError("WAL unavailable")
+    process.gate = Mock(set_condition=Mock())
+    risk = Mock(halt=Mock())
+    process.coordinator = Mock(
+        risk_guard=risk,
+        wait_expiry_fatal=AsyncMock(return_value=failure),
+    )
+    process._try_publish_fatal_status = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="entry expiry task failed") as raised:
+        await process._entry_expiry_fatal_loop()
+
+    assert raised.value.__cause__ is failure
+    assert process._runtime_fatal_reason == "entry expiry task failed: RuntimeError"
+    process.gate.set_condition.assert_called_once_with("execution", False)
+    risk.halt.assert_called_once_with("entry expiry task failed: RuntimeError")
+    process._try_publish_fatal_status.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
 async def test_execution_lease_loss_halts_process_fail_closed():
     settings = SpikeLiveSettings(
         account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
@@ -1427,7 +1458,11 @@ def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():
     risk = Mock(halted=False)
     account = Mock(has_unresolved_orders=Mock(return_value=False))
     process.gate = gate
-    process.coordinator = Mock(risk_guard=risk, account=account)
+    process.coordinator = Mock(
+        risk_guard=risk,
+        account=account,
+        expiry_failed=False,
+    )
     process.runtime = Mock(user_stream=Mock(connected=True))
 
     assert process._restore_execution_gate() is True
@@ -1450,6 +1485,12 @@ def test_stream_recovery_reopens_execution_only_when_all_facts_are_safe():
     assert process._restore_execution_gate() is False
     gate.set_condition.assert_called_with("execution", False)
 
+    gate.reset_mock()
+    process.execution_lease = None
+    process.coordinator.expiry_failed = True
+    assert process._restore_execution_gate() is False
+    gate.set_condition.assert_called_with("execution", False)
+
 
 def test_disconnect_recovery_sequence_waits_for_resolved_orders_before_reopening():
     settings = SpikeLiveSettings(
@@ -1467,7 +1508,11 @@ def test_disconnect_recovery_sequence_waits_for_resolved_orders_before_reopening
     account = Mock(has_unresolved_orders=Mock(return_value=True))
     stream = Mock(connected=False)
     process.gate = gate
-    process.coordinator = Mock(risk_guard=risk, account=account)
+    process.coordinator = Mock(
+        risk_guard=risk,
+        account=account,
+        expiry_failed=False,
+    )
     process.runtime = Mock(user_stream=stream)
 
     process._on_execution_stream_disconnected()
@@ -2013,6 +2058,98 @@ async def test_restart_immediately_cancels_entry_whose_wal_ttl_elapsed():
 
     account.cancel_order.assert_called_once_with("11")
     account.flush_cancellations.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_new_entry_expiry_iter_orders_failure_closes_execution_gate():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    failure = RuntimeError("WAL unavailable")
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(iter_orders=Mock(side_effect=failure)),
+        executor=Mock(submit=AsyncMock(return_value=Mock(status="NEW"))),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+    )
+    coordinator._owned_campaign_id = "spike_short:BTCUSDT:1000"
+
+    await coordinator._submit(replace(_entry(), ttl_ms=1))
+    observed = await asyncio.wait_for(coordinator.wait_expiry_fatal(), timeout=1)
+
+    assert observed is failure
+    assert coordinator.expiry_failed is True
+    assert gate.condition("execution") is False
+
+
+@pytest.mark.asyncio
+async def test_recovered_entry_expiry_cancel_failure_closes_execution_gate():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    failure = RuntimeError("cancel bookkeeping failed")
+    order = Mock(
+        order_id="11",
+        client_order_id="entry-recovered",
+        reduce_only=False,
+        status="NEW",
+        created_at=1_000,
+        ttl_ms=1,
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(
+            iter_orders=Mock(return_value=(order,)),
+            cancel_order=Mock(side_effect=failure),
+        ),
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+        now_ms=lambda: 1_000,
+    )
+
+    await coordinator.reconcile_entry_expirations()
+    observed = await asyncio.wait_for(coordinator.wait_expiry_fatal(), timeout=1)
+
+    assert observed is failure
+    assert gate.condition("execution") is False
+
+
+@pytest.mark.asyncio
+async def test_entry_expiry_flush_failure_closes_execution_gate():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    failure = RuntimeError("cancellation flush failed")
+    order = Mock(
+        order_id="11",
+        client_order_id="entry-flush",
+        status="NEW",
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(
+            iter_orders=Mock(return_value=(order,)),
+            cancel_order=Mock(return_value=True),
+        ),
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+    )
+    coordinator.request_cancellation_flush = AsyncMock(side_effect=failure)
+
+    coordinator._schedule_expiry_task("entry-flush", 0)
+    observed = await asyncio.wait_for(coordinator.wait_expiry_fatal(), timeout=1)
+
+    assert observed is failure
+    assert gate.condition("execution") is False
 
 
 def test_recovered_live_risk_without_owned_campaign_fails_closed():
