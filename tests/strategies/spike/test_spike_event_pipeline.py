@@ -280,6 +280,78 @@ async def test_queued_entry_uses_remaining_signal_ttl_at_submit_time():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("invalidator", ["gate", "symbol"])
+async def test_queued_entry_invalidated_before_execution_releases_local_fifo(
+    invalidator,
+):
+    first_campaign = "spike_short:BTCUSDT:1000"
+    second_campaign = "spike_short:ETHUSDT:2000"
+    strategy = LiveSignalIntentStrategy(
+        {
+            "BTCUSDT": [entry("BTCUSDT", 1_000)],
+            "ETHUSDT": [entry("ETHUSDT", 2_000)],
+        },
+        {first_campaign: 10_000, second_campaign: 10_000},
+    )
+    executor = Mock(submit=AsyncMock(return_value=Mock(status="NEW")))
+    coordinator, gate = coordinator_for(strategy, executor)
+    coordinator._now_ms = lambda: 3_000
+
+    await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
+    if invalidator == "gate":
+        gate.set_condition("market", False)
+    else:
+        strategy.blocked_entry_symbols = frozenset({"BTCUSDT"})
+    coordinator.start_execution_worker()
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+
+    executor.submit.assert_not_awaited()
+    assert coordinator.campaign_store.active is None
+    assert coordinator._signal_arbiter.active_campaign_id is None
+    skipped = coordinator._pending_audit_events[-1]
+    assert skipped.event_type == "signal_skipped_invalid"
+    assert skipped.details == {
+        "stage": "execution_queue",
+        "reason": "entry_gate_closed" if invalidator == "gate" else "symbol_blocked",
+    }
+
+    if invalidator == "gate":
+        gate.set_condition("market", True)
+    else:
+        strategy.blocked_entry_symbols = frozenset()
+    await coordinator.on_bar1s_queued(bar("ETHUSDT", 2))
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+
+    executor.submit.assert_awaited_once()
+    assert executor.submit.await_args.args[0].symbol == "ETHUSDT"
+    await coordinator.stop_execution_worker()
+
+
+@pytest.mark.asyncio
+async def test_queued_entry_noop_never_releases_an_owned_redis_campaign():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    strategy = LiveSignalIntentStrategy(
+        {"BTCUSDT": [entry("BTCUSDT", 1_000)]},
+        {campaign_id: 10_000},
+    )
+    executor = Mock(submit=AsyncMock(return_value=Mock(status="NEW")))
+    coordinator, gate = coordinator_for(strategy, executor)
+    coordinator._now_ms = lambda: 3_000
+
+    await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
+    assert await coordinator._acquire_campaign(campaign_id, "BTCUSDT", 2_000)
+    gate.set_condition("market", False)
+    coordinator.start_execution_worker()
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+
+    executor.submit.assert_not_awaited()
+    assert coordinator.campaign_store.active is not None
+    assert coordinator._owned_campaign_id == campaign_id
+    assert coordinator._signal_arbiter.active_campaign_id == campaign_id
+    await coordinator.stop_execution_worker()
+
+
+@pytest.mark.asyncio
 async def test_execution_worker_submits_exit_before_earlier_entry():
     submitted = []
 

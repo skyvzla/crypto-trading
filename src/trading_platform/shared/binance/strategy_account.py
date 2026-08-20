@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
@@ -33,6 +34,7 @@ class BinanceStrategyAccount:
         strategy_id: str,
         risk_guard: RiskGuard,
         now_ms: Callable[[], int] | None = None,
+        required_cross_margin_symbols: Iterable[str] = (),
     ):
         self.rest_client = rest_client
         self.wal = wal
@@ -40,6 +42,11 @@ class BinanceStrategyAccount:
         self.strategy_id = strategy_id
         self.risk_guard = risk_guard
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
+        self._required_cross_margin_symbols = frozenset(
+            symbol.strip().upper()
+            for symbol in required_cross_margin_symbols
+            if symbol.strip()
+        )
         self._positions: dict[str, Position] = {}
         self._position_update_ms: dict[str, int] = {}
         self._pending_position_update_ms: dict[str, int] = {}
@@ -165,29 +172,62 @@ class BinanceStrategyAccount:
         snapshots = await self.rest_client.get_position_risk()
         if not isinstance(snapshots, list):
             raise RuntimeError("invalid Binance position snapshot")
+
+        parsed_snapshots: list[tuple[str, int, Decimal, str, Decimal, Decimal]] = []
+        seen: set[str] = set()
+        for raw in snapshots:
+            symbol = str(raw.get("symbol") or "").strip().upper()
+            if not symbol:
+                raise RuntimeError("position snapshot missing symbol")
+            amount = self._decimal(raw, "positionAmt")
+            if symbol in self._required_cross_margin_symbols or amount != 0:
+                margin_type = str(raw.get("marginType") or "").strip().lower()
+                if margin_type not in {"cross", "crossed"}:
+                    raise RuntimeError(
+                        f"Binance position snapshot for {symbol} requires cross margin"
+                    )
+            position_side = str(raw.get("positionSide") or "BOTH")
+            if position_side != "BOTH":
+                raise RuntimeError("Binance position snapshot is not one-way")
+            parsed_snapshots.append(
+                (
+                    symbol,
+                    int(raw.get("updateTime") or 0),
+                    amount,
+                    position_side,
+                    self._decimal(raw, "entryPrice"),
+                    self._decimal(raw, "unRealizedProfit", default="0"),
+                )
+            )
+            seen.add(symbol)
+
+        missing = self._required_cross_margin_symbols - seen
+        if missing:
+            raise RuntimeError(
+                "Binance position snapshot missing managed symbols: "
+                + ", ".join(sorted(missing))
+            )
+
         async with self._lock:
-            seen: set[str] = set()
-            for raw in snapshots:
-                symbol = str(raw.get("symbol") or "")
-                if not symbol:
-                    raise RuntimeError("position snapshot missing symbol")
-                update_ms = int(raw.get("updateTime") or 0)
+            for (
+                symbol,
+                update_ms,
+                amount,
+                position_side,
+                entry_price,
+                unrealized_pnl,
+            ) in parsed_snapshots:
                 if update_ms < self._position_update_ms.get(symbol, -1):
                     continue
-                amount = self._decimal(raw, "positionAmt")
-                position_side = str(raw.get("positionSide") or "BOTH")
-                if position_side != "BOTH":
-                    raise RuntimeError("Binance position snapshot is not one-way")
                 self._apply_position(
                     symbol=symbol,
                     amount=amount,
-                    entry_price=self._decimal(raw, "entryPrice"),
-                    unrealized_pnl=self._decimal(raw, "unRealizedProfit", default="0"),
+                    entry_price=entry_price,
+                    unrealized_pnl=unrealized_pnl,
                     update_ms=update_ms,
                     position_side=position_side,
                     confirms_stream_fill=False,
                 )
-                seen.add(symbol)
 
     async def handle_account_update(self, event: dict[str, Any]) -> None:
         if event.get("e") != "ACCOUNT_UPDATE":

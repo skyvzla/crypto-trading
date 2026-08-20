@@ -676,14 +676,29 @@ class SpikeExecutionCoordinator:
         require_arbitrated: bool = False,
     ) -> bool:
         symbol_allowed = getattr(self.strategy, "is_symbol_entry_enabled", None)
+        raw_entries = [intent for intent in intents if not intent.reduce_only]
         entries = [
             intent
-            for intent in intents
-            if not intent.reduce_only
-            and (not callable(symbol_allowed) or symbol_allowed(intent.symbol))
+            for intent in raw_entries
+            if not callable(symbol_allowed) or symbol_allowed(intent.symbol)
         ]
         exits = [intent for intent in intents if intent.reduce_only]
         approved_entries: list[OrderIntent] = []
+        if require_arbitrated and raw_entries and not entries:
+            self._skip_queued_entry(
+                raw_entries[0],
+                status="invalid",
+                reason="symbol_blocked",
+                event_time=self._now_ms(),
+            )
+        elif require_arbitrated and entries and not self.gate.enabled:
+            self._skip_queued_entry(
+                entries[0],
+                status="invalid",
+                reason="entry_gate_closed",
+                event_time=self._now_ms(),
+            )
+            entries = []
         if entries and self.gate.enabled:
             campaign_id = self._campaign_id(entries[0])
             async with self._campaign_lock:
@@ -700,30 +715,38 @@ class SpikeExecutionCoordinator:
                     require_arbitrated
                     and self._signal_arbiter.active_campaign_id != campaign_id
                 ):
+                    self._skip_queued_entry(
+                        entries[0],
+                        status="overlap",
+                        reason="arbitration_lost",
+                        event_time=now_ms,
+                    )
                     entries = []
                 elif require_arbitrated and callable(expire_time_getter) and (
                     expires_at is None or expires_at <= now_ms
                 ):
                     status = "stale" if expires_at is not None else "invalid"
-                    self._pending_audit_events += (
-                        StrategyAuditEvent(
-                            event_time=now_ms,
-                            event_type=f"signal_skipped_{status}",
-                            symbol=entries[0].symbol,
-                            strategy_id=STRATEGY_ID,
-                            campaign_id=campaign_id,
-                            details={"stage": "execution_queue"},
+                    self._skip_queued_entry(
+                        entries[0],
+                        status=status,
+                        reason=(
+                            "signal_expired"
+                            if expires_at is not None
+                            else "campaign_invalidated"
                         ),
+                        event_time=now_ms,
                     )
-                    if self._signal_arbiter.active_campaign_id == campaign_id:
-                        self._signal_arbiter.release(campaign_id)
                     entries = []
                 elif not await self._acquire_campaign(
                     campaign_id, entries[0].symbol, event_time
                 ):
                     self.gate.set_condition("campaign", False)
-                    if self._signal_arbiter.active_campaign_id == campaign_id:
-                        self._signal_arbiter.release(campaign_id)
+                    self._skip_queued_entry(
+                        entries[0],
+                        status="overlap",
+                        reason="campaign_unavailable",
+                        event_time=now_ms,
+                    )
                 else:
                     total_value = sum(
                         intent.price * intent.quantity for intent in entries
@@ -735,6 +758,13 @@ class SpikeExecutionCoordinator:
                         self.risk_guard.block_symbol(
                             entries[0].symbol, f"entry rejected:{reason}"
                         )
+                        if require_arbitrated:
+                            self._skip_queued_entry(
+                                entries[0],
+                                status="invalid",
+                                reason="risk_rejected",
+                                event_time=now_ms,
+                            )
                     else:
                         approved_entries = [
                             replace(intent, ttl_ms=expires_at - now_ms)
@@ -767,6 +797,31 @@ class SpikeExecutionCoordinator:
                 async with self._campaign_lock:
                     self._submissions_inflight -= len(approved_exits)
         return True
+
+    def _skip_queued_entry(
+        self,
+        intent: OrderIntent,
+        *,
+        status: str,
+        reason: str,
+        event_time: int,
+    ) -> None:
+        campaign_id = self._campaign_id(intent)
+        self._pending_audit_events += (
+            StrategyAuditEvent(
+                event_time=event_time,
+                event_type=f"signal_skipped_{status}",
+                symbol=intent.symbol,
+                strategy_id=STRATEGY_ID,
+                campaign_id=campaign_id,
+                details={"stage": "execution_queue", "reason": reason},
+            ),
+        )
+        if (
+            self._owned_campaign_id is None
+            and self._signal_arbiter.active_campaign_id == campaign_id
+        ):
+            self._signal_arbiter.release(campaign_id)
 
     def _enqueue_intents(
         self, intents: list[OrderIntent], *, event_time: int

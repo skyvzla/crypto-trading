@@ -425,6 +425,7 @@ class SpikeLiveProcess:
             account_id=self.settings.account_id,
             strategy_id=STRATEGY_ID,
             risk_guard=risk,
+            required_cross_margin_symbols=self.settings.symbols,
         )
         strategy = DynamicSpikeBacktestStrategy(
             self.settings.symbols,
