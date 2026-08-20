@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import signal
 import time
@@ -24,6 +23,8 @@ from trading_platform.ledger.db.models import (
     StrategyRuntimeStatus,
     create_connection_pool,
 )
+from trading_platform.ledger.income_store import IncomeStore
+from trading_platform.ledger.income_sync import FundingIncomeSync
 from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.binance.rest_client import BinanceRestClient
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
@@ -343,17 +344,10 @@ class SpikeLiveProcess:
         )
 
     @staticmethod
-    def _build_funding_source(rest: BinanceRestClient, pool: Any) -> Any:
-        income_store_module = importlib.import_module(
-            "trading_platform.ledger.income_store"
-        )
-        income_sync_module = importlib.import_module(
-            "trading_platform.ledger.income_sync"
-        )
-        return income_sync_module.FundingIncomeSync(
-            rest,
-            income_store_module.IncomeStore(pool),
-        )
+    def _build_funding_source(
+        rest: BinanceRestClient, pool: Any
+    ) -> FundingIncomeSync:
+        return FundingIncomeSync(rest, IncomeStore(pool))
 
     async def _build_resources(self) -> None:
         pool = await create_connection_pool(self.database.dsn)
@@ -537,7 +531,7 @@ class SpikeLiveProcess:
         self.runtime.user_stream.on_execution_report = callbacks.handle_execution_report
         self.runtime.user_stream.on_account_update = callbacks.handle_account_update
         self.runtime.user_stream.on_disconnect = self._on_execution_stream_disconnected
-        self.runtime.on_recovered = self._restore_execution_gate
+        self.runtime.on_recovered = self._recover_execution_after_reconnect
 
     def _on_execution_stream_disconnected(self) -> None:
         if self.gate is not None:
@@ -659,6 +653,32 @@ class SpikeLiveProcess:
             ready = False
         self.gate.set_condition("execution", ready)
         return ready
+
+    async def _recover_execution_after_reconnect(self) -> bool:
+        """重连后以交易所仓位和钱包事实重新决定执行与资金准入。"""
+
+        if (
+            self.coordinator is None
+            or self.capital_store is None
+            or self.capital_snapshot is None
+        ):
+            return self._restore_execution_gate()
+        await self.coordinator.account.refresh_positions()
+        snapshot = await self.capital_store.get_state(
+            account_id=self.settings.account_id,
+            strategy_id=STRATEGY_ID,
+        )
+        if snapshot is None:
+            raise RuntimeError("persisted capital state disappeared")
+        recovery_allowed = bool(
+            self.coordinator._owned_campaign_id
+            or self.coordinator.account.symbols_with_live_risk()
+        )
+        await self._reconcile_capital_wallet(
+            snapshot,
+            recovery_allowed=recovery_allowed,
+        )
+        return self._restore_execution_gate()
 
     async def _reconcile_capital_wallet(
         self,

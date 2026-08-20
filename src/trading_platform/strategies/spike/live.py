@@ -811,6 +811,16 @@ class SpikeExecutionCoordinator:
                     ),
                 )
                 continue
+            self._pending_audit_events += (
+                StrategyAuditEvent(
+                    event_time=event_time,
+                    event_type="signal_acquired",
+                    symbol=candidate.symbol,
+                    strategy_id=STRATEGY_ID,
+                    campaign_id=candidate.campaign_id,
+                    details={"arrival_sequence": candidate.arrival_sequence},
+                ),
+            )
             for intent in campaign_entries:
                 try:
                     self.execution_queue.put_nowait(

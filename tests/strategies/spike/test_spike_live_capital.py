@@ -361,17 +361,12 @@ def test_process_builds_funding_sync_from_ledger_modules(monkeypatch):
     income_store_type = Mock(return_value=income_store)
     funding_sync = Mock()
     funding_sync_type = Mock(return_value=funding_sync)
-    modules = {
-        "trading_platform.ledger.income_store": SimpleNamespace(
-            IncomeStore=income_store_type
-        ),
-        "trading_platform.ledger.income_sync": SimpleNamespace(
-            FundingIncomeSync=funding_sync_type
-        ),
-    }
     monkeypatch.setattr(
-        "trading_platform.strategies.spike.main.importlib.import_module",
-        modules.__getitem__,
+        "trading_platform.strategies.spike.main.IncomeStore", income_store_type
+    )
+    monkeypatch.setattr(
+        "trading_platform.strategies.spike.main.FundingIncomeSync",
+        funding_sync_type,
     )
     rest = Mock()
     pool = Mock()
@@ -411,6 +406,61 @@ async def test_open_campaign_wallet_shortfall_keeps_exit_recovery_running():
     assert process.gate.condition("capital") is False
     assert process.gate.condition("execution") is True
     process.coordinator.record_capital_admission.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_refreshes_positions_and_wallet_before_execution_gate():
+    process = live_process()
+    snapshot = capital_snapshot()
+    process.capital_snapshot = snapshot
+    process.capital_store = Mock(get_state=AsyncMock(return_value=snapshot))
+    process.execution_rest.get_account = AsyncMock(
+        return_value={"totalWalletBalance": "100"}
+    )
+    process.coordinator.account = Mock(
+        refresh_positions=AsyncMock(),
+        symbols_with_live_risk=Mock(return_value=set()),
+        has_unresolved_orders=Mock(return_value=False),
+    )
+    process.coordinator._owned_campaign_id = None
+    process.coordinator.risk_guard = RiskGuard("account-a", RiskConfig())
+    process.runtime = Mock(user_stream=Mock(connected=True))
+    process.execution_lease = Mock(held=True)
+
+    assert await process._recover_execution_after_reconnect() is True
+
+    process.coordinator.account.refresh_positions.assert_awaited_once()
+    process.capital_store.get_state.assert_awaited_once_with(
+        account_id="account-a", strategy_id="spike_short"
+    )
+    process.execution_rest.get_account.assert_awaited_once()
+    assert process.gate.condition("capital") is True
+    assert process.gate.condition("execution") is True
+
+
+@pytest.mark.asyncio
+async def test_reconnect_wallet_shortfall_keeps_existing_position_exit_enabled():
+    process = live_process()
+    snapshot = capital_snapshot()
+    process.capital_snapshot = snapshot
+    process.capital_store = Mock(get_state=AsyncMock(return_value=snapshot))
+    process.execution_rest.get_account = AsyncMock(
+        return_value={"totalWalletBalance": "90"}
+    )
+    process.coordinator.account = Mock(
+        refresh_positions=AsyncMock(),
+        symbols_with_live_risk=Mock(return_value={"BTCUSDT"}),
+        has_unresolved_orders=Mock(return_value=False),
+    )
+    process.coordinator._owned_campaign_id = "spike_short:BTCUSDT:1000"
+    process.coordinator.risk_guard = RiskGuard("account-a", RiskConfig())
+    process.runtime = Mock(user_stream=Mock(connected=True))
+    process.execution_lease = Mock(held=True)
+
+    assert await process._recover_execution_after_reconnect() is True
+
+    assert process.gate.condition("capital") is False
+    assert process.gate.condition("execution") is True
 
 
 def test_spike_entry_reason_is_part_of_live_admission():

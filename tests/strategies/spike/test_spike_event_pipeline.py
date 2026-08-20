@@ -173,9 +173,16 @@ async def test_slow_submit_does_not_block_strategy_event_ingestion_and_fifo_wins
     assert submitted == ["BTCUSDT"]
     # 第二个同批信号在入队阶段即被首个 Campaign 排除，不能在首单释放后复活。
     assert coordinator.execution_queue.qsize == 0
-    assert coordinator._pending_audit_events[-1].event_type == (
-        "signal_skipped_overlap"
-    )
+    fifo_events = [
+        event
+        for event in coordinator._pending_audit_events
+        if event.event_type.startswith("signal_")
+    ]
+    assert [event.event_type for event in fifo_events] == [
+        "signal_acquired",
+        "signal_skipped_overlap",
+    ]
+    assert [event.details["arrival_sequence"] for event in fifo_events] == [1, 2]
 
     release_submit.set()
     await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)

@@ -44,6 +44,26 @@ def test_single_entry_capital_settings_override_legacy_fixed_notional():
     assert settings.capital_config.minimum_trading_capital == Decimal("5")
 
 
+def test_dynamic_capital_does_not_require_legacy_total_notional():
+    args = parse_args(
+        [
+            "--symbol", "BTCUSDT",
+            "--start", "2026-01-01T00:00:00+00:00",
+            "--end", "2026-01-02T00:00:00+00:00",
+            "--duckdb-path", "candles.duckdb",
+            "--entry-tier-mode", "single-entry",
+            "--initial-account-capital", "100",
+            "--initial-trading-capital", "50",
+        ]
+    )
+
+    settings = resolve_settings(args)
+
+    assert args.total_notional is None
+    assert settings.capital_config is not None
+    assert settings.capital_config.initial_trading_capital == Decimal("50")
+
+
 def test_single_entry_requires_both_initial_capital_values():
     with pytest.raises(ValueError, match="initial-account-capital"):
         resolve_settings(

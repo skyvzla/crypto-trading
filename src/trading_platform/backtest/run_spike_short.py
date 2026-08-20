@@ -146,8 +146,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--total-notional",
         type=Decimal,
-        required=True,
-        help="Total notional allocated to each signal",
+        default=None,
+        help="旧固定资金模式的每轮名义金额；动态资金模式不需要",
     )
     parser.add_argument(
         "--initial-account-capital",
@@ -482,7 +482,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
-    if args.total_notional <= 0:
+    if args.total_notional is not None and args.total_notional <= 0:
         raise ValueError("--total-notional must be positive")
     start_ms = _timestamp_ms(args.start)
     end_ms = _timestamp_ms(args.end)
@@ -520,6 +520,10 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
             initial_trading_capital=initial_capitals[1],
             profit_reinvest_ratio=args.profit_reinvest_ratio,
             minimum_trading_capital=args.minimum_trading_capital,
+        )
+    if capital_config is None and args.total_notional is None:
+        raise ValueError(
+            "--total-notional or both dynamic capital values are required"
         )
     if entry_tier_mode == "single-entry" and capital_config is None:
         raise ValueError(
