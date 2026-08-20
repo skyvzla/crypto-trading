@@ -14,7 +14,10 @@ from trading_platform.market.archive.index import (
     verify_archive_index_files,
 )
 from trading_platform.market.archive.metrics import load_metrics_index
-from trading_platform.market.archive.parquet import archive_root_from_catalog
+from trading_platform.market.archive.parquet import (
+    CANDLE_FEATURE_COLUMNS,
+    archive_root_from_catalog,
+)
 from trading_platform.shared.events import Bar1s, Kline
 
 Event = Union[Bar1s, Kline]
@@ -79,6 +82,27 @@ def _decimal_value(value: object) -> Decimal:
     if isinstance(value, str):
         return Decimal(value)
     return Decimal(str(value))
+
+
+def _optional_decimal_value(value: object) -> Decimal | None:
+    return None if value is None else _decimal_value(value)
+
+
+def _optional_int_value(value: object) -> int | None:
+    return None if value is None else int(value)
+
+
+_DECIMAL_BAR1S_FEATURES = {
+    "vwap",
+    "quote_volume",
+    "taker_buy_volume",
+    "taker_sell_volume",
+    "taker_buy_quote_volume",
+    "taker_sell_quote_volume",
+    "max_agg_trade_quantity",
+    "max_taker_buy_agg_trade_quantity",
+    "max_taker_sell_agg_trade_quantity",
+}
 
 
 class BacktestDataLoader:
@@ -275,6 +299,20 @@ class BacktestDataLoader:
                 return None
             source_sql = "read_parquet(?, union_by_name=true)"
             source_parameters.append(source_files)
+        source_columns = {
+            str(row[0])
+            for row in connection.execute(
+                f"DESCRIBE SELECT * FROM {source_sql}", source_parameters
+            ).fetchall()
+        }
+        feature_select = []
+        for name in CANDLE_FEATURE_COLUMNS:
+            if name not in source_columns:
+                feature_select.append(f"NULL AS {name}")
+            elif name in _DECIMAL_BAR1S_FEATURES:
+                feature_select.append(f"CAST({name} AS VARCHAR) AS {name}")
+            else:
+                feature_select.append(name)
         available_time_sql = (
             "CASE WHEN timeframe = '1s' "
             "THEN epoch_ms(open_time) + 1000 + ? "
@@ -285,8 +323,10 @@ class BacktestDataLoader:
             "CAST(open AS VARCHAR), CAST(high AS VARCHAR), "
             "CAST(low AS VARCHAR), CAST(close AS VARCHAR), "
             "CAST(volume AS VARCHAR), "
-            f"{available_time_sql} AS available_time "
-            f"FROM {source_sql} "
+            f"{available_time_sql} AS available_time, "
+            + ", ".join(feature_select)
+            + " "
+            + f"FROM {source_sql} "
             f"WHERE symbol IN ({placeholders}) "
             f"AND timeframe IN ({timeframe_placeholders}) "
             "AND ((timeframe = '1s' AND epoch_ms(open_time) >= ? "
@@ -349,12 +389,59 @@ class BacktestDataLoader:
                     f"{shifted_open}..{shifted_close}"
                 )
             close_decimal = _decimal_value(close)
+            feature_values = dict(zip(CANDLE_FEATURE_COLUMNS, row[10:], strict=True))
+            vwap = _optional_decimal_value(feature_values["vwap"]) or close_decimal
             return Bar1s(
                 symbol=symbol, timestamp=shifted_open,
                 available_time=available_time, type_priority=1, sequence=sequence,
                 open=_decimal_value(open_), high=_decimal_value(high),
                 low=_decimal_value(low), close=close_decimal,
-                volume=_decimal_value(volume), trade_count=0, vwap=close_decimal,
+                volume=_decimal_value(volume),
+                trade_count=int(feature_values["trade_count"] or 0),
+                vwap=vwap,
+                quote_volume=_optional_decimal_value(feature_values["quote_volume"]),
+                raw_trade_count=_optional_int_value(feature_values["raw_trade_count"]),
+                taker_buy_volume=_optional_decimal_value(
+                    feature_values["taker_buy_volume"]
+                ),
+                taker_sell_volume=_optional_decimal_value(
+                    feature_values["taker_sell_volume"]
+                ),
+                taker_buy_quote_volume=_optional_decimal_value(
+                    feature_values["taker_buy_quote_volume"]
+                ),
+                taker_sell_quote_volume=_optional_decimal_value(
+                    feature_values["taker_sell_quote_volume"]
+                ),
+                taker_buy_trade_count=_optional_int_value(
+                    feature_values["taker_buy_trade_count"]
+                ),
+                taker_sell_trade_count=_optional_int_value(
+                    feature_values["taker_sell_trade_count"]
+                ),
+                taker_buy_agg_trade_count=_optional_int_value(
+                    feature_values["taker_buy_agg_trade_count"]
+                ),
+                taker_sell_agg_trade_count=_optional_int_value(
+                    feature_values["taker_sell_agg_trade_count"]
+                ),
+                max_agg_trade_quantity=_optional_decimal_value(
+                    feature_values["max_agg_trade_quantity"]
+                ),
+                max_taker_buy_agg_trade_quantity=_optional_decimal_value(
+                    feature_values["max_taker_buy_agg_trade_quantity"]
+                ),
+                max_taker_sell_agg_trade_quantity=_optional_decimal_value(
+                    feature_values["max_taker_sell_agg_trade_quantity"]
+                ),
+                first_aggregate_trade_id=_optional_int_value(
+                    feature_values["first_aggregate_trade_id"]
+                ),
+                last_aggregate_trade_id=_optional_int_value(
+                    feature_values["last_aggregate_trade_id"]
+                ),
+                first_trade_id=_optional_int_value(feature_values["first_trade_id"]),
+                last_trade_id=_optional_int_value(feature_values["last_trade_id"]),
             )
         return Kline(
             symbol=symbol, interval=timeframe, open_time=open_time,

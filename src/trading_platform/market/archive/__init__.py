@@ -1,4 +1,4 @@
-from .models import Candle
+from .models import Candle, Candle1s
 from .index import (
     ARCHIVE_INDEX_FILENAME,
     ArchiveIndexError,
@@ -48,6 +48,7 @@ __all__ = [
     "ArchiveIndexError",
     "BinanceFuturesMetadataFetcher",
     "Candle",
+    "Candle1s",
     "BinanceVisionHTTPFetcher",
     "BinanceVisionWorkerPoolFetcher",
     "DownloadResult",

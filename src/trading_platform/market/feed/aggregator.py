@@ -22,12 +22,21 @@ class Bar1sAggregator:
     设置 available_time = timestamp + 1000
     """
 
-    def __init__(self, window_tolerance_ms: int = 5000):
+    def __init__(
+        self,
+        window_tolerance_ms: int = 5000,
+        *,
+        auto_finalize: bool = True,
+    ):
         """
         Args:
             window_tolerance_ms: 允许迟到的时间窗口（毫秒），默认 5 秒
+            auto_finalize: 实时模式在进入下一秒后立即发布旧窗口；历史批处理
+                可关闭此选项并在输入完成后统一 flush，确保乱序归档仍能得到
+                正确的 open/close。
         """
         self.window_tolerance_ms = window_tolerance_ms
+        self.auto_finalize = auto_finalize
 
         # {symbol: {second_timestamp: TradeWindow}}
         self._windows: dict[str, dict[int, TradeWindow]] = defaultdict(dict)
@@ -46,6 +55,9 @@ class Bar1sAggregator:
         quantity: Decimal,
         timestamp: int,
         aggregate_trade_id: int | None = None,
+        first_trade_id: int | None = None,
+        last_trade_id: int | None = None,
+        is_buyer_maker: bool | None = None,
     ) -> list[Bar1s]:
         """
         添加一笔交易，返回本次完成的全部 Bar
@@ -85,13 +97,23 @@ class Bar1sAggregator:
             windows[second_ts] = TradeWindow(second_ts)
 
         window = windows[second_ts]
-        window.add_trade(price, quantity, aggregate_trade_id)
+        window.add_trade(
+            price,
+            quantity,
+            timestamp=timestamp,
+            aggregate_trade_id=aggregate_trade_id,
+            first_trade_id=first_trade_id,
+            last_trade_id=last_trade_id,
+            is_buyer_maker=is_buyer_maker,
+        )
 
         # 更新最新时间戳
         if timestamp > last_ts:
             self._last_timestamp[symbol] = timestamp
 
         # 检查是否可以关闭旧窗口
+        if not self.auto_finalize:
+            return []
         return self._close_completed_windows(symbol, second_ts)
 
     def _close_completed_windows(self, symbol: str, current_second: int) -> list[Bar1s]:
@@ -179,15 +201,49 @@ class TradeWindow:
         self.volume = Decimal("0")
         self.trade_count = 0
         self.quote_volume = Decimal("0")  # 用于计算 vwap
+        self.raw_trade_count = 0
+        self._raw_trade_count_complete = True
+        self.taker_buy_volume = Decimal("0")
+        self.taker_sell_volume = Decimal("0")
+        self.taker_buy_quote_volume = Decimal("0")
+        self.taker_sell_quote_volume = Decimal("0")
+        self.taker_buy_trade_count = 0
+        self.taker_sell_trade_count = 0
+        self.taker_buy_agg_trade_count = 0
+        self.taker_sell_agg_trade_count = 0
+        self._orderflow_complete = True
+        self.max_agg_trade_quantity = Decimal("0")
+        self.max_taker_buy_agg_trade_quantity = Decimal("0")
+        self.max_taker_sell_agg_trade_quantity = Decimal("0")
         self.first_aggregate_trade_id: int | None = None
         self.last_aggregate_trade_id: int | None = None
+        self.first_trade_id: int | None = None
+        self.last_trade_id: int | None = None
+        self._first_event_key: tuple[int, int] | None = None
+        self._last_event_key: tuple[int, int] | None = None
+        self._sequence = 0
 
     def add_trade(
-        self, price: Decimal, quantity: Decimal, aggregate_trade_id: int | None = None
+        self,
+        price: Decimal,
+        quantity: Decimal,
+        *,
+        timestamp: int,
+        aggregate_trade_id: int | None = None,
+        first_trade_id: int | None = None,
+        last_trade_id: int | None = None,
+        is_buyer_maker: bool | None = None,
     ) -> None:
         """添加一笔交易到窗口"""
-        if self.open is None:
+        self._sequence += 1
+        tie_breaker = aggregate_trade_id if aggregate_trade_id is not None else self._sequence
+        event_key = (timestamp, tie_breaker)
+        if self._first_event_key is None or event_key < self._first_event_key:
+            self._first_event_key = event_key
             self.open = price
+        if self._last_event_key is None or event_key > self._last_event_key:
+            self._last_event_key = event_key
+            self.close = price
 
         if self.high is None or price > self.high:
             self.high = price
@@ -195,10 +251,49 @@ class TradeWindow:
         if self.low is None or price < self.low:
             self.low = price
 
-        self.close = price
         self.volume += quantity
-        self.quote_volume += price * quantity
+        quote_quantity = price * quantity
+        self.quote_volume += quote_quantity
         self.trade_count += 1
+        self.max_agg_trade_quantity = max(self.max_agg_trade_quantity, quantity)
+
+        raw_count: int | None = None
+        if first_trade_id is None or last_trade_id is None or last_trade_id < first_trade_id:
+            self._raw_trade_count_complete = False
+        else:
+            raw_count = last_trade_id - first_trade_id + 1
+            self.raw_trade_count += raw_count
+            self.first_trade_id = (
+                first_trade_id
+                if self.first_trade_id is None
+                else min(self.first_trade_id, first_trade_id)
+            )
+            self.last_trade_id = (
+                last_trade_id
+                if self.last_trade_id is None
+                else max(self.last_trade_id, last_trade_id)
+            )
+
+        if is_buyer_maker is None:
+            self._orderflow_complete = False
+        elif is_buyer_maker:
+            self.taker_sell_volume += quantity
+            self.taker_sell_quote_volume += quote_quantity
+            self.taker_sell_agg_trade_count += 1
+            if raw_count is not None:
+                self.taker_sell_trade_count += raw_count
+            self.max_taker_sell_agg_trade_quantity = max(
+                self.max_taker_sell_agg_trade_quantity, quantity
+            )
+        else:
+            self.taker_buy_volume += quantity
+            self.taker_buy_quote_volume += quote_quantity
+            self.taker_buy_agg_trade_count += 1
+            if raw_count is not None:
+                self.taker_buy_trade_count += raw_count
+            self.max_taker_buy_agg_trade_quantity = max(
+                self.max_taker_buy_agg_trade_quantity, quantity
+            )
         if aggregate_trade_id is not None:
             if (
                 self.first_aggregate_trade_id is None
@@ -227,6 +322,55 @@ class TradeWindow:
             volume=self.volume,
             trade_count=self.trade_count,
             vwap=vwap,
+            quote_volume=self.quote_volume,
+            raw_trade_count=(
+                self.raw_trade_count if self._raw_trade_count_complete else None
+            ),
+            taker_buy_volume=(
+                self.taker_buy_volume if self._orderflow_complete else None
+            ),
+            taker_sell_volume=(
+                self.taker_sell_volume if self._orderflow_complete else None
+            ),
+            taker_buy_quote_volume=(
+                self.taker_buy_quote_volume if self._orderflow_complete else None
+            ),
+            taker_sell_quote_volume=(
+                self.taker_sell_quote_volume if self._orderflow_complete else None
+            ),
+            taker_buy_trade_count=(
+                self.taker_buy_trade_count
+                if self._orderflow_complete and self._raw_trade_count_complete
+                else None
+            ),
+            taker_sell_trade_count=(
+                self.taker_sell_trade_count
+                if self._orderflow_complete and self._raw_trade_count_complete
+                else None
+            ),
+            taker_buy_agg_trade_count=(
+                self.taker_buy_agg_trade_count if self._orderflow_complete else None
+            ),
+            taker_sell_agg_trade_count=(
+                self.taker_sell_agg_trade_count if self._orderflow_complete else None
+            ),
+            max_agg_trade_quantity=self.max_agg_trade_quantity,
+            max_taker_buy_agg_trade_quantity=(
+                self.max_taker_buy_agg_trade_quantity
+                if self._orderflow_complete
+                else None
+            ),
+            max_taker_sell_agg_trade_quantity=(
+                self.max_taker_sell_agg_trade_quantity
+                if self._orderflow_complete
+                else None
+            ),
+            first_trade_id=(
+                self.first_trade_id if self._raw_trade_count_complete else None
+            ),
+            last_trade_id=(
+                self.last_trade_id if self._raw_trade_count_complete else None
+            ),
             first_aggregate_trade_id=self.first_aggregate_trade_id,
             last_aggregate_trade_id=self.last_aggregate_trade_id,
             type_priority=1,

@@ -66,13 +66,32 @@ class RedisPublisher:
         """
         channel = f"bar1s:{bar.symbol}"
 
-        payload = bar.to_dict()
+        # None 表示上游数据源不提供该维度；省略可保持旧消费者兼容并避免
+        # 订单流扩展字段在不可用时无意义地放大 Redis 消息。
+        payload = {key: value for key, value in bar.to_dict().items() if value is not None}
+        if not bar.orderflow_available:
+            # 旧的测试/回补调用可能只有 price/quantity。此时保持原有 wire
+            # schema；真实 Binance aggTrade 带 is_buyer_maker，会走扩展 schema。
+            for key in (
+                "quote_volume",
+                "raw_trade_count",
+                "taker_buy_volume",
+                "taker_sell_volume",
+                "taker_buy_quote_volume",
+                "taker_sell_quote_volume",
+                "taker_buy_trade_count",
+                "taker_sell_trade_count",
+                "taker_buy_agg_trade_count",
+                "taker_sell_agg_trade_count",
+                "max_agg_trade_quantity",
+                "max_taker_buy_agg_trade_quantity",
+                "max_taker_sell_agg_trade_quantity",
+                "first_trade_id",
+                "last_trade_id",
+            ):
+                payload.pop(key, None)
         payload.pop("type_priority", None)
         payload.pop("sequence", None)
-        if bar.first_aggregate_trade_id is None:
-            payload.pop("first_aggregate_trade_id", None)
-        if bar.last_aggregate_trade_id is None:
-            payload.pop("last_aggregate_trade_id", None)
         message = json.dumps(payload)
         stream = f"bar1s:stream:{bar.symbol}"
 

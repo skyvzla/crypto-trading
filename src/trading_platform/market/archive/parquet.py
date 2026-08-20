@@ -11,7 +11,109 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .models import Candle
+from .models import Candle, Candle1s
+
+
+CANDLE_BASE_COLUMNS = (
+    "symbol", "timeframe", "open_time", "open", "high", "low", "close",
+    "volume", "close_time",
+)
+CANDLE_BASE_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("timeframe", pa.string()),
+        ("open_time", pa.timestamp("ms", tz="UTC")),
+        ("open", pa.float64()),
+        ("high", pa.float64()),
+        ("low", pa.float64()),
+        ("close", pa.float64()),
+        ("volume", pa.float64()),
+        ("close_time", pa.timestamp("ms", tz="UTC")),
+    ]
+)
+CANDLE_FEATURE_COLUMNS = (
+    "vwap",
+    "quote_volume",
+    "trade_count",
+    "raw_trade_count",
+    "taker_buy_volume",
+    "taker_sell_volume",
+    "taker_buy_quote_volume",
+    "taker_sell_quote_volume",
+    "taker_buy_trade_count",
+    "taker_sell_trade_count",
+    "taker_buy_agg_trade_count",
+    "taker_sell_agg_trade_count",
+    "max_agg_trade_quantity",
+    "max_taker_buy_agg_trade_quantity",
+    "max_taker_sell_agg_trade_quantity",
+    "first_aggregate_trade_id",
+    "last_aggregate_trade_id",
+    "first_trade_id",
+    "last_trade_id",
+)
+CANDLE_SCHEMA = pa.schema(
+    [
+        ("symbol", pa.string()),
+        ("timeframe", pa.string()),
+        ("open_time", pa.timestamp("ms", tz="UTC")),
+        ("open", pa.float64()),
+        ("high", pa.float64()),
+        ("low", pa.float64()),
+        ("close", pa.float64()),
+        ("volume", pa.float64()),
+        ("close_time", pa.timestamp("ms", tz="UTC")),
+        ("vwap", pa.float64()),
+        ("quote_volume", pa.float64()),
+        ("trade_count", pa.int64()),
+        ("raw_trade_count", pa.int64()),
+        ("taker_buy_volume", pa.float64()),
+        ("taker_sell_volume", pa.float64()),
+        ("taker_buy_quote_volume", pa.float64()),
+        ("taker_sell_quote_volume", pa.float64()),
+        ("taker_buy_trade_count", pa.int64()),
+        ("taker_sell_trade_count", pa.int64()),
+        ("taker_buy_agg_trade_count", pa.int64()),
+        ("taker_sell_agg_trade_count", pa.int64()),
+        ("max_agg_trade_quantity", pa.float64()),
+        ("max_taker_buy_agg_trade_quantity", pa.float64()),
+        ("max_taker_sell_agg_trade_quantity", pa.float64()),
+        ("first_aggregate_trade_id", pa.int64()),
+        ("last_aggregate_trade_id", pa.int64()),
+        ("first_trade_id", pa.int64()),
+        ("last_trade_id", pa.int64()),
+    ]
+)
+_DUCKDB_CANDLE_TYPES = {
+    "symbol": "VARCHAR",
+    "timeframe": "VARCHAR",
+    "open_time": "TIMESTAMPTZ",
+    "open": "DOUBLE",
+    "high": "DOUBLE",
+    "low": "DOUBLE",
+    "close": "DOUBLE",
+    "volume": "DOUBLE",
+    "close_time": "TIMESTAMPTZ",
+    "vwap": "DOUBLE",
+    "quote_volume": "DOUBLE",
+    "trade_count": "BIGINT",
+    "raw_trade_count": "BIGINT",
+    "taker_buy_volume": "DOUBLE",
+    "taker_sell_volume": "DOUBLE",
+    "taker_buy_quote_volume": "DOUBLE",
+    "taker_sell_quote_volume": "DOUBLE",
+    "taker_buy_trade_count": "BIGINT",
+    "taker_sell_trade_count": "BIGINT",
+    "taker_buy_agg_trade_count": "BIGINT",
+    "taker_sell_agg_trade_count": "BIGINT",
+    "max_agg_trade_quantity": "DOUBLE",
+    "max_taker_buy_agg_trade_quantity": "DOUBLE",
+    "max_taker_sell_agg_trade_quantity": "DOUBLE",
+    "first_aggregate_trade_id": "BIGINT",
+    "last_aggregate_trade_id": "BIGINT",
+    "first_trade_id": "BIGINT",
+    "last_trade_id": "BIGINT",
+}
 
 
 class ParquetCandleArchive:
@@ -112,25 +214,32 @@ class ParquetCandleArchive:
                 "one Parquet write must contain exactly one archive partition"
             )
         symbol, timeframe, year, month, day = keys.pop()
-        table = pa.table(
-            {
-                "symbol": pa.array([symbol] * len(rows), type=pa.string()),
-                "timeframe": pa.array([timeframe] * len(rows), type=pa.string()),
-                "open_time": pa.array(
-                    [item.open_time_utc for item in rows],
-                    type=pa.timestamp("ms", tz="UTC"),
-                ),
-                "open": pa.array([item.open for item in rows], type=pa.float64()),
-                "high": pa.array([item.high for item in rows], type=pa.float64()),
-                "low": pa.array([item.low for item in rows], type=pa.float64()),
-                "close": pa.array([item.close for item in rows], type=pa.float64()),
-                "volume": pa.array([item.volume for item in rows], type=pa.float64()),
-                "close_time": pa.array(
-                    [item.close_time_utc for item in rows],
-                    type=pa.timestamp("ms", tz="UTC"),
-                ),
-            }
-        )
+        columns = {
+            "symbol": pa.array([symbol] * len(rows), type=pa.string()),
+            "timeframe": pa.array([timeframe] * len(rows), type=pa.string()),
+            "open_time": pa.array(
+                [item.open_time_utc for item in rows],
+                type=pa.timestamp("ms", tz="UTC"),
+            ),
+            "open": pa.array([item.open for item in rows], type=pa.float64()),
+            "high": pa.array([item.high for item in rows], type=pa.float64()),
+            "low": pa.array([item.low for item in rows], type=pa.float64()),
+            "close": pa.array([item.close for item in rows], type=pa.float64()),
+            "volume": pa.array([item.volume for item in rows], type=pa.float64()),
+            "close_time": pa.array(
+                [item.close_time_utc for item in rows],
+                type=pa.timestamp("ms", tz="UTC"),
+            ),
+        }
+        if timeframe == "1s":
+            feature_rows = [item if isinstance(item, Candle1s) else None for item in rows]
+            feature_types = {field.name: field.type for field in CANDLE_SCHEMA}
+            for name in CANDLE_FEATURE_COLUMNS:
+                columns[name] = pa.array(
+                    [getattr(item, name, None) if item is not None else None for item in feature_rows],
+                    type=feature_types[name],
+                )
+        table = pa.table(columns)
         return self.upsert_table(
             table,
             symbol=symbol,
@@ -154,22 +263,20 @@ class ParquetCandleArchive:
 
         if not table.num_rows:
             return 0
-        schema = pa.schema(
-            [
-                ("symbol", pa.string()),
-                ("timeframe", pa.string()),
-                ("open_time", pa.timestamp("ms", tz="UTC")),
-                ("open", pa.float64()),
-                ("high", pa.float64()),
-                ("low", pa.float64()),
-                ("close", pa.float64()),
-                ("volume", pa.float64()),
-                ("close_time", pa.timestamp("ms", tz="UTC")),
-            ]
-        )
-        if set(table.column_names) != set(schema.names):
+        unknown = set(table.column_names) - set(CANDLE_SCHEMA.names)
+        missing_base = set(CANDLE_BASE_COLUMNS) - set(table.column_names)
+        if unknown or missing_base:
             raise ValueError("candle Arrow table has incompatible columns")
-        table = table.select(schema.names).cast(schema)
+        if timeframe.strip().lower() == "1s":
+            for field in CANDLE_SCHEMA:
+                if field.name not in table.column_names:
+                    table = table.append_column(
+                        field.name, pa.nulls(table.num_rows, type=field.type)
+                    )
+            table = table.select(CANDLE_SCHEMA.names).cast(CANDLE_SCHEMA)
+        else:
+            # 订单流扩展只属于 aggTrade 生成的 1s 数据；其它 K 线继续写窄表。
+            table = table.select(CANDLE_BASE_SCHEMA.names).cast(CANDLE_BASE_SCHEMA)
         partition = self._partition_dir(symbol, timeframe, year, month, day)
         partition.mkdir(parents=True, exist_ok=True)
         target = partition / "candles.parquet"
@@ -239,42 +346,33 @@ def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
                 str(dataset / "archive_index.parquet"),
             ],
         )
+        source_columns: set[str] = set()
         if has_files:
-            connection.execute(
-                f"""
-            CREATE OR REPLACE VIEW candles AS
-            SELECT
-                symbol::VARCHAR AS symbol,
-                timeframe::VARCHAR AS timeframe,
-                open_time::TIMESTAMPTZ AS open_time,
-                open::DOUBLE AS open,
-                high::DOUBLE AS high,
-                low::DOUBLE AS low,
-                close::DOUBLE AS close,
-                volume::DOUBLE AS volume,
-                close_time::TIMESTAMPTZ AS close_time
-            FROM read_parquet(
-                {glob}, union_by_name = true
-            )
-            """
-            )
-        else:
-            connection.execute(
-                """
-                CREATE OR REPLACE VIEW candles AS
-                SELECT
-                    NULL::VARCHAR AS symbol,
-                    NULL::VARCHAR AS timeframe,
-                    NULL::TIMESTAMPTZ AS open_time,
-                    NULL::DOUBLE AS open,
-                    NULL::DOUBLE AS high,
-                    NULL::DOUBLE AS low,
-                    NULL::DOUBLE AS close,
-                    NULL::DOUBLE AS volume,
-                    NULL::TIMESTAMPTZ AS close_time
-                WHERE false
-                """
-            )
+            source_columns = {
+                str(row[0])
+                for row in connection.execute(
+                    f"DESCRIBE SELECT * FROM read_parquet({glob}, union_by_name=true)"
+                ).fetchall()
+            }
+        select_columns = []
+        for name, data_type in _DUCKDB_CANDLE_TYPES.items():
+            if name in source_columns:
+                select_columns.append(f'{name}::{data_type} AS {name}')
+            else:
+                select_columns.append(f'NULL::{data_type} AS {name}')
+        source = (
+            f"FROM read_parquet({glob}, union_by_name=true)"
+            if has_files
+            else ""
+        )
+        where = "" if has_files else " WHERE false"
+        connection.execute(
+            "CREATE OR REPLACE VIEW candles AS SELECT "
+            + ", ".join(select_columns)
+            + " "
+            + source
+            + where
+        )
     finally:
         connection.close()
     return catalog
@@ -320,10 +418,20 @@ def ensure_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
         row = connection.execute(
             "SELECT sql FROM duckdb_views() WHERE view_name = 'candles'"
         ).fetchone()
+        columns = {
+            str(item[0])
+            for item in connection.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'main' AND table_name = 'candles'"
+            ).fetchall()
+        }
     finally:
         connection.close()
     has_parquet_view = row is not None and "read_parquet" in str(row[0]).lower()
-    if has_indexed_partitions != has_parquet_view:
+    if (
+        has_indexed_partitions != has_parquet_view
+        or not set(_DUCKDB_CANDLE_TYPES).issubset(columns)
+    ):
         return create_duckdb_catalog(dataset, catalog)
     return catalog
 
