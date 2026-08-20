@@ -267,6 +267,130 @@ async def test_account_updates_are_returned_to_event_loop_as_complete_events(mon
 
 
 @pytest.mark.asyncio
+async def test_account_update_waits_for_earlier_order_across_startup_barrier(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    order_started = asyncio.Event()
+    release_order = asyncio.Event()
+    account_finished = asyncio.Event()
+    calls = []
+
+    async def on_report(order):
+        calls.append(("order-start", order["c"]))
+        order_started.set()
+        await release_order.wait()
+        calls.append(("order-finish", order["c"]))
+
+    async def on_account_update(event):
+        calls.append(("account", event["T"]))
+        account_finished.set()
+
+    stream = UserDataStream(
+        rest,
+        on_execution_report=on_report,
+        on_account_update=on_account_update,
+    )
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+    await stream._connect_ws()
+    on_message = FakeWebSocketApp.instance.callbacks["on_message"]
+
+    def publish_in_arrival_order():
+        on_message(
+            FakeWebSocketApp.instance,
+            '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}',
+        )
+        on_message(
+            FakeWebSocketApp.instance,
+            '{"e":"ACCOUNT_UPDATE","T":1780000000000,"a":{"B":[],"P":[]}}',
+        )
+
+    thread = threading.Thread(target=publish_in_arrival_order)
+    thread.start()
+    thread.join()
+    await asyncio.wait_for(order_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert account_finished.is_set() is False
+    assert calls == [("order-start", "client-1")]
+
+    release_order.set()
+    await asyncio.wait_for(account_finished.wait(), timeout=1)
+    assert calls == [
+        ("order-start", "client-1"),
+        ("order-finish", "client-1"),
+        ("account", 1780000000000),
+    ]
+    await stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_order_updates_preserve_arrival_fifo_with_reversed_time_and_duplicate(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    finished = asyncio.Event()
+    received = []
+
+    async def on_report(order):
+        received.append((order["E"], order["X"], order["z"]))
+        if len(received) == 1:
+            first_started.set()
+            await release_first.wait()
+        if len(received) == 4:
+            finished.set()
+
+    stream = UserDataStream(rest, on_execution_report=on_report)
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+    await stream._connect_ws()
+    on_message = FakeWebSocketApp.instance.callbacks["on_message"]
+    messages = [
+        '{"e":"ORDER_TRADE_UPDATE","o":{"E":400,"X":"PARTIALLY_FILLED","z":"0.4"}}',
+        '{"e":"ORDER_TRADE_UPDATE","o":{"E":300,"X":"NEW","z":"0"}}',
+        '{"e":"ORDER_TRADE_UPDATE","o":{"E":400,"X":"PARTIALLY_FILLED","z":"0.4"}}',
+        '{"e":"ORDER_TRADE_UPDATE","o":{"E":500,"X":"FILLED","z":"1"}}',
+    ]
+    for message in messages:
+        on_message(FakeWebSocketApp.instance, message)
+
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    assert received == [(400, "PARTIALLY_FILLED", "0.4")]
+
+    release_first.set()
+    await asyncio.wait_for(finished.wait(), timeout=1)
+    assert received == [
+        (400, "PARTIALLY_FILLED", "0.4"),
+        (300, "NEW", "0"),
+        (400, "PARTIALLY_FILLED", "0.4"),
+        (500, "FILLED", "1"),
+    ]
+    await stream.stop()
+
+
+@pytest.mark.asyncio
 async def test_close_schedules_only_one_reconnect_and_stop_cancels_it(monkeypatch):
     monkeypatch.setattr(
         "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
@@ -383,7 +507,12 @@ async def test_callback_failure_sets_fatal_signal(monkeypatch):
     async def fail_report(_order):
         raise RuntimeError("ledger unavailable")
 
-    stream = UserDataStream(rest, on_execution_report=fail_report)
+    account_update = AsyncMock()
+    stream = UserDataStream(
+        rest,
+        on_execution_report=fail_report,
+        on_account_update=account_update,
+    )
     stream._loop = asyncio.get_running_loop()
     stream._running = True
     stream.listen_key = "listen-key"
@@ -394,10 +523,16 @@ async def test_callback_failure_sets_fatal_signal(monkeypatch):
         FakeWebSocketApp.instance,
         '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}',
     )
+    FakeWebSocketApp.instance.callbacks["on_message"](
+        FakeWebSocketApp.instance,
+        '{"e":"ACCOUNT_UPDATE","T":1780000000000,"a":{"B":[],"P":[]}}',
+    )
 
     failure = await asyncio.wait_for(stream.wait_fatal(), timeout=1)
     assert isinstance(failure, RuntimeError)
     assert str(failure) == "ledger unavailable"
+    await asyncio.sleep(0)
+    account_update.assert_not_awaited()
     await stream.stop()
 
 
@@ -462,7 +597,8 @@ async def test_stop_waits_for_in_flight_callback_within_drain_timeout(monkeypatc
     assert stopping.done() is False
     release_callback.set()
     await asyncio.wait_for(stopping, timeout=1)
-    assert stream._scheduled_futures == set()
+    assert stream._callback_worker is None
+    assert stream._callback_queue is None
 
 
 @pytest.mark.asyncio
@@ -504,6 +640,7 @@ async def test_stop_cancels_callback_after_bounded_drain_timeout(monkeypatch):
     with pytest.raises(TimeoutError, match="timed out draining 1"):
         await asyncio.wait_for(stream.stop(), timeout=1)
     await asyncio.wait_for(callback_cancelled.wait(), timeout=1)
-    assert stream._scheduled_futures == set()
+    assert stream._callback_worker is None
+    assert stream._callback_queue is None
     assert stream.listen_key is None
     rest.close_listen_key.assert_awaited_once_with("listen-key")
