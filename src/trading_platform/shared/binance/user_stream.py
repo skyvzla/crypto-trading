@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import json
 import logging
+import threading
 from concurrent.futures import Future
 from typing import Callable, Any
 
@@ -71,6 +72,8 @@ class UserDataStream:
         self._callback_queue: asyncio.Queue[tuple[str, dict[str, Any]]] | None = None
         self._callback_worker: asyncio.Task | None = None
         self._callback_in_flight = False
+        self._callback_schedule_lock = threading.Lock()
+        self._accept_callback_enqueues = True
         self._loop: asyncio.AbstractEventLoop | None = None
         self._connected_event: asyncio.Event | None = None
         self._fatal_event = asyncio.Event()
@@ -85,7 +88,9 @@ class UserDataStream:
             logger.warning("User Data Stream already running")
             return
 
-        self._running = True
+        with self._callback_schedule_lock:
+            self._running = True
+        self._accept_callback_enqueues = True
         self._loop = asyncio.get_running_loop()
         self._connected_event = asyncio.Event()
         self._fatal_event = asyncio.Event()
@@ -114,7 +119,10 @@ class UserDataStream:
         ):
             return
 
-        self._running = False
+        # Linearize stop against the websocket thread: callbacks authorized before
+        # this boundary are already posted to the loop; later messages are rejected.
+        with self._callback_schedule_lock:
+            self._running = False
         self._mark_disconnected()
 
         if self._reconnect_task and not self._reconnect_task.done():
@@ -386,13 +394,14 @@ class UserDataStream:
 
     def _schedule_callback(self, kind: str, payload: dict[str, Any]) -> None:
         """按 websocket 接收顺序把业务事件安全投递到主事件循环。"""
-        loop = self._loop
-        if not self._running or not loop or loop.is_closed():
-            return
-        try:
-            loop.call_soon_threadsafe(self._enqueue_callback, kind, payload)
-        except RuntimeError:
-            logger.warning("User Data Stream callback loop is unavailable")
+        with self._callback_schedule_lock:
+            loop = self._loop
+            if not self._running or not loop or loop.is_closed():
+                return
+            try:
+                loop.call_soon_threadsafe(self._enqueue_callback, kind, payload)
+            except RuntimeError:
+                logger.warning("User Data Stream callback loop is unavailable")
 
     def _ensure_callback_worker(self) -> None:
         if self._callback_queue is None:
@@ -409,7 +418,7 @@ class UserDataStream:
         worker.add_done_callback(self._callback_worker_done)
 
     def _enqueue_callback(self, kind: str, payload: dict[str, Any]) -> None:
-        if not self._running:
+        if not self._accept_callback_enqueues:
             return
         if self._fatal_exception is not None:
             logger.error(
@@ -476,6 +485,7 @@ class UserDataStream:
     async def _drain_scheduled_callbacks(self) -> None:
         # 先让 websocket 线程已投递的 call_soon 回调进入 FIFO。
         await asyncio.sleep(0)
+        self._accept_callback_enqueues = False
         queue = self._callback_queue
         worker = self._callback_worker
         drain_error: TimeoutError | None = None

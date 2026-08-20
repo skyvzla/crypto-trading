@@ -602,6 +602,58 @@ async def test_stop_waits_for_in_flight_callback_within_drain_timeout(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_stop_drains_callbacks_scheduled_before_stop_boundary(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    received = []
+
+    async def on_report(order):
+        received.append(("order", order["c"]))
+
+    async def on_account_update(event):
+        received.append(("account", event["T"]))
+
+    stream = UserDataStream(
+        rest,
+        on_execution_report=on_report,
+        on_account_update=on_account_update,
+    )
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+    await stream._connect_ws()
+    ws = FakeWebSocketApp.instance
+
+    ws.callbacks["on_message"](
+        ws,
+        '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}',
+    )
+    ws.callbacks["on_message"](
+        ws,
+        '{"e":"ACCOUNT_UPDATE","T":1780000000000,"a":{"B":[],"P":[]}}',
+    )
+    await asyncio.wait_for(stream.stop(), timeout=1)
+
+    assert received == [
+        ("order", "client-1"),
+        ("account", 1780000000000),
+    ]
+    stream._schedule_callback("execution_report", {"c": "after-stop"})
+    await asyncio.sleep(0)
+    assert received == [
+        ("order", "client-1"),
+        ("account", 1780000000000),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stop_cancels_callback_after_bounded_drain_timeout(monkeypatch):
     monkeypatch.setattr(
         "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
