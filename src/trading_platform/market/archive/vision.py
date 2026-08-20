@@ -14,6 +14,7 @@ import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from threading import Condition, Lock, local
 from typing import BinaryIO
@@ -22,7 +23,9 @@ import duckdb
 import httpx
 import pyarrow as pa
 
-from .models import Candle
+from trading_platform.market.feed.aggregator import Bar1sAggregator
+
+from .models import Candle, Candle1s
 
 
 VISION_PUBLIC_ROOT = "https://data.binance.vision"
@@ -497,67 +500,95 @@ def parse_aggtrade_archive(
     symbol: str,
     day: str,
 ) -> list[Candle]:
-    """Parse one Binance Vision daily aggTrades ZIP into trade-active 1s bars."""
+    """Parse one Binance Vision daily aggTrades ZIP using the live aggregator."""
 
     normalized_symbol = symbol.strip().upper()
     member = f"{normalized_symbol}-aggTrades-{day}.csv"
-    # Keep only aggregate state per second. Vision rows are normally ordered,
-    # but tracking the timestamp/id keys preserves correct open/close prices
-    # for unordered input without retaining the full trade file in memory.
-    grouped: dict[
-        datetime,
-        tuple[
-            tuple[datetime, int, float],
-            tuple[datetime, int, float],
-            float,
-            float,
-            float,
-        ],
-    ] = {}
+    aggregator = Bar1sAggregator(
+        window_tolerance_ms=24 * 60 * 60 * 1000,
+        auto_finalize=False,
+    )
     source = io.BytesIO(content) if isinstance(content, bytes) else content
     with zipfile.ZipFile(source) as archive:
         with archive.open(member) as raw:
             rows = csv.DictReader(io.TextIOWrapper(raw, encoding="utf-8"))
-            required = {"agg_trade_id", "price", "quantity", "transact_time"}
+            required = {
+                "agg_trade_id",
+                "price",
+                "quantity",
+                "first_trade_id",
+                "last_trade_id",
+                "transact_time",
+                "is_buyer_maker",
+            }
             if rows.fieldnames is None or not required.issubset(rows.fieldnames):
                 raise ValueError(f"{member} has incompatible columns")
             for row in rows:
-                timestamp = int(row["transact_time"])
-                occurred = _epoch_datetime(timestamp)
-                trade_id = int(row["agg_trade_id"])
-                price = float(row["price"])
-                quantity = float(row["quantity"])
-                second = occurred.replace(microsecond=0)
-                key = (occurred, trade_id, price)
-                current = grouped.get(second)
-                if current is None:
-                    grouped[second] = (key, key, price, price, quantity)
-                    continue
-                first, last, high, low, volume = current
-                grouped[second] = (
-                    min(first, key),
-                    max(last, key),
-                    max(high, price),
-                    min(low, price),
-                    volume + quantity,
+                aggregator.add_trade(
+                    normalized_symbol,
+                    Decimal(row["price"]),
+                    Decimal(row["quantity"]),
+                    _epoch_millis(int(row["transact_time"])),
+                    int(row["agg_trade_id"]),
+                    first_trade_id=int(row["first_trade_id"]),
+                    last_trade_id=int(row["last_trade_id"]),
+                    is_buyer_maker=_parse_bool(row["is_buyer_maker"]),
                 )
+    return [_candle_from_bar1s(bar) for bar in aggregator.flush_symbol(normalized_symbol)]
 
-    candles: list[Candle] = []
-    for second, (first, last, high, low, volume) in sorted(grouped.items()):
-        candles.append(
-            Candle(
-                symbol=normalized_symbol,
-                timeframe="1s",
-                open_time=second,
-                open=first[2],
-                high=high,
-                low=low,
-                close=last[2],
-                volume=volume,
-                close_time=second + timedelta(seconds=1),
-            )
-        )
-    return candles
+
+def _parse_bool(value: object) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1"}:
+        return True
+    if normalized in {"false", "0"}:
+        return False
+    raise ValueError(f"invalid boolean value: {value!r}")
+
+
+def _epoch_millis(value: int) -> int:
+    return value // 1_000 if abs(value) >= 100_000_000_000_000 else value
+
+
+def _candle_from_bar1s(bar) -> Candle1s:
+    return Candle1s(
+        symbol=bar.symbol,
+        timeframe="1s",
+        open_time=datetime.fromtimestamp(bar.timestamp / 1000, tz=UTC),
+        open=float(bar.open),
+        high=float(bar.high),
+        low=float(bar.low),
+        close=float(bar.close),
+        volume=float(bar.volume),
+        close_time=datetime.fromtimestamp((bar.timestamp + 1000) / 1000, tz=UTC),
+        vwap=float(bar.vwap),
+        quote_volume=_optional_float(bar.quote_volume),
+        trade_count=bar.trade_count,
+        raw_trade_count=bar.raw_trade_count,
+        taker_buy_volume=_optional_float(bar.taker_buy_volume),
+        taker_sell_volume=_optional_float(bar.taker_sell_volume),
+        taker_buy_quote_volume=_optional_float(bar.taker_buy_quote_volume),
+        taker_sell_quote_volume=_optional_float(bar.taker_sell_quote_volume),
+        taker_buy_trade_count=bar.taker_buy_trade_count,
+        taker_sell_trade_count=bar.taker_sell_trade_count,
+        taker_buy_agg_trade_count=bar.taker_buy_agg_trade_count,
+        taker_sell_agg_trade_count=bar.taker_sell_agg_trade_count,
+        max_agg_trade_quantity=_optional_float(bar.max_agg_trade_quantity),
+        max_taker_buy_agg_trade_quantity=_optional_float(
+            bar.max_taker_buy_agg_trade_quantity
+        ),
+        max_taker_sell_agg_trade_quantity=_optional_float(
+            bar.max_taker_sell_agg_trade_quantity
+        ),
+        first_aggregate_trade_id=bar.first_aggregate_trade_id,
+        last_aggregate_trade_id=bar.last_aggregate_trade_id,
+        first_trade_id=bar.first_trade_id,
+        last_trade_id=bar.last_trade_id,
+    )
+
+
+def _optional_float(value: Decimal | None) -> float | None:
+    return None if value is None else float(value)
 
 
 def parse_monthly_aggtrade_archive(
@@ -591,7 +622,15 @@ def _aggregate_monthly_aggtrade_archive(
 
         with csv_path.open(encoding="utf-8", newline="") as extracted:
             fieldnames = next(csv.reader(extracted), None)
-        required = {"agg_trade_id", "price", "quantity", "transact_time"}
+        required = {
+            "agg_trade_id",
+            "price",
+            "quantity",
+            "first_trade_id",
+            "last_trade_id",
+            "transact_time",
+            "is_buyer_maker",
+        }
         if fieldnames is None or not required.issubset(fieldnames):
             raise ValueError(f"{member} has incompatible columns")
 
@@ -614,6 +653,9 @@ def _aggregate_monthly_aggtrade_archive(
                         agg_trade_id,
                         price,
                         quantity,
+                        first_trade_id,
+                        last_trade_id,
+                        is_buyer_maker,
                         CASE
                             WHEN abs(transact_time) >= 100000000000000
                                 THEN transact_time
@@ -648,7 +690,39 @@ def _aggregate_monthly_aggtrade_archive(
                     max(price) AS high,
                     min(price) AS low,
                     arg_max(price, event_key) AS close,
-                    sum(quantity) AS volume
+                    sum(quantity) AS volume,
+                    sum(price * quantity) AS quote_volume,
+                    sum(price * quantity) / nullif(sum(quantity), 0) AS vwap,
+                    count(*)::BIGINT AS trade_count,
+                    sum(greatest(last_trade_id - first_trade_id + 1, 0))::BIGINT
+                        AS raw_trade_count,
+                    sum(CASE WHEN NOT is_buyer_maker THEN quantity ELSE 0 END)
+                        AS taker_buy_volume,
+                    sum(CASE WHEN is_buyer_maker THEN quantity ELSE 0 END)
+                        AS taker_sell_volume,
+                    sum(CASE WHEN NOT is_buyer_maker THEN price * quantity ELSE 0 END)
+                        AS taker_buy_quote_volume,
+                    sum(CASE WHEN is_buyer_maker THEN price * quantity ELSE 0 END)
+                        AS taker_sell_quote_volume,
+                    sum(CASE WHEN NOT is_buyer_maker
+                        THEN greatest(last_trade_id - first_trade_id + 1, 0)
+                        ELSE 0 END)::BIGINT AS taker_buy_trade_count,
+                    sum(CASE WHEN is_buyer_maker
+                        THEN greatest(last_trade_id - first_trade_id + 1, 0)
+                        ELSE 0 END)::BIGINT AS taker_sell_trade_count,
+                    count(*) FILTER (WHERE NOT is_buyer_maker)::BIGINT
+                        AS taker_buy_agg_trade_count,
+                    count(*) FILTER (WHERE is_buyer_maker)::BIGINT
+                        AS taker_sell_agg_trade_count,
+                    max(quantity) AS max_agg_trade_quantity,
+                    coalesce(max(quantity) FILTER (WHERE NOT is_buyer_maker), 0)
+                        AS max_taker_buy_agg_trade_quantity,
+                    coalesce(max(quantity) FILTER (WHERE is_buyer_maker), 0)
+                        AS max_taker_sell_agg_trade_quantity,
+                    min(agg_trade_id)::BIGINT AS first_aggregate_trade_id,
+                    max(agg_trade_id)::BIGINT AS last_aggregate_trade_id,
+                    min(first_trade_id)::BIGINT AS first_trade_id,
+                    max(last_trade_id)::BIGINT AS last_trade_id
                 FROM trades
                 GROUP BY second_epoch
                 """,
@@ -673,7 +747,26 @@ def _aggregate_monthly_aggtrade_archive(
                         low,
                         close,
                         volume,
-                        to_timestamp(second_epoch + 1) AS close_time
+                        to_timestamp(second_epoch + 1) AS close_time,
+                        vwap,
+                        quote_volume,
+                        trade_count,
+                        raw_trade_count,
+                        taker_buy_volume,
+                        taker_sell_volume,
+                        taker_buy_quote_volume,
+                        taker_sell_quote_volume,
+                        taker_buy_trade_count,
+                        taker_sell_trade_count,
+                        taker_buy_agg_trade_count,
+                        taker_sell_agg_trade_count,
+                        max_agg_trade_quantity,
+                        max_taker_buy_agg_trade_quantity,
+                        max_taker_sell_agg_trade_quantity,
+                        first_aggregate_trade_id,
+                        last_aggregate_trade_id,
+                        first_trade_id,
+                        last_trade_id
                     FROM monthly_candles
                     WHERE CAST(to_timestamp(second_epoch) AS DATE) = ?
                     ORDER BY second_epoch
@@ -686,20 +779,51 @@ def _aggregate_monthly_aggtrade_archive(
 
 
 def _candles_from_arrow(table: pa.Table) -> list[Candle]:
-    return [
-        Candle(
-            symbol=row["symbol"],
-            timeframe=row["timeframe"],
-            open_time=row["open_time"],
-            open=row["open"],
-            high=row["high"],
-            low=row["low"],
-            close=row["close"],
-            volume=row["volume"],
-            close_time=row["close_time"],
+    candles: list[Candle] = []
+    for row in table.to_pylist():
+        common = {
+            "symbol": row["symbol"],
+            "timeframe": row["timeframe"],
+            "open_time": row["open_time"],
+            "open": row["open"],
+            "high": row["high"],
+            "low": row["low"],
+            "close": row["close"],
+            "volume": row["volume"],
+            "close_time": row["close_time"],
+        }
+        if row["timeframe"] != "1s":
+            candles.append(Candle(**common))
+            continue
+        candles.append(
+            Candle1s(
+                **common,
+                vwap=row.get("vwap"),
+                quote_volume=row.get("quote_volume"),
+                trade_count=row.get("trade_count"),
+                raw_trade_count=row.get("raw_trade_count"),
+                taker_buy_volume=row.get("taker_buy_volume"),
+                taker_sell_volume=row.get("taker_sell_volume"),
+                taker_buy_quote_volume=row.get("taker_buy_quote_volume"),
+                taker_sell_quote_volume=row.get("taker_sell_quote_volume"),
+                taker_buy_trade_count=row.get("taker_buy_trade_count"),
+                taker_sell_trade_count=row.get("taker_sell_trade_count"),
+                taker_buy_agg_trade_count=row.get("taker_buy_agg_trade_count"),
+                taker_sell_agg_trade_count=row.get("taker_sell_agg_trade_count"),
+                max_agg_trade_quantity=row.get("max_agg_trade_quantity"),
+                max_taker_buy_agg_trade_quantity=row.get(
+                    "max_taker_buy_agg_trade_quantity"
+                ),
+                max_taker_sell_agg_trade_quantity=row.get(
+                    "max_taker_sell_agg_trade_quantity"
+                ),
+                first_aggregate_trade_id=row.get("first_aggregate_trade_id"),
+                last_aggregate_trade_id=row.get("last_aggregate_trade_id"),
+                first_trade_id=row.get("first_trade_id"),
+                last_trade_id=row.get("last_trade_id"),
+            )
         )
-        for row in table.to_pylist()
-    ]
+    return candles
 
 
 def parse_kline_archive(

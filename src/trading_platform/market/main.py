@@ -466,6 +466,9 @@ class MarketLayerService:
                 quantity=trade_data["quantity"],
                 timestamp=trade_data["timestamp"],
                 aggregate_trade_id=trade_data.get("agg_trade_id"),
+                first_trade_id=trade_data.get("first_trade_id"),
+                last_trade_id=trade_data.get("last_trade_id"),
+                is_buyer_maker=trade_data.get("is_buyer_maker"),
             )
 
             for bar in bars:
@@ -635,6 +638,9 @@ def create_app(
                         trade["quantity"],
                         trade["timestamp"],
                         trade["agg_trade_id"],
+                        first_trade_id=trade.get("first_trade_id"),
+                        last_trade_id=trade.get("last_trade_id"),
+                        is_buyer_maker=trade.get("is_buyer_maker"),
                     )
                 )
             bars.extend(aggregator.flush_symbol(symbol.upper()))

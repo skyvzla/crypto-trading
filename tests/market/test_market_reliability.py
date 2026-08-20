@@ -130,6 +130,63 @@ def test_aggregator_emits_first_and_last_aggregate_trade_ids():
     assert emitted[0].last_aggregate_trade_id == 102
 
 
+def test_aggregator_preserves_taker_orderflow_and_raw_trade_counts():
+    aggregator = Bar1sAggregator()
+    aggregator.add_trade(
+        "BTCUSDT",
+        Decimal("10"),
+        Decimal("2"),
+        1_100,
+        aggregate_trade_id=10,
+        first_trade_id=100,
+        last_trade_id=101,
+        is_buyer_maker=False,
+    )
+    aggregator.add_trade(
+        "BTCUSDT",
+        Decimal("12"),
+        Decimal("3"),
+        1_200,
+        aggregate_trade_id=11,
+        first_trade_id=102,
+        last_trade_id=104,
+        is_buyer_maker=True,
+    )
+    emitted = aggregator.add_trade(
+        "BTCUSDT",
+        Decimal("11"),
+        Decimal("1"),
+        2_000,
+        aggregate_trade_id=12,
+        first_trade_id=105,
+        last_trade_id=105,
+        is_buyer_maker=False,
+    )
+
+    bar = emitted[0]
+    assert bar.trade_count == 2
+    assert bar.raw_trade_count == 5
+    assert bar.quote_volume == Decimal("56")
+    assert bar.vwap == Decimal("11.2")
+    assert bar.taker_buy_volume == Decimal("2")
+    assert bar.taker_sell_volume == Decimal("3")
+    assert bar.taker_buy_trade_count == 2
+    assert bar.taker_sell_trade_count == 3
+    assert bar.taker_buy_agg_trade_count == 1
+    assert bar.taker_sell_agg_trade_count == 1
+    assert bar.volume_delta == Decimal("-1")
+    assert bar.volume_imbalance == Decimal("-0.2")
+    assert bar.quote_volume_delta == Decimal("-16")
+    assert bar.quote_volume_imbalance == Decimal("-16") / Decimal("56")
+    assert bar.taker_buy_vwap == Decimal("10")
+    assert bar.taker_sell_vwap == Decimal("12")
+    assert bar.avg_taker_buy_raw_trade_quantity == Decimal("1")
+    assert bar.avg_taker_sell_raw_trade_quantity == Decimal("1")
+    assert bar.first_trade_id == 100
+    assert bar.last_trade_id == 104
+    assert Bar1s.from_json(bar.to_json()) == bar
+
+
 def test_aggregator_drops_trade_for_an_already_published_second():
     aggregator = Bar1sAggregator(window_tolerance_ms=5000)
     aggregator.add_trade("BTCUSDT", Decimal("10"), Decimal("1"), 1000)

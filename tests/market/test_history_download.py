@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import duckdb
 import httpx
+import pyarrow.parquet as pq
 import pytest
 
 from trading_platform.backtest.loader import BacktestDataLoader
@@ -20,6 +21,7 @@ from trading_platform.market.archive import (
     BinanceVisionHTTPFetcher,
     BinanceVisionWorkerPoolFetcher,
     Candle,
+    Candle1s,
     DownloadProgress,
     DownloadResult,
     ParquetCandleArchive,
@@ -34,6 +36,7 @@ from trading_platform.market.archive import (
     parse_monthly_aggtrade_archive,
 )
 from trading_platform.market.archive import cli as archive_cli
+from trading_platform.market.archive.parquet import CANDLE_SCHEMA
 from trading_platform.market.archive.cli import (
     _DiskSpaceGuard,
     _ProgressReporter,
@@ -327,11 +330,60 @@ def test_aggtrade_archive_aggregates_millisecond_and_microsecond_timestamps():
         payload.getvalue(), "AKEUSDT", "2026-07-01"
     )
 
+    assert all(isinstance(item, Candle1s) for item in candles)
     assert [(item.open, item.high, item.low, item.close, item.volume) for item in candles] == [
         (10.0, 12.0, 10.0, 12.0, 5.0),
         (11.0, 11.0, 11.0, 11.0, 5.0),
     ]
+    assert candles[0].trade_count == 2
+    assert candles[0].raw_trade_count == 2
+    assert candles[0].taker_buy_volume == 2.0
+    assert candles[0].taker_sell_volume == 3.0
+    assert candles[0].taker_buy_trade_count == 1
+    assert candles[0].taker_sell_trade_count == 1
+    assert candles[0].quote_volume == 56.0
+    assert candles[0].vwap == pytest.approx(11.2)
     assert candles[0].open_time == datetime(2026, 7, 1, tzinfo=UTC)
+
+
+def test_regular_candle_does_not_expose_1s_orderflow_fields():
+    candle = Candle(
+        symbol="AKEUSDT",
+        timeframe="5m",
+        open_time=datetime(2026, 7, 1, tzinfo=UTC),
+        open=10,
+        high=12,
+        low=9,
+        close=11,
+        volume=20,
+        close_time=datetime(2026, 7, 1, 0, 5, tzinfo=UTC),
+    )
+
+    assert not hasattr(candle, "taker_buy_volume")
+    assert not hasattr(candle, "raw_trade_count")
+
+
+def test_non_1s_parquet_partition_keeps_base_candle_schema(tmp_path):
+    candle = Candle(
+        symbol="AKEUSDT",
+        timeframe="5m",
+        open_time=datetime(2026, 7, 1, tzinfo=UTC),
+        open=10,
+        high=12,
+        low=9,
+        close=11,
+        volume=20,
+        close_time=datetime(2026, 7, 1, 0, 5, tzinfo=UTC),
+    )
+    root = tmp_path / "history"
+    with ParquetCandleArchive(root, rebuild_index_on_close=False) as archive:
+        archive.upsert([candle])
+
+    table = pq.read_table(root / "AKEUSDT/5m/2026/07/00/candles.parquet")
+    assert table.column_names == [
+        "symbol", "timeframe", "open_time", "open", "high", "low", "close",
+        "volume", "close_time",
+    ]
 
 
 def test_monthly_aggtrade_archive_streams_daily_candle_partitions():
@@ -364,6 +416,58 @@ def test_monthly_aggtrade_archive_streams_daily_candle_partitions():
         (10.0, 12.0, 10.0, 12.0, 5.0),
         (11.0, 11.0, 11.0, 11.0, 5.0),
     ]
+
+
+def test_daily_and_monthly_aggtrade_aggregation_share_orderflow_semantics():
+    header = (
+        "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+        "transact_time,is_buyer_maker\n"
+    )
+    rows = (
+        "12,12,3,103,105,1782864000900,true\n"
+        "10,10,2,100,101,1782864000100,false\n"
+        "11,11,1,102,102,1782864000500,false\n"
+    )
+    daily_payload = BytesIO()
+    with zipfile.ZipFile(daily_payload, "w") as archive:
+        archive.writestr(
+            "AKEUSDT-aggTrades-2026-07-01.csv",
+            header + rows,
+        )
+    monthly_payload = BytesIO()
+    with zipfile.ZipFile(monthly_payload, "w") as archive:
+        archive.writestr(
+            "AKEUSDT-aggTrades-2026-07.csv",
+            header + rows,
+        )
+
+    daily = parse_aggtrade_archive(
+        daily_payload.getvalue(), "AKEUSDT", "2026-07-01"
+    )[0]
+    monthly = list(
+        parse_monthly_aggtrade_archive(
+            monthly_payload.getvalue(), "AKEUSDT", "2026-07"
+        )
+    )[0][1][0]
+
+    fields = [
+        "open", "high", "low", "close", "volume", "vwap", "quote_volume",
+        "trade_count", "raw_trade_count", "taker_buy_volume",
+        "taker_sell_volume", "taker_buy_quote_volume",
+        "taker_sell_quote_volume", "taker_buy_trade_count",
+        "taker_sell_trade_count", "taker_buy_agg_trade_count",
+        "taker_sell_agg_trade_count", "max_agg_trade_quantity",
+        "max_taker_buy_agg_trade_quantity", "max_taker_sell_agg_trade_quantity",
+        "first_aggregate_trade_id", "last_aggregate_trade_id",
+        "first_trade_id", "last_trade_id",
+    ]
+    for field in fields:
+        daily_value = getattr(daily, field)
+        monthly_value = getattr(monthly, field)
+        if isinstance(daily_value, float):
+            assert monthly_value == pytest.approx(daily_value), field
+        else:
+            assert monthly_value == daily_value, field
 
 
 def test_download_history_uses_one_monthly_aggtrade_archive_for_complete_month(
@@ -443,18 +547,11 @@ def test_monthly_aggtrade_download_uses_arrow_table_upsert():
     assert results[0].rows == 1
     assert len(tables) == 1
     table, partition = tables[0]
-    assert table.column_names == [
-        "symbol",
-        "timeframe",
-        "open_time",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "close_time",
-    ]
+    assert table.column_names == list(CANDLE_SCHEMA.names)
     assert table.to_pylist()[0]["close"] == 12.0
+    assert table.to_pylist()[0]["taker_buy_volume"] == 2.0
+    assert table.to_pylist()[0]["taker_sell_volume"] == 3.0
+    assert table.to_pylist()[0]["trade_count"] == 2
     assert partition == {
         "symbol": "AKEUSDT",
         "timeframe": "1s",
@@ -672,9 +769,16 @@ def test_download_history_imports_daily_seconds_and_monthly_klines(tmp_path):
         duckdb_path=str(catalog),
     ).iter_all()
     events = list(events)
-    assert [event.timestamp for event in events if hasattr(event, "timestamp")] == [
+    second_events = [event for event in events if hasattr(event, "timestamp")]
+    assert [event.timestamp for event in second_events] == [
         1_782_864_000_000
     ]
+    assert second_events[0].trade_count == 1
+    assert second_events[0].raw_trade_count == 1
+    assert second_events[0].taker_buy_volume == 2
+    assert second_events[0].taker_sell_volume == 0
+    assert second_events[0].volume_delta == 2
+    assert second_events[0].vwap == 10
 
 
 def test_download_history_uses_daily_klines_for_partial_month(
@@ -1387,17 +1491,7 @@ def test_catalog_supports_an_all_unavailable_download(tmp_path):
         connection.close()
 
     assert rows == []
-    assert columns == [
-        "symbol",
-        "timeframe",
-        "open_time",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "close_time",
-    ]
+    assert columns == list(CANDLE_SCHEMA.names)
 
 
 def test_cli_handles_keyboard_interrupt_without_traceback(

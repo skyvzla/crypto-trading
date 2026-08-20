@@ -12,7 +12,15 @@ from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
 from trading_platform.strategies.spike.v1_1 import SpikeV11Strategy
 
 
-def _bar(index: int, *, close: str = "100", volume: str = "1") -> Bar1s:
+def _bar(
+    index: int,
+    *,
+    close: str = "100",
+    volume: str = "1",
+    buy_volume: str | None = None,
+    sell_volume: str | None = None,
+    raw_trade_count: int | None = None,
+) -> Bar1s:
     price = Decimal(close)
     return Bar1s(
         symbol="BTCUSDT",
@@ -25,6 +33,13 @@ def _bar(index: int, *, close: str = "100", volume: str = "1") -> Bar1s:
         volume=Decimal(volume),
         trade_count=1,
         vwap=price,
+        raw_trade_count=raw_trade_count,
+        taker_buy_volume=(
+            None if buy_volume is None else Decimal(buy_volume)
+        ),
+        taker_sell_volume=(
+            None if sell_volume is None else Decimal(sell_volume)
+        ),
     )
 
 
@@ -75,6 +90,63 @@ def test_unrequested_1s_feature_has_no_1s_cache_or_calculation():
 
     assert provider.bars_1s == []
     assert provider.bar_features(bar) is None
+
+
+def test_orderflow_feature_builds_rolling_cvd_from_archivable_bar_fields():
+    provider = SpikeSharedFeatureProvider(
+        shared_features={FeatureSpec("orderflow", "1s")}
+    )
+    bars = [
+        _bar(
+            index,
+            volume="3",
+            buy_volume="2",
+            sell_volume="1",
+            raw_trade_count=3,
+        )
+        for index in range(301)
+    ]
+    for bar in bars:
+        provider.process_event(bar)
+
+    features = provider.orderflow_features(bars[-1])
+
+    assert features is not None
+    assert features.orderflow_ready is True
+    assert features.taker_buy_volume_5s == Decimal("10")
+    assert features.taker_sell_volume_5s == Decimal("5")
+    assert features.raw_trade_count_5s == 15
+    assert features.cvd_5s == Decimal("5")
+    assert features.cvd_1m == Decimal("60")
+    assert features.cvd_5m == Decimal("300")
+    assert features.taker_buy_ratio_5s == Decimal("2") / Decimal("3")
+
+
+def test_orderflow_feature_rejects_gapped_windows():
+    provider = SpikeSharedFeatureProvider(
+        shared_features={FeatureSpec("orderflow", "1s")}
+    )
+    bars = [
+        _bar(
+            index,
+            volume="3",
+            buy_volume="2",
+            sell_volume="1",
+            raw_trade_count=3,
+        )
+        for index in range(301)
+        if index != 299
+    ]
+    for bar in bars:
+        provider.process_event(bar)
+
+    features = provider.orderflow_features(bars[-1])
+
+    assert features is not None
+    assert features.orderflow_ready is False
+    assert features.cvd_5s is None
+    assert features.cvd_1m is None
+    assert features.cvd_5m is None
 
 
 def test_spike_provider_rejects_features_owned_by_other_strategies():

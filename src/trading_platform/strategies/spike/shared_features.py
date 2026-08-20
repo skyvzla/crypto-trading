@@ -16,6 +16,7 @@ from trading_platform.backtest.strategy_definition import FeatureSpec
 from trading_platform.shared.events import Bar1s, Kline
 from trading_platform.strategies.spike.definition import (
     SPIKE_CANDIDATE_EXIT_FEATURE,
+    SPIKE_ORDERFLOW_FEATURE,
     SPIKE_RISE_5S_FEATURE,
 )
 from trading_platform.strategies.spike.exit_features import (
@@ -28,6 +29,7 @@ MS_PER_SECOND = 1_000
 MS_PER_MINUTE = 60_000
 SUPPORTED_FEATURES = frozenset({
     SPIKE_RISE_5S_FEATURE,
+    SPIKE_ORDERFLOW_FEATURE,
     SPIKE_CANDIDATE_EXIT_FEATURE,
 })
 
@@ -72,6 +74,14 @@ class SpikeBarFeatures:
     volume_5s: Decimal | None = None
     median_volume_1s: Decimal | None = None
     volume_multiple_5s: Decimal | None = None
+    orderflow_ready: bool = False
+    taker_buy_volume_5s: Decimal | None = None
+    taker_sell_volume_5s: Decimal | None = None
+    raw_trade_count_5s: int | None = None
+    cvd_5s: Decimal | None = None
+    cvd_1m: Decimal | None = None
+    cvd_5m: Decimal | None = None
+    taker_buy_ratio_5s: Decimal | None = None
 
 
 class SpikeSharedFeatureProvider:
@@ -94,7 +104,10 @@ class SpikeSharedFeatureProvider:
                 sorted(f"{feature.name}@{feature.timeframe}" for feature in unsupported)
             )
             raise ValueError(f"unsupported Spike shared features: {names}")
-        self._requires_1s = SPIKE_RISE_5S_FEATURE in self.shared_features
+        self._requires_1s = bool(
+            {SPIKE_RISE_5S_FEATURE, SPIKE_ORDERFLOW_FEATURE}
+            & self.shared_features
+        )
         self._requires_kline = SPIKE_CANDIDATE_EXIT_FEATURE in self.shared_features
         self.bars_1s: list[Bar1s] = []
         self.klines_1m: deque[Kline] = deque()
@@ -104,6 +117,7 @@ class SpikeSharedFeatureProvider:
         self.retained_1m_minutes = max(30 * 60, int(retained_1m_minutes))
         self._latest_bar: Bar1s | None = None
         self._latest_bar_features: SpikeBarFeatures | None = None
+        self._first_bar1s_timestamp: int | None = None
         self._candidate_version = 0
         self._candidate_cache: dict[
             tuple[int, CandidateFeatureConfig], CandidateFeatureSnapshot | None
@@ -128,8 +142,11 @@ class SpikeSharedFeatureProvider:
             if not self._requires_1s:
                 return
             self.bars_1s.append(event)
-            if len(self.bars_1s) > 61:
-                del self.bars_1s[:-61]
+            if self._first_bar1s_timestamp is None:
+                self._first_bar1s_timestamp = event.timestamp
+            cutoff = event.timestamp - 300 * MS_PER_SECOND
+            while self.bars_1s and self.bars_1s[0].timestamp < cutoff:
+                del self.bars_1s[0]
             self._latest_bar = event
             self._latest_bar_features = None
             return
@@ -207,8 +224,101 @@ class SpikeSharedFeatureProvider:
             volume_5s=volume_5s,
             median_volume_1s=median,
             volume_multiple_5s=multiple,
+            orderflow_ready=features.orderflow_ready,
+            taker_buy_volume_5s=features.taker_buy_volume_5s,
+            taker_sell_volume_5s=features.taker_sell_volume_5s,
+            raw_trade_count_5s=features.raw_trade_count_5s,
+            cvd_5s=features.cvd_5s,
+            cvd_1m=features.cvd_1m,
+            cvd_5m=features.cvd_5m,
+            taker_buy_ratio_5s=features.taker_buy_ratio_5s,
         )
         return self._latest_bar_features
+
+    def orderflow_features(self, bar: Bar1s) -> SpikeBarFeatures | None:
+        """按需计算滚动主动成交与 CVD；只依赖 Bar1s 归档原始聚合。"""
+        features = self.bar_features(bar)
+        if features is None:
+            # orderflow-only 消费者不需要等待 60 秒的涨幅基线。
+            if not self._requires_1s or self._latest_bar is None:
+                return None
+            if bar.timestamp != self._latest_bar.timestamp:
+                raise RuntimeError("shared Spike features must be consumed in event order")
+            features = SpikeBarFeatures(
+                timestamp=bar.timestamp,
+                continuous=False,
+                rise_5s=Decimal("0"),
+            )
+            self._latest_bar_features = features
+        if features.orderflow_ready:
+            return features
+
+        five = self._orderflow_window(bar.timestamp, 5)
+        one_minute = self._orderflow_window(bar.timestamp, 60)
+        five_minutes = self._orderflow_window(bar.timestamp, 300)
+        if five is None:
+            return features
+        buy_5s, sell_5s, raw_count_5s, cvd_5s = five
+        total_5s = buy_5s + sell_5s
+        self._latest_bar_features = SpikeBarFeatures(
+            timestamp=features.timestamp,
+            continuous=features.continuous,
+            rise_5s=features.rise_5s,
+            volume_ready=features.volume_ready,
+            volume_5s=features.volume_5s,
+            median_volume_1s=features.median_volume_1s,
+            volume_multiple_5s=features.volume_multiple_5s,
+            orderflow_ready=True,
+            taker_buy_volume_5s=buy_5s,
+            taker_sell_volume_5s=sell_5s,
+            raw_trade_count_5s=raw_count_5s,
+            cvd_5s=cvd_5s,
+            cvd_1m=None if one_minute is None else one_minute[3],
+            cvd_5m=None if five_minutes is None else five_minutes[3],
+            taker_buy_ratio_5s=(
+                None if total_5s <= 0 else buy_5s / total_5s
+            ),
+        )
+        return self._latest_bar_features
+
+    def _orderflow_window(
+        self, timestamp: int, seconds: int
+    ) -> tuple[Decimal, Decimal, int | None, Decimal] | None:
+        if self._first_bar1s_timestamp is None:
+            return None
+        required_start = timestamp - (seconds - 1) * MS_PER_SECOND
+        # 至少观察满一个完整窗口后才输出，避免启动时把短样本冒充完整窗口。
+        if self._first_bar1s_timestamp > required_start:
+            return None
+        selected = [
+            item
+            for item in self.bars_1s
+            if required_start <= item.timestamp <= timestamp
+        ]
+        if len(selected) != seconds:
+            return None
+        if any(
+            current.timestamp - previous.timestamp != MS_PER_SECOND
+            for previous, current in pairwise(selected)
+        ):
+            return None
+        if any(not item.orderflow_available for item in selected):
+            return None
+        buy = sum(
+            (item.taker_buy_volume or Decimal("0") for item in selected),
+            Decimal("0"),
+        )
+        sell = sum(
+            (item.taker_sell_volume or Decimal("0") for item in selected),
+            Decimal("0"),
+        )
+        raw_counts = [item.raw_trade_count for item in selected]
+        raw_count = (
+            None
+            if any(value is None for value in raw_counts)
+            else sum(int(value) for value in raw_counts if value is not None)
+        )
+        return buy, sell, raw_count, buy - sell
 
     def candidate_features(
         self, config: CandidateFeatureConfig
