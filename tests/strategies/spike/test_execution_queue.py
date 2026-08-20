@@ -94,3 +94,43 @@ async def test_entry_backlog_is_bounded_without_blocking_exit_or_cancel():
         (await queue.get()).kind,
         (await queue.get()).kind,
     ] == ["exit", "cancel", "entry"]
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_is_visible_to_owner_and_stop_is_idempotent():
+    queue = ExecutionQueue()
+
+    async def fail(_job):
+        raise RuntimeError("submit failed")
+
+    worker = ExecutionWorker(queue, fail)
+    task = worker.start()
+    queue.put_nowait("entry", intent=entry())
+
+    with pytest.raises(RuntimeError, match="submit failed"):
+        await task
+    await worker.stop()
+    await worker.stop()
+
+
+@pytest.mark.asyncio
+async def test_worker_stop_cancels_in_flight_network_handler():
+    queue = ExecutionQueue()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def wait_forever(_job):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    worker = ExecutionWorker(queue, wait_forever)
+    worker.start()
+    queue.put_nowait("entry", intent=entry())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    await worker.stop()
+
+    assert cancelled.is_set()

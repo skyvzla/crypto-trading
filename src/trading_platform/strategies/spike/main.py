@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 BAR_STREAM_STALE_SECONDS = 10.0
 RUNTIME_HEARTBEAT_SECONDS = 5.0
 EXCHANGE_RULE_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
+MARKET_EVENT_QUEUE_MAXSIZE = 1_024
 
 
 def _snapshot_from_database(
@@ -134,6 +135,11 @@ class SpikeLiveProcess:
         self._stop = asyncio.Event()
         self._stack = AsyncExitStack()
         self._tasks: list[asyncio.Task] = []
+        self._market_events: asyncio.Queue[Bar1s | Kline] = asyncio.Queue(
+            maxsize=MARKET_EVENT_QUEUE_MAXSIZE
+        )
+        self._market_event_queue_overflowed = False
+        self._queued_execution_started = False
         self._last_kline: dict[tuple[str, str], int] = {}
         self._last_bar_received_monotonic: dict[str, float] = {}
         self._last_bar_trade_id: dict[str, int] = {}
@@ -186,6 +192,11 @@ class SpikeLiveProcess:
             for symbol in self.settings.symbols:
                 await self.coordinator.maybe_release_campaign(symbol)
             self._restore_execution_gate()
+
+            execution_worker = self.coordinator.start_execution_worker()
+            self._tasks.append(execution_worker)
+            self._queued_execution_started = True
+            self.gate.set_condition("event_queue", True)
 
             await self._register_market_subscriptions()
             await self._start_bar_consumer()
@@ -261,6 +272,7 @@ class SpikeLiveProcess:
         if self.gate is not None:
             self.gate.set_condition("execution", False)
             self.gate.set_condition("market", False)
+            self.gate.set_condition("event_queue", False)
         if self.runtime_callbacks is not None:
             self.runtime_callbacks.abort_startup_recovery()
         for task in self._tasks:
@@ -268,6 +280,7 @@ class SpikeLiveProcess:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        self._queued_execution_started = False
         errors: list[BaseException] = []
         if self.coordinator is not None:
             try:
@@ -415,6 +428,7 @@ class SpikeLiveProcess:
             "subcategory",
             "campaign",
             "exchange_symbols",
+            "event_queue",
         ):
             self.gate.set_condition(condition, False)
         self.coordinator = SpikeExecutionCoordinator(
@@ -547,7 +561,7 @@ class SpikeLiveProcess:
             safety_ready = all(
                 gates.get(name, False)
                 for name in ("execution", "market", "bar_stream")
-            )
+            ) and gates.get("event_queue", True)
             status = "running" if safety_ready and not halted else "degraded"
         accepted = await self.db.upsert_strategy_runtime_status(
             StrategyRuntimeStatus(
@@ -708,19 +722,28 @@ class SpikeLiveProcess:
     async def _start_bar_consumer(self) -> None:
         """订阅 Redis 后才允许等待依赖消费者存在的市场质量门禁。"""
         ready = asyncio.Event()
+        strategy_task = asyncio.create_task(
+            self._strategy_event_loop(), name="spike-strategy-event-loop"
+        )
+        self._tasks.append(strategy_task)
         task = asyncio.create_task(self._bar_loop(ready), name="spike-bar-loop")
         self._tasks.append(task)
         waiter = asyncio.create_task(ready.wait(), name="spike-bar-ready")
         try:
             done, _ = await asyncio.wait(
-                {task, waiter},
+                {strategy_task, task, waiter},
                 timeout=10,
                 return_when=asyncio.FIRST_COMPLETED,
             )
             if waiter not in done:
+                if strategy_task in done:
+                    strategy_task.result()
                 if task in done:
                     task.result()
                 raise RuntimeError("bar consumer did not become ready")
+            if strategy_task.done():
+                strategy_task.result()
+                raise RuntimeError("strategy event loop stopped during startup")
             if task.done():
                 task.result()
                 raise RuntimeError("bar consumer stopped during startup")
@@ -744,7 +767,7 @@ class SpikeLiveProcess:
                     raise RuntimeError(
                         f"unexpected bar symbol on managed subscription: {bar.symbol}"
                     )
-                await self._handle_live_bar(bar)
+                await self._enqueue_market_event(bar)
         except asyncio.CancelledError:
             raise
         except BaseException:
@@ -753,6 +776,54 @@ class SpikeLiveProcess:
             raise
         finally:
             await pubsub.aclose()
+
+    async def _enqueue_market_event(self, event: Bar1s | Kline) -> None:
+        """正常路径不等待策略；满载时关闭入场并背压，保证事件不丢。"""
+
+        try:
+            self._market_events.put_nowait(event)
+            return
+        except asyncio.QueueFull:
+            pass
+        if not self._market_event_queue_overflowed:
+            self._market_event_queue_overflowed = True
+            assert self.gate is not None
+            assert self.coordinator is not None
+            self.gate.set_condition("event_queue", False)
+            self.coordinator.close_entry_pipeline(
+                "market event queue full",
+                symbol=event.symbol,
+                event_time=event.available_time,
+            )
+            logger.error(
+                "%s 行情事件队列已满，关闭入场并保留背压事件",
+                event.symbol,
+            )
+        await self._market_events.put(event)
+
+    async def _strategy_event_loop(self) -> None:
+        """按实际入队顺序串行更新策略状态，网络执行由独立 worker 处理。"""
+
+        while True:
+            event = await self._market_events.get()
+            try:
+                if isinstance(event, Bar1s):
+                    await self._handle_live_bar(event)
+                else:
+                    assert self.coordinator is not None
+                    if self._queued_execution_started:
+                        await self.coordinator.on_kline_queued(event)
+                    else:
+                        await self.coordinator.on_kline(event)
+            finally:
+                self._market_events.task_done()
+
+    async def _deliver_bar1s(self, bar: Bar1s) -> None:
+        assert self.coordinator is not None
+        if self._queued_execution_started:
+            await self.coordinator.on_bar1s_queued(bar)
+        else:
+            await self.coordinator.on_bar1s(bar)
 
     async def _handle_live_bar(self, bar: Bar1s) -> None:
         """校验逐币种水位，必要时回放缺口，然后交给策略串行处理。"""
@@ -769,7 +840,7 @@ class SpikeLiveProcess:
             await self._fail_bar_continuity(bar.symbol, "missing or invalid watermark")
             self._last_bar_trade_id.pop(bar.symbol, None)
             self._bar_continuity_streak[bar.symbol] = 0
-            await self.coordinator.on_bar1s(bar)
+            await self._deliver_bar1s(bar)
             return
 
         if previous_id is not None and last_id <= previous_id:
@@ -790,14 +861,14 @@ class SpikeLiveProcess:
                     bar.symbol, previous_id + 1, first_id - 1
                 )
             for recovered_bar in recovered:
-                await self.coordinator.on_bar1s(recovered_bar)
+                await self._deliver_bar1s(recovered_bar)
             self._bar_continuity_streak[bar.symbol] = 0
 
         self._last_bar_trade_id[bar.symbol] = last_id
         self._bar_continuity_streak[bar.symbol] = (
             self._bar_continuity_streak.get(bar.symbol, 0) + 1
         )
-        await self.coordinator.on_bar1s(bar)
+        await self._deliver_bar1s(bar)
         self._refresh_bar_continuity_gate()
 
     async def _fail_bar_continuity(self, symbol: str, reason: str) -> None:
@@ -908,7 +979,7 @@ class SpikeLiveProcess:
                     key = (symbol, interval)
                     if kline.close_time <= self._last_kline.get(key, -1):
                         continue
-                    await self.coordinator.on_kline(kline)
+                    await self._enqueue_market_event(kline)
                     self._last_kline[key] = kline.close_time
             await asyncio.sleep(1)
 
@@ -1035,7 +1106,7 @@ class SpikeLiveProcess:
             current - self._last_bar_received_monotonic.get(symbol, float("-inf"))
             <= BAR_STREAM_STALE_SECONDS
             for symbol in self._market_symbols()
-        )
+        ) and not self._market_event_queue_overflowed
         self.gate.set_condition("bar_stream", ready)
         return ready
 

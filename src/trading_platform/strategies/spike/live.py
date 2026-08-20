@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -23,6 +24,11 @@ from trading_platform.shared.events import (
 )
 from trading_platform.shared.risk import RiskGuard
 from trading_platform.strategies.campaign_store import CampaignLease, RedisCampaignStore
+from trading_platform.strategies.spike.execution_queue import (
+    ExecutionJob,
+    ExecutionQueue,
+    ExecutionWorker,
+)
 from trading_platform.strategies.spike.short import (
     DynamicSpikeBacktestStrategy,
     parse_entry_client_order_id,
@@ -33,6 +39,9 @@ from trading_platform.strategies.universe import DEFAULT_DELISTING_FREEZE_DAYS
 STRATEGY_ID = "spike_short"
 ENTRY_REASONS = {"spike_tier1", "spike_tier2", "spike_tier3"}
 LIVE_CONFIRMATION = "I_UNDERSTAND_LIVE_ORDERS_ARE_REAL"
+
+
+logger = logging.getLogger(__name__)
 
 
 def require_one_way_position_mode(response: dict[str, Any]) -> None:
@@ -166,6 +175,7 @@ class SpikeExecutionCoordinator:
         trade_source: CampaignTradeSource | None = None,
         audit_sink: AuditSink | None = None,
         now_ms: Callable[[], int] | None = None,
+        execution_queue: ExecutionQueue | None = None,
     ):
         self.strategy = strategy
         self.account = account
@@ -182,6 +192,21 @@ class SpikeExecutionCoordinator:
         self._owned_campaign_lease: CampaignLease | None = None
         self._expiry_tasks: dict[str, asyncio.Task] = {}
         self._pending_audit_events: tuple[StrategyAuditEvent, ...] = ()
+        self._audit_lock = asyncio.Lock()
+        self.execution_queue = execution_queue or ExecutionQueue()
+        self._execution_worker = ExecutionWorker(
+            self.execution_queue, self._handle_execution_job
+        )
+        self._maintenance_queued = False
+        self._entry_pipeline_close_reason: str | None = None
+
+    def start_execution_worker(self) -> asyncio.Task[None]:
+        """启动唯一账户执行 worker，并把任务交给进程监督。"""
+
+        return self._execution_worker.start()
+
+    async def stop_execution_worker(self) -> None:
+        await self._execution_worker.stop()
 
     async def restore_campaign_gate(self) -> None:
         """恢复 Redis 互斥事实；不依据本地状态猜测或删除已有 lease。"""
@@ -400,6 +425,18 @@ class SpikeExecutionCoordinator:
             await self._publish_audit()
             await self.maybe_release_campaign(bar.symbol)
 
+    async def on_bar1s_queued(self, bar: Bar1s) -> None:
+        """只计算策略并排队执行，不在策略事件循环中等待交易所 REST。"""
+
+        async with self._lock:
+            intents = self.strategy.on_bar1s(bar)
+            queued = self._enqueue_intents(intents, event_time=bar.available_time)
+            audit_pending = await self._stage_strategy_audit_events()
+            if not queued and (
+                audit_pending or self.account.has_pending_cancellations
+            ):
+                self._enqueue_maintenance(event_time=bar.available_time)
+
     async def on_kline(self, kline: Kline) -> None:
         async with self._lock:
             intents = self.strategy.on_kline(kline)
@@ -410,6 +447,18 @@ class SpikeExecutionCoordinator:
                 await self._persist_exit_state(kline.symbol)
             await self._flush_cancellations()
             await self._publish_audit()
+
+    async def on_kline_queued(self, kline: Kline) -> None:
+        """与 1s Bar 共用同一个异步执行通道。"""
+
+        async with self._lock:
+            intents = self.strategy.on_kline(kline)
+            queued = self._enqueue_intents(intents, event_time=kline.available_time)
+            audit_pending = await self._stage_strategy_audit_events()
+            if not queued and (
+                audit_pending or self.account.has_pending_cancellations
+            ):
+                self._enqueue_maintenance(event_time=kline.available_time)
 
     async def on_fill(self, fill: Fill) -> None:
         async with self._lock:
@@ -539,6 +588,101 @@ class SpikeExecutionCoordinator:
                 return False
             await self._submit(intent)
         return True
+
+    def _enqueue_intents(
+        self, intents: list[OrderIntent], *, event_time: int
+    ) -> int:
+        """退出永不因入场积压被拒；同优先级按策略事件到达顺序排队。"""
+
+        symbol_allowed = getattr(self.strategy, "is_symbol_entry_enabled", None)
+        entries = [
+            intent
+            for intent in intents
+            if not intent.reduce_only
+            and (not callable(symbol_allowed) or symbol_allowed(intent.symbol))
+        ]
+        exits = [intent for intent in intents if intent.reduce_only]
+        queued = 0
+        for intent in exits:
+            self.execution_queue.put_nowait(
+                "exit", intent=intent, event_time=event_time
+            )
+            queued += 1
+        for intent in entries:
+            if not self.gate.enabled:
+                continue
+            try:
+                self.execution_queue.put_nowait(
+                    "entry", intent=intent, event_time=event_time
+                )
+            except asyncio.QueueFull:
+                self.close_entry_pipeline(
+                    "entry execution queue full",
+                    symbol=intent.symbol,
+                    event_time=event_time,
+                )
+                continue
+            queued += 1
+        return queued
+
+    def _enqueue_maintenance(self, *, event_time: int) -> None:
+        if self._maintenance_queued:
+            return
+        self.execution_queue.put_nowait("cancel", event_time=event_time)
+        self._maintenance_queued = True
+
+    def close_entry_pipeline(
+        self, reason: str, *, symbol: str, event_time: int
+    ) -> None:
+        """永久关闭本次运行的入场，并把现有入场挂单交给执行 worker 撤销。"""
+
+        self.gate.set_condition("event_queue", False)
+        if self._entry_pipeline_close_reason is None:
+            self._entry_pipeline_close_reason = reason
+            logger.error("%s entry pipeline closed: %s", symbol, reason)
+            self._pending_audit_events += (
+                StrategyAuditEvent(
+                    event_time=event_time,
+                    event_type="entry_pipeline_closed",
+                    symbol=symbol,
+                    strategy_id=STRATEGY_ID,
+                    campaign_id=self._owned_campaign_id,
+                    details={"reason": reason},
+                ),
+            )
+        cancellation_requested = False
+        for order in self.account.iter_orders():
+            if not order.reduce_only and order.status in {"NEW", "PARTIALLY_FILLED"}:
+                cancellation_requested = (
+                    self.account.cancel_order(order.order_id)
+                    or cancellation_requested
+                )
+        if cancellation_requested or self._pending_audit_events:
+            self._enqueue_maintenance(event_time=event_time)
+
+    async def _handle_execution_job(self, job: ExecutionJob) -> None:
+        if job.kind == "cancel":
+            self._maintenance_queued = False
+        try:
+            execution_complete = True
+            if job.kind == "cancel":
+                await self._flush_cancellations()
+            else:
+                assert job.intent is not None
+                execution_complete = await self._execute(
+                    [job.intent], event_time=job.event_time
+                )
+                if execution_complete and job.intent.reduce_only:
+                    await self._persist_exit_state(job.intent.symbol)
+                await self._flush_cancellations()
+            await self._publish_audit()
+            if job.intent is not None:
+                await self.maybe_release_campaign(job.intent.symbol)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            self.gate.set_condition("event_queue", False)
+            raise
 
     async def _submit(self, intent: OrderIntent) -> None:
         campaign_id = self._owned_campaign_id
@@ -703,6 +847,7 @@ class SpikeExecutionCoordinator:
         return released
 
     async def stop(self) -> None:
+        await self.stop_execution_worker()
         for task in tuple(self._expiry_tasks.values()):
             task.cancel()
         if self._expiry_tasks:
@@ -738,23 +883,35 @@ class SpikeExecutionCoordinator:
     async def _publish_audit(self) -> bool:
         if self.audit_sink is None:
             return True
+        async with self._audit_lock:
+            self._drain_strategy_audit_events()
+            events = self._pending_audit_events
+            if not events:
+                return True
+            try:
+                await self.audit_sink(events)
+            except asyncio.CancelledError:
+                self._close_on_audit_failure("strategy audit write cancelled")
+                raise
+            except Exception as exc:
+                self._close_on_audit_failure(
+                    f"strategy audit write failed: {type(exc).__name__}"
+                )
+                return False
+            self._pending_audit_events = self._pending_audit_events[len(events) :]
+            return True
+
+    async def _stage_strategy_audit_events(self) -> bool:
+        if self.audit_sink is None:
+            return False
+        async with self._audit_lock:
+            return self._drain_strategy_audit_events()
+
+    def _drain_strategy_audit_events(self) -> bool:
         events = tuple(self.strategy.drain_audit_events())
         if events:
             self._pending_audit_events += events
-        if not self._pending_audit_events:
-            return True
-        try:
-            await self.audit_sink(self._pending_audit_events)
-        except asyncio.CancelledError:
-            self._close_on_audit_failure("strategy audit write cancelled")
-            raise
-        except Exception as exc:
-            self._close_on_audit_failure(
-                f"strategy audit write failed: {type(exc).__name__}"
-            )
-            return False
-        self._pending_audit_events = ()
-        return True
+        return bool(self._pending_audit_events)
 
     def _close_on_audit_failure(self, reason: str) -> None:
         self.gate.set_condition("execution", False)
