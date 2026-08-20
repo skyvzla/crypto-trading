@@ -454,6 +454,9 @@ class SpikeLiveProcess:
                 if self.strategy_definition.defaults.profit_unlock_percent is not None
                 else None
             ),
+            strategy_parameters={
+                "reject_below_current": True,
+            },
             strategy_class=self.strategy_definition.strategy_class,
         )
         executor = BinanceOrderExecutor(
