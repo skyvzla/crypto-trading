@@ -492,6 +492,7 @@ class DynamicSpikeShortStrategy:
         self.last_signal_time: Optional[int] = None
         self._last_cap_rejection_audit: tuple[int, tuple[str, ...]] | None = None
         self._last_entry_filter_rejection_audit: tuple[int, tuple[str, ...]] | None = None
+        self._last_signal_rejection_audit: tuple[int, tuple[str, ...]] | None = None
         self.active_signals: List[SpikeSignal] = []
         self.first_fill_time: Optional[int] = None
         self._campaign_id_for_timing: str | None = None
@@ -1749,20 +1750,66 @@ class DynamicSpikeShortStrategy:
             if rise_low_age_minutes < self.min_rise_duration_minutes:
                 return None
 
-        # 5b. 箱体/通道突破时长过滤：现价须已站上突破线（3d/7d 上沿均值）
-        #     超过 box_duration_min_minutes 才允许入场（0=关闭）。
+        # 5b. 箱体/通道突破时长过滤：现价已站上突破线（3d/7d 上沿均值）
+        #     超过 box_duration_min_minutes 视为蓄势充分的健康突破，豁免
+        #     后续过早触发过滤（OR 逻辑）；未达标的信号仍交由 5c 判定（0=关闭）。
+        box_passed = False
         box_break = None
         if self.box_duration_min_minutes > 0:
             box_break = self._box_breakthrough(minute_start, current.close)
-            if box_break is None or box_break["box_break_minutes"] < self.box_duration_min_minutes:
-                return None
+            if box_break is not None and box_break["box_break_minutes"] >= self.box_duration_min_minutes:
+                box_passed = True
+            else:
+                self._record_signal_rejection(
+                    event_time=current.timestamp,
+                    rejection_stage="box_breakthrough_entry_filter",
+                    rejection_reasons=("box_duration_min_minutes",),
+                    trigger_price=current.close,
+                    rise_5s=rise_5s,
+                    rise_window_returns=rise_window_returns,
+                    volume_5s=volume_5s,
+                    median_volume_1s=median_volume,
+                    volume_multiple_5s=volume_multiple_5s,
+                    low_12h=low_12h,
+                    rise_from_12h_low=rise_from_12h_low,
+                    extra={
+                        "box_break_minutes": (
+                            box_break["box_break_minutes"] if box_break else None
+                        ),
+                        "box_duration_min_minutes": self.box_duration_min_minutes,
+                    },
+                )
 
         # 5c. 过早触发过滤：信号触发价相对前 30m 均价偏离度与 60m 极差
-        #     同时超阈值时判定为在脉冲顶部触发，做空接飞刀风险高（0=关闭）。
+        #     同时超阈值时判定为在脉冲顶部触发，做空接飞刀风险高，拒绝。
+        #     箱体突破健康信号豁免此过滤（0=关闭）。
         premature = None
-        if self.spike_avg_deviation_max_pct > 0 and self.spike_range_max_pct > 0:
+        if (
+            not box_passed
+            and self.spike_avg_deviation_max_pct > 0
+            and self.spike_range_max_pct > 0
+        ):
             premature = self._premature_spike_filter(minute_start, current.close)
             if premature is not None and premature["rejected"]:
+                self._record_signal_rejection(
+                    event_time=current.timestamp,
+                    rejection_stage="premature_spike_entry_filter",
+                    rejection_reasons=("spike_avg_deviation_max_pct",),
+                    trigger_price=current.close,
+                    rise_5s=rise_5s,
+                    rise_window_returns=rise_window_returns,
+                    volume_5s=volume_5s,
+                    median_volume_1s=median_volume,
+                    volume_multiple_5s=volume_multiple_5s,
+                    low_12h=low_12h,
+                    rise_from_12h_low=rise_from_12h_low,
+                    extra={
+                        "spike_avg_deviation_pct": premature["spike_avg_deviation_pct"],
+                        "spike_range_pct": premature["spike_range_pct"],
+                        "spike_avg_deviation_max_pct": self.spike_avg_deviation_max_pct,
+                        "spike_range_max_pct": self.spike_range_max_pct,
+                    },
+                )
                 return None
 
         # 5d. VWAP 偏离过滤：触发价相对前 100m 聚合 20 根 5m VWAP 偏离超阈值
@@ -1771,6 +1818,23 @@ class DynamicSpikeShortStrategy:
         if self.spike_vwap_deviation_max_pct > 0:
             vwap_dev = self._vwap_deviation_filter(minute_start, current.close)
             if vwap_dev is not None and vwap_dev["rejected"]:
+                self._record_signal_rejection(
+                    event_time=current.timestamp,
+                    rejection_stage="vwap_deviation_entry_filter",
+                    rejection_reasons=("spike_vwap_deviation_max_pct",),
+                    trigger_price=current.close,
+                    rise_5s=rise_5s,
+                    rise_window_returns=rise_window_returns,
+                    volume_5s=volume_5s,
+                    median_volume_1s=median_volume,
+                    volume_multiple_5s=volume_multiple_5s,
+                    low_12h=low_12h,
+                    rise_from_12h_low=rise_from_12h_low,
+                    extra={
+                        "spike_vwap_deviation_pct": vwap_dev["spike_vwap_deviation_pct"],
+                        "spike_vwap_deviation_max_pct": self.spike_vwap_deviation_max_pct,
+                    },
+                )
                 return None
 
         # 6. 起涨点（16 小时最低价）
@@ -1799,16 +1863,52 @@ class DynamicSpikeShortStrategy:
         # 9. 三档价格：spike_high - ATR × (1.15, 0.75, 0.35)
         #    tier1（最低档）用于保护线检查，不随 tier_atr_shift 上移，避免放宽入场门槛
         tier_atr_shift = self._entry_tier_atr_shift(rise_from_12h_low)
-        tier_prices = [
-            spike_high
-            - atr
-            * (
-                self.RETEST_ATR
-                - Decimal(n - 1) * self.SPREAD_ATR
-                - (tier_atr_shift if n > 0 else Decimal("0"))
+        scored = self._entry_scored_decision(
+            spike_high=spike_high,
+            atr=atr,
+            tier_atr_shift=tier_atr_shift,
+            bar=current,
+            origin_price=origin_price,
+            minute_start=minute_start,
+            rise_from_12h_low=rise_from_12h_low,
+        )
+        if scored is not None and scored[0]:
+            self._record_signal_rejection(
+                event_time=current.timestamp,
+                rejection_stage="scored_entry_filter",
+                rejection_reasons=(scored[0],),
+                trigger_price=current.close,
+                rise_5s=rise_5s,
+                rise_window_returns=rise_window_returns,
+                volume_5s=volume_5s,
+                median_volume_1s=median_volume,
+                volume_multiple_5s=volume_multiple_5s,
+                low_12h=low_12h,
+                rise_from_12h_low=rise_from_12h_low,
+                extra={"scored_score": scored[1], "scored_threshold": scored[2]},
             )
-            for n in range(3)
-        ]
+            return None
+        tier_prices = self._entry_tier_prices(
+            spike_high=spike_high,
+            atr=atr,
+            tier_atr_shift=tier_atr_shift,
+            bar=current,
+            origin_price=origin_price,
+            minute_start=minute_start,
+            rise_from_12h_low=rise_from_12h_low,
+            scored=scored,
+        )
+        if tier_prices is None:
+            tier_prices = [
+                spike_high
+                - atr
+                * (
+                    self.RETEST_ATR
+                    - Decimal(n - 1) * self.SPREAD_ATR
+                    - (tier_atr_shift if n > 0 else Decimal("0"))
+                )
+                for n in range(3)
+            ]
 
         # 10. 价格合理性：最低档不得低于 origin_floor。
         #     reject_below_current=False（默认）时不再拦截"现价已高于
@@ -1818,6 +1918,24 @@ class DynamicSpikeShortStrategy:
         origin_floor = origin_price * (Decimal("1") + self.ORIGIN_MIN_RISE)
         lowest_tier = min(tier_prices)
         if lowest_tier < origin_floor:
+            self._record_signal_rejection(
+                event_time=current.timestamp,
+                rejection_stage="price_sanity_entry_filter",
+                rejection_reasons=("origin_floor",),
+                trigger_price=current.close,
+                rise_5s=rise_5s,
+                rise_window_returns=rise_window_returns,
+                volume_5s=volume_5s,
+                median_volume_1s=median_volume,
+                volume_multiple_5s=volume_multiple_5s,
+                low_12h=low_12h,
+                rise_from_12h_low=rise_from_12h_low,
+                extra={
+                    "origin_price": str(origin_price),
+                    "origin_floor": str(origin_floor),
+                    "lowest_tier": str(lowest_tier),
+                },
+            )
             return None
         if self.entry_tier_mode == "single-entry":
             entry_tier = spike_high - atr * self.SINGLE_ENTRY_ATR
@@ -1826,6 +1944,23 @@ class DynamicSpikeShortStrategy:
         else:
             entry_tier = lowest_tier
         if self.reject_below_current and entry_tier <= current.close:
+            self._record_signal_rejection(
+                event_time=current.timestamp,
+                rejection_stage="price_sanity_entry_filter",
+                rejection_reasons=("reject_below_current",),
+                trigger_price=current.close,
+                rise_5s=rise_5s,
+                rise_window_returns=rise_window_returns,
+                volume_5s=volume_5s,
+                median_volume_1s=median_volume,
+                volume_multiple_5s=volume_multiple_5s,
+                low_12h=low_12h,
+                rise_from_12h_low=rise_from_12h_low,
+                extra={
+                    "entry_tier": str(entry_tier),
+                    "current_close": str(current.close),
+                },
+            )
             return None
         allowed_prior_high = prior_high * (
             Decimal("1") - self.prior_high_tolerance_percent / Decimal("100")
@@ -1835,6 +1970,24 @@ class DynamicSpikeShortStrategy:
             or self.prior_high_tolerance_percent == 0
             and lowest_tier == allowed_prior_high
         ):
+            self._record_signal_rejection(
+                event_time=current.timestamp,
+                rejection_stage="price_sanity_entry_filter",
+                rejection_reasons=("prior_high",),
+                trigger_price=current.close,
+                rise_5s=rise_5s,
+                rise_window_returns=rise_window_returns,
+                volume_5s=volume_5s,
+                median_volume_1s=median_volume,
+                volume_multiple_5s=volume_multiple_5s,
+                low_12h=low_12h,
+                rise_from_12h_low=rise_from_12h_low,
+                extra={
+                    "lowest_tier": str(lowest_tier),
+                    "allowed_prior_high": str(allowed_prior_high),
+                    "prior_high": str(prior_high),
+                },
+            )
             return None
 
         prior_high_4h = (
@@ -1990,6 +2143,43 @@ class DynamicSpikeShortStrategy:
         """
         return Decimal("0")
 
+    def _entry_tier_prices(
+        self,
+        *,
+        spike_high: Decimal,
+        atr: Decimal,
+        tier_atr_shift: Decimal,
+        bar: Bar1s,
+        origin_price: Decimal,
+        minute_start: int,
+        rise_from_12h_low: Decimal | None,
+        scored: tuple[str, float, float] | None = None,
+    ) -> list[Decimal] | None:
+        """可选的三档挂单价覆盖钩子。
+
+        基类默认返回 None（使用 spike_high - ATR×系数 默认三档）；
+        版本策略可返回自定义三档价格列表（如动态溢价预测单档）。
+        """
+        return None
+
+    def _entry_scored_decision(
+        self,
+        *,
+        spike_high: Decimal,
+        atr: Decimal,
+        tier_atr_shift: Decimal,
+        bar: Bar1s,
+        origin_price: Decimal,
+        minute_start: int,
+        rise_from_12h_low: Decimal | None,
+    ) -> tuple[str, float, float] | None:
+        """可选的评分准入决策钩子。
+
+        返回 None 表示不启用评分准入；返回 (rejection_reason, score, threshold)
+        表示信号评分低于准入阈值被拒绝。基类默认不启用。
+        """
+        return None
+
     def _entry_bucket(self, rise_from_12h_low: Decimal | None) -> str | None:
         """按入场信号快照确定强弱桶（"strong"/"weak"），持仓期不变。
 
@@ -2023,6 +2213,60 @@ class DynamicSpikeShortStrategy:
         ):
             return
         self._last_entry_filter_rejection_audit = (event_time, rejection_reasons)
+        self._record_audit(
+            event_time=event_time,
+            event_type="signal_rejected",
+            campaign_id=self._campaign_id_at(event_time),
+            details=details,
+        )
+
+    def _record_signal_rejection(
+        self,
+        *,
+        event_time: int,
+        rejection_stage: str,
+        rejection_reasons: tuple[str, ...],
+        trigger_price: Decimal,
+        rise_5s: Decimal | None = None,
+        rise_window_returns: dict[int, Decimal] | None = None,
+        volume_5s: Decimal | None = None,
+        median_volume_1s: Decimal | None = None,
+        volume_multiple_5s: Decimal | None = None,
+        low_12h: Decimal | None = None,
+        rise_from_12h_low: Decimal | None = None,
+        entry_context: EntryContextFeatures | None = None,
+        extra: dict[str, object] | None = None,
+    ) -> None:
+        """统一记录信号链路任一环节的拒绝（event_type=signal_rejected）。
+
+        各拦截点共用一套审计详情（触发快照 + 环节字段），冷却窗口内
+        相同拒绝原因只记一条，避免日志风暴。
+        """
+        previous = self._last_signal_rejection_audit
+        if (
+            previous is not None
+            and previous[1] == rejection_reasons
+            and event_time - previous[0] < self.SIGNAL_COOLDOWN * MS_PER_SECOND
+        ):
+            return
+        self._last_signal_rejection_audit = (event_time, rejection_reasons)
+        details = self._signal_audit_details(
+            trigger_price=trigger_price,
+            rise_5s=rise_5s,
+            rise_window_returns=rise_window_returns,
+            volume_5s=volume_5s,
+            median_volume_1s=median_volume_1s,
+            volume_multiple_5s=volume_multiple_5s,
+            low_12h=low_12h,
+            rise_from_12h_low=rise_from_12h_low,
+            entry_context=entry_context,
+        )
+        details.update({
+            "rejection_stage": rejection_stage,
+            "rejection_reasons": list(rejection_reasons),
+        })
+        if extra:
+            details.update(extra)
         self._record_audit(
             event_time=event_time,
             event_type="signal_rejected",
