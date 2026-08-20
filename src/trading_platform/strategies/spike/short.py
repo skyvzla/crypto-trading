@@ -58,6 +58,7 @@ from trading_platform.strategies.spike.exit_policy import (
 MS_PER_SECOND = 1000
 MS_PER_MINUTE = 60 * MS_PER_SECOND
 BINANCE_CLIENT_ORDER_ID_MAX_LENGTH = 36
+EntryTierMode = Literal["three-tier", "tier3-only", "single-entry"]
 
 
 def _base36(value: int) -> str:
@@ -186,6 +187,7 @@ class DynamicSpikeShortStrategy:
 
     # ---- 冻结参数（来自实验脚本，不得擅自修改）----
     TIER_WEIGHTS = (Decimal("0.30"), Decimal("0.40"), Decimal("0.30"))
+    SINGLE_ENTRY_ATR = Decimal("0.35")
     RETEST_ATR = Decimal("0.75")  # 主目标位（第二档）ATR 倍数
     SPREAD_ATR = Decimal("0.40")  # 档位间隔 ATR 倍数
     ORIGIN_MIN_RISE = Decimal("0.10")  # 三档价格不得低于 origin × 1.10
@@ -231,7 +233,7 @@ class DynamicSpikeShortStrategy:
         account_id: str = "backtest",
         exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007",
         prior_high_lookback_minutes: int | None = None,
-        entry_tier_mode: Literal["three-tier", "tier3-only"] = "three-tier",
+        entry_tier_mode: EntryTierMode = "three-tier",
         reject_below_current: bool = False,
         rise_low_lookback_minutes: int = 0,
         min_rise_duration_minutes: int = 0,
@@ -267,8 +269,8 @@ class DynamicSpikeShortStrategy:
         """
         Args:
             symbol: 交易对
-            total_notional: 每轮固定总名义金额（D-005）。三档按 30/40/30 分配。
-                            该值必须由配置显式提供，不设默认值。
+            total_notional: 每轮固定总名义金额（D-005）。该值必须由配置显式提供，
+                            不设默认值；single-entry 模式全部用于唯一入场单。
             account: 订单、持仓查询与撤单适配器
             account_id: 账户 ID
         """
@@ -279,8 +281,10 @@ class DynamicSpikeShortStrategy:
         self.total_notional = Decimal(total_notional)
         self.account_id = account_id
         self.exit_policy = exit_policy
-        if entry_tier_mode not in {"three-tier", "tier3-only"}:
-            raise ValueError("entry_tier_mode must be three-tier or tier3-only")
+        if entry_tier_mode not in {"three-tier", "tier3-only", "single-entry"}:
+            raise ValueError(
+                "entry_tier_mode must be three-tier, tier3-only, or single-entry"
+            )
         self.entry_tier_mode = entry_tier_mode
         self.reject_below_current = bool(reject_below_current)
         if (rise_low_lookback_minutes <= 0) != (min_rise_duration_minutes <= 0):
@@ -896,6 +900,11 @@ class DynamicSpikeShortStrategy:
                         ),
                         "tier_prices": [str(price) for price in signal.tier_prices],
                         "tier_weights": [str(weight) for weight in signal.tier_weights],
+                        **(
+                            {"entry_price": str(self._single_entry_price(signal))}
+                            if self.entry_tier_mode == "single-entry"
+                            else {}
+                        ),
                         "invalid_price": str(signal.invalid_price),
                         "active_time": signal.active_time,
                         "expire_time": signal.expire_time,
@@ -1354,10 +1363,20 @@ class DynamicSpikeShortStrategy:
             ):
                 sig.pullback_low = bar.low
 
-            # 4. 三档挂单（按 client_order_id 幂等）
-            for tier_idx, (tier_price, tier_weight) in enumerate(
-                zip(sig.tier_prices, sig.tier_weights), start=1
-            ):
+            # 4. 按模式挂单（client_order_id 保持兼容旧 WAL）。
+            if self.entry_tier_mode == "single-entry":
+                entry_levels = (
+                    (3, self._single_entry_price(sig), Decimal("1"), "spike_entry"),
+                )
+            else:
+                entry_levels = (
+                    (tier_idx, tier_price, tier_weight, f"spike_tier{tier_idx}")
+                    for tier_idx, (tier_price, tier_weight) in enumerate(
+                        zip(sig.tier_prices, sig.tier_weights), start=1
+                    )
+                )
+
+            for tier_idx, tier_price, tier_weight, trigger_reason in entry_levels:
                 if tier_weight <= 0:
                     continue
                 client_order_id = self._client_order_id(sig, tier_idx)
@@ -1377,7 +1396,7 @@ class DynamicSpikeShortStrategy:
                         ttl_ms=sig.expire_time - bar.timestamp,
                         reduce_only=False,
                         strategy_id="spike_short",
-                        trigger_reason=f"spike_tier{tier_idx}",
+                        trigger_reason=trigger_reason,
                         campaign_id=self._campaign_id(sig),
                     )
                 )
@@ -1387,6 +1406,9 @@ class DynamicSpikeShortStrategy:
 
     def _client_order_id(self, sig: SpikeSignal, tier_idx: int) -> str:
         return build_entry_client_order_id(self.symbol, sig.signal_time, tier_idx)
+
+    def _single_entry_price(self, sig: SpikeSignal) -> Decimal:
+        return sig.spike_high - sig.atr * self.SINGLE_ENTRY_ATR
 
     def _cancel_signal_orders(self, sig: SpikeSignal) -> int:
         """
@@ -1797,11 +1819,12 @@ class DynamicSpikeShortStrategy:
         lowest_tier = min(tier_prices)
         if lowest_tier < origin_floor:
             return None
-        entry_tier = (
-            tier_prices[-1]
-            if self.entry_tier_mode == "tier3-only"
-            else lowest_tier
-        )
+        if self.entry_tier_mode == "single-entry":
+            entry_tier = spike_high - atr * self.SINGLE_ENTRY_ATR
+        elif self.entry_tier_mode == "tier3-only":
+            entry_tier = tier_prices[-1]
+        else:
+            entry_tier = lowest_tier
         if self.reject_below_current and entry_tier <= current.close:
             return None
         allowed_prior_high = prior_high * (
@@ -1906,7 +1929,7 @@ class DynamicSpikeShortStrategy:
             tier_prices=tier_prices,
             tier_weights=(
                 [Decimal("0"), Decimal("0"), Decimal("1")]
-                if self.entry_tier_mode == "tier3-only"
+                if self.entry_tier_mode in {"tier3-only", "single-entry"}
                 else list(self.TIER_WEIGHTS)
             ),
             invalid_price=invalid_price,
@@ -2365,7 +2388,7 @@ class DynamicSpikeBacktestStrategy:
         account: Optional[StrategyAccount] = None,
         exit_policy: Literal["execution-test-d007", "candidate-v1"] = "execution-test-d007",
         prior_high_lookback_minutes: int | None = None,
-        entry_tier_mode: Literal["three-tier", "tier3-only"] = "three-tier",
+        entry_tier_mode: EntryTierMode = "three-tier",
         rise_low_lookback_minutes: int = 0,
         min_rise_duration_minutes: int = 0,
         early_profit_unlock_ratio: Decimal | None = None,
