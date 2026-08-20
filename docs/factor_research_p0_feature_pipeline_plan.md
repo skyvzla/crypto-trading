@@ -307,4 +307,3 @@ CVD不创新高
 2. 回测可以读取同样feature。
 3. factor_lab可以直接使用1s feature。
 4. 新增因子无需修改交易核心逻辑。
-
