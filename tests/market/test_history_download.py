@@ -639,6 +639,46 @@ def test_download_history_keeps_partial_month_seconds_on_daily_archives(tmp_path
     assert all("/daily/aggTrades/" in url for url in requested)
 
 
+def test_download_history_falls_back_to_daily_when_monthly_aggtrades_are_missing(
+    tmp_path,
+):
+    requested: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        requested.append(url)
+        label = url.removesuffix(".zip").rsplit("aggTrades-", 1)[1]
+        if label == "2026-01":
+            raise archive_vision.ArchiveNotFoundError(url)
+        day = datetime.fromisoformat(label).replace(tzinfo=UTC)
+        payload = BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr(
+                f"AKEUSDT-aggTrades-{label}.csv",
+                "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+                "transact_time,is_buyer_maker\n"
+                f"1,1.0,2.0,1,1,{int(day.timestamp() * 1000) + 100},false\n",
+            )
+        return payload.getvalue()
+
+    with ParquetCandleArchive(tmp_path / "history") as archive:
+        results = download_history(
+            archive,
+            fetch=fetch,
+            symbols=["AKEUSDT"],
+            timeframes=["1s"],
+            start=datetime(2026, 1, 1, tzinfo=UTC),
+            end=datetime(2026, 2, 3, tzinfo=UTC),
+        )
+
+    assert "/monthly/aggTrades/" in requested[0]
+    assert sum("/daily/aggTrades/" in url for url in requested) == 33
+    assert [(item.period, item.rows) for item in results] == [
+        ("2026-01", 31),
+        ("2026-02-01", 1),
+        ("2026-02-02", 1),
+    ]
+
+
 def test_kline_archive_parses_epoch_without_session_timezone_conversion():
     payload = BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
@@ -957,7 +997,7 @@ def test_worker_pool_switches_proxy_for_streaming_archives():
     assert calls == ["a", "b"]
 
 
-def test_worker_pool_waits_for_proxy_when_all_proxies_are_occupied():
+def test_worker_pool_uses_direct_when_all_proxies_are_occupied():
     started = Event()
     release = Event()
 
@@ -983,11 +1023,27 @@ def test_worker_pool_waits_for_proxy_when_all_proxies_are_occupied():
         occupied = executor.submit(pool, "first")
         assert started.wait(timeout=1)
         fallback = executor.submit(pool, "second")
-        assert not fallback.done()
+        assert fallback.result(timeout=1) == b"direct"
         release.set()
         assert occupied.result(timeout=1) == b"proxy"
-        assert fallback.result(timeout=1) == b"proxy"
-    assert routes == [(None, None), (None, None)]
+    assert routes == [(None, None), (None, "no-available-proxy")]
+
+
+def test_worker_pool_keeps_workers_above_proxy_capacity_on_direct_access():
+    proxy_calls = []
+    pool = BinanceVisionWorkerPoolFetcher(
+        [lambda url: proxy_calls.append(url) or b"proxy"],
+        direct_fetcher=lambda _url: b"direct",
+        attempts=5,
+    )
+    previous_worker_id = archive_vision.current_archive_worker_id()
+    archive_vision._WORKER_CONTEXT.worker_id = 2
+    try:
+        assert pool("archive") == b"direct"
+    finally:
+        archive_vision._WORKER_CONTEXT.worker_id = previous_worker_id
+
+    assert proxy_calls == []
 
 
 def test_worker_pool_reserves_final_attempt_for_direct_access():
@@ -1182,8 +1238,8 @@ def test_cli_progress_starts_on_download_and_records_early_terminal_states():
     assert [
         (item.name, item.status) for item in dashboard._completed
     ] == [
-        ("worker=4 proxy=pending task=XRPUSDT 1m 2026-08", "Failed"),
-        ("worker=3 proxy=pending task=SOLUSDT 1m 2026-08", "Unavailable"),
+        ("worker=4 proxy=direct task=XRPUSDT 1m 2026-08", "Failed"),
+        ("worker=3 proxy=direct task=SOLUSDT 1m 2026-08", "Unavailable"),
         ("worker=2 proxy=pending task=ETHUSDT 1m 2026-08", "Skipped"),
     ]
     reporter.close()
@@ -1315,6 +1371,43 @@ def test_disk_space_guard_stops_at_configured_reserve(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="insufficient disk space"):
         guard()
+
+
+def test_temporary_worker_capacity_reserves_tmp_space(monkeypatch):
+    monkeypatch.setattr(
+        archive_cli.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=10 * 1024**3),
+    )
+
+    assert archive_cli._temporary_worker_capacity(20) == 4
+
+
+def test_temporary_worker_capacity_rejects_full_tmp(monkeypatch):
+    monkeypatch.setattr(
+        archive_cli.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=2 * 1024**3),
+    )
+
+    with pytest.raises(RuntimeError, match="temporary filesystem"):
+        archive_cli._temporary_worker_capacity(4)
+
+
+def test_cleanup_stale_archive_temporary_directories(tmp_path):
+    stale = tmp_path / "aggtrades-999999999-stale"
+    active = tmp_path / f"aggtrades-{archive_cli.os.getpid()}-active"
+    unrelated = tmp_path / "another-program"
+    for path in (stale, active, unrelated):
+        path.mkdir()
+        (path / "data").write_text("keep", encoding="utf-8")
+
+    removed = archive_cli._cleanup_stale_archive_temporary_directories(tmp_path)
+
+    assert removed == 1
+    assert not stale.exists()
+    assert active.is_dir()
+    assert unrelated.is_dir()
 
 
 def test_cli_without_symbols_loads_all_tradable_symbols(

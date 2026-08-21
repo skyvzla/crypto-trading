@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -40,6 +41,9 @@ from .vision import (
 )
 
 logger = logging.getLogger(__name__)
+
+_TEMPORARY_RESERVE_BYTES = 2 * 1024**3
+_TEMPORARY_BYTES_PER_WORKER = 2 * 1024**3
 
 
 def _setup_logging(log_level: str, log_file: Path | None) -> None:
@@ -202,6 +206,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     candle_reporter_closed = False
     try:
         _setup_logging(args.log_level, log_file)
+        temporary_root = Path(tempfile.gettempdir())
+        removed_temporary_dirs = _cleanup_stale_archive_temporary_directories(
+            temporary_root
+        )
+        if removed_temporary_dirs:
+            logger.info(
+                "Removed %d stale aggTrades temporary directories from %s",
+                removed_temporary_dirs,
+                temporary_root,
+            )
+        temporary_workers = _temporary_worker_capacity(
+            workers, temporary_root=temporary_root
+        )
+        temporary_slots = threading.BoundedSemaphore(temporary_workers)
+        if temporary_workers < workers:
+            print(
+                f"{main_worker} Temporary filesystem capacity limits "
+                f"large-file concurrency to {temporary_workers}/{workers} workers.",
+                file=sys.stderr,
+                flush=True,
+            )
         candle_reporter = _ProgressReporter(
             workers,
             proxies=[_proxy_label(proxy) for proxy in proxies],
@@ -305,6 +330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     BinanceVisionHTTPFetcher(
                         client,
                         attempts=1,
+                        temporary_slots=temporary_slots,
                     )
                     for client in clients
                 ]
@@ -313,6 +339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     direct_fetcher=BinanceVisionHTTPFetcher(
                         direct_client,
                         attempts=1,
+                        temporary_slots=temporary_slots,
                     ),
                     attempts=args.attempts,
                     labels=[_proxy_label(proxy) for proxy in proxies],
@@ -324,6 +351,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     clients[0],
                     attempts=args.attempts,
                     on_retry=candle_reporter.retry,
+                    temporary_slots=temporary_slots,
                 )
             metrics_results: list[DownloadResult] = []
             metrics_catalog_path = None
@@ -496,6 +524,40 @@ def _proxy_label(proxy: str) -> str:
     return f"{parsed.scheme}://{authority}"
 
 
+def _temporary_worker_capacity(
+    workers: int, *, temporary_root: Path | None = None
+) -> int:
+    root = temporary_root or Path(tempfile.gettempdir())
+    free_bytes = shutil.disk_usage(root).free
+    if free_bytes <= _TEMPORARY_RESERVE_BYTES:
+        raise RuntimeError(
+            "insufficient temporary filesystem space: "
+            f"{_format_bytes(free_bytes)} free on {root}, requires more than "
+            f"{_format_bytes(_TEMPORARY_RESERVE_BYTES)}"
+        )
+    capacity = (free_bytes - _TEMPORARY_RESERVE_BYTES) // (
+        _TEMPORARY_BYTES_PER_WORKER
+    )
+    return max(1, min(workers, int(capacity)))
+
+
+def _cleanup_stale_archive_temporary_directories(root: Path) -> int:
+    removed = 0
+    for path in root.glob("aggtrades-*-*"):
+        if path.is_symlink() or not path.is_dir():
+            continue
+        parts = path.name.split("-", 2)
+        try:
+            owner_pid = int(parts[1])
+        except (IndexError, ValueError):
+            continue
+        if Path(f"/proc/{owner_pid}").exists():
+            continue
+        shutil.rmtree(path)
+        removed += 1
+    return removed
+
+
 class _DiskSpaceGuard:
     def __init__(self, path: Path, min_free_gb: float) -> None:
         self.path = path.resolve()
@@ -555,9 +617,10 @@ class _ProgressReporter:
         self._dashboard: TaskDashboard | None = None
         self._active_names: dict[int, str] = {}
         self._base_names: dict[int, str] = {}
-        self._sources = {worker: "pending" for worker in range(1, workers + 1)}
-        if not proxies:
-            self._sources = {worker: "direct" for worker in range(1, workers + 1)}
+        self._sources = {
+            worker: "pending" if worker <= len(proxies) else "direct"
+            for worker in range(1, workers + 1)
+        }
 
     def _ensure_dashboard(self, total: int) -> TaskDashboard:
         if self._dashboard is None:

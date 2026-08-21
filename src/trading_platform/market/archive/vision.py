@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import hashlib
 import io
+import os
 import re
 import shutil
 import sys
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from threading import Condition, Lock, local
+from threading import Lock, Semaphore, local
 from typing import BinaryIO
 
 import duckdb
@@ -96,11 +97,13 @@ class BinanceVisionHTTPFetcher:
         attempts: int = 3,
         retry_base_seconds: float = 1.0,
         on_retry: Callable[[str, int, int, Exception], None] | None = None,
+        temporary_slots: Semaphore | None = None,
     ) -> None:
         self._client = client
         self._attempts = max(1, attempts)
         self._retry_base_seconds = max(0.0, retry_base_seconds)
         self._on_retry = on_retry
+        self._temporary_slots = temporary_slots
 
     def __call__(self, url: str) -> bytes:
         with self.open_archive(url) as source:
@@ -110,12 +113,18 @@ class BinanceVisionHTTPFetcher:
     def open_archive(self, url: str) -> Iterator[BinaryIO]:
         """Stream a verified archive to disk and keep it seekable for ZIP."""
 
-        with tempfile.TemporaryFile(mode="w+b") as source:
-            actual = self._download_to(url, source)
-            checksum_text = self._get(url + ".CHECKSUM").text
-            self._verify_checksum(url, checksum_text, actual)
-            source.seek(0)
-            yield source
+        if self._temporary_slots is not None:
+            self._temporary_slots.acquire()
+        try:
+            with tempfile.TemporaryFile(mode="w+b") as source:
+                actual = self._download_to(url, source)
+                checksum_text = self._get(url + ".CHECKSUM").text
+                self._verify_checksum(url, checksum_text, actual)
+                source.seek(0)
+                yield source
+        finally:
+            if self._temporary_slots is not None:
+                self._temporary_slots.release()
 
     @staticmethod
     def _verify_checksum(url: str, checksum_text: str, actual: str) -> None:
@@ -232,7 +241,7 @@ class BinanceVisionWorkerPoolFetcher:
         self._retry_base_seconds = max(0.0, retry_base_seconds)
         self._on_retry = on_retry
         self._on_route = on_route
-        self._condition = Condition(Lock())
+        self._proxy_lock = Lock()
         self._busy = [False] * len(self._fetchers)
         self._next = 0
 
@@ -338,10 +347,11 @@ class BinanceVisionWorkerPoolFetcher:
     def _acquire(
         self, excluded: set[int], *, force_direct: bool = False
     ) -> tuple[int | None, Callable[[str], bytes], str]:
-        if force_direct:
+        worker_id = current_archive_worker_id()
+        if force_direct or worker_id > len(self._fetchers):
             return None, self._direct_fetcher, "direct"
         while True:
-            with self._condition:
+            with self._proxy_lock:
                 for offset in range(len(self._fetchers)):
                     index = (self._next + offset) % len(self._fetchers)
                     if index in excluded or self._busy[index]:
@@ -349,16 +359,13 @@ class BinanceVisionWorkerPoolFetcher:
                     self._busy[index] = True
                     self._next = (index + 1) % len(self._fetchers)
                     return index, self._fetchers[index], self._labels[index]
-                if len(excluded) >= len(self._fetchers):
-                    return None, self._direct_fetcher, "direct"
-                self._condition.wait()
+                return None, self._direct_fetcher, "direct"
 
     def _release(self, index: int | None) -> None:
         if index is None:
             return
-        with self._condition:
+        with self._proxy_lock:
             self._busy[index] = False
-            self._condition.notify()
 
     def _notify_retry(
         self,
@@ -613,7 +620,9 @@ def _aggregate_monthly_aggtrade_archive(
     member = f"{normalized_symbol}-aggTrades-{month}.csv"
     source = io.BytesIO(content) if isinstance(content, bytes) else content
 
-    with tempfile.TemporaryDirectory(prefix="aggtrades-") as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix=f"aggtrades-{os.getpid()}-"
+    ) as temporary:
         temporary_path = Path(temporary)
         csv_path = temporary_path / member
         with zipfile.ZipFile(source) as archive:
@@ -1085,6 +1094,71 @@ def download_history(
                         rows = archive.upsert(candles)
                 processing_seconds = time.monotonic() - processing_started
         except ArchiveNotFoundError:
+            if monthly_seconds:
+                rows = 0
+                found_daily = False
+                fallback_started = time.monotonic()
+                relevant_days = _relevant_days(
+                    period,
+                    start_utc,
+                    end_utc,
+                    (symbol_availability or {}).get(symbol),
+                )
+                for day in relevant_days:
+                    existing_rows = existing_daily_rows.get(day)
+                    if existing_rows is not None:
+                        rows += existing_rows
+                        found_daily = True
+                        continue
+                    day_label = day.isoformat()
+                    day_url = aggtrade_archive_url(symbol, day_label)
+                    _notify(
+                        on_progress,
+                        "downloading",
+                        current,
+                        total,
+                        symbol,
+                        timeframe,
+                        day_label,
+                    )
+                    daily_started = time.monotonic()
+                    try:
+                        with open_fetched_archive(fetch, day_url) as content:
+                            download_seconds += time.monotonic() - daily_started
+                            _notify(
+                                on_progress,
+                                "processing",
+                                current,
+                                total,
+                                symbol,
+                                timeframe,
+                                day_label,
+                            )
+                            candles = parse_aggtrade_archive(
+                                content, symbol, day_label
+                            )
+                    except ArchiveNotFoundError:
+                        continue
+                    if storage_check is not None:
+                        storage_check()
+                    rows += archive.upsert(candles)
+                    found_daily = True
+                processing_seconds += time.monotonic() - fallback_started
+                if found_daily:
+                    _notify(
+                        on_progress,
+                        "stored",
+                        current,
+                        total,
+                        symbol,
+                        timeframe,
+                        label,
+                        elapsed_seconds=time.monotonic() - task_started,
+                        download_seconds=download_seconds,
+                        processing_seconds=processing_seconds,
+                        rows=rows,
+                    )
+                    return DownloadResult(symbol, timeframe, label, rows)
             _notify(
                 on_progress,
                 "unavailable",
