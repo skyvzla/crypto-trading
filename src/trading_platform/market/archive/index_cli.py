@@ -7,7 +7,7 @@ from typing import Sequence
 
 from .index import build_archive_index, load_archive_index
 from .metrics import load_metrics_index, publish_metrics_archive
-from .parquet import create_duckdb_catalog
+from .parquet import create_duckdb_catalog, repair_mixed_candle_partitions
 from .cli import _validate_distinct_archive_roots
 
 
@@ -53,6 +53,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"正在并行扫描 Parquet footer：workers={args.workers}",
             flush=True,
         )
+        removed_partitions = repair_mixed_candle_partitions(args.archive)
+        if removed_partitions:
+            print(
+                f"已删除混合月份中的非活动分区：{len(removed_partitions)}",
+                flush=True,
+            )
         index_path = build_archive_index(args.archive, workers=args.workers)
         frame = load_archive_index(index_path)
         create_duckdb_catalog(args.archive, catalog)

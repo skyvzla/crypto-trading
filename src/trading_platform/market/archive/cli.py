@@ -28,8 +28,12 @@ from .metrics import (
     MetricsArchive,
     download_metrics_history,
 )
-from .index import ARCHIVE_INDEX_FILENAME
-from .parquet import ParquetCandleArchive, ensure_duckdb_catalog
+from .index import ARCHIVE_INDEX_FILENAME, build_archive_index
+from .parquet import (
+    ParquetCandleArchive,
+    ensure_duckdb_catalog,
+    repair_mixed_candle_partitions,
+)
 from .vision import (
     BinanceFuturesMetadataFetcher,
     BinanceVisionHTTPFetcher,
@@ -279,6 +283,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         candle_storage_guard = _DiskSpaceGuard(args.archive, args.min_free_gb)
         candle_storage_guard()
+        removed_partitions = repair_mixed_candle_partitions(args.archive)
+        if removed_partitions:
+            build_archive_index(args.archive, workers=min(workers, 8))
+            logger.warning(
+                "Removed %d inactive candle partitions from mixed month layouts",
+                len(removed_partitions),
+            )
         _require_index_for_existing_archive(
             args.archive,
             ARCHIVE_INDEX_FILENAME,

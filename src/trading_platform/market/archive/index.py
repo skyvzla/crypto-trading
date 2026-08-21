@@ -27,6 +27,46 @@ class ArchiveIndexError(RuntimeError):
     pass
 
 
+class _PartitionLayoutValidator:
+    def __init__(self) -> None:
+        self._layouts: dict[tuple[str, str, int, int], tuple[str, str]] = {}
+
+    def check(self, row: dict[str, Any]) -> None:
+        self.check_values(
+            symbol=str(row["symbol"]),
+            timeframe=str(row["timeframe"]),
+            year=int(row["year"]),
+            month=int(row["month"]),
+            day=int(row["day"]),
+            relative_path=str(row["relative_path"]),
+        )
+
+    def check_values(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        year: int,
+        month: int,
+        day: int,
+        relative_path: str,
+    ) -> None:
+        key = (symbol, timeframe, year, month)
+        layout = "monthly" if day == 0 else "daily"
+        if key[1] == "1s" and layout == "monthly":
+            raise ArchiveIndexError(
+                f"1s archive must use daily partitions: {relative_path}"
+            )
+        previous = self._layouts.get(key)
+        if previous is not None and previous[0] != layout:
+            raise ArchiveIndexError(
+                "archive contains monthly and daily partitions for "
+                f"{key[0]} {key[1]} {key[2]:04d}-{key[3]:02d}: "
+                f"{previous[1]} and {relative_path}"
+            )
+        self._layouts[key] = (layout, relative_path)
+
+
 INDEX_SCHEMA = pa.schema([
     ("symbol", pa.string()),
     ("timeframe", pa.string()),
@@ -99,9 +139,13 @@ def _write_index_rows(
     rows: Iterator[dict[str, Any]],
     *,
     schema: pa.Schema,
+    layout_validator: _PartitionLayoutValidator | None = None,
 ) -> int:
     row_count = 0
     while batch := list(islice(rows, INDEX_WRITE_BATCH_SIZE)):
+        if layout_validator is not None:
+            for row in batch:
+                layout_validator.check(row)
         writer.write_table(pa.Table.from_pylist(batch, schema=schema))
         row_count += len(batch)
     return row_count
@@ -136,6 +180,7 @@ def _build_archive_index(archive_root: Path, worker_count: int) -> Path:
     temporary_meta = archive_root / f".{ARCHIVE_INDEX_META_FILENAME}.{generation}.tmp"
     try:
         partition_count = 0
+        layout_validator = _PartitionLayoutValidator()
         paths = (
             str(path)
             for path in archive_root.glob("*/*/*/*/*/candles.parquet")
@@ -156,7 +201,10 @@ def _build_archive_index(archive_root: Path, worker_count: int) -> Path:
                                 chunksize=32,
                             )
                             partition_count += _write_index_rows(
-                                writer, inspected, schema=schema
+                                writer,
+                                inspected,
+                                schema=schema,
+                                layout_validator=layout_validator,
                             )
                             path_batch = list(
                                 islice(paths, INDEX_SCAN_BATCH_SIZE)
@@ -164,7 +212,10 @@ def _build_archive_index(archive_root: Path, worker_count: int) -> Path:
             else:
                 inspected = (_inspect_partition(root_text, path) for path in paths)
                 partition_count = _write_index_rows(
-                    writer, inspected, schema=schema
+                    writer,
+                    inspected,
+                    schema=schema,
+                    layout_validator=layout_validator,
                 )
         temporary_meta.write_text(json.dumps({
             "schema_version": ARCHIVE_INDEX_SCHEMA_VERSION,
@@ -183,11 +234,14 @@ def _build_archive_index(archive_root: Path, worker_count: int) -> Path:
 def update_archive_index(
     root: str | Path,
     changed_paths: Iterator[Path] | list[Path] | set[Path] | tuple[Path, ...],
+    *,
+    removed_paths: Iterator[Path] | list[Path] | set[Path] | tuple[Path, ...] = (),
 ) -> Path:
     """Merge changed partitions without scanning unchanged archive files."""
 
     archive_root = Path(root).resolve()
     paths = tuple(Path(path).resolve() for path in changed_paths)
+    retired = tuple(Path(path).resolve() for path in removed_paths)
     with _index_lock(archive_root):
         index_path = archive_root / ARCHIVE_INDEX_FILENAME
         records: dict[str, dict[str, Any]] = {}
@@ -197,6 +251,8 @@ def update_archive_index(
                 str(row["relative_path"]): row
                 for row in frame.to_dict(orient="records")
             }
+        for path in retired:
+            records.pop(path.relative_to(archive_root).as_posix(), None)
         for path in paths:
             record = _inspect_partition(str(archive_root), str(path))
             records[str(record["relative_path"])] = record
@@ -221,8 +277,14 @@ def _write_archive_index_records(
     temporary_index = archive_root / f".{ARCHIVE_INDEX_FILENAME}.{generation}.tmp"
     temporary_meta = archive_root / f".{ARCHIVE_INDEX_META_FILENAME}.{generation}.tmp"
     try:
+        layout_validator = _PartitionLayoutValidator()
         with pq.ParquetWriter(temporary_index, schema, compression="zstd") as writer:
-            partition_count = _write_index_rows(writer, records, schema=schema)
+            partition_count = _write_index_rows(
+                writer,
+                records,
+                schema=schema,
+                layout_validator=layout_validator,
+            )
         temporary_meta.write_text(json.dumps({
             "schema_version": ARCHIVE_INDEX_SCHEMA_VERSION,
             "generation": generation,
@@ -281,6 +343,16 @@ def load_archive_index(
     ):
         raise ArchiveIndexError("archive index is incomplete or incompatible")
     frame = parquet.read().to_pandas()
+    layout_validator = _PartitionLayoutValidator()
+    for row in frame.itertuples(index=False):
+        layout_validator.check_values(
+            symbol=str(row.symbol),
+            timeframe=str(row.timeframe),
+            year=int(row.year),
+            month=int(row.month),
+            day=int(row.day),
+            relative_path=str(row.relative_path),
+        )
     if verify_files and not frame.empty:
         root_value = schema_metadata.get(b"archive_root")
         if root_value is None:

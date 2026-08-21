@@ -7,9 +7,11 @@ from .index import (
     verify_archive_index_files,
 )
 from .parquet import (
+    ArchivePartitionConflictError,
     ParquetCandleArchive,
     archive_root_from_catalog,
     create_duckdb_catalog,
+    repair_mixed_candle_partitions,
 )
 from .metrics import (
     METRICS_INDEX_FILENAME,
@@ -44,6 +46,7 @@ from .vision import (
 
 __all__ = [
     "ArchiveNotFoundError",
+    "ArchivePartitionConflictError",
     "ARCHIVE_INDEX_FILENAME",
     "ArchiveIndexError",
     "BinanceFuturesMetadataFetcher",
@@ -65,6 +68,7 @@ __all__ = [
     "archive_root_from_catalog",
     "build_archive_index",
     "create_duckdb_catalog",
+    "repair_mixed_candle_partitions",
     "load_archive_index",
     "METRICS_INDEX_FILENAME",
     "METRICS_PERIOD",

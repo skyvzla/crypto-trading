@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import fcntl
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from threading import Lock
 from uuid import uuid4
@@ -12,6 +12,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .models import Candle, Candle1s
+
+
+ARCHIVE_CATALOG_SCHEMA_VERSION = 2
+
+
+class ArchivePartitionConflictError(RuntimeError):
+    pass
 
 
 CANDLE_BASE_COLUMNS = (
@@ -134,6 +141,7 @@ class ParquetCandleArchive:
         self._closed = False
         self._state_lock = Lock()
         self._changed_paths: set[Path] = set()
+        self._retired_paths: set[Path] = set()
         self._indexed_rows: dict[tuple[str, str, int, int, int], int] | None = None
         index_path = self.root / "archive_index.parquet"
         if index_path.is_file():
@@ -162,9 +170,15 @@ class ParquetCandleArchive:
             from .index import build_archive_index, update_archive_index
 
             if self._indexed_rows is None:
+                _remove_partition_files(sorted(self._retired_paths))
                 build_archive_index(self.root, workers=self.index_workers)
             else:
-                update_archive_index(self.root, self._changed_paths)
+                update_archive_index(
+                    self.root,
+                    self._changed_paths,
+                    removed_paths=self._retired_paths,
+                )
+                _remove_partition_files(sorted(self._retired_paths))
 
     def partition_rows(
         self,
@@ -178,9 +192,7 @@ class ParquetCandleArchive:
             symbol.strip().upper(), timeframe.strip().lower(), year, month, day
         )
         if self._indexed_rows is not None:
-            indexed = self._indexed_rows.get(normalized_key)
-            if indexed is not None:
-                return indexed
+            return self._indexed_rows.get(normalized_key)
         target = self._partition_dir(symbol, timeframe, year, month, day)
         target /= "candles.parquet"
         if not target.is_file():
@@ -267,7 +279,13 @@ class ParquetCandleArchive:
         missing_base = set(CANDLE_BASE_COLUMNS) - set(table.column_names)
         if unknown or missing_base:
             raise ValueError("candle Arrow table has incompatible columns")
-        if timeframe.strip().lower() == "1s":
+        normalized_symbol = symbol.strip().upper()
+        normalized_timeframe = timeframe.strip().lower()
+        if normalized_timeframe == "1s" and day == 0:
+            raise ArchivePartitionConflictError(
+                "1s archive must use daily partitions"
+            )
+        if normalized_timeframe == "1s":
             for field in CANDLE_SCHEMA:
                 if field.name not in table.column_names:
                     table = table.append_column(
@@ -277,32 +295,88 @@ class ParquetCandleArchive:
         else:
             # 订单流扩展只属于 aggTrade 生成的 1s 数据；其它 K 线继续写窄表。
             table = table.select(CANDLE_BASE_SCHEMA.names).cast(CANDLE_BASE_SCHEMA)
-        partition = self._partition_dir(symbol, timeframe, year, month, day)
-        partition.mkdir(parents=True, exist_ok=True)
-        target = partition / "candles.parquet"
-        temporary = partition / f".candles-{uuid4().hex}.tmp.parquet"
-        lock_file = (partition / ".write.lock").open("a+")
+        month_partition = self._partition_dir(
+            normalized_symbol, normalized_timeframe, year, month, 0
+        ).parent
+        month_partition.mkdir(parents=True, exist_ok=True)
+        month_lock_file = (month_partition / ".partition.lock").open("a+")
+        fcntl.flock(
+            month_lock_file.fileno(),
+            fcntl.LOCK_EX if day == 0 else fcntl.LOCK_SH,
+        )
         try:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            lock_file.close()
-            raise RuntimeError(
-                f"partition writer is already active for {partition}"
-            ) from error
-        try:
-            pq.write_table(table, temporary, compression="zstd")
-            os.replace(temporary, target)
-            with self._state_lock:
-                self._dirty = True
-                self._changed_paths.add(target)
-                if self._indexed_rows is not None:
-                    self._indexed_rows[
-                        (symbol.upper(), timeframe.lower(), year, month, day)
-                    ] = table.num_rows
+            monthly_target = month_partition / "00" / "candles.parquet"
+            if day > 0 and monthly_target.is_file():
+                raise ArchivePartitionConflictError(
+                    "cannot write a daily partition while a monthly partition exists: "
+                    f"{monthly_target}"
+                )
+            daily_targets = sorted(
+                path
+                for path in month_partition.glob("*/candles.parquet")
+                if path.parent.name != "00"
+            )
+            if day == 0 and daily_targets:
+                _require_open_time_coverage(
+                    required_paths=daily_targets,
+                    covering_table=table,
+                    context=(
+                        f"monthly replacement for {normalized_symbol} "
+                        f"{normalized_timeframe} {year:04d}-{month:02d}"
+                    ),
+                )
+
+            partition = self._partition_dir(
+                normalized_symbol, normalized_timeframe, year, month, day
+            )
+            partition.mkdir(parents=True, exist_ok=True)
+            target = partition / "candles.parquet"
+            temporary = partition / f".candles-{uuid4().hex}.tmp.parquet"
+            lock_file = (partition / ".write.lock").open("a+")
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                lock_file.close()
+                raise RuntimeError(
+                    f"partition writer is already active for {partition}"
+                ) from error
+            try:
+                pq.write_table(table, temporary, compression="zstd")
+                os.replace(temporary, target)
+                retired_paths = daily_targets if day == 0 else []
+                with self._state_lock:
+                    self._dirty = True
+                    self._changed_paths.add(target)
+                    self._retired_paths.update(retired_paths)
+                    if self._indexed_rows is not None:
+                        self._indexed_rows[
+                            (
+                                normalized_symbol,
+                                normalized_timeframe,
+                                year,
+                                month,
+                                day,
+                            )
+                        ] = table.num_rows
+                        for retired in retired_paths:
+                            removed_day = int(retired.parent.name)
+                            self._indexed_rows.pop(
+                                (
+                                    normalized_symbol,
+                                    normalized_timeframe,
+                                    year,
+                                    month,
+                                    removed_day,
+                                ),
+                                None,
+                            )
+            finally:
+                temporary.unlink(missing_ok=True)
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
         finally:
-            temporary.unlink(missing_ok=True)
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            lock_file.close()
+            fcntl.flock(month_lock_file.fileno(), fcntl.LOCK_UN)
+            month_lock_file.close()
         return table.num_rows
 
     def _partition_dir(
@@ -323,14 +397,161 @@ class ParquetCandleArchive:
         )
 
 
+def repair_mixed_candle_partitions(root: str | Path) -> list[Path]:
+    """Remove inactive side of a mixed monthly/daily layout after coverage checks."""
+
+    archive_root = Path(root).resolve()
+    indexed_layouts = _indexed_partition_layouts(archive_root)
+    candidates: list[tuple[Path, list[Path], list[Path]]] = []
+    for monthly_target in sorted(archive_root.glob("*/*/*/*/00/candles.parquet")):
+        month_partition = monthly_target.parent.parent
+        daily_targets = sorted(
+            path
+            for path in month_partition.glob("*/candles.parquet")
+            if path.parent.name != "00"
+        )
+        if not daily_targets:
+            continue
+        relative = monthly_target.relative_to(archive_root)
+        symbol, timeframe, year, month = relative.parts[:4]
+        indexed_days = indexed_layouts.get(
+            (symbol.upper(), timeframe.lower(), int(year), int(month)), set()
+        )
+        if 0 in indexed_days and not any(day > 0 for day in indexed_days):
+            required_paths = daily_targets
+            covering_paths = [monthly_target]
+            inactive_paths = daily_targets
+        else:
+            required_paths = [monthly_target]
+            covering_paths = daily_targets
+            inactive_paths = [monthly_target]
+        _require_open_time_coverage(
+            required_paths=required_paths,
+            covering_paths=covering_paths,
+            context=f"mixed archive layout under {month_partition}",
+        )
+        candidates.append((month_partition, covering_paths, inactive_paths))
+
+    removed: list[Path] = []
+    for month_partition, covering_paths, inactive_paths in candidates:
+        month_lock_file = (month_partition / ".partition.lock").open("a+")
+        fcntl.flock(month_lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            _require_open_time_coverage(
+                required_paths=inactive_paths,
+                covering_paths=covering_paths,
+                context=f"mixed archive layout under {month_partition}",
+            )
+            removed.extend(_remove_partition_files(inactive_paths))
+        finally:
+            fcntl.flock(month_lock_file.fileno(), fcntl.LOCK_UN)
+            month_lock_file.close()
+    return removed
+
+
+def _indexed_partition_layouts(
+    archive_root: Path,
+) -> dict[tuple[str, str, int, int], set[int]]:
+    index_path = archive_root / "archive_index.parquet"
+    if not index_path.is_file():
+        return {}
+    table = pq.read_table(
+        index_path,
+        columns=["symbol", "timeframe", "year", "month", "day"],
+    )
+    layouts: dict[tuple[str, str, int, int], set[int]] = {}
+    for batch in table.to_batches(max_chunksize=4096):
+        for row in batch.to_pylist():
+            key = (
+                str(row["symbol"]).upper(),
+                str(row["timeframe"]).lower(),
+                int(row["year"]),
+                int(row["month"]),
+            )
+            layouts.setdefault(key, set()).add(int(row["day"]))
+    return layouts
+
+
+def _require_open_time_coverage(
+    *,
+    required_paths: Sequence[Path],
+    context: str,
+    covering_paths: Sequence[Path] = (),
+    covering_table: pa.Table | None = None,
+) -> None:
+    required = _open_times_from_paths(required_paths)
+    if covering_table is None:
+        covering = _open_times_from_paths(covering_paths)
+    else:
+        covering_rows = covering_table["open_time"].to_pylist()
+        covering = set(covering_rows)
+        if len(covering_rows) != len(covering):
+            raise ArchivePartitionConflictError(
+                f"{context} contains duplicate open_time values"
+            )
+    missing = required - covering
+    if missing:
+        raise ArchivePartitionConflictError(
+            f"{context} is not fully covered; {len(missing)} timestamps are missing"
+        )
+
+
+def _open_times_from_paths(paths: Sequence[Path]) -> set[object]:
+    values: set[object] = set()
+    for path in paths:
+        column = pq.read_table(path, columns=["open_time"])["open_time"]
+        rows = column.to_pylist()
+        if len(rows) != len(set(rows)):
+            raise ArchivePartitionConflictError(
+                f"partition contains duplicate open_time values: {path}"
+            )
+        overlap = values.intersection(rows)
+        if overlap:
+            raise ArchivePartitionConflictError(
+                f"daily partitions overlap at {path}"
+            )
+        values.update(rows)
+    return values
+
+
+def _remove_partition_files(paths: Sequence[Path]) -> list[Path]:
+    removed: list[Path] = []
+    for path in paths:
+        if not path.is_file():
+            continue
+        path.unlink()
+        removed.append(path)
+        path.with_name(".write.lock").unlink(missing_ok=True)
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
 def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
     dataset = Path(root).resolve()
-    has_files = next(dataset.glob("*/*/*/*/*/candles.parquet"), None) is not None
+    index_path = dataset / "archive_index.parquet"
+    physical_files_exist = (
+        next(dataset.glob("*/*/*/*/*/candles.parquet"), None) is not None
+    )
+    if index_path.is_file():
+        from .index import load_archive_index
+
+        has_files = not load_archive_index(index_path).empty
+    elif physical_files_exist:
+        raise RuntimeError(
+            "archive index is required before creating a DuckDB catalog"
+        )
+    else:
+        has_files = False
     catalog = Path(catalog_path).resolve()
     catalog.parent.mkdir(parents=True, exist_ok=True)
     glob = _sql_literal(
         str(dataset / "*" / "*" / "*" / "*" / "*" / "candles.parquet")
     )
+    index_literal = _sql_literal(str(index_path))
+    root_prefix = _sql_literal(str(dataset) + "/")
     connection = duckdb.connect(str(catalog))
     try:
         connection.execute("SET TimeZone = 'UTC'")
@@ -340,10 +561,12 @@ def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
         )
         connection.execute(
             "INSERT OR REPLACE INTO archive_catalog_metadata VALUES "
-            "('archive_root', ?), ('archive_index', ?)",
+            "('archive_root', ?), ('archive_index', ?), "
+            "('catalog_schema_version', ?)",
             [
                 str(dataset),
-                str(dataset / "archive_index.parquet"),
+                str(index_path),
+                str(ARCHIVE_CATALOG_SCHEMA_VERSION),
             ],
         )
         source_columns: set[str] = set()
@@ -351,21 +574,29 @@ def create_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
             source_columns = {
                 str(row[0])
                 for row in connection.execute(
-                    f"DESCRIBE SELECT * FROM read_parquet({glob}, union_by_name=true)"
+                    "DESCRIBE SELECT * FROM "
+                    f"read_parquet({glob}, union_by_name=true, filename=true)"
                 ).fetchall()
             }
         select_columns = []
         for name, data_type in _DUCKDB_CANDLE_TYPES.items():
             if name in source_columns:
-                select_columns.append(f'{name}::{data_type} AS {name}')
+                select_columns.append(f'source.{name}::{data_type} AS {name}')
             else:
                 select_columns.append(f'NULL::{data_type} AS {name}')
         source = (
-            f"FROM read_parquet({glob}, union_by_name=true)"
+            "FROM "
+            f"read_parquet({glob}, union_by_name=true, filename=true) AS source"
             if has_files
             else ""
         )
-        where = "" if has_files else " WHERE false"
+        where = (
+            " WHERE source.filename IN ("
+            f"SELECT {root_prefix} || relative_path FROM read_parquet({index_literal})"
+            ")"
+            if has_files
+            else " WHERE false"
+        )
         connection.execute(
             "CREATE OR REPLACE VIEW candles AS SELECT "
             + ", ".join(select_columns)
@@ -425,12 +656,17 @@ def ensure_duckdb_catalog(root: str | Path, catalog_path: str | Path) -> Path:
                 "WHERE table_schema = 'main' AND table_name = 'candles'"
             ).fetchall()
         }
+        version_row = connection.execute(
+            "SELECT value FROM archive_catalog_metadata "
+            "WHERE key = 'catalog_schema_version'"
+        ).fetchone()
     finally:
         connection.close()
     has_parquet_view = row is not None and "read_parquet" in str(row[0]).lower()
     if (
         has_indexed_partitions != has_parquet_view
         or not set(_DUCKDB_CANDLE_TYPES).issubset(columns)
+        or version_row != (str(ARCHIVE_CATALOG_SCHEMA_VERSION),)
     ):
         return create_duckdb_catalog(dataset, catalog)
     return catalog

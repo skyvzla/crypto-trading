@@ -14,6 +14,7 @@ from trading_platform.market.archive.index import (
     update_archive_index,
 )
 from trading_platform.market.archive import index as archive_index
+from trading_platform.market.archive import parquet as archive_parquet
 from trading_platform.market.archive.metrics import MetricsArchive, MetricsSnapshot
 from trading_platform.market.archive.parquet import (
     ParquetCandleArchive,
@@ -40,6 +41,13 @@ def _table(symbol: str, timeframe: str, start: datetime, rows: int) -> pa.Table:
         "volume": [10.0] * rows,
         "close_time": pa.array(closes, type=pa.timestamp("ms", tz="UTC")),
     })
+
+
+def _write_partition(root: Path, relative: str, table: pa.Table) -> Path:
+    target = root / relative / "candles.parquet"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, target)
+    return target
 
 
 def test_index_rows_are_written_in_bounded_batches(monkeypatch):
@@ -99,6 +107,117 @@ def test_build_archive_index_reads_partition_footer_in_parallel(tmp_path: Path):
     one_second = frame[frame["timeframe"] == "1s"].iloc[0]
     assert one_second["first_open_ms"] == 1782864000000
     assert one_second["last_close_ms"] == 1782864002999
+
+
+def test_build_archive_index_rejects_mixed_month_and_daily_partitions(
+    tmp_path: Path,
+):
+    root = tmp_path / "history"
+    table = _table("AKEUSDT", "1m", datetime(2026, 8, 1, tzinfo=UTC), 1)
+    _write_partition(root, "AKEUSDT/1m/2026/08/00", table)
+    _write_partition(root, "AKEUSDT/1m/2026/08/01", table)
+
+    with pytest.raises(ArchiveIndexError, match="monthly and daily"):
+        build_archive_index(root, workers=1)
+
+
+def test_catalog_reads_only_partitions_published_by_archive_index(tmp_path: Path):
+    root = tmp_path / "history"
+    table = _table("AKEUSDT", "1m", datetime(2026, 8, 1, tzinfo=UTC), 1)
+    _write_partition(root, "AKEUSDT/1m/2026/08/01", table)
+    build_archive_index(root, workers=1)
+    catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
+
+    # Simulate a monthly compaction file written before its index generation
+    # is published. Readers must keep seeing only the indexed daily partition.
+    _write_partition(root, "AKEUSDT/1m/2026/08/00", table)
+
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        assert connection.execute("SELECT count(*) FROM candles").fetchone() == (1,)
+    finally:
+        connection.close()
+
+
+def test_monthly_partition_atomically_replaces_daily_partitions(tmp_path: Path):
+    root = tmp_path / "history"
+    first = _table("AKEUSDT", "1m", datetime(2026, 7, 1, tzinfo=UTC), 1)
+    second = _table("AKEUSDT", "1m", datetime(2026, 7, 2, tzinfo=UTC), 1)
+    with ParquetCandleArchive(root, index_workers=1) as archive:
+        archive.upsert_table(
+            first,
+            symbol="AKEUSDT", timeframe="1m", year=2026, month=7, day=1,
+        )
+        archive.upsert_table(
+            second,
+            symbol="AKEUSDT", timeframe="1m", year=2026, month=7, day=2,
+        )
+    catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
+
+    monthly = pa.concat_tables([first, second])
+    archive = ParquetCandleArchive(root, index_workers=1)
+    archive.upsert_table(
+        monthly,
+        symbol="AKEUSDT", timeframe="1m", year=2026, month=7, day=0,
+    )
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        assert connection.execute("SELECT count(*) FROM candles").fetchone() == (2,)
+    finally:
+        connection.close()
+    archive.close()
+
+    assert (root / "AKEUSDT/1m/2026/07/00/candles.parquet").is_file()
+    assert not (root / "AKEUSDT/1m/2026/07/01/candles.parquet").exists()
+    assert not (root / "AKEUSDT/1m/2026/07/02/candles.parquet").exists()
+    frame = load_archive_index(root, verify_files=True)
+    assert frame[["day", "row_count"]].values.tolist() == [[0, 2]]
+    connection = duckdb.connect(str(catalog), read_only=True)
+    try:
+        assert connection.execute("SELECT count(*) FROM candles").fetchone() == (2,)
+    finally:
+        connection.close()
+
+
+def test_repair_removes_only_month_partition_covered_by_daily_data(
+    tmp_path: Path,
+):
+    root = tmp_path / "history"
+    first = _table("AKEUSDT", "1m", datetime(2026, 8, 1, tzinfo=UTC), 1)
+    second = _table("AKEUSDT", "1m", datetime(2026, 8, 2, tzinfo=UTC), 1)
+    monthly = _write_partition(
+        root, "AKEUSDT/1m/2026/08/00", pa.concat_tables([first, second])
+    )
+    _write_partition(root, "AKEUSDT/1m/2026/08/01", first)
+
+    with pytest.raises(
+        archive_parquet.ArchivePartitionConflictError,
+        match="not fully covered",
+    ):
+        archive_parquet.repair_mixed_candle_partitions(root)
+    assert monthly.is_file()
+
+    _write_partition(root, "AKEUSDT/1m/2026/08/02", second)
+    removed = archive_parquet.repair_mixed_candle_partitions(root)
+
+    assert removed == [monthly]
+    assert not monthly.exists()
+
+
+def test_repair_keeps_indexed_month_and_removes_unindexed_daily_files(
+    tmp_path: Path,
+):
+    root = tmp_path / "history"
+    table = _table("AKEUSDT", "1m", datetime(2026, 7, 1, tzinfo=UTC), 1)
+    monthly = _write_partition(root, "AKEUSDT/1m/2026/07/00", table)
+    build_archive_index(root, workers=1)
+    daily = _write_partition(root, "AKEUSDT/1m/2026/07/01", table)
+
+    removed = archive_parquet.repair_mixed_candle_partitions(root)
+
+    assert removed == [daily]
+    assert monthly.is_file()
+    assert not daily.exists()
 
 
 def test_archive_close_atomically_refreshes_index(tmp_path: Path):
