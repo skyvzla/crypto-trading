@@ -35,6 +35,7 @@ VISION_ROOT = f"{VISION_S3_ROOT}/data/futures/um"
 EXCHANGE_INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 NATIVE_TIMEFRAMES = {"1m", "5m", "15m", "1h", "4h", "1d"}
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+TRANSFER_PROGRESS_INTERVAL_SECONDS = 0.25
 _WORKER_CONTEXT = local()
 
 
@@ -79,12 +80,82 @@ class DownloadProgress:
     timeframe: str
     period: str
     downloaded_bytes: int = 0
+    total_bytes: int = 0
     elapsed_seconds: float = 0.0
     rows: int = 0
     error: str = ""
     worker_id: int = 0
     download_seconds: float = 0.0
     processing_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class _TransferProgressContext:
+    callback: Callable[[DownloadProgress], None] | None
+    current: int
+    total: int
+    symbol: str
+    timeframe: str
+    period: str
+    worker_id: int
+
+
+@contextmanager
+def track_archive_transfer(
+    callback: Callable[[DownloadProgress], None] | None,
+    current: int,
+    total: int,
+    symbol: str,
+    timeframe: str,
+    period: str,
+    *,
+    worker_id: int | None = None,
+) -> Iterator[None]:
+    previous = getattr(_WORKER_CONTEXT, "transfer_progress", None)
+    _WORKER_CONTEXT.transfer_progress = _TransferProgressContext(
+        callback,
+        current,
+        total,
+        symbol,
+        timeframe,
+        period,
+        current_archive_worker_id() if worker_id is None else worker_id,
+    )
+    try:
+        yield
+    finally:
+        if previous is None:
+            delattr(_WORKER_CONTEXT, "transfer_progress")
+        else:
+            _WORKER_CONTEXT.transfer_progress = previous
+
+
+def _notify_transfer(
+    phase: str,
+    *,
+    downloaded_bytes: int = 0,
+    total_bytes: int = 0,
+    elapsed_seconds: float = 0.0,
+) -> None:
+    context: _TransferProgressContext | None = getattr(
+        _WORKER_CONTEXT, "transfer_progress", None
+    )
+    if context is None or context.callback is None:
+        return
+    context.callback(
+        DownloadProgress(
+            phase=phase,
+            current=context.current,
+            total=context.total,
+            symbol=context.symbol,
+            timeframe=context.timeframe,
+            period=context.period,
+            downloaded_bytes=downloaded_bytes,
+            total_bytes=total_bytes,
+            elapsed_seconds=elapsed_seconds,
+            worker_id=context.worker_id,
+        )
+    )
 
 
 class BinanceVisionHTTPFetcher:
@@ -113,11 +184,16 @@ class BinanceVisionHTTPFetcher:
     def open_archive(self, url: str) -> Iterator[BinaryIO]:
         """Stream a verified archive to disk and keep it seekable for ZIP."""
 
+        _notify_transfer("waiting")
         if self._temporary_slots is not None:
             self._temporary_slots.acquire()
         try:
             with tempfile.TemporaryFile(mode="w+b") as source:
                 actual = self._download_to(url, source)
+                _notify_transfer(
+                    "verifying",
+                    downloaded_bytes=source.tell(),
+                )
                 checksum_text = self._get(url + ".CHECKSUM").text
                 self._verify_checksum(url, checksum_text, actual)
                 source.seek(0)
@@ -143,6 +219,11 @@ class BinanceVisionHTTPFetcher:
                 target.seek(0)
                 target.truncate()
                 digest = hashlib.sha256()
+                started = time.monotonic()
+                downloaded_bytes = 0
+                total_bytes = 0
+                last_progress_at = started
+                _notify_transfer("connecting")
                 try:
                     with self._client.stream(
                         "GET",
@@ -152,9 +233,34 @@ class BinanceVisionHTTPFetcher:
                         },
                     ) as response:
                         response.raise_for_status()
+                        try:
+                            total_bytes = int(
+                                response.headers.get("Content-Length", "0")
+                            )
+                        except ValueError:
+                            total_bytes = 0
                         for chunk in response.iter_bytes():
                             target.write(chunk)
                             digest.update(chunk)
+                            downloaded_bytes += len(chunk)
+                            now = time.monotonic()
+                            if (
+                                now - last_progress_at
+                                >= TRANSFER_PROGRESS_INTERVAL_SECONDS
+                            ):
+                                _notify_transfer(
+                                    "downloading",
+                                    downloaded_bytes=downloaded_bytes,
+                                    total_bytes=total_bytes,
+                                    elapsed_seconds=now - started,
+                                )
+                                last_progress_at = now
+                    _notify_transfer(
+                        "downloading",
+                        downloaded_bytes=downloaded_bytes,
+                        total_bytes=total_bytes,
+                        elapsed_seconds=time.monotonic() - started,
+                    )
                     target.flush()
                     return digest.hexdigest()
                 except httpx.HTTPStatusError as error:
@@ -1021,7 +1127,14 @@ def download_history(
         download_seconds = 0.0
         processing_seconds = 0.0
         try:
-            with open_fetched_archive(fetch, url) as content:
+            with track_archive_transfer(
+                on_progress,
+                current,
+                total,
+                symbol,
+                timeframe,
+                label,
+            ), open_fetched_archive(fetch, url) as content:
                 download_seconds = time.monotonic() - started
                 _notify(
                     on_progress,
@@ -1123,7 +1236,14 @@ def download_history(
                     )
                     daily_started = time.monotonic()
                     try:
-                        with open_fetched_archive(fetch, day_url) as content:
+                        with track_archive_transfer(
+                            on_progress,
+                            current,
+                            total,
+                            symbol,
+                            timeframe,
+                            day_label,
+                        ), open_fetched_archive(fetch, day_url) as content:
                             download_seconds += time.monotonic() - daily_started
                             _notify(
                                 on_progress,
@@ -1279,6 +1399,7 @@ def _notify(
     timeframe: str,
     period: str,
     downloaded_bytes: int = 0,
+    total_bytes: int = 0,
     elapsed_seconds: float = 0.0,
     rows: int = 0,
     error: str = "",
@@ -1296,6 +1417,7 @@ def _notify(
                 period=period,
                 worker_id=current_archive_worker_id(),
                 downloaded_bytes=downloaded_bytes,
+                total_bytes=total_bytes,
                 elapsed_seconds=elapsed_seconds,
                 rows=rows,
                 error=error,

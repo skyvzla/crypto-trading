@@ -29,6 +29,7 @@ from trading_platform.market.archive.vision import (
     VISION_ROOT,
     current_archive_worker_id,
     open_fetched_archive,
+    track_archive_transfer,
 )
 
 
@@ -499,7 +500,15 @@ def download_metrics_history(
         download_seconds = 0.0
         processing_seconds = 0.0
         try:
-            with open_fetched_archive(fetch, url) as content:
+            with track_archive_transfer(
+                on_progress,
+                current,
+                total,
+                symbol,
+                "metrics",
+                label,
+                worker_id=_worker_id(),
+            ), open_fetched_archive(fetch, url) as content:
                 download_seconds = time.monotonic() - started
                 _notify(
                     on_progress, "downloaded", current, total, symbol, label,

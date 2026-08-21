@@ -906,6 +906,59 @@ def test_http_fetcher_exposes_verified_seekable_stream():
             assert source.read(8) == b"verified"
 
 
+def test_download_history_reports_streaming_and_processing_progress(tmp_path):
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr(
+            "AKEUSDT-aggTrades-2026-07-01.csv",
+            "agg_trade_id,price,quantity,first_trade_id,last_trade_id,"
+            "transact_time,is_buyer_maker\n"
+            "1,1.0,2.0,1,1,1782864000100,false\n",
+        )
+    content = payload.getvalue()
+    checksum = hashlib.sha256(content).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith(".CHECKSUM"):
+            return httpx.Response(200, text=checksum)
+        return httpx.Response(
+            200,
+            content=content,
+            headers={"Content-Length": str(len(content))},
+        )
+
+    progress: list[DownloadProgress] = []
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        fetch = BinanceVisionHTTPFetcher(client, attempts=1)
+        with ParquetCandleArchive(tmp_path / "history") as archive:
+            download_history(
+                archive,
+                fetch=fetch,
+                symbols=["AKEUSDT"],
+                timeframes=["1s"],
+                start=datetime(2026, 7, 1, tzinfo=UTC),
+                end=datetime(2026, 7, 2, tzinfo=UTC),
+                on_progress=progress.append,
+            )
+
+    phases = [item.phase for item in progress]
+    assert phases == [
+        "downloading",
+        "waiting",
+        "connecting",
+        "downloading",
+        "verifying",
+        "downloaded",
+        "processing",
+        "stored",
+    ]
+    streamed = progress[3]
+    assert streamed.downloaded_bytes == len(content)
+    assert streamed.total_bytes == len(content)
+    assert streamed.elapsed_seconds >= 0
+    assert streamed.worker_id == 1
+
+
 def test_worker_pool_switches_proxy_after_connection_failure():
     calls: list[str] = []
     retries: list[tuple[int, str | None]] = []
@@ -1214,7 +1267,7 @@ def test_cli_progress_starts_on_download_and_records_early_terminal_states():
     dashboard = reporter._dashboard
     assert dashboard is not None
     assert list(dashboard._running) == [
-        "worker=1 proxy=pending task=BTCUSDT 1m 2026-08"
+        "worker=1 proxy=pending stage=waiting task=BTCUSDT 1m 2026-08"
     ]
 
     for phase, worker_id, symbol in [
@@ -1280,12 +1333,52 @@ def test_cli_progress_keeps_running_rows_in_worker_order_and_updates_proxy():
         "socks5://proxy-b:1080",
         worker_id=1,
     )
+    reporter(
+        DownloadProgress(
+            phase="downloading",
+            worker_id=1,
+            current=1,
+            total=3,
+            symbol="BTCUSDT",
+            timeframe="1s",
+            period="2026-08-01",
+            downloaded_bytes=4 * 1024 * 1024,
+            total_bytes=8 * 1024 * 1024,
+            elapsed_seconds=2,
+        )
+    )
 
     dashboard = reporter._dashboard
     assert dashboard is not None
     assert list(dashboard._running) == [
-        "worker=1 proxy=socks5://proxy-b:1080 task=BTCUSDT 1s 2026-08-01",
-        "worker=2 proxy=pending task=ETHUSDT 1m 2026-08",
+        "worker=1 proxy=socks5://proxy-b:1080 stage=downloading "
+        "4.0 MiB/8.0 MiB 2.0 MiB/s task=BTCUSDT 1s 2026-08-01",
+        "worker=2 proxy=pending stage=waiting task=ETHUSDT 1m 2026-08",
+    ]
+    reporter(
+        DownloadProgress(
+            phase="processing",
+            worker_id=1,
+            current=1,
+            total=3,
+            symbol="BTCUSDT",
+            timeframe="1s",
+            period="2026-08-01",
+        )
+    )
+    assert list(dashboard._running)[0] == (
+        "worker=1 proxy=socks5://proxy-b:1080 stage=processing "
+        "task=BTCUSDT 1s 2026-08-01"
+    )
+    worker_name = list(dashboard._running)[0]
+    assert list(dashboard._running_fields[worker_name]) == [
+        "Worker",
+        "Task",
+        "Stage",
+        "Progress",
+        "Elapsed",
+        "Speed",
+        "Proxy",
     ]
     reporter.close()
 

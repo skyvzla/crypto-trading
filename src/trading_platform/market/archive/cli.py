@@ -617,6 +617,7 @@ class _ProgressReporter:
         self._dashboard: TaskDashboard | None = None
         self._active_names: dict[int, str] = {}
         self._base_names: dict[int, str] = {}
+        self._progress: dict[int, DownloadProgress] = {}
         self._sources = {
             worker: "pending" if worker <= len(proxies) else "direct"
             for worker in range(1, workers + 1)
@@ -638,21 +639,86 @@ class _ProgressReporter:
             f"{progress.timeframe} {progress.period}"
         )
 
-    def _display_name(self, worker_id: int, task_name: str) -> str:
+    def _display_name(
+        self,
+        worker_id: int,
+        task_name: str,
+        progress: DownloadProgress | None = None,
+    ) -> str:
         source = self._sources.get(worker_id, "pending")
-        return f"worker={worker_id} proxy={source} task={task_name}"
+        stage = self._stage(progress) if progress is not None else None
+        stage_text = f" stage={stage}" if stage is not None else ""
+        transfer_text = ""
+        if progress is not None and progress.downloaded_bytes > 0:
+            transferred = _format_bytes(progress.downloaded_bytes)
+            if progress.total_bytes > 0:
+                transferred += f"/{_format_bytes(progress.total_bytes)}"
+            transfer_text = f" {transferred}"
+            if progress.elapsed_seconds > 0:
+                speed = progress.downloaded_bytes / progress.elapsed_seconds
+                transfer_text += f" {_format_bytes(speed)}/s"
+        return (
+            f"worker={worker_id} proxy={source}{stage_text}{transfer_text} "
+            f"task={task_name}"
+        )
+
+    @staticmethod
+    def _stage(progress: DownloadProgress | None) -> str | None:
+        if progress is None:
+            return None
+        if progress.phase == "downloading" and progress.downloaded_bytes == 0:
+            return "waiting"
+        return progress.phase
+
+    def _row_fields(
+        self, worker_id: int, task_name: str, progress: DownloadProgress
+    ) -> dict[str, str]:
+        transferred = "-"
+        speed = "-"
+        if progress.downloaded_bytes > 0:
+            transferred = _format_bytes(progress.downloaded_bytes)
+            if progress.total_bytes > 0:
+                transferred += f"/{_format_bytes(progress.total_bytes)}"
+            if progress.elapsed_seconds > 0:
+                bytes_per_second = (
+                    progress.downloaded_bytes / progress.elapsed_seconds
+                )
+                speed = (
+                    f"{_format_bytes(bytes_per_second)}/s"
+                )
+        return {
+            "Worker": str(worker_id),
+            "Task": task_name,
+            "Stage": self._stage(progress) or "-",
+            "Progress": transferred,
+            "Elapsed": "",
+            "Speed": speed,
+            "Proxy": self._sources.get(worker_id, "pending"),
+        }
 
     def __call__(self, progress: DownloadProgress) -> None:
         with self._lock:
-            if progress.phase in {"downloading", "downloaded"}:
+            if progress.phase in {
+                "waiting",
+                "connecting",
+                "downloading",
+                "verifying",
+                "downloaded",
+                "processing",
+            }:
                 dashboard = self._ensure_dashboard(progress.total)
                 worker_id = progress.worker_id
                 task_name = self._task_name(progress)
                 self._base_names[worker_id] = task_name
-                name = self._display_name(worker_id, task_name)
+                self._progress[worker_id] = progress
+                name = self._display_name(worker_id, task_name, progress)
                 if self._active_names.get(worker_id) != name:
                     self._active_names[worker_id] = name
-                    dashboard.task_start(name, slot=worker_id)
+                    dashboard.task_start(
+                        name,
+                        slot=worker_id,
+                        fields=self._row_fields(worker_id, task_name, progress),
+                    )
                 return
             if progress.phase not in {
                 "stored",
@@ -663,11 +729,11 @@ class _ProgressReporter:
                 return
             dashboard = self._ensure_dashboard(progress.total)
             worker_id = progress.worker_id
-            name = self._active_names.pop(worker_id, None)
-            if name is None:
-                task_name = self._task_name(progress)
-                self._base_names[worker_id] = task_name
-                name = self._display_name(worker_id, task_name)
+            active_name = self._active_names.pop(worker_id, None)
+            self._progress.pop(worker_id, None)
+            task_name = self._task_name(progress)
+            name = self._display_name(worker_id, task_name)
+            if active_name != name:
                 dashboard.task_start(name, slot=worker_id)
             self._base_names.pop(worker_id, None)
             if progress.phase == "stored":
@@ -750,9 +816,20 @@ class _ProgressReporter:
                 self._sources[resolved_worker] = source
                 task_name = self._base_names.get(resolved_worker)
                 if task_name is not None and self._dashboard is not None:
-                    updated_name = self._display_name(resolved_worker, task_name)
+                    progress = self._progress.get(resolved_worker)
+                    updated_name = self._display_name(
+                        resolved_worker, task_name, progress
+                    )
                     self._active_names[resolved_worker] = updated_name
-                    self._dashboard.task_start(updated_name, slot=resolved_worker)
+                    self._dashboard.task_start(
+                        updated_name,
+                        slot=resolved_worker,
+                        fields=(
+                            self._row_fields(resolved_worker, task_name, progress)
+                            if progress is not None
+                            else None
+                        ),
+                    )
 
     def metadata_fallback(self, error: Exception) -> None:
         with self._lock:

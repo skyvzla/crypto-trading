@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TextIO
 from urllib.parse import quote
@@ -94,6 +95,7 @@ class TaskDashboard:
         self._eta_estimated_at: float | None = None
         self._running: dict[str, float] = {}
         self._running_slots: dict[int, tuple[str, float]] = {}
+        self._running_fields: dict[str, dict[str, str]] = {}
         self._samples: list[float] = []
         self._completed: deque[CompletedItem] = deque(maxlen=self._max_completed)
         self._console: Console | None = None
@@ -169,7 +171,13 @@ class TaskDashboard:
                 live.stop()
                 raise
 
-    def task_start(self, name: str, *, slot: int | None = None) -> None:
+    def task_start(
+        self,
+        name: str,
+        *,
+        slot: int | None = None,
+        fields: Mapping[str, str] | None = None,
+    ) -> None:
         with self._lock:
             if slot is None:
                 self._running[name] = time.monotonic()
@@ -178,6 +186,7 @@ class TaskDashboard:
                 started = previous[1] if previous is not None else time.monotonic()
                 if previous is not None:
                     self._running.pop(previous[0], None)
+                    self._running_fields.pop(previous[0], None)
                 self._running_slots[slot] = (name, started)
                 self._running = {
                     current_name: current_started
@@ -185,6 +194,10 @@ class TaskDashboard:
                         self._running_slots.items()
                     )
                 }
+            if fields is not None:
+                self._running_fields[name] = dict(fields)
+            else:
+                self._running_fields.pop(name, None)
         self._refresh()
 
     def task_done(
@@ -214,6 +227,7 @@ class TaskDashboard:
                         self._running_slots.items()
                     )
                 }
+            self._running_fields.pop(name, None)
             if started is not None:
                 duration = completed_at - started
                 if count_as_sample and duration >= 0:
@@ -351,24 +365,69 @@ class TaskDashboard:
             samples = list(self._samples)
             if self._running_slots:
                 running = [
-                    (name, started)
+                    (name, started, self._running_fields.get(name))
                     for _, (name, started) in sorted(self._running_slots.items())
                 ]
             else:
-                running = sorted(self._running.items(), key=lambda item: item[1])
+                running = [
+                    (name, started, self._running_fields.get(name))
+                    for name, started in sorted(
+                        self._running.items(), key=lambda item: item[1]
+                    )
+                ]
             completed = list(self._completed)
             elapsed_s = now - self._started_at
             eta = self._estimate_eta(total, done, samples, now)
         elapsed = _format_duration(elapsed_s)
         running_block: list[Text] = []
-        if running:
-            for name, started in running:
+        structured = next((fields for _, _, fields in running if fields), None)
+        if structured is not None:
+            running_content: Text | Table = Table(
+                box=None,
+                show_edge=False,
+                pad_edge=False,
+                padding=(0, 1),
+            )
+            columns = list(structured)
+            if "Elapsed" not in columns:
+                columns.append("Elapsed")
+            for column in columns:
+                running_content.add_column(
+                    column,
+                    no_wrap=True,
+                    overflow="ellipsis",
+                    max_width={
+                        "Worker": 6,
+                        "Task": 30,
+                        "Stage": 11,
+                        "Progress": 21,
+                        "Elapsed": 8,
+                        "Speed": 12,
+                        "Proxy": 30,
+                    }.get(column),
+                )
+            for name, started, fields in running:
+                values = fields or {"Task": name}
+                elapsed_value = _format_duration(time.monotonic() - started)
+                running_content.add_row(
+                    *(
+                        elapsed_value
+                        if column == "Elapsed"
+                        else values.get(column, "-")
+                        for column in columns
+                    ),
+                )
+        else:
+            for name, started, _fields in running:
                 running_block.append(
                     Text(f"  {name}") + Text("  Elapsed ")
                     + Text(_format_duration(time.monotonic() - started))
                 )
+            running_content = (
+                Group(*running_block) if running_block else Text("  (none)")
+            )
         running_panel = Panel(
-            Group(*running_block) if running_block else Text("  (none)"),
+            running_content,
             title=f"Running ({len(running)})",
             border_style="cyan",
             padding=(0, 1),

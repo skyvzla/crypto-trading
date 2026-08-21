@@ -449,6 +449,39 @@ def test_tty_live_reads_current_dashboard_state(monkeypatch):
     dashboard.close()
 
 
+def test_tty_running_panel_renders_structured_rows_as_table():
+    class TTYStream(StringIO):
+        def isatty(self):
+            return True
+
+    dashboard = TaskDashboard(title="market-archive", stream=TTYStream())
+    dashboard.task_start(
+        "worker-1-task",
+        slot=1,
+        fields={
+            "Worker": "1",
+            "Proxy": "proxy-a",
+            "Stage": "downloading",
+            "Progress": "4.0 MiB/8.0 MiB",
+            "Speed": "2.0 MiB/s",
+            "Task": "BTCUSDT 1s 2026-08-01",
+        },
+    )
+
+    rendered = StringIO()
+    Console(file=rendered, force_terminal=False, width=160).print(
+        dashboard._render()
+    )
+    output = rendered.getvalue()
+    assert output.count("Worker") == 1
+    assert output.count("Proxy") == 1
+    assert "downloading" in output
+    assert "4.0 MiB/8.0 MiB" in output
+    assert "2.0 MiB/s" in output
+    assert "BTCUSDT 1s 2026-08-01" in output
+    assert "worker=1" not in output
+
+
 def test_progress_bar_format():
     assert _format_bar(0.5, width=10) == "[#####-----]"
     assert _format_bar(0.0, width=10) == "[----------]"
