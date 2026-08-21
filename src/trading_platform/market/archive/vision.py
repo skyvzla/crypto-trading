@@ -169,12 +169,14 @@ class BinanceVisionHTTPFetcher:
         retry_base_seconds: float = 1.0,
         on_retry: Callable[[str, int, int, Exception], None] | None = None,
         temporary_slots: Semaphore | None = None,
+        temporary_directory: Path | None = None,
     ) -> None:
         self._client = client
         self._attempts = max(1, attempts)
         self._retry_base_seconds = max(0.0, retry_base_seconds)
         self._on_retry = on_retry
         self._temporary_slots = temporary_slots
+        self._temporary_directory = temporary_directory
 
     def __call__(self, url: str) -> bytes:
         with self.open_archive(url) as source:
@@ -188,7 +190,9 @@ class BinanceVisionHTTPFetcher:
         if self._temporary_slots is not None:
             self._temporary_slots.acquire()
         try:
-            with tempfile.TemporaryFile(mode="w+b") as source:
+            with tempfile.TemporaryFile(
+                mode="w+b", dir=self._temporary_directory
+            ) as source:
                 actual = self._download_to(url, source)
                 _notify_transfer(
                     "verifying",
@@ -708,11 +712,13 @@ def parse_monthly_aggtrade_archive(
     content: bytes | BinaryIO,
     symbol: str,
     month: str,
+    *,
+    temporary_directory: Path | None = None,
 ) -> Iterator[tuple[date, list[Candle]]]:
     """Aggregate one monthly aggTrades ZIP into daily 1s partitions."""
 
     for partition_day, table in _aggregate_monthly_aggtrade_archive(
-        content, symbol, month
+        content, symbol, month, temporary_directory=temporary_directory
     ):
         yield partition_day, _candles_from_arrow(table)
 
@@ -721,13 +727,15 @@ def _aggregate_monthly_aggtrade_archive(
     content: bytes | BinaryIO,
     symbol: str,
     month: str,
+    *,
+    temporary_directory: Path | None = None,
 ) -> Iterator[tuple[date, pa.Table]]:
     normalized_symbol = symbol.strip().upper()
     member = f"{normalized_symbol}-aggTrades-{month}.csv"
     source = io.BytesIO(content) if isinstance(content, bytes) else content
 
     with tempfile.TemporaryDirectory(
-        prefix=f"aggtrades-{os.getpid()}-"
+        prefix=f"aggtrades-{os.getpid()}-", dir=temporary_directory
     ) as temporary:
         temporary_path = Path(temporary)
         csv_path = temporary_path / member
@@ -996,6 +1004,7 @@ def download_history(
     symbol_availability: Mapping[str, SymbolAvailability] | None = None,
     storage_check: Callable[[], None] | None = None,
     on_worker_exit: Callable[[int], None] | None = None,
+    temporary_directory: Path | None = None,
 ) -> list[DownloadResult]:
     """Download a bounded UTC range; network reads are separate from one writer."""
 
@@ -1169,7 +1178,10 @@ def download_history(
                     rows = 0
                     upsert_table = getattr(archive, "upsert_table", None)
                     for day, table in _aggregate_monthly_aggtrade_archive(
-                        content, symbol, label
+                        content,
+                        symbol,
+                        label,
+                        temporary_directory=temporary_directory,
                     ):
                         if day not in relevant_days:
                             continue

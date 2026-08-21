@@ -471,7 +471,7 @@ def test_daily_and_monthly_aggtrade_aggregation_share_orderflow_semantics():
 
 
 def test_download_history_uses_one_monthly_aggtrade_archive_for_complete_month(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     payload = BytesIO()
     with zipfile.ZipFile(payload, "w") as archive:
@@ -483,12 +483,24 @@ def test_download_history_uses_one_monthly_aggtrade_archive_for_complete_month(
             "2,11,3,2,2,1782950400100,false\n",
         )
     requested: list[str] = []
+    temporary_directories: list[object] = []
+    original_temporary_directory = archive_vision.tempfile.TemporaryDirectory
+
+    def temporary_directory(*args, **kwargs):
+        temporary_directories.append(kwargs.get("dir"))
+        return original_temporary_directory(*args, **kwargs)
+
+    monkeypatch.setattr(
+        archive_vision.tempfile, "TemporaryDirectory", temporary_directory
+    )
 
     def fetch(url: str) -> bytes:
         requested.append(url)
         return payload.getvalue()
 
     archive_root = tmp_path / "history"
+    temporary_root = tmp_path / "archive-tmp"
+    temporary_root.mkdir()
     with ParquetCandleArchive(archive_root) as archive:
         results = download_history(
             archive,
@@ -497,6 +509,7 @@ def test_download_history_uses_one_monthly_aggtrade_archive_for_complete_month(
             timeframes=["1s"],
             start=datetime(2026, 7, 1, tzinfo=UTC),
             end=datetime(2026, 8, 1, tzinfo=UTC),
+            temporary_directory=temporary_root,
         )
 
     assert [url.rsplit("/", 1)[-1] for url in requested] == [
@@ -504,6 +517,7 @@ def test_download_history_uses_one_monthly_aggtrade_archive_for_complete_month(
     ]
     assert "/monthly/aggTrades/" in requested[0]
     assert [(item.period, item.rows) for item in results] == [("2026-07", 2)]
+    assert temporary_directories == [temporary_root]
     assert (archive_root / "AKEUSDT/1s/2026/07/01/candles.parquet").is_file()
     assert (archive_root / "AKEUSDT/1s/2026/07/02/candles.parquet").is_file()
 
@@ -889,7 +903,7 @@ def test_http_fetcher_verifies_binance_checksum():
     assert result == content
 
 
-def test_http_fetcher_exposes_verified_seekable_stream():
+def test_http_fetcher_exposes_verified_seekable_stream(tmp_path, monkeypatch):
     content = b"verified streamed archive"
     checksum = hashlib.sha256(content).hexdigest()
 
@@ -898,12 +912,25 @@ def test_http_fetcher_exposes_verified_seekable_stream():
             return httpx.Response(200, text=checksum)
         return httpx.Response(200, content=content)
 
+    temporary_files: list[object] = []
+    original_temporary_file = archive_vision.tempfile.TemporaryFile
+
+    def temporary_file(*args, **kwargs):
+        temporary_files.append(kwargs.get("dir"))
+        return original_temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(archive_vision.tempfile, "TemporaryFile", temporary_file)
+    temporary_root = tmp_path / "archive-tmp"
+    temporary_root.mkdir()
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        fetch = BinanceVisionHTTPFetcher(client, attempts=1)
+        fetch = BinanceVisionHTTPFetcher(
+            client, attempts=1, temporary_directory=temporary_root
+        )
         with fetch.open_archive("https://data.binance.vision/archive.zip") as source:
             assert source.read() == content
             source.seek(0)
             assert source.read(8) == b"verified"
+    assert temporary_files == [temporary_root]
 
 
 def test_download_history_reports_streaming_and_processing_progress(tmp_path):
@@ -1554,9 +1581,59 @@ def test_cli_without_symbols_loads_all_tradable_symbols(
         "postgresql://archive", freeze_days=15, strategy_id=None
     )
     assert captured["symbols"] == ["AKEUSDT", "BTCUSDT"]
+    assert captured["temporary_directory"] == tmp_path / "tmp"
+    assert (tmp_path / "tmp").is_dir()
     stderr = capsys.readouterr().err
     assert "Loaded 2 tradable symbols from PostgreSQL." in stderr
     assert "Downloading data for 2 trading pairs." in stderr
+
+
+def test_progress_reporter_logs_temporary_storage_hint_on_enospc(
+    tmp_path, monkeypatch
+):
+    temporary_root = tmp_path / "archive-tmp"
+    temporary_root.mkdir()
+    monkeypatch.setattr(
+        archive_cli.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=512 * 1024**2),
+    )
+    logged = MagicMock()
+    warned = MagicMock()
+    monkeypatch.setattr(archive_cli.logger, "error", logged)
+    monkeypatch.setattr(archive_cli.logger, "warning", warned)
+    reporter = _ProgressReporter(workers=1, temporary_root=temporary_root)
+
+    reporter(
+        DownloadProgress(
+            phase="failed",
+            worker_id=1,
+            current=1,
+            total=1,
+            symbol="AKEUSDT",
+            timeframe="1s",
+            period="2026-07",
+            error="OSError: [Errno 28] No space left on device",
+        )
+    )
+
+    message = logged.call_args.args[0]
+    assert f"temporary_storage={temporary_root}" in message
+    assert "free=512.0 MiB" in message
+    assert "reduce --workers or free space" in message
+
+    reporter.retry(
+        "https://example.com/AKEUSDT-aggTrades-2026-07.zip",
+        2,
+        5,
+        OSError(28, "No space left on device"),
+        worker_id=1,
+    )
+    warning = warned.call_args.args[0]
+    assert f"temporary_storage={temporary_root}" in warning
+    assert "free=512.0 MiB" in warning
+    assert "reduce --workers or free space" in warning
+    reporter.close(status="failed")
 
 
 def test_cli_uses_failover_proxy_pool(

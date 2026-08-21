@@ -121,6 +121,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=os.getenv("MARKET_HISTORY_MIN_FREE_GB", "10"),
         help="stop when archive filesystem free space reaches this value; 0 disables",
     )
+    parser.add_argument(
+        "--temporary-dir",
+        type=Path,
+        default=None,
+        help="temporary download/spill directory (default: <archive-parent>/tmp)",
+    )
     parser.add_argument("--timeframes", nargs="+", required=True)
     parser.add_argument(
         "--metrics-archive",
@@ -206,7 +212,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     candle_reporter_closed = False
     try:
         _setup_logging(args.log_level, log_file)
-        temporary_root = Path(tempfile.gettempdir())
+        temporary_root = (
+            args.temporary_dir or args.archive.resolve().parent / "tmp"
+        ).resolve()
+        temporary_root.mkdir(parents=True, exist_ok=True)
+        logger.debug(
+            "Using archive temporary directory %s (%s free)",
+            temporary_root,
+            _format_bytes(shutil.disk_usage(temporary_root).free),
+        )
         removed_temporary_dirs = _cleanup_stale_archive_temporary_directories(
             temporary_root
         )
@@ -230,6 +244,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         candle_reporter = _ProgressReporter(
             workers,
             proxies=[_proxy_label(proxy) for proxy in proxies],
+            temporary_root=temporary_root,
         )
         start = _parse_datetime(args.start)
         end = _parse_datetime(args.end)
@@ -331,6 +346,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         client,
                         attempts=1,
                         temporary_slots=temporary_slots,
+                        temporary_directory=temporary_root,
                     )
                     for client in clients
                 ]
@@ -340,6 +356,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         direct_client,
                         attempts=1,
                         temporary_slots=temporary_slots,
+                        temporary_directory=temporary_root,
                     ),
                     attempts=args.attempts,
                     labels=[_proxy_label(proxy) for proxy in proxies],
@@ -352,6 +369,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     attempts=args.attempts,
                     on_retry=candle_reporter.retry,
                     temporary_slots=temporary_slots,
+                    temporary_directory=temporary_root,
                 )
             metrics_results: list[DownloadResult] = []
             metrics_catalog_path = None
@@ -372,11 +390,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         symbol_availability=symbol_availability,
                         storage_check=candle_storage_guard,
                         on_worker_exit=candle_reporter.worker_exit,
+                        temporary_directory=temporary_root,
                     )
             else:
                 metrics_reporter = _ProgressReporter(
                     workers,
                     proxies=[_proxy_label(proxy) for proxy in proxies],
+                    temporary_root=temporary_root,
                 )
                 with (
                     ParquetCandleArchive(
@@ -399,6 +419,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "symbol_availability": symbol_availability,
                         "storage_check": candle_storage_guard,
                         "on_worker_exit": candle_reporter.worker_exit,
+                        "temporary_directory": temporary_root,
                     }
                     metrics_kwargs = {
                         "fetch": fetch,
@@ -610,9 +631,11 @@ class _ProgressReporter:
         *,
         title: str = "market-archive",
         proxies: Sequence[str] = (),
+        temporary_root: Path | None = None,
     ) -> None:
         self._workers = workers
         self._title = title
+        self._temporary_root = temporary_root
         self._lock = threading.Lock()
         self._dashboard: TaskDashboard | None = None
         self._active_names: dict[int, str] = {}
@@ -740,9 +763,10 @@ class _ProgressReporter:
                 )
                 dashboard.task_done(name, "Unavailable", count_as_sample=False)
             else:
+                temporary_hint = self._temporary_space_hint(progress.error)
                 logger.error(
                     f"failed {progress.symbol} {progress.timeframe} "
-                    f"{progress.period}: {progress.error}"
+                    f"{progress.period}: {progress.error}{temporary_hint}"
                 )
                 dashboard.task_failed(name)
 
@@ -766,10 +790,11 @@ class _ProgressReporter:
                 if elapsed_seconds is not None
                 else ""
             )
+            temporary_hint = self._temporary_space_hint(error)
             logger.warning(
                 f"{worker} Retry {attempt}/{attempts} "
                 f"{filename}{source}{duration}: "
-                f"{type(error).__name__}: {error}"
+                f"{type(error).__name__}: {error}{temporary_hint}"
             )
 
     def route(
@@ -824,6 +849,23 @@ class _ProgressReporter:
     def worker_exit(self, worker_id: int) -> None:
         with self._lock:
             logger.debug(f"{_worker_label(worker_id)} exited")
+
+    def _temporary_space_hint(self, error: object) -> str:
+        if (
+            self._temporary_root is None
+            or "No space left on device" not in str(error)
+        ):
+            return ""
+        try:
+            free_bytes = shutil.disk_usage(self._temporary_root).free
+            free_label = _format_bytes(free_bytes)
+        except OSError:
+            free_label = "unknown"
+        return (
+            f" temporary_storage={self._temporary_root}"
+            f" free={free_label}; reduce --workers or free space,"
+            " then rerun to retry the failed task"
+        )
 
     def close(self, *, status: str = "ok") -> None:
         with self._lock:
