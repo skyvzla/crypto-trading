@@ -1267,7 +1267,7 @@ def test_cli_progress_starts_on_download_and_records_early_terminal_states():
     dashboard = reporter._dashboard
     assert dashboard is not None
     assert list(dashboard._running) == [
-        "worker=1 proxy=pending stage=waiting task=BTCUSDT 1m 2026-08"
+        "worker=1 task=BTCUSDT 1m 2026-08"
     ]
 
     for phase, worker_id, symbol in [
@@ -1291,9 +1291,9 @@ def test_cli_progress_starts_on_download_and_records_early_terminal_states():
     assert [
         (item.name, item.status) for item in dashboard._completed
     ] == [
-        ("worker=4 proxy=direct task=XRPUSDT 1m 2026-08", "Failed"),
-        ("worker=3 proxy=direct task=SOLUSDT 1m 2026-08", "Unavailable"),
-        ("worker=2 proxy=pending task=ETHUSDT 1m 2026-08", "Skipped"),
+        ("worker=4 task=XRPUSDT 1m 2026-08", "Failed"),
+        ("worker=3 task=SOLUSDT 1m 2026-08", "Unavailable"),
+        ("worker=2 task=ETHUSDT 1m 2026-08", "Skipped"),
     ]
     reporter.close()
 
@@ -1351,10 +1351,19 @@ def test_cli_progress_keeps_running_rows_in_worker_order_and_updates_proxy():
     dashboard = reporter._dashboard
     assert dashboard is not None
     assert list(dashboard._running) == [
-        "worker=1 proxy=socks5://proxy-b:1080 stage=downloading "
-        "4.0 MiB/8.0 MiB 2.0 MiB/s task=BTCUSDT 1s 2026-08-01",
-        "worker=2 proxy=pending stage=waiting task=ETHUSDT 1m 2026-08",
+        "worker=1 task=BTCUSDT 1s 2026-08-01",
+        "worker=2 task=ETHUSDT 1m 2026-08",
     ]
+    worker_name = list(dashboard._running)[0]
+    assert dashboard._running_fields[worker_name] == {
+        "Worker": "1",
+        "Task": "BTCUSDT 1s 2026-08-01",
+        "Stage": "downloading",
+        "Progress": "4.0 MiB/8.0 MiB",
+        "Elapsed": "",
+        "Speed": "2.0 MiB/s",
+        "Proxy": "socks5://proxy-b:1080",
+    }
     reporter(
         DownloadProgress(
             phase="processing",
@@ -1366,11 +1375,8 @@ def test_cli_progress_keeps_running_rows_in_worker_order_and_updates_proxy():
             period="2026-08-01",
         )
     )
-    assert list(dashboard._running)[0] == (
-        "worker=1 proxy=socks5://proxy-b:1080 stage=processing "
-        "task=BTCUSDT 1s 2026-08-01"
-    )
-    worker_name = list(dashboard._running)[0]
+    assert list(dashboard._running)[0] == "worker=1 task=BTCUSDT 1s 2026-08-01"
+    assert dashboard._running_fields[worker_name]["Stage"] == "processing"
     assert list(dashboard._running_fields[worker_name]) == [
         "Worker",
         "Task",

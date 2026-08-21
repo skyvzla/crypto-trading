@@ -639,28 +639,9 @@ class _ProgressReporter:
             f"{progress.timeframe} {progress.period}"
         )
 
-    def _display_name(
-        self,
-        worker_id: int,
-        task_name: str,
-        progress: DownloadProgress | None = None,
-    ) -> str:
-        source = self._sources.get(worker_id, "pending")
-        stage = self._stage(progress) if progress is not None else None
-        stage_text = f" stage={stage}" if stage is not None else ""
-        transfer_text = ""
-        if progress is not None and progress.downloaded_bytes > 0:
-            transferred = _format_bytes(progress.downloaded_bytes)
-            if progress.total_bytes > 0:
-                transferred += f"/{_format_bytes(progress.total_bytes)}"
-            transfer_text = f" {transferred}"
-            if progress.elapsed_seconds > 0:
-                speed = progress.downloaded_bytes / progress.elapsed_seconds
-                transfer_text += f" {_format_bytes(speed)}/s"
-        return (
-            f"worker={worker_id} proxy={source}{stage_text}{transfer_text} "
-            f"task={task_name}"
-        )
+    @staticmethod
+    def _identity(worker_id: int, task_name: str) -> str:
+        return f"worker={worker_id} task={task_name}"
 
     @staticmethod
     def _stage(progress: DownloadProgress | None) -> str | None:
@@ -711,14 +692,13 @@ class _ProgressReporter:
                 task_name = self._task_name(progress)
                 self._base_names[worker_id] = task_name
                 self._progress[worker_id] = progress
-                name = self._display_name(worker_id, task_name, progress)
-                if self._active_names.get(worker_id) != name:
-                    self._active_names[worker_id] = name
-                    dashboard.task_start(
-                        name,
-                        slot=worker_id,
-                        fields=self._row_fields(worker_id, task_name, progress),
-                    )
+                name = self._identity(worker_id, task_name)
+                self._active_names[worker_id] = name
+                dashboard.task_start(
+                    name,
+                    slot=worker_id,
+                    fields=self._row_fields(worker_id, task_name, progress),
+                )
                 return
             if progress.phase not in {
                 "stored",
@@ -732,9 +712,13 @@ class _ProgressReporter:
             active_name = self._active_names.pop(worker_id, None)
             self._progress.pop(worker_id, None)
             task_name = self._task_name(progress)
-            name = self._display_name(worker_id, task_name)
+            name = self._identity(worker_id, task_name)
             if active_name != name:
-                dashboard.task_start(name, slot=worker_id)
+                dashboard.task_start(
+                    name,
+                    slot=worker_id,
+                    fields=self._row_fields(worker_id, task_name, progress),
+                )
             self._base_names.pop(worker_id, None)
             if progress.phase == "stored":
                 logger.debug(
@@ -817,17 +801,15 @@ class _ProgressReporter:
                 task_name = self._base_names.get(resolved_worker)
                 if task_name is not None and self._dashboard is not None:
                     progress = self._progress.get(resolved_worker)
-                    updated_name = self._display_name(
-                        resolved_worker, task_name, progress
-                    )
+                    if progress is None:
+                        return
+                    updated_name = self._identity(resolved_worker, task_name)
                     self._active_names[resolved_worker] = updated_name
                     self._dashboard.task_start(
                         updated_name,
                         slot=resolved_worker,
-                        fields=(
-                            self._row_fields(resolved_worker, task_name, progress)
-                            if progress is not None
-                            else None
+                        fields=self._row_fields(
+                            resolved_worker, task_name, progress
                         ),
                     )
 
