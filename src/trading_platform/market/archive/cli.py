@@ -43,7 +43,7 @@ from .vision import (
 logger = logging.getLogger(__name__)
 
 _TEMPORARY_RESERVE_BYTES = 2 * 1024**3
-_TEMPORARY_BYTES_PER_WORKER = 2 * 1024**3
+_TEMPORARY_BYTES_PER_WORKER = 1 * 1024**3
 
 
 def _setup_logging(log_level: str, log_file: Path | None) -> None:

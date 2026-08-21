@@ -1479,7 +1479,7 @@ def test_temporary_worker_capacity_reserves_tmp_space(monkeypatch):
         lambda _path: SimpleNamespace(free=10 * 1024**3),
     )
 
-    assert archive_cli._temporary_worker_capacity(20) == 4
+    assert archive_cli._temporary_worker_capacity(20) == 8
 
 
 def test_temporary_worker_capacity_rejects_full_tmp(monkeypatch):
