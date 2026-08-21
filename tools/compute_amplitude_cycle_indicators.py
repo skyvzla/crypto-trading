@@ -68,7 +68,7 @@ from trading_platform.research.indicators import (  # noqa: E402
 )
 
 
-FORMULA_VERSION = "amplitude-cycle-v1"
+FORMULA_VERSION = "amplitude-cycle-v2"
 MS_1S = 1_000
 MS_5S = 5_000
 MS_1M = 60_000
@@ -101,7 +101,23 @@ BAR_COLUMNS = [
     "low",
     "close",
     "volume",
+    "taker_buy_volume",
+    "taker_sell_volume",
+    "taker_buy_quote_volume",
+    "taker_sell_quote_volume",
+    "quote_volume",
+    "trade_count",
     "complete_bar",
+]
+
+# 1s 归档独有的订单流字段（d8ff91a 起归档），其他周期 K 线无这些列。
+TAKER_COLUMNS = [
+    "taker_buy_volume",
+    "taker_sell_volume",
+    "taker_buy_quote_volume",
+    "taker_sell_quote_volume",
+    "quote_volume",
+    "trade_count",
 ]
 
 
@@ -208,15 +224,20 @@ def _feature_specs() -> list[dict[str, Any]]:
     ):
         add(name, period, role, "candles", params)
 
-    # Flow and microstructure.  These are deliberately not filled by a candle proxy.
+    # Flow and microstructure.  Taker fields come from the 1s candle archive
+    # (native 1m+ candles carry no taker fields, so those periods stay NaN);
+    # order-book-only features remain unsupported.
+    for name, period, role in (
+        ("taker_buy_ratio", "5s", "environment"),
+        ("taker_delta", "1s/5s", "trigger_aux"),
+        ("signed_volume_delta", "1s/5s", "trigger_aux"),
+        ("cvd", "5s", "trigger"),
+        ("price_cvd_divergence", "5s", "trigger"),
+        ("delta_price_efficiency", "5s", "trigger_aux"),
+        ("price_impact", "5s", "trigger_aux"),
+    ):
+        add(name, period, role, "candle archive taker fields", '{}')
     for name, period, role, source in (
-        ("taker_buy_ratio", "5s/1m", "environment", "aggTrades or taker fields"),
-        ("taker_delta", "1s/5s/1m", "trigger_aux", "aggTrades"),
-        ("signed_volume_delta", "1s/5s/1m", "trigger_aux", "aggTrades"),
-        ("cvd", "5s/1m", "trigger", "aggTrades"),
-        ("price_cvd_divergence", "1m", "trigger", "aggTrades"),
-        ("delta_price_efficiency", "5s/1m", "trigger_aux", "aggTrades"),
-        ("price_impact", "5s/1m", "trigger_aux", "aggTrades"),
         ("buy_absorption", "1s/5s", "trigger", "order book + aggTrades"),
         ("order_book_imbalance", "1s/5s", "trigger_aux", "order book"),
         ("ask_replenishment", "1s/5s", "trigger_aux", "order book"),
@@ -271,8 +292,12 @@ def _clean_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame.copy()
     for column in ("open_ms", "close_ms"):
         result[column] = pd.to_numeric(result[column], errors="coerce").astype("Int64")
-    for column in ("open", "high", "low", "close", "volume"):
-        result[column] = pd.to_numeric(result[column], errors="coerce")
+    numeric_columns = ["open", "high", "low", "close", "volume", *TAKER_COLUMNS]
+    for column in numeric_columns:
+        if column in result.columns:
+            result[column] = pd.to_numeric(result[column], errors="coerce")
+        else:
+            result[column] = np.nan
     result = result.dropna(subset=["open_ms", "close_ms", "open", "high", "low", "close", "volume"])
     result["open_ms"] = result["open_ms"].astype(np.int64)
     result["close_ms"] = result["close_ms"].astype(np.int64)
@@ -291,11 +316,15 @@ def _query_candles(
 ) -> pd.DataFrame:
     if not paths:
         return pd.DataFrame(columns=BAR_COLUMNS)
+    # 只有 1s 归档带订单流字段；其余周期 K 线 schema 里没有这些列。
+    taker_select = ""
+    if timeframe == "1s":
+        taker_select = ",\n               " + ",\n               ".join(TAKER_COLUMNS)
     rows = connection.execute(
-        """
+        f"""
         SELECT epoch_ms(open_time) AS open_ms,
                epoch_ms(close_time) AS close_ms,
-               open, high, low, close, volume
+               open, high, low, close, volume{taker_select}
         FROM read_parquet(?, union_by_name=true)
         WHERE symbol = ? AND timeframe = ?
           AND epoch_ms(open_time) < ?
@@ -304,10 +333,10 @@ def _query_candles(
         """,
         [paths, symbol, timeframe, end_ms, start_ms],
     ).fetchall()
-    return _clean_frame(pd.DataFrame(
-        rows,
-        columns=["open_ms", "close_ms", "open", "high", "low", "close", "volume"],
-    ))
+    columns = ["open_ms", "close_ms", "open", "high", "low", "close", "volume"]
+    if timeframe == "1s":
+        columns += TAKER_COLUMNS
+    return _clean_frame(pd.DataFrame(rows, columns=columns))
 
 
 def _merge_intervals(intervals: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -347,14 +376,18 @@ def _aggregate_frame(frame: pd.DataFrame, timeframe: str, source_timeframe: str)
     data = frame.copy()
     data["bar_open_ms"] = (data["open_ms"] // tf_ms) * tf_ms
     grouped = data.groupby("bar_open_ms", sort=True, observed=True)
-    out = grouped.agg(
+    agg = grouped.agg(
         open=("open", "first"),
         high=("high", "max"),
         low=("low", "min"),
         close=("close", "last"),
         volume=("volume", "sum"),
         input_count=("open_ms", "size"),
-    ).reset_index(names="open_ms")
+    )
+    # 订单流字段按窗口求和；整组缺失时保持 NaN，不用 0 伪造。
+    for column in TAKER_COLUMNS:
+        agg[column] = grouped[column].sum(min_count=1) if column in data.columns else np.nan
+    out = agg.reset_index(names="open_ms")
     expected = max(1, tf_ms // source_ms)
     out["complete_bar"] = out["input_count"] >= expected
     out["close_ms"] = out["open_ms"] + tf_ms - 1
@@ -573,15 +606,37 @@ def _add_bar_features(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     out["td_sell_setup"] = _consecutive_count(td_cond.fillna(False).to_numpy())
 
     typical = (o + h + l + c) / 4.0
-    volume_delta_proxy = np.sign(c - o) * v
-    out["signed_volume_delta_ohlcv_proxy"] = volume_delta_proxy
-    out["cvd_ohlcv_proxy"] = np.cumsum(volume_delta_proxy)
+    # 真实订单流指标：仅 1s/5s 有 taker 字段，其余周期保持 NaN（不伪造）。
+    has_taker = "taker_buy_volume" in out.columns and out["taker_buy_volume"].notna().any()
+    if has_taker:
+        buy_vol = out["taker_buy_volume"].to_numpy(float)
+        sell_vol = out["taker_sell_volume"].to_numpy(float)
+        buy_quote = out["taker_buy_quote_volume"].to_numpy(float)
+        sell_quote = out["taker_sell_quote_volume"].to_numpy(float)
+        quote_vol = out["quote_volume"].to_numpy(float)
+        signed_delta = buy_vol - sell_vol
+        out["signed_volume_delta"] = signed_delta
+        out["cvd"] = np.cumsum(np.where(np.isfinite(signed_delta), signed_delta, 0.0))
+        total_taker = buy_vol + sell_vol
+        out["taker_buy_ratio"] = buy_vol / np.where(total_taker == 0, np.nan, total_taker)
+        out["taker_delta"] = buy_quote - sell_quote
+        out["delta_price_efficiency"] = np.abs(log_ret) / np.maximum(np.abs(signed_delta), 1e-12)
+        out["price_impact"] = np.abs(log_ret) / np.maximum(quote_vol, 1e-12)
+        cvd_series = pd.Series(out["cvd"])
+        div_window = max(3, round(15 / tf_minutes))
+        price_hh = h >= pd.Series(h).rolling(div_window, min_periods=div_window).max().to_numpy()
+        cvd_hh = cvd_series.to_numpy() >= cvd_series.rolling(div_window, min_periods=div_window).max().to_numpy()
+        out["price_cvd_divergence"] = (price_hh & ~cvd_hh).astype(np.int8)
+    else:
+        for column in (
+            "signed_volume_delta", "cvd", "taker_buy_ratio", "taker_delta",
+            "delta_price_efficiency", "price_impact", "price_cvd_divergence",
+        ):
+            out[column] = np.nan
     out["volume_multiple"] = v / np.maximum(pd.Series(v).rolling(max(12, vol_window), min_periods=max(12, vol_window)).median().to_numpy(), 1e-12)
     mean_v = pd.Series(v).rolling(vol_window, min_periods=vol_window).mean().to_numpy()
     std_v = pd.Series(v).rolling(vol_window, min_periods=vol_window).std(ddof=1).to_numpy()
     out["vol_zscore"] = (v - mean_v) / np.where(std_v == 0, np.nan, std_v)
-    out["delta_price_efficiency_ohlcv_proxy"] = np.abs(log_ret) / np.maximum(np.abs(volume_delta_proxy), 1e-12)
-    out["price_impact_ohlcv_proxy"] = np.abs(log_ret) / np.maximum(v, 1e-12)
     # 只使用当前及历史数据：前一根出现量能峰值，当前量能衰减且价格未继续创新高。
     volume_series = pd.Series(v)
     high_series = pd.Series(h)
@@ -668,7 +723,8 @@ def _parse_events(paths: list[Path]) -> pd.DataFrame:
         parsed = pd.to_datetime(values, utc=True, errors="coerce")
         result = pd.Series(pd.NA, index=values.index, dtype="Int64")
         valid = parsed.notna()
-        result.loc[valid] = parsed.loc[valid].astype("int64") // 1_000_000
+        # pandas 3.0 起 to_datetime 默认返回 us 精度，显式转 ns 再换算毫秒，保证单位无关。
+        result.loc[valid] = parsed.loc[valid].dt.as_unit("ns").astype("int64") // 1_000_000
         return result
 
     events["start_ms"] = timestamp_ms(events["start_utc"])

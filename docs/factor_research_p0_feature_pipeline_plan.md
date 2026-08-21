@@ -1,5 +1,44 @@
 # P0 Feature Pipeline 改造计划
 
+> 状态：已完成。后续以实际归档 schema 为准，本节保留最初设计背景。
+
+## P0 完成后的数据边界（2026-08-21）
+
+当前 1s 归档已经包含足够的不可恢复订单流原始聚合，包括：
+
+```text
+OHLCV
+quote_volume
+trade_count / raw_trade_count
+taker_buy_volume / taker_sell_volume
+taker_buy_quote_volume / taker_sell_quote_volume
+taker_buy_trade_count / taker_sell_trade_count
+taker_buy_agg_trade_count / taker_sell_agg_trade_count
+max_agg_trade_quantity
+max_taker_buy_agg_trade_quantity / max_taker_sell_agg_trade_quantity
+aggTrade / raw trade ID 边界
+```
+
+字段语义：
+
+- `taker_buy_volume` / `taker_sell_volume` 是基础资产数量，例如 BTC、0G。
+- `taker_buy_quote_volume` / `taker_sell_quote_volume` 是对应成交的计价资产金额，
+  USDT 合约中即成交的 USDT 名义金额，更适合跨 symbol 做资金强度比较。
+- `trade_count` 表示 aggTrade 数，`raw_trade_count` 表示底层原始撮合笔数；研究时
+  不应混用两种口径。
+- CVD、买卖比、imbalance、滚动均值、Z-score、velocity 等都能由上述字段无损或
+  因果地重新计算，因此不作为新的长期归档列保存。
+
+### 存储冻结原则
+
+当前磁盘空间不足以继续扩大 1s 长期归档宽度。P1 起冻结 1s 原始 schema：
+
+1. 不因为新增因子继续增加可派生字段；
+2. CVD 使用 `taker_buy_volume - taker_sell_volume` 在研究/回测时按窗口计算；
+3. Factor Dataset 默认按需生成，不默认永久保存全量秒级派生数据；
+4. 只有“无法从现有归档恢复、且经研究证明有显著增量价值”的数据，才进入未来
+   的存储扩展评审。
+
 ## 目标
 
 为 spike 插针逼空策略建立统一的实时/回测/研究数据层。

@@ -25,6 +25,34 @@ research report
 strategy configuration
 ```
 
+## 1.1 P1 数据约束：不再扩 1s 原始归档
+
+P0 已经提供完整度足够的 1s 聚合订单流数据。由于当前磁盘容量不支持继续扩大
+长期秒级数据，P1 明确采用“原始聚合冻结、派生因子按需计算”的方案。
+
+现有 1s 数据可直接用于 P1：
+
+```text
+OHLCV + quote_volume
+trade_count + raw_trade_count
+taker buy/sell base volume
+taker buy/sell quote volume
+taker buy/sell raw trade count
+taker buy/sell aggTrade count
+方向最大 aggTrade quantity
+trade / aggTrade ID 边界
+```
+
+其中：
+
+- base volume 表示基础资产数量；
+- quote volume 表示计价资产金额，USDT 合约中可理解为成交的 USDT 名义金额；
+- CVD、quote CVD、buy ratio、imbalance、rolling CVD、Z-score 等全部在 Factor Lab
+  运行时派生，不增加归档字段。
+
+P1 也不默认落盘全量 factor frame。默认只生成事件级 Dataset 和小型统计报告；
+是否保存事件集由研究命令显式决定。
+
 ---
 
 # 2. 当前项目结构分析
@@ -345,13 +373,10 @@ score config
 
 ## Step 1
 
-新增衍生品数据存储。
+冻结并复用当前数据层，不新增 1s 原始字段。
 
-完成：
-
-- OI
-- Funding
-- Long Short Ratio
+已有 metrics 归档则直接复用其中 5m OI / Long Short Ratio；Funding 在没有现成
+历史归档前不作为 P1 主流程的硬依赖，避免为了一个待验证因子先扩大数据存储。
 
 ---
 
@@ -398,6 +423,137 @@ score config
 
 - 引入深度学习
 - 删除现有评分系统
+
+---
+
+# 12. 当前 P1 实现状态（2026-08-21）
+
+已落地代码：
+
+```text
+src/trading_platform/research/factor_lab/
+├── dataset.py        # 只读加载现有 1s 归档、构建事件 Dataset
+├── event.py          # spike 事件检测与 cooldown 聚类
+├── labels.py         # 做空视角 future return / MFE / MAE / success 标签
+├── derivatives.py    # 复用现有 5m metrics，严格按 available_time 拼接
+├── analysis.py       # IC / Spearman IC / 月度 ICIR / 分位收益
+├── correlation.py    # 因子相关矩阵与高相关因子对
+├── horizon.py        # 5m/15m/30m/1h Signal Horizon 与离散 Half-life
+├── catalog.py        # 第一批因子分组与默认研究目录
+├── report.py         # 轻量 Markdown 报告
+├── workflow.py       # 事件级研究闭环
+└── cli.py            # 分 symbol、分时间块执行研究
+```
+
+第一批 Factor Group：
+
+```text
+price
+volume
+structure
+orderflow
+derivatives
+```
+
+原始 CVD / quote CVD 属于 scale-sensitive 因子，默认不进入跨 symbol 的自动比较；
+优先使用 `taker_buy_ratio`、`volume_imbalance`、`orderflow_exhaustion` 等归一化
+因子。需要单 symbol 研究原始 CVD 时再显式开启。
+
+## 12.1 默认标签
+
+每个事件生成：
+
+```text
+short_return_5m / 15m / 30m / 1h
+short_mfe_5m / 15m / 30m / 1h
+short_mae_5m / 15m / 30m / 1h
+success
+```
+
+所有收益均按做空仓位相对入场价计算，例如：
+
+```text
+short MFE = (entry - future_min) / entry
+short MAE = (future_max - entry) / entry
+```
+
+Factor 只能读取事件时点及以前的数据，未来窗口只允许由 label 阶段读取。
+
+## 12.2 Signal Horizon
+
+Factor Lab 会额外比较同一因子对：
+
+```text
+short_return_5m
+short_return_15m
+short_return_30m
+short_return_1h
+```
+
+的 Spearman IC，并记录：
+
+```text
+peak_horizon_seconds
+signal_half_life_seconds
+```
+
+Half-life 是当前离散研究周期上的近似值，不应当解释成精确到秒的物理半衰期。
+它用于决定某个因子更适合执行层、短 Alpha 还是较慢环境层。
+
+## 12.3 大数据执行方式
+
+禁止一次把“全市场 × 数月 1s Factor Frame”全部加载到内存。
+
+CLI 默认：
+
+```text
+一个 symbol
+    ↓
+24 小时时间块
+    ↓
+只读 1s 原始归档
+    ↓
+临时 Factor Frame
+    ↓
+事件级 Dataset
+    ↓
+释放秒级数据
+```
+
+最终只合并事件级 Dataset 做全市场统计，因此不会生成新的全量 1s factor archive。
+
+## 12.4 使用方式
+
+默认只向 stdout 输出报告，不保存 Dataset：
+
+```bash
+python -m trading_platform.research.factor_lab.cli \
+  data/market/candles/candles.duckdb \
+  --symbols BTCUSDT,ETHUSDT \
+  --start 2026-07-01T00:00:00+00:00 \
+  --end 2026-08-01T00:00:00+00:00
+```
+
+如果已有 metrics archive，可增加：
+
+```text
+--metrics-catalog data/market/metrics/metrics.duckdb
+```
+
+只有明确需要保留事件级研究样本时才使用：
+
+```text
+--dataset-out reports/factor_events.parquet
+```
+
+这不是全量秒级 Factor Frame，体积应远小于原始 1s 数据。
+
+## 12.5 当前 P1 不覆盖
+
+- 不新增 Funding 历史归档；有稳定现成数据源后再进入增量价值验证。
+- 不训练 Logistic / XGBoost；先完成统计筛因子和去冗余。
+- 不自动修改 `strategies/spike/scoring.py` 权重。
+- 不把研究因子写入实时策略路径，避免研究实现影响线上执行。
 - 加入大量技术指标
 - 保存全部trade tick历史
 
