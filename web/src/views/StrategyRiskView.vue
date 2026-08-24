@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { Ban, CheckCircle2, GitBranch, Search, ShieldCheck } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
@@ -8,11 +8,20 @@ import type { ExchangeCategory, StrategyCategoryAdmission, StrategyCategoryAdmis
 import DataState from '@/features/operations/DataState.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { formatDateTime } from '@/features/operations/format'
-import { collectPageItems } from '@/features/operations/pagination'
+import { collectPageItems } from '@/shared/pagination'
+import { useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
+import { formatDateTime } from '@/shared/format'
+
+/**
+ * 有效交易池的冻结期天数。
+ * 与执行 worker 的判定保持一致；改这里也要同步页面上的说明文案。
+ */
+const UNIVERSE_FREEZE_DAYS = 15
+/** 审计记录展示上限。 */
+const AUDIT_LIMIT = 100
 
 const route = useRoute()
-const router = useRouter()
+const syncQuery = useQuerySync()
 const strategies = ref<string[]>([])
 const strategyId = ref(String(route.query.strategy ?? ''))
 const categories = ref<ExchangeCategory[]>([])
@@ -24,10 +33,7 @@ const categorySearch = ref(String(route.query.category_q ?? ''))
 const universeSearch = ref(String(route.query.universe_q ?? ''))
 const initialMode = String(route.query.universe_mode ?? 'all')
 const universeMode = ref<'all' | 'effective' | 'excluded'>(initialMode === 'effective' || initialMode === 'excluded' ? initialMode : 'all')
-const loading = ref(false)
 const saving = ref(false)
-const error = ref<string | null>(null)
-const refreshedAt = ref<string | null>(null)
 const confirmOpen = ref(false)
 const pendingCategory = ref<ExchangeCategory | null>(null)
 const pendingEnabled = ref(false)
@@ -56,87 +62,80 @@ function policyLabel(item: ExchangeCategory): string {
   return admission.enabled ? '显式允许' : '显式关闭'
 }
 
-async function bootstrap() {
-  loading.value = true
-  error.value = null
-  try {
-    const [runtimePage, rows] = await Promise.all([
+/**
+ * 逐页拉全有效交易池。
+ *
+ * 不能只取第一页：本地还要做搜索和「有效/排除」筛选，取不全会漏交易对。
+ * 汇总字段（候选数、有效数）取最后一页的快照即可，服务端每页都一致。
+ */
+async function loadCompleteUniverse(): Promise<UniversePreview> {
+  const effective = universeMode.value === 'all' ? undefined : universeMode.value === 'effective'
+  const snapshots: UniversePreview[] = []
+  const page = await collectPageItems(async (params) => {
+    const response = await operationsApi.universePreview(strategyId.value, {
+      freeze_days: UNIVERSE_FREEZE_DAYS,
+      effective,
+      ...params
+    })
+    snapshots.push(response)
+    return response
+  })
+  const snapshot = snapshots.at(-1)
+  if (!snapshot) throw new Error('有效交易池接口未返回数据')
+  return { ...snapshot, items: page.items, limit: page.items.length || snapshot.limit, offset: 0 }
+}
+
+const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
+  // 策略清单只需要拉一次；之后切换策略只重取该策略的准入与交易池。
+  if (!strategies.value.length) {
+    const [runtimePage, categoryRows] = await Promise.all([
       collectPageItems((params) => operationsApi.runtimeStatus(params)),
       collectPageItems((params) => operationsApi.categoriesPage(true, params)).then((page) => page.items)
     ])
+    if (isStale()) return
     strategies.value = [...new Set(runtimePage.items.map((item) => item.strategy_id))].sort()
-    categories.value = rows
-    expanded.value = new Set(rows.filter((item) => item.category_type === 'CATEGORY').map((item) => item.category_key))
+    categories.value = categoryRows
+    expanded.value = new Set(categoryRows.filter((item) => item.category_type === 'CATEGORY').map((item) => item.category_key))
     if (!strategies.value.includes(strategyId.value)) strategyId.value = strategies.value[0] ?? ''
-    if (strategyId.value) await loadPolicy()
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '策略风控数据加载失败'
-  } finally { loading.value = false }
-}
-
-async function loadPolicy() {
+  }
   if (!strategyId.value) return
-  loading.value = true
-  error.value = null
-  try {
-    await syncUrl()
-    const [rules, universe, auditPage] = await Promise.all([
-      collectPageItems((params) => operationsApi.strategyAdmissionsPage(strategyId.value, params)).then((page) => page.items),
-      loadCompleteUniverse(),
-      operationsApi.strategyAdmissionAudits({ strategy_id: strategyId.value, limit: 100 })
-    ])
-    admissions.value = new Map(rules.map((item) => [item.category_key, item]))
-    preview.value = universe
-    audits.value = auditPage.items
-    refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '策略准入加载失败'
-  } finally { loading.value = false }
-}
 
-async function loadCompleteUniverse(): Promise<UniversePreview> {
-  const items: UniversePreviewItem[] = []
-  let snapshot: UniversePreview | null = null
-  const effective = universeMode.value === 'all' ? undefined : universeMode.value === 'effective'
-
-  do {
-    const page = await operationsApi.universePreview(strategyId.value, {
-      freeze_days: 15,
-      effective,
-      limit: 1000,
-      offset: items.length
-    })
-    snapshot = page
-    const expected = page.total
-    if (!page.items.length && items.length < expected) {
-      throw new Error(`有效交易池分页读取在 ${items.length}/${expected} 条时中断`)
-    }
-    items.push(...page.items)
-    if (items.length >= expected) break
-  } while (snapshot)
-
-  if (!snapshot) throw new Error('有效交易池接口未返回数据')
-  return { ...snapshot, items, limit: items.length || snapshot.limit, offset: 0 }
-}
+  const [rules, universe, auditPage] = await Promise.all([
+    collectPageItems((params) => operationsApi.strategyAdmissionsPage(strategyId.value, params)).then((page) => page.items),
+    loadCompleteUniverse(),
+    operationsApi.strategyAdmissionAudits({ strategy_id: strategyId.value, limit: AUDIT_LIMIT })
+  ])
+  if (isStale()) return
+  admissions.value = new Map(rules.map((item) => [item.category_key, item]))
+  preview.value = universe
+  audits.value = auditPage.items
+}, {
+  fallbackMessage: '策略风控数据加载失败',
+  onActivate: () => {
+    strategyId.value = String(route.query.strategy ?? strategyId.value)
+    categorySearch.value = String(route.query.category_q ?? '')
+    universeSearch.value = String(route.query.universe_q ?? '')
+  }
+})
 
 async function syncUrl() {
-  await router.replace({ query: {
-    ...(strategyId.value ? { strategy: strategyId.value } : {}),
-    ...(categorySearch.value.trim() ? { category_q: categorySearch.value.trim() } : {}),
-    ...(universeSearch.value.trim() ? { universe_q: universeSearch.value.trim() } : {}),
-    ...(universeMode.value !== 'all' ? { universe_mode: universeMode.value } : {})
-  } })
+  await syncQuery({
+    strategy: strategyId.value,
+    category_q: categorySearch.value.trim(),
+    universe_q: universeSearch.value.trim(),
+    universe_mode: universeMode.value === 'all' ? '' : universeMode.value
+  })
 }
 
 async function changeStrategy() {
   await syncUrl()
-  await loadPolicy()
+  await reload()
 }
 
 async function changeUniverseMode() {
   universeSearch.value = ''
   await syncUrl()
-  await loadPolicy()
+  await reload()
 }
 
 function requestChange(item: ExchangeCategory, value: boolean) {
@@ -154,28 +153,27 @@ async function saveChange() {
     await operationsApi.updateStrategyAdmission(strategyId.value, pendingCategory.value.category_key, { enabled: pendingEnabled.value, expected_version: current?.version ?? 0, updated_by: 'ledger-web', reason: reason.value.trim() })
     confirmOpen.value = false
     message.success(`${pendingCategory.value.name} 已${pendingEnabled.value ? '允许' : '关闭'}`)
-    await loadPolicy()
+    await reload()
   } catch (caught) {
     message.error(caught instanceof Error ? caught.message : '分类准入更新失败')
-    await loadPolicy()
+    await reload()
   } finally { saving.value = false }
 }
 
 function toggleTree(key: string) { const next = new Set(expanded.value); next.has(key) ? next.delete(key) : next.add(key); expanded.value = next }
 function reasons(item: UniversePreviewItem): string { return item.exclusion_reasons.length ? item.exclusion_reasons.join('；') : '通过交易所、全局与策略分类门禁' }
 
-onMounted(bootstrap)
 </script>
 
 <template>
   <main class="operations-page strategy-risk-page">
-    <PageHeader eyebrow="RISK / CATEGORY ADMISSION" title="策略风控" description="首期只管理选定策略的 Category/Subcategory 可选黑名单；不控制策略进程，也不配置仓位、杠杆或参数。" :loading="loading" :refreshed-at="refreshedAt" @refresh="strategyId ? loadPolicy() : bootstrap()" />
+    <PageHeader eyebrow="RISK / CATEGORY ADMISSION" title="策略风控" description="首期只管理选定策略的 Category/Subcategory 可选黑名单；不控制策略进程，也不配置仓位、杠杆或参数。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
     <div class="strategy-selector"><label><span>策略 *</span><a-select v-model:value="strategyId" show-search placeholder="选择运行状态中已知策略" :options="strategyOptions" :filter-option="(input: string, option: { label?: string }) => String(option.label || '').toLowerCase().includes(input.toLowerCase())" @change="changeStrategy" /></label><div><ShieldCheck :size="15" /><span>策略来源：账本 runtime status</span></div></div>
     <a-alert v-if="!strategies.length && !loading" type="warning" show-icon message="没有可选择的策略" description="策略选择器只使用账本运行状态中的真实 strategy_id，不提供容易输错的自由文本输入。" />
 
-    <DataState v-if="strategyId" :loading="loading" :error="error" @retry="loadPolicy">
+    <DataState v-if="strategyId" :loading="loading" :error="error" @retry="reload">
       <section v-if="preview" class="metric-grid preview-metrics">
-        <MetricTile label="候选交易对" :value="String(preview.total_symbols)" hint="交易所生命周期 + freeze_days=15" />
+        <MetricTile label="候选交易对" :value="String(preview.total_symbols)" :hint="`交易所生命周期 + freeze_days=${UNIVERSE_FREEZE_DAYS}`" />
         <MetricTile label="最终有效交易池" :value="String(preview.effective_symbols)" tone="positive" hint="与执行 worker 同源判定" />
         <MetricTile label="已排除交易对" :value="String(preview.excluded_symbols)" :tone="preview.excluded_symbols ? 'warning' : 'neutral'" hint="含上游全局与策略门禁" />
         <MetricTile label="显式关闭分类" :value="String([...admissions.values()].filter((item) => !item.enabled).length)" hint="空配置保持默认允许" />

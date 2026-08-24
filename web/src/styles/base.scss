@@ -22,10 +22,7 @@
   --line: #dbe3ee;
   --text: #1e293b;
   --muted: #64748b;
-  --chart-border: #cbd5e1;
-  --chart-grid: #e2e8f0;
   --chart-overlay: rgba(255, 255, 255, .96);
-  --chart-filled: #ea580c;
 }
 
 :root[data-theme='dark'] {
@@ -42,12 +39,36 @@
   --line: #27364a;
   --text: #dbe7f5;
   --muted: #94a8c1;
-  --chart-border: #41536b;
-  --chart-grid: #263243;
   --chart-overlay: rgba(17, 24, 39, .96);
-  --chart-filled: #fb923c;
 }
 
+/* ── 元素重置 ─────────────────────────────────────────────────────── */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: var(--app-bg);
+  color: var(--text);
+  font-family: var(--font-family-sans);
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ── 页面骨架 ─────────────────────────────────────────────────────── */
 .backtest-page,
 .operations-page {
   width: 100%;
@@ -85,8 +106,6 @@
 }
 .symbol-name, .mono-value, .report-value { font-family: var(--font-family-mono); }
 .report-value { display: block; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.value-positive { color: var(--color-success); }
-.value-negative { color: var(--color-danger); }
 .query-state { display: flex; align-items: center; justify-content: center; gap: 10px; min-height: 240px; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
 .error-state { color: var(--color-danger); }
 .query-empty { min-height: 240px; padding-top: 72px; border: 1px solid var(--line); border-radius: 6px; }
@@ -120,16 +139,12 @@
 .chart-section:fullscreen .candlestick-host { min-height: 0; }
 .chart-loading { display: flex; align-items: center; justify-content: center; gap: 12px; height: 420px; color: var(--muted); }
 .chart-legend { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; min-height: 36px; padding: 6px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: var(--font-size-xs); }
+/* 图例只描述线型；颜色由 chartTheme.ts 注入，确保和画布一致。 */
 .legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .legend-item i { display: inline-block; width: 18px; border-top: 2px solid currentColor; }
-.legend-item.signal { color: var(--color-warning); }
-.legend-item.signal i, .legend-item.pending i, .legend-item.invalid i { border-top-style: dashed; }
-.legend-item.pending { color: var(--color-info); }
-.legend-item.filled { color: var(--chart-filled); font-weight: 600; }
-.legend-item.filled i { border-top-width: 3px; }
-.legend-item.average { color: var(--text); }
-.legend-item.invalid { color: var(--color-danger); }
-.legend-item.exit { color: var(--color-success); }
+.legend-item.is-dashed i { border-top-style: dashed; }
+.legend-item.is-strong { font-weight: 600; }
+.legend-item.is-strong i { border-top-width: 3px; }
 .replay-details { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(300px, .6fr); gap: 14px; }
 .detail-section { margin-top: 14px; }
 .detail-section h3 { margin: 0 0 9px; font-size: var(--font-size-md); letter-spacing: 0; }
@@ -175,7 +190,6 @@
 .equity-tooltip dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 
 @media (max-width: 900px) {
-  .workspace { padding: 14px !important; }
   .trade-summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .trade-summary-strip > div { border-bottom: 1px solid var(--line); }
   .replay-details { grid-template-columns: 1fr; }
@@ -200,31 +214,6 @@
   .equity-summary-strip { grid-template-columns: 1fr; }
   .equity-chart-wrap { min-height: 320px; height: 48vh; }
   .equity-section-heading { align-items: flex-start; flex-direction: column; }
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#app {
-  height: 100%;
-}
-
-body {
-  margin: 0;
-  min-width: 320px;
-  background: var(--app-bg);
-  color: var(--text);
-  font-family: var(--font-family-sans);
-  font-size: var(--font-size-md);
-  line-height: 1.5;
-}
-
-a {
-  color: inherit;
-  text-decoration: none;
 }
 
 /* Shared operations console vocabulary. Values remain legible in both themes. */

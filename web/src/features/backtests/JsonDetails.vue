@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { JsonObject, StrategyField, StrategyGroup } from '@/api/types'
-import { displayValue } from './format'
+import { displayValue } from '@/shared/format'
 
 const props = defineProps<{
   value?: JsonObject

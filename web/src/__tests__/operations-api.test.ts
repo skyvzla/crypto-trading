@@ -1,15 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { operationsApi } from '@/api/operations'
+import { jsonResponse } from './httpMocks'
 
 beforeEach(() => {
   vi.restoreAllMocks()
 })
 
 function mockJson(payload: unknown = {}) {
-  vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-    ok: true,
-    json: () => Promise.resolve(payload)
-  } as Response)
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(payload))
 }
 
 function requestedUrl(): URL {
@@ -284,11 +282,9 @@ describe('operationsApi', () => {
   })
 
   it('propagates API failures instead of returning placeholder data', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
-      ok: false,
-      status: 503,
-      json: () => Promise.resolve({ detail: 'database unavailable' })
-    } as Response)
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse({ detail: 'database unavailable' }, { ok: false, status: 503 })
+    )
 
     await expect(operationsApi.health()).rejects.toEqual(
       expect.objectContaining({

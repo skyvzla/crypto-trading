@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, Maximize2, Minimize2, RefreshCw, RotateCcw, SlidersHorizontal } from 'lucide-vue-next'
 import { backtestApi } from '@/api/backtests'
 import type { BacktestCandle, ChartOverlay } from '@/api/types'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import TradeCandlestickChart from '@/features/backtests/TradeCandlestickChart.vue'
-import { timestampMs } from './format'
+import { getChartTheme } from '@/features/backtests/chartTheme'
+import { timestampMs } from '@/shared/time'
+import { IS_DARK_THEME } from '@/shared/theme'
 import type { TradeChartData, TradeChartFillDisplay, TradeChartFillTimeSemantics } from './tradeChart'
 
 const intervals = ['1s', '1m', '5m', '15m', '1h', '4h', '6h', '8h', '12h', '1d']
@@ -38,6 +40,32 @@ const props = withDefaults(defineProps<{
   fillTimeSemantics: 'backtest-confirmation',
   exitLabel: '退出成交',
   strategyLines: true
+})
+
+const isDarkTheme = inject(IS_DARK_THEME, computed(() => false))
+const palette = computed(() => getChartTheme(isDarkTheme.value))
+
+/**
+ * 图例。颜色直接取画布调色板，而不是在 CSS 里另抄一份，
+ * 否则改了 chartTheme，图例就会和实际标线不一致。
+ */
+const legendItems = computed(() => {
+  const colors = palette.value
+  if (props.fillDisplay === 'all') {
+    return [
+      { label: '买入', color: colors.filled, dashed: false, strong: true },
+      { label: '卖出', color: colors.invalid, dashed: false, strong: false },
+      { label: '开仓均价', color: colors.average, dashed: false, strong: false }
+    ]
+  }
+  return [
+    { label: '信号', color: colors.signal, dashed: true, strong: false },
+    { label: '未成交挂单', color: colors.pending, dashed: true, strong: false },
+    { label: '实际成交', color: colors.filled, dashed: false, strong: true },
+    { label: '开仓均价', color: colors.average, dashed: false, strong: false },
+    { label: '失效价', color: colors.invalid, dashed: true, strong: false },
+    { label: '退出', color: colors.exitProfit, dashed: false, strong: false }
+  ]
 })
 
 const interval = ref('5m')
@@ -184,19 +212,13 @@ watch(() => props.trade.entry_time, () => { focusTimeMs.value = null })
     </QueryPanel>
     <div class="chart-legend">
       <a-tag color="blue">{{ candlesQuery.data.value?.source === 'archive' ? '本地归档' : 'Binance' }}</a-tag>
-      <template v-if="fillDisplay === 'all'">
-        <span class="legend-item filled"><i />买入</span>
-        <span class="legend-item invalid"><i />卖出</span>
-        <span class="legend-item average"><i />开仓均价</span>
-      </template>
-      <template v-else>
-        <span class="legend-item signal"><i />信号</span>
-        <span class="legend-item pending"><i />未成交挂单</span>
-        <span class="legend-item filled"><i />实际成交</span>
-        <span class="legend-item average"><i />开仓均价</span>
-        <span class="legend-item invalid"><i />失效价</span>
-        <span class="legend-item exit"><i />退出</span>
-      </template>
+      <span
+        v-for="item in legendItems"
+        :key="item.label"
+        class="legend-item"
+        :class="{ 'is-dashed': item.dashed, 'is-strong': item.strong }"
+        :style="{ color: item.color }"
+      ><i />{{ item.label }}</span>
     </div>
   </section>
 </template>

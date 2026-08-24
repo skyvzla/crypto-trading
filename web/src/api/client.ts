@@ -11,7 +11,8 @@ import type {
   NotificationPolicyInput,
   NotificationDelivery,
   NotificationPublishResponse,
-  Page
+  Page,
+  PageParams
 } from '@/api/types'
 
 const BASE = '/api/v1'
@@ -39,6 +40,30 @@ function search(query?: Query): string {
   return qs ? `?${qs}` : ''
 }
 
+/**
+ * 读取响应体文本。
+ *
+ * 204/205 按协议没有 body；DELETE 之类的接口也可能返回 200 但 body 为空。
+ * 统一先取文本再决定是否解析，避免直接调用 `response.json()` 抛 SyntaxError。
+ */
+async function readBody(response: Response): Promise<string> {
+  if (response.status === 204 || response.status === 205) return ''
+  return response.text().catch(() => '')
+}
+
+/** FastAPI 的错误体统一是 `{detail: string}`；取不到时返回 null 交给调用方退回状态码。 */
+function parseErrorDetail(body: string): string | null {
+  if (!body) return null
+  try {
+    const parsed: unknown = JSON.parse(body)
+    return parsed && typeof parsed === 'object' && typeof (parsed as { detail?: unknown }).detail === 'string'
+      ? (parsed as { detail: string }).detail
+      : null
+  } catch {
+    return null
+  }
+}
+
 async function request<T>(
   path: string,
   init?: RequestInit & { query?: Query }
@@ -48,17 +73,17 @@ async function request<T>(
     headers: { 'Content-Type': 'application/json' },
     ...rest
   })
+  const body = await readBody(response)
   if (!response.ok) {
-    // FastAPI 的错误体统一是 {detail: string}，取不到时退回状态码。
-    const body = await response.json().catch(() => null)
-    const detail =
-      body && typeof body.detail === 'string'
-        ? body.detail
-        : `HTTP ${response.status}`
-    throw new ApiError(response.status, detail)
+    throw new ApiError(response.status, parseErrorDetail(body) ?? `HTTP ${response.status}`)
   }
-  if (response.status === 204) return undefined as T
-  return response.json() as Promise<T>
+  if (!body) return undefined as T
+  try {
+    return JSON.parse(body) as T
+  } catch {
+    // 200 但 body 不是合法 JSON 属于服务端故障，包装成 ApiError 让页面统一展示。
+    throw new ApiError(response.status, '服务端返回了无法解析的响应体')
+  }
 }
 
 export const api = {
@@ -76,18 +101,24 @@ export const api = {
 
 const NOTIFICATIONS = '/notifications'
 
-/** REST client for notification configuration and delivery operations. */
+/**
+ * REST client for notification configuration and delivery operations.
+ *
+ * 配置类列表接受标准分页参数，由调用方用 collectPageItems 逐页取全，
+ * 而不是在这里硬编码一个「足够大」的 limit 假装不用分页。
+ */
 export const notificationApi = {
   overview: () => api.get<NotificationOverview>(`${NOTIFICATIONS}/overview`),
-  connectors: () => api.get<Page<NotificationConnector>>(`${NOTIFICATIONS}/connectors`, { limit: 1000 }),
+  connectors: (query: PageParams = {}) =>
+    api.get<Page<NotificationConnector>>(`${NOTIFICATIONS}/connectors`, { ...query }),
   createConnector: (body: NotificationConnectorInput) =>
     api.post<NotificationConnector>(`${NOTIFICATIONS}/connectors`, body),
   updateConnector: (id: string, body: NotificationConnectorInput & { expected_version: number }) =>
     api.put<NotificationConnector>(`${NOTIFICATIONS}/connectors/${encodeURIComponent(id)}`, body),
   deleteConnector: (id: string, expectedVersion: number) =>
     api.delete<void>(`${NOTIFICATIONS}/connectors/${encodeURIComponent(id)}`, { expected_version: expectedVersion }),
-  endpoints: (connectorId?: string) =>
-    api.get<Page<NotificationEndpoint>>(`${NOTIFICATIONS}/endpoints`, { limit: 1000, ...(connectorId ? { connector_id: connectorId } : {}) }),
+  endpoints: (query: PageParams & { connector_id?: string } = {}) =>
+    api.get<Page<NotificationEndpoint>>(`${NOTIFICATIONS}/endpoints`, { ...query }),
   createEndpoint: (body: NotificationEndpointInput) =>
     api.post<NotificationEndpoint>(`${NOTIFICATIONS}/endpoints`, body),
   updateEndpoint: (id: string, body: NotificationEndpointInput & { expected_version: number }) =>
@@ -96,14 +127,16 @@ export const notificationApi = {
     api.delete<void>(`${NOTIFICATIONS}/endpoints/${encodeURIComponent(id)}`, { expected_version: expectedVersion }),
   testEndpoint: (id: string, body?: { title?: string; body?: string; payload?: Record<string, unknown> }) =>
     api.post<NotificationPublishResponse>(`${NOTIFICATIONS}/endpoints/${encodeURIComponent(id)}/test`, body),
-  groups: () => api.get<Page<NotificationGroup>>(`${NOTIFICATIONS}/groups`, { limit: 1000 }),
+  groups: (query: PageParams = {}) =>
+    api.get<Page<NotificationGroup>>(`${NOTIFICATIONS}/groups`, { ...query }),
   createGroup: (body: NotificationGroupInput) =>
     api.post<NotificationGroup>(`${NOTIFICATIONS}/groups`, body),
   updateGroup: (id: string, body: NotificationGroupInput & { expected_version: number }) =>
     api.put<NotificationGroup>(`${NOTIFICATIONS}/groups/${encodeURIComponent(id)}`, body),
   deleteGroup: (id: string, expectedVersion: number) =>
     api.delete<void>(`${NOTIFICATIONS}/groups/${encodeURIComponent(id)}`, { expected_version: expectedVersion }),
-  policies: () => api.get<Page<NotificationPolicy>>(`${NOTIFICATIONS}/policies`, { limit: 1000 }),
+  policies: (query: PageParams = {}) =>
+    api.get<Page<NotificationPolicy>>(`${NOTIFICATIONS}/policies`, { ...query }),
   createPolicy: (body: NotificationPolicyInput) =>
     api.post<NotificationPolicy>(`${NOTIFICATIONS}/policies`, body),
   updatePolicy: (id: string, body: NotificationPolicyInput & { expected_version: number }) =>

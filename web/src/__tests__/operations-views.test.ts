@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { router } from '@/router'
 import { operationsApi } from '@/api/operations'
+import App from '@/App.vue'
 import OverviewView from '@/views/OverviewView.vue'
 import CalendarView from '@/views/CalendarView.vue'
 import CategoryManagementView from '@/views/CategoryManagementView.vue'
@@ -413,5 +414,29 @@ describe('operations views', () => {
     expect(wrapper.text()).toContain('ETHUSDT')
     expect(wrapper.text()).toContain('通过交易所、全局与策略分类门禁')
     expect(universePreview).toHaveBeenNthCalledWith(2, 'spike-short', expect.objectContaining({ limit: 1000, offset: 1 }))
+  })
+
+  it('被 KeepAlive 缓存的页面重新激活时按当前 URL 重新取数', async () => {
+    // 运行总览会被一并挂载，给它一套最小桩避免噪音。
+    vi.spyOn(operationsApi, 'health').mockResolvedValue({ status: 'healthy', service: 'ledger', timestamp: '2026-08-16T00:00:00Z' })
+    vi.spyOn(operationsApi, 'runtimeStatus').mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 })
+    vi.spyOn(operationsApi, 'orders').mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 })
+    vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 6, offset: 0 })
+    vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([])
+    const positions = vi.spyOn(operationsApi, 'positions').mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 })
+
+    await router.push('/positions?account_id=first')
+    const wrapper = mount(App)
+    await flushPromises()
+    expect(positions).toHaveBeenLastCalledWith(expect.objectContaining({ account_id: 'first' }))
+
+    // 离开后再带着不同筛选回来：缓存实例必须跟上地址栏，而不是继续显示上一次的条件。
+    await router.push('/overview')
+    await flushPromises()
+    await router.push('/positions?account_id=second')
+    await flushPromises()
+
+    expect(positions).toHaveBeenLastCalledWith(expect.objectContaining({ account_id: 'second' }))
+    wrapper.unmount()
   })
 })

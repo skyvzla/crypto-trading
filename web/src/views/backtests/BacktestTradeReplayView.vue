@@ -7,7 +7,8 @@ import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import JsonDetails from '@/features/backtests/JsonDetails.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
-import { formatNumber, formatPercent, formatTime, pnlClass, timestampMs } from '@/features/backtests/format'
+import { formatDateTime, formatNumber, formatPercent, pnlClass } from '@/shared/format'
+import { timestampMs } from '@/shared/time'
 
 const route = useRoute()
 const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
@@ -81,9 +82,9 @@ const crumbs = computed(() => openedFromEquity.value
     <QueryPanel :pending="tradeQuery.isPending.value" :error="tradeQuery.error.value" @retry="tradeQuery.refetch()">
       <template v-if="tradeQuery.data.value">
         <div class="trade-summary-strip">
-          <div><span>首笔成交确认</span><strong>{{ formatTime(tradeQuery.data.value.entry_time) }}</strong></div>
+          <div><span>首笔成交确认</span><strong>{{ formatDateTime(tradeQuery.data.value.entry_time) }}</strong></div>
           <div><span>开仓均价</span><strong>{{ formatNumber(tradeQuery.data.value.average_entry_price ?? tradeQuery.data.value.entry_price, 8) }}</strong></div>
-          <div><span>退出时间</span><strong>{{ formatTime(tradeQuery.data.value.exit_time) }}</strong></div>
+          <div><span>退出时间</span><strong>{{ formatDateTime(tradeQuery.data.value.exit_time) }}</strong></div>
           <div><span>净盈亏</span><strong :class="pnlClass(tradeQuery.data.value.net_pnl)">{{ formatNumber(tradeQuery.data.value.net_pnl) }} U</strong></div>
           <div><span>收益率</span><strong>{{ formatPercent(tradeQuery.data.value.net_return) }}</strong></div>
           <div class="fill-status"><span>成交档位</span><strong>{{ `已成交 ${filledTierCount} / ${tierDetails.length} 档` }}</strong></div>
@@ -98,15 +99,15 @@ const crumbs = computed(() => openedFromEquity.value
           <section class="detail-section">
             <h3>成交明细</h3>
             <a-descriptions :column="3" layout="vertical" bordered>
-              <a-descriptions-item label="信号时间">{{ formatTime(tradeQuery.data.value.signal_time) }}</a-descriptions-item>
+              <a-descriptions-item label="信号时间">{{ formatDateTime(tradeQuery.data.value.signal_time) }}</a-descriptions-item>
               <a-descriptions-item label="信号价格">{{ formatNumber(tradeQuery.data.value.signal_price, 8) }}</a-descriptions-item>
               <a-descriptions-item label="失效价格">{{ formatNumber(tradeQuery.data.value.invalid_price, 8) }}</a-descriptions-item>
               <a-descriptions-item v-for="tier in tierDetails" :key="tier.index" :label="tier.filled ? `${entrySideLabel}${tier.index}` : `限${entrySideLabel}${tier.index}`">
                 <span class="tier-price">{{ formatNumber(tier.price, 8) }}</span>
                 <a-tag :color="tier.filled ? 'success' : 'default'" class="tier-status">{{ tier.filled ? '已成交' : '未成交' }}</a-tag>
                 <span v-if="tier.filled" class="tier-times">
-                  <span>触发 K线 {{ formatTime(tier.triggerTime) }}</span>
-                  <span>确认 {{ formatTime(tier.confirmationTime) }}</span>
+                  <span>触发 K线 {{ formatDateTime(tier.triggerTime) }}</span>
+                  <span>确认 {{ formatDateTime(tier.confirmationTime) }}</span>
                 </span>
               </a-descriptions-item>
             </a-descriptions>
@@ -114,7 +115,7 @@ const crumbs = computed(() => openedFromEquity.value
           <section class="detail-section timeline-section">
             <h3>事件时间线</h3>
             <QueryPanel :pending="eventsQuery.isPending.value" :error="eventsQuery.error.value" :empty="eventsQuery.data.value?.items.length === 0" @retry="eventsQuery.refetch()">
-              <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id"><div class="event-heading"><strong>{{ event.title || event.type }}</strong><time>{{ formatTime(event.time) }}</time></div><div class="event-content">{{ eventContent(event) }}</div></a-timeline-item></a-timeline>
+              <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id"><div class="event-heading"><strong>{{ event.title || event.type }}</strong><time>{{ formatDateTime(event.time) }}</time></div><div class="event-content">{{ eventContent(event) }}</div></a-timeline-item></a-timeline>
             </QueryPanel>
           </section>
         </div>

@@ -9,8 +9,13 @@ import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vu
 import type { TradeChartData } from '@/features/backtests/tradeChart'
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { collectPageItems } from '@/features/operations/pagination'
-import { formatDateTime, formatMoney, pnlClass, sideLabel } from '@/features/operations/format'
+import { collectPageItems } from '@/shared/pagination'
+import { useLedgerLoader } from '@/features/operations/useOperationsView'
+import { formatDateTime, formatDurationMs, formatMoney, pnlClass, sideLabel, toNumberOrNull } from '@/shared/format'
+import { timestampMs } from '@/shared/time'
+
+/** 策略审计事件展示上限。 */
+const EVENT_LIMIT = 200
 
 const route = useRoute()
 const router = useRouter()
@@ -20,38 +25,28 @@ const strategyId = computed(() => String(route.query.strategy_id ?? '').trim())
 const symbol = computed(() => String(route.query.symbol ?? '').trim())
 const routeReady = computed(() => Boolean(campaignId.value && accountId.value && strategyId.value && symbol.value))
 const routeKey = computed(() => `${accountId.value}:${strategyId.value}:${symbol.value}:${campaignId.value}`)
-const loading = ref(false)
-const error = ref<string | null>(null)
 const campaignPnl = ref<CampaignPnL | null>(null)
 const campaignPnlError = ref<string | null>(null)
 const fills = ref<LedgerTrade[]>([])
 const fillError = ref<string | null>(null)
 const events = ref<StrategyAuditEvent[]>([])
 const eventError = ref<string | null>(null)
-const refreshedAt = ref<string | null>(null)
 
-const sortedFills = computed(() => [...fills.value].sort((left, right) => {
-  const leftTime = Date.parse(left.exchange_time)
-  const rightTime = Date.parse(right.exchange_time)
-  return (Number.isNaN(leftTime) ? 0 : leftTime) - (Number.isNaN(rightTime) ? 0 : rightTime)
-}))
-
-function numberValue(value: string | number | null | undefined): number | null {
-  const number = Number(value)
-  return Number.isFinite(number) ? number : null
-}
+const sortedFills = computed(() => [...fills.value].sort(
+  (left, right) => (timestampMs(left.exchange_time) ?? 0) - (timestampMs(right.exchange_time) ?? 0)
+))
 
 const campaignChartTrade = computed<TradeChartData | null>(() => {
   const [firstFill] = sortedFills.value
   const lastFill = sortedFills.value.at(-1)
   if (!firstFill || !lastFill) return null
   const firstSide = String(firstFill.side).toUpperCase()
-  const firstPrice = numberValue(firstFill.price)
-  const lastPrice = numberValue(lastFill.price)
+  const firstPrice = toNumberOrNull(firstFill.price)
+  const lastPrice = toNumberOrNull(lastFill.price)
   if (firstPrice === null || lastPrice === null) return null
   const averageEntry = firstSide === 'BUY'
-    ? numberValue(campaignPnl.value?.buy_avg_price)
-    : numberValue(campaignPnl.value?.sell_avg_price)
+    ? toNumberOrNull(campaignPnl.value?.buy_avg_price)
+    : toNumberOrNull(campaignPnl.value?.sell_avg_price)
   return {
     symbol: symbol.value,
     side: firstSide,
@@ -60,14 +55,14 @@ const campaignChartTrade = computed<TradeChartData | null>(() => {
     average_entry_price: averageEntry ?? firstPrice,
     exit_time: lastFill.exchange_time,
     exit_price: lastPrice,
-    net_pnl: numberValue(campaignPnl.value?.net_realized_pnl) ?? 0,
+    net_pnl: toNumberOrNull(campaignPnl.value?.net_realized_pnl) ?? 0,
     fills: sortedFills.value.flatMap((fill) => {
-      const price = numberValue(fill.price)
+      const price = toNumberOrNull(fill.price)
       return price === null ? [] : [{
         id: String(fill.id),
         time: fill.exchange_time,
         price,
-        quantity: numberValue(fill.quantity),
+        quantity: toNumberOrNull(fill.quantity),
         side: fill.side
       }]
     })
@@ -84,21 +79,11 @@ const fillColumns: TableColumnsType<LedgerTrade> = [
   { title: '订单 / 成交', key: 'ids', width: 220, customRender: ({ record }) => `${record.order_id} / ${record.trade_id}` }
 ]
 
-function formatDuration(value: number | null): string {
-  if (value == null) return '—'
-  const seconds = Math.max(0, Math.round(value / 1000))
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.floor(seconds / 60)
-  return `${minutes}m ${seconds % 60}s`
-}
-
 function failureMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback
 }
 
-async function load() {
-  loading.value = true
-  error.value = null
+const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
   campaignPnl.value = null
   campaignPnlError.value = null
   fills.value = []
@@ -106,15 +91,15 @@ async function load() {
   events.value = []
   eventError.value = null
   if (!routeReady.value) {
-    error.value = 'Campaign 链接缺少账户、策略或交易对身份。'
-    loading.value = false
-    return
+    throw new Error('Campaign 链接缺少账户、策略或交易对身份。')
   }
+  // 三个来源独立成败：PnL 不可用时仍要展示权威账本成交。
   const [pnlResult, eventResult, fillResult] = await Promise.allSettled([
     operationsApi.campaignPnl(campaignId.value, { account_id: accountId.value, strategy_id: strategyId.value }),
-    operationsApi.strategyAuditEvents({ account_id: accountId.value, strategy_id: strategyId.value, campaign_id: campaignId.value, limit: 200 }),
+    operationsApi.strategyAuditEvents({ account_id: accountId.value, strategy_id: strategyId.value, campaign_id: campaignId.value, limit: EVENT_LIMIT }),
     collectPageItems((page) => operationsApi.trades({ account_id: accountId.value, strategy_id: strategyId.value, symbol: symbol.value, campaign_id: campaignId.value, ...page }))
   ])
+  if (isStale()) return
   campaignPnl.value = pnlResult.status === 'fulfilled' ? pnlResult.value : null
   campaignPnlError.value = pnlResult.status === 'rejected' ? failureMessage(pnlResult.reason, 'Campaign PnL 事实不完整') : null
   events.value = eventResult.status === 'fulfilled' ? eventResult.value.items : []
@@ -122,11 +107,9 @@ async function load() {
   fills.value = fillResult.status === 'fulfilled' ? fillResult.value.items : []
   fillError.value = fillResult.status === 'rejected' ? failureMessage(fillResult.reason, '账本成交读取失败') : null
   if (pnlResult.status === 'rejected' && eventResult.status === 'rejected' && fillResult.status === 'rejected') {
-    error.value = 'Campaign 明细读取失败'
+    throw new Error('Campaign 明细读取失败')
   }
-  refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-  loading.value = false
-}
+}, { fallbackMessage: 'Campaign 明细读取失败', loadOnMount: false })
 
 function backToTrades() {
   void router.push({
@@ -139,18 +122,19 @@ function backToTrades() {
   })
 }
 
-watch(routeKey, () => { void load() }, { immediate: true })
+// 详情页身份来自路由，参数变化即重新加载（KeepAlive 缓存下同样成立）。
+watch(routeKey, () => { void reload() }, { immediate: true })
 </script>
 
 <template>
   <main class="operations-page campaign-detail-page">
-    <PageHeader eyebrow="ANALYSIS / EXECUTION TRACE" :title="symbol ? `${symbol} Campaign 成交` : 'Campaign 成交'" description="查看完整账本成交、K 线买卖点与策略审计事件。" :loading="loading" :refreshed-at="refreshedAt" @refresh="load">
+    <PageHeader eyebrow="ANALYSIS / EXECUTION TRACE" :title="symbol ? `${symbol} Campaign 成交` : 'Campaign 成交'" description="查看完整账本成交、K 线买卖点与策略审计事件。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload">
       <template #actions>
         <a-tooltip title="返回成交复盘"><a-button type="text" shape="circle" aria-label="返回成交复盘" @click="backToTrades"><ArrowLeft :size="16" /></a-button></a-tooltip>
       </template>
     </PageHeader>
 
-    <DataState :loading="loading" :error="error" @retry="load">
+    <DataState :loading="loading" :error="error" @retry="reload">
       <section class="campaign-identity">
         <div><span>CAMPAIGN</span><strong>{{ campaignId || '—' }}</strong></div>
         <div><span>SYMBOL</span><strong>{{ symbol || '—' }}</strong></div>
@@ -165,7 +149,7 @@ watch(routeKey, () => { void load() }, { immediate: true })
         <article><span>状态</span><strong>{{ campaignPnl.closed_at ? '已结束' : campaignPnl.has_open_quantity ? '仍有敞口' : '事实不完整' }}</strong></article>
         <article><span>卖出 / 买入均价</span><strong>{{ formatMoney(campaignPnl.sell_avg_price, 6) }} / {{ formatMoney(campaignPnl.buy_avg_price, 6) }}</strong></article>
         <article><span>闭合时间</span><strong>{{ formatDateTime(campaignPnl.closed_at) }}</strong></article>
-        <article><span>生命周期</span><strong>{{ formatDuration(campaignPnl.lifecycle_duration_ms) }}</strong></article>
+        <article><span>生命周期</span><strong>{{ formatDurationMs(campaignPnl.lifecycle_duration_ms) }}</strong></article>
       </section>
       <a-alert v-if="campaignPnl" type="info" show-icon message="资金费、滑点与规范化退出原因暂不可用" :description="campaignPnl.has_open_quantity ? '该 Campaign 尚有敞口；当前数值是截至最新 fill 的账本已实现 PnL 扣 USDT 手续费，不是最终轮次收益。' : '该 Campaign 已完整闭合；净 PnL 为账本 realized_pnl 扣 USDT 手续费。'" />
       <a-alert v-else-if="campaignPnlError" type="warning" show-icon message="Campaign 净 PnL 不可用" :description="`${campaignPnlError}；下方仍展示权威账本成交。`" />

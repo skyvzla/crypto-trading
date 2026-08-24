@@ -175,18 +175,21 @@ export interface OrderQuery extends LedgerFilters, PageParams {
   active_only?: boolean
 }
 
+/** 后端接受的日界线取值。请求侧统一用这个别名，不要再抄字面量联合。 */
+export type LedgerTimezone = 'UTC' | 'Asia/Shanghai'
+
 export interface TradeQuery extends LedgerFilters, PageParams {
   campaign_id?: string
   start_date?: string
   end_date?: string
-  timezone?: 'UTC' | 'Asia/Shanghai'
+  timezone?: LedgerTimezone
 }
 
 export interface CampaignQuery extends LedgerFilters, PageParams {
   campaign_id?: string
   start_date?: string
   end_date?: string
-  timezone?: 'UTC' | 'Asia/Shanghai'
+  timezone?: LedgerTimezone
 }
 
 export interface PositionQuery extends LedgerFilters, PageParams {}
@@ -208,7 +211,7 @@ export interface PnLQuery extends LedgerFilters {
 export interface DailyPnLQuery extends LedgerFilters {
   start_date: string
   end_date: string
-  timezone?: 'UTC' | 'Asia/Shanghai'
+  timezone?: LedgerTimezone
 }
 
 export interface LedgerAccount {
@@ -219,7 +222,7 @@ export interface PerformanceQuery extends LedgerFilters {
   account_id: string
   start_date: string
   end_date: string
-  timezone?: 'UTC' | 'Asia/Shanghai'
+  timezone?: LedgerTimezone
 }
 
 export interface AdmissionUpdate {
@@ -315,7 +318,7 @@ export interface DailyPnL {
   account_id: string | null
   strategy_id: string | null
   symbol: string | null
-  timezone: 'UTC' | 'Asia/Shanghai'
+  timezone: LedgerTimezone
   campaign_count: number
   fill_count: number
   trade_count: number

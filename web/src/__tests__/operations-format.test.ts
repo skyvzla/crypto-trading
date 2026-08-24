@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { sideLabel } from '@/features/operations/format'
+import { sideLabel } from '@/shared/format'
 
 describe('运营页方向格式化', () => {
   it('将交易与持仓方向统一显示为买卖', () => {

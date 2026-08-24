@@ -8,8 +8,8 @@ import { backtestApi } from '@/api/backtests'
 import type { BacktestResearch } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
-import { formatNumber, formatPercent, formatTime, pnlClass } from '@/features/backtests/format'
-import { useBacktestPagination } from '@/features/backtests/pagination'
+import { formatDateTime, formatNumber, formatPercent, pnlClass } from '@/shared/format'
+import { useBacktestPagination } from '@/features/backtests/useBacktestPagination'
 
 const { page, pageSize, preservedQuery } = useBacktestPagination(25, 'research')
 const query = useQuery({
@@ -25,7 +25,7 @@ const columns: TableColumnsType<BacktestResearch> = [
   { title: '交易数', key: 'trade_count', dataIndex: 'trade_count', width: 90 },
   { title: '胜率', key: 'win_rate', dataIndex: 'win_rate', width: 90, customRender: ({ record: row }) => formatPercent(row.win_rate) },
   { title: '最佳参数净盈亏', key: 'net_pnl', dataIndex: 'net_pnl', width: 140, customRender: ({ record: row }) => h('span', { class: pnlClass(row.net_pnl) }, formatNumber(row.net_pnl)) },
-  { title: '创建时间', key: 'created_at', dataIndex: 'created_at', width: 180, customRender: ({ record: row }) => formatTime(row.created_at) },
+  { title: '创建时间', key: 'created_at', dataIndex: 'created_at', width: 180, customRender: ({ record: row }) => formatDateTime(row.created_at) },
   {
     title: '操作', key: 'actions', width: 154, fixed: 'right',
     customRender: ({ record: row }) => h(Space, { size: 4 }, () => [

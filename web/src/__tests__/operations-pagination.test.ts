@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { collectPageItems } from '@/features/operations/pagination'
+import { collectPageItems } from '@/shared/pagination'
 
 describe('operations pagination', () => {
   it('continues loading until the server total is complete', async () => {

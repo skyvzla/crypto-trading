@@ -8,8 +8,8 @@ import { backtestApi } from '@/api/backtests'
 import type { BacktestSymbolSummary } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
-import { formatDuration, formatNumber, formatPercent, pnlClass } from '@/features/backtests/format'
-import { useBacktestPagination } from '@/features/backtests/pagination'
+import { formatDuration, formatNumber, formatPercent, pnlClass } from '@/shared/format'
+import { useBacktestPagination } from '@/features/backtests/useBacktestPagination'
 
 const route = useRoute()
 const router = useRouter()

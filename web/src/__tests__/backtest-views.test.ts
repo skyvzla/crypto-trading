@@ -1,5 +1,4 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import BacktestResearchListView from '@/views/backtests/BacktestResearchListView.vue'
 import BacktestReportDetailView from '@/views/backtests/BacktestReportDetailView.vue'
@@ -25,9 +24,9 @@ vi.mock('@/api/backtests', () => ({
   }
 }))
 
-function plugins(path = '/') {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-  return router.push(path).then(() => ({ list: [[VueQueryPlugin, { queryClient }]] as const }))
+/** vue-query 已在 vitest.setup.ts 全局安装，这里只需把路由推到目标地址。 */
+async function atRoute(path = '/') {
+  await router.push(path)
 }
 
 beforeEach(() => vi.clearAllMocks())
@@ -38,8 +37,8 @@ describe('回测关键视图', () => {
       items: [{ id: 'r-1', name: '7月全币种参数研究', strategy_id: 'spike-short', status: 'completed', trade_count: 1007, symbol_count: 494, win_rate: 0.67, net_pnl: 3304.57, created_at: '2026-08-10T08:00:00Z' }],
       total: 1, limit: 25, offset: 0
     })
-    const { list } = await plugins()
-    const wrapper = mount(BacktestResearchListView, { global: { plugins: list as never } })
+    await atRoute()
+    const wrapper = mount(BacktestResearchListView)
     await flushPromises()
     expect(wrapper.text()).toContain('7月全币种参数研究')
     const links = wrapper.findAll('a').map((item) => item.attributes('href'))
@@ -54,8 +53,8 @@ describe('回测关键视图', () => {
       columns: [{ key: 'bucket', title: '盈亏区间' }, { key: 'trade_count', title: '交易数', type: 'number' }],
       rows: [{ bucket: '盈利大于10U', trade_count: 18 }], total: 1, limit: 50, offset: 0
     })
-    const { list } = await plugins('/backtests/r-1/reports/pnl_bucket')
-    const wrapper = mount(BacktestReportDetailView, { global: { plugins: list as never } })
+    await atRoute('/backtests/r-1/reports/pnl_bucket')
+    const wrapper = mount(BacktestReportDetailView)
     await flushPromises()
     expect(wrapper.text()).toContain('盈亏金额分组')
     expect(wrapper.text()).toContain('盈亏区间')
@@ -68,8 +67,8 @@ describe('回测关键视图', () => {
     vi.mocked(backtestApi.symbols).mockResolvedValue({
       items: [{ symbol: 'AKEUSDT', trade_count: 2, win_rate: 0.5, net_pnl: -10 }], total: 1, limit: 25, offset: 0
     })
-    const { list } = await plugins('/backtests/r-1/symbols?symbol_filter=AKE&sort_by=win_rate&sort_order=asc')
-    const wrapper = mount(BacktestSymbolListView, { global: { plugins: list as never } })
+    await atRoute('/backtests/r-1/symbols?symbol_filter=AKE&sort_by=win_rate&sort_order=asc')
+    const wrapper = mount(BacktestSymbolListView)
     await flushPromises()
     expect(backtestApi.symbols).toHaveBeenCalledWith('r-1', 25, 0, 'AKE', 'win_rate', 'asc')
     expect((wrapper.get('input').element as HTMLInputElement).value).toBe('AKE')
@@ -83,8 +82,8 @@ describe('回测关键视图', () => {
       limit,
       offset
     }))
-    const { list } = await plugins('/backtests/r-1/symbols?symbol_filter=NO_MATCH')
-    const wrapper = mount(BacktestSymbolListView, { global: { plugins: list as never } })
+    await atRoute('/backtests/r-1/symbols?symbol_filter=NO_MATCH')
+    const wrapper = mount(BacktestSymbolListView)
     await flushPromises()
 
     expect(wrapper.find('.query-empty').exists()).toBe(true)
@@ -103,8 +102,8 @@ describe('回测关键视图', () => {
       items: [{ id: 't-1', symbol: 'AKEUSDT', entry_time: 1_750_000_000_000, entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10, net_return: -0.1, winner: false }],
       total: 1, limit: 25, offset: 0
     })
-    const { list } = await plugins('/backtests/r-1/symbols/AKEUSDT/trades?result=loss&min_pnl=-100&trade_sort_by=net_pnl&trade_sort_order=asc')
-    const wrapper = mount(BacktestTradeListView, { global: { plugins: list as never } })
+    await atRoute('/backtests/r-1/symbols/AKEUSDT/trades?result=loss&min_pnl=-100&trade_sort_by=net_pnl&trade_sort_order=asc')
+    const wrapper = mount(BacktestTradeListView)
     await flushPromises()
     expect(backtestApi.trades).toHaveBeenCalledWith('r-1', 'AKEUSDT', 25, 0, expect.objectContaining({
       winner: false, min_pnl: -100, sort_by: 'net_pnl', sort_order: 'asc'
@@ -121,9 +120,9 @@ describe('回测关键视图', () => {
       parameters: {},
       items: [{ id: 't-1', symbol: 'AKEUSDT', entry_time: 1_750_000_000_000, exit_time: 1_750_001_800_000, entry_price: 1, exit_price: 0.9, net_pnl: 50, gross_pnl: 50, entry_notional: 500, gross_return: 0.1 }]
     })
-    const { list } = await plugins('/backtests/r-1/equity')
+    await atRoute('/backtests/r-1/equity')
     const wrapper = mount(BacktestEquityReplayView, {
-      global: { plugins: list as never, stubs: { EquityCurveChart: true } }
+      global: { stubs: { EquityCurveChart: true } }
     })
     await flushPromises()
 
@@ -147,9 +146,9 @@ describe('回测关键视图', () => {
     vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
     vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
     vi.mocked(backtestApi.candles).mockResolvedValue({ symbol: 'AKEUSDT', interval: '5m', source: 'binance', candles: [] })
-    const { list } = await plugins('/backtests/r-1/trades/t-1?from=equity')
+    await atRoute('/backtests/r-1/trades/t-1?from=equity')
     const wrapper = mount(BacktestTradeReplayView, {
-      global: { plugins: list as never, stubs: { TradeCandlestickChart: true } }
+      global: { stubs: { TradeCandlestickChart: true } }
     })
     await flushPromises()
 
@@ -177,9 +176,9 @@ describe('回测关键视图', () => {
       symbol: 'AKEUSDT', interval: '5m', source: 'binance',
       candles: [{ time: 1_750_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }]
     })
-    const { list } = await plugins('/backtests/r-1/trades/t-1?symbol_filter=AKE&result=loss')
+    await atRoute('/backtests/r-1/trades/t-1?symbol_filter=AKE&result=loss')
     const wrapper = mount(BacktestTradeReplayView, {
-      global: { plugins: list as never, stubs: { TradeCandlestickChart: true } }
+      global: { stubs: { TradeCandlestickChart: true } }
     })
     await flushPromises()
     expect(wrapper.find('.event-heading').text()).toContain('entry_plan_created')

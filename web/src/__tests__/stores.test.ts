@@ -1,39 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
-import { useFiltersStore } from '@/stores/filters'
 import { useHealthStore } from '@/stores/health'
+import { jsonResponse } from './httpMocks'
 
 beforeEach(() => {
   setActivePinia(createPinia())
-})
-
-describe('filters store', () => {
-  it('starts with empty filters', () => {
-    const store = useFiltersStore()
-    expect(store.accountId).toBe('')
-    expect(store.strategyId).toBe('')
-    expect(store.symbol).toBe('')
-  })
-
-  it('query drops empty fields', () => {
-    const store = useFiltersStore()
-    expect(store.query).toEqual({})
-    store.symbol = 'BTCUSDT'
-    expect(store.query).toEqual({ symbol: 'BTCUSDT' })
-    store.symbol = '  '
-    expect(store.query).toEqual({})
-  })
-
-  it('reset clears all fields', () => {
-    const store = useFiltersStore()
-    store.accountId = 'acc1'
-    store.strategyId = 's1'
-    store.symbol = 'X'
-    store.reset()
-    expect(store.accountId).toBe('')
-    expect(store.strategyId).toBe('')
-    expect(store.symbol).toBe('')
-  })
 })
 
 describe('health store', () => {
@@ -52,20 +23,14 @@ describe('health store', () => {
   })
 
   it('check sets healthy on /health 200', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({ status: 'healthy' })
-    })
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ status: 'healthy' }))
     const store = useHealthStore()
     await store.check()
     expect(store.status).toBe('healthy')
   })
 
   it('check sets unhealthy on /health non-200', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      json: () => Promise.resolve({ detail: 'boom' })
-    })
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ detail: 'boom' }, { ok: false, status: 503 }))
     const store = useHealthStore()
     await store.check()
     expect(store.status).toBe('unhealthy')

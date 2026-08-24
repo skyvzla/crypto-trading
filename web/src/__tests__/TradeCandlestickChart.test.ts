@@ -6,6 +6,7 @@ import TradeCandlestickChart from '@/features/backtests/TradeCandlestickChart.vu
 const remove = vi.fn()
 const setData = vi.fn()
 const createPriceLine = vi.fn()
+const removePriceLine = vi.fn()
 const setVisibleLogicalRange = vi.fn()
 const setVisibleRange = vi.fn()
 const createSeriesMarkers = vi.fn()
@@ -14,7 +15,7 @@ const disconnect = vi.fn()
 const paneSetStretchFactor = vi.fn()
 const subscribeCrosshairMove = vi.fn()
 const subscribeVisibleLogicalRangeChange = vi.fn()
-const seriesApis: Array<{ setData: typeof setData; createPriceLine: typeof createPriceLine }> = []
+const seriesApis: Array<Record<string, unknown>> = []
 const seriesOptions: Array<Record<string, unknown>> = []
 const paneMocks = Array.from({ length: 4 }, (_, index) => ({
   getHeight: vi.fn(() => index === 0 ? 300 : 100),
@@ -33,7 +34,16 @@ vi.mock('lightweight-charts', () => ({
   createSeriesMarkers: (...args: unknown[]) => createSeriesMarkers(...args),
   createChart: vi.fn(() => ({
     addSeries: (_definition: unknown, options: Record<string, unknown> = {}) => {
-      const api = { setData, createPriceLine, priceToCoordinate: vi.fn((price: number) => price * 100) }
+      const api = {
+        setData,
+        // 真实 API 返回可移除的价格线句柄，标线显隐依赖它做就地增删。
+        createPriceLine: (...args: unknown[]) => {
+          createPriceLine(...args)
+          return { applyOptions: vi.fn(), options: vi.fn() }
+        },
+        removePriceLine,
+        priceToCoordinate: vi.fn((price: number) => price * 100)
+      }
       seriesApis.push(api)
       seriesOptions.push(options)
       return api
@@ -350,6 +360,56 @@ describe('TradeCandlestickChart', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     const expected = { type: 'price', precision: 8, minMove: 0.00000001 }
     seriesOptions.slice(0, 6).forEach((options) => expect(options.priceFormat).toEqual(expected))
+  })
+
+  it('切换标线显隐时就地增删价格线，不重建图表', async () => {
+    const start = 1_754_000_000
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles: [
+          { time: start, open: 1, high: 1.3, low: 0.9, close: 1.1, volume: 10 },
+          { time: start + 1, open: 1.1, high: 1.2, low: 0.8, close: 1, volume: 12 }
+        ],
+        trade: {
+          id: 't-toggle', symbol: 'AKEUSDT', strategy_id: 'spike-short', side: 'SHORT',
+          entry_time: start * 1000, entry_price: 1.1, invalid_price: 1.4,
+          tier_prices: [1.1, 1.2, 1.3], net_pnl: 1
+        },
+        lineVisibility: { tiers: true, average: true, invalid: true, signal: true, extensions: true }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const removeCount = remove.mock.calls.length
+    const linesAfterMount = createPriceLine.mock.calls.length
+    expect(linesAfterMount).toBeGreaterThan(0)
+
+    await wrapper.setProps({ lineVisibility: { tiers: false, average: true, invalid: true, signal: true, extensions: true } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    // 图表没有被销毁重建，只是把旧价格线摘掉重画。
+    expect(remove).toHaveBeenCalledTimes(removeCount)
+    expect(removePriceLine).toHaveBeenCalledTimes(linesAfterMount)
+    const redrawn = createPriceLine.mock.calls.slice(linesAfterMount)
+    expect(redrawn.some(([line]) => /^限卖|^卖/.test((line as { title: string }).title))).toBe(false)
+  })
+
+  it('切换指标时重建窗格但保留当前视窗', async () => {
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 80 }, (_, index) => ({ time: start + index, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }))
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        trade: { id: 't-ind', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: (start + 40) * 1000, entry_price: 1.1, net_pnl: 1 },
+        indicators: { volume: false }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    setVisibleRange.mockClear()
+
+    await wrapper.setProps({ indicators: { volume: true } })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(setVisibleRange).toHaveBeenCalledWith({ from: 1_754_000_030, to: 1_754_000_060 })
   })
 
   it('恢复并保存整体图高与指标窗格，并可重置为默认尺寸', async () => {

@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ChevronDown, ChevronRight, DatabaseBackup, FolderTree, ListFilter, Search } from 'lucide-vue-next'
 import { message } from 'ant-design-vue'
 import { operationsApi } from '@/api/operations'
 import type { ExchangeCategory, ExchangeSymbol, ExchangeSymbolSyncStatus } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { formatDateTime } from '@/features/operations/format'
-import { collectPageItems } from '@/features/operations/pagination'
+import { collectPageItems } from '@/shared/pagination'
+import { useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
+import { formatDateTime } from '@/shared/format'
+
+/** 详情区每页交易对数量。 */
+const DETAIL_PAGE_SIZE = 50
 
 const route = useRoute()
-const router = useRouter()
+const syncQuery = useQuerySync()
 const categories = ref<ExchangeCategory[]>([])
 const syncStatus = ref<ExchangeSymbolSyncStatus | null>(null)
 const search = ref(String(route.query.q ?? ''))
@@ -21,12 +25,8 @@ const viewingUnclassified = ref(false)
 const selectedSymbols = ref<ExchangeSymbol[]>([])
 const selectedTotal = ref(0)
 const detailPage = ref(Math.max(1, Number(route.query.detail_page) || 1))
-const detailPageSize = 50
-let detailRequest = 0
-const loading = ref(false)
 const detailLoading = ref(false)
-const error = ref<string | null>(null)
-const refreshedAt = ref<string | null>(null)
+let detailRequest = 0
 
 const parents = computed(() => categories.value.filter((item) => item.category_type === 'CATEGORY').map((parent) => ({ ...parent, children: categories.value.filter((child) => child.parent_key === parent.category_key) })))
 const orphans = computed(() => categories.value.filter((item) => item.category_type === 'SUBCATEGORY' && !categories.value.some((parent) => parent.category_key === item.parent_key)))
@@ -36,29 +36,27 @@ const visibleParents = computed(() => {
   return parents.value.filter((parent) => [parent.name, parent.code, ...parent.children.flatMap((child) => [child.name, child.code])].some((value) => value.toLowerCase().includes(query)))
 })
 
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    const [categoryPage, status] = await Promise.all([
-      collectPageItems((params) => operationsApi.categoriesPage(false, params)),
-      operationsApi.symbolSyncStatus()
-    ])
-    const rows = categoryPage.items
-    categories.value = rows
-    syncStatus.value = status
-    expanded.value = new Set(rows.filter((item) => item.category_type === 'CATEGORY').slice(0, 3).map((item) => item.category_key))
-    refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-    if (route.query.unclassified === 'true') {
-      await selectUnclassified(false)
-    } else if (route.query.category) {
-      const initial = rows.find((item) => item.category_key === String(route.query.category))
-      if (initial) await selectCategory(initial, false)
-    }
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '分类目录加载失败'
-  } finally { loading.value = false }
-}
+const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
+  const [categoryPage, status] = await Promise.all([
+    collectPageItems((params) => operationsApi.categoriesPage(false, params)),
+    operationsApi.symbolSyncStatus()
+  ])
+  if (isStale()) return
+  const rows = categoryPage.items
+  categories.value = rows
+  syncStatus.value = status
+  // 默认只展开前三个 Category，避免首屏铺开上百个子分类。
+  expanded.value = new Set(rows.filter((item) => item.category_type === 'CATEGORY').slice(0, 3).map((item) => item.category_key))
+  if (route.query.unclassified === 'true') {
+    await selectUnclassified(false)
+  } else if (route.query.category) {
+    const initial = rows.find((item) => item.category_key === String(route.query.category))
+    if (initial) await selectCategory(initial, false)
+  }
+}, {
+  fallbackMessage: '分类目录加载失败',
+  onActivate: () => { search.value = String(route.query.q ?? '') }
+})
 
 function toggle(key: string) {
   const next = new Set(expanded.value)
@@ -97,14 +95,14 @@ async function loadDetailSymbols() {
   selectedSymbols.value = []
   detailLoading.value = true
   try {
-    const params = { limit: detailPageSize, offset: (detailPage.value - 1) * detailPageSize }
+    const params = { limit: DETAIL_PAGE_SIZE, offset: (detailPage.value - 1) * DETAIL_PAGE_SIZE }
     const page = viewingUnclassified.value
       ? await operationsApi.exchangeSymbols({ ...params, unclassified: true })
       : selected.value
         ? await operationsApi.categorySymbols(selected.value.category_key, params)
         : null
     if (request === detailRequest && page) {
-      const lastPage = Math.max(1, Math.ceil(page.total / detailPageSize))
+      const lastPage = Math.max(1, Math.ceil(page.total / DETAIL_PAGE_SIZE))
       if (detailPage.value > lastPage) {
         detailPage.value = lastPage
         await syncUrl()
@@ -128,25 +126,25 @@ async function changeDetailPage(page: number) {
 }
 
 async function syncUrl() {
-  await router.replace({ query: {
-    ...(search.value.trim() ? { q: search.value.trim() } : {}),
+  const hasDetail = Boolean(selected.value || viewingUnclassified.value)
+  await syncQuery({
+    q: search.value.trim(),
     ...(viewingUnclassified.value ? { unclassified: 'true' } : selected.value ? { category: selected.value.category_key } : {}),
-    ...((selected.value || viewingUnclassified.value) && detailPage.value > 1 ? { detail_page: String(detailPage.value) } : {})
-  } })
+    ...(hasDetail && detailPage.value > 1 ? { detail_page: detailPage.value } : {})
+  })
 }
 
-onMounted(load)
 </script>
 
 <template>
   <main class="operations-page categories-page">
-    <PageHeader eyebrow="REFERENCE DATA / BINANCE TAXONOMY" title="分类管理" description="只读展示程序同步的 Category → Subcategory → 交易对关系；Web 不创建、重命名或编辑同步事实。" :loading="loading" :refreshed-at="refreshedAt" @refresh="load" />
+    <PageHeader eyebrow="REFERENCE DATA / BINANCE TAXONOMY" title="分类管理" description="只读展示程序同步的 Category → Subcategory → 交易对关系；Web 不创建、重命名或编辑同步事实。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
     <div v-if="syncStatus" :class="['status-strip', { stale: syncStatus.stale, error: syncStatus.status !== 'SUCCESS' }]">
       <DatabaseBackup :size="14" /><span>来源 <strong>Binance 同步事实</strong> · {{ syncStatus.status }} · 最近成功 {{ formatDateTime(syncStatus.last_success_at) }} · 允许最大年龄 {{ syncStatus.max_age_hours }}h</span><a-tag v-if="syncStatus.stale" color="gold">STALE · 历史数据仍展示</a-tag>
     </div>
     <div class="category-tools"><a-input v-model:value="search" allow-clear placeholder="搜索 Category / Subcategory" @change="syncUrl" @press-enter="syncUrl"><template #prefix><Search :size="14" /></template></a-input><a-button @click="toggleAll">{{ expanded.size ? '全部收起' : '全部展开' }}</a-button><a-button :type="viewingUnclassified ? 'primary' : 'default'" @click="selectUnclassified()"><template #icon><ListFilter :size="14" /></template>未分类交易对</a-button><span>{{ parents.length }} Category · {{ categories.length - parents.length }} Subcategory</span></div>
     <a-alert v-if="syncStatus?.last_error" type="warning" show-icon :message="syncStatus.last_error" description="保留并展示最近一次成功同步的数据。" class="sync-error" />
-    <DataState :loading="loading" :error="error" :empty="!categories.length && !viewingUnclassified" @retry="load">
+    <DataState :loading="loading" :error="error" :empty="!categories.length && !viewingUnclassified" @retry="reload">
       <div class="category-layout">
         <section class="taxonomy-tree">
           <article v-for="parent in visibleParents" :key="parent.category_key" class="taxonomy-parent">
@@ -169,7 +167,7 @@ onMounted(load)
             <a-spin :spinning="detailLoading">
               <div v-if="selectedSymbols.length" class="category-symbol-list"><div v-for="symbol in selectedSymbols" :key="symbol.symbol" class="category-symbol-row"><span><strong>{{ symbol.symbol }}</strong><small>{{ symbol.base_asset }} / {{ symbol.quote_asset }}</small></span><span><a-tag :color="symbol.status === 'TRADING' ? 'green' : 'gold'">{{ symbol.status }}</a-tag><a-tag :color="symbol.global_enabled ? 'blue' : 'red'">{{ symbol.global_enabled ? '全局允许' : '全局禁止' }}</a-tag></span></div></div>
               <a-empty v-else-if="!detailLoading" :description="viewingUnclassified ? '当前没有未分类交易对' : '该分类没有关联交易对'" />
-              <div v-if="selectedTotal > detailPageSize" class="detail-pagination"><a-pagination :current="detailPage" :page-size="detailPageSize" :total="selectedTotal" size="small" show-less-items @change="changeDetailPage" /></div>
+              <div v-if="selectedTotal > DETAIL_PAGE_SIZE" class="detail-pagination"><a-pagination :current="detailPage" :page-size="DETAIL_PAGE_SIZE" :total="selectedTotal" size="small" show-less-items @change="changeDetailPage" /></div>
             </a-spin>
           </template>
           <div v-else class="select-hint"><FolderTree :size="28" /><p>选择左侧 Category 或 Subcategory 查看关联交易对和当前有效状态。</p></div>

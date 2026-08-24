@@ -9,7 +9,7 @@ import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import EquityCurveChart from '@/features/backtests/EquityCurveChart.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import { replayEquity, type EquityReplayRow } from '@/features/backtests/equityReplay'
-import { formatNumber, formatPercent, formatTime, pnlClass } from '@/features/backtests/format'
+import { formatDateTime, formatNumber, formatPercent, pnlClass } from '@/shared/format'
 
 const route = useRoute()
 const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
@@ -63,8 +63,8 @@ const skipLabels = { overlap: '持仓中忽略', liquidated: '停止后忽略', 
 const columns: TableColumnsType<EquityReplayRow> = [
   { title: '#', key: 'sequence', dataIndex: 'sequence', width: 60 },
   { title: '交易对', key: 'symbol', dataIndex: 'symbol', width: 110, customRender: ({ text }) => h('strong', { class: 'symbol-name' }, String(text)) },
-  { title: '入场时间', key: 'entry_time', dataIndex: 'entry_time', width: 170, customRender: ({ text }) => formatTime(text) },
-  { title: '退出时间', key: 'exit_time', dataIndex: 'exit_time', width: 170, customRender: ({ text }) => formatTime(text) },
+  { title: '入场时间', key: 'entry_time', dataIndex: 'entry_time', width: 170, customRender: ({ text }) => formatDateTime(text) },
+  { title: '退出时间', key: 'exit_time', dataIndex: 'exit_time', width: 170, customRender: ({ text }) => formatDateTime(text) },
   { title: '状态', key: 'status', dataIndex: 'status', width: 110, customRender: ({ record }) => h(Tag, { color: record.status === 'executed' ? 'success' : 'default' }, () => record.status === 'executed' ? '已执行' : skipLabels[record.skipReason!] || '已忽略') },
   { title: '本笔仓位', key: 'positionAmount', dataIndex: 'positionAmount', width: 110, customRender: ({ text }) => `${formatNumber(text)} U` },
   { title: '毛收益率', key: 'grossReturn', dataIndex: 'grossReturn', width: 100, customRender: ({ text }) => formatPercent(text) },

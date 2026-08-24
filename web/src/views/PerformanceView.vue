@@ -1,53 +1,39 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { BarChart3, Info, Scale } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
 import type { DailyPnL, PerformanceBreakdownResponse, PerformanceDimension, PerformanceSummary } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
-import FilterBar, { type OperationFilters } from '@/features/operations/FilterBar.vue'
+import FilterBar from '@/features/operations/FilterBar.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { asNumber, formatMoney, formatPercent, formatRatio, pnlClass } from '@/features/operations/format'
+import { useLedgerLoader, useOperationFilters, useQuerySync } from '@/features/operations/useOperationsView'
+import { asNumber, formatMoney, formatPercent, formatRatio, pnlClass } from '@/shared/format'
+import { LEDGER_TIMEZONE, ledgerDate, shiftLedgerDate } from '@/shared/time'
+
+/** 默认统计窗口：含今天在内的最近 30 个自然日。 */
+const DEFAULT_RANGE_DAYS = 30
 
 const route = useRoute()
 const router = useRouter()
-const shanghaiDate = (date: Date) => {
-  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit'
-  }).formatToParts(date).map((item) => [item.type, item.value]))
-  return `${parts.year}-${parts.month}-${parts.day}`
-}
-const shiftDate = (value: string, days: number) => {
-  const [year, month, day] = value.split('-').map(Number)
-  const shifted = new Date(Date.UTC(year, month - 1, day + days))
-  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`
-}
-const defaultEndDate = shanghaiDate(new Date())
-const defaultStartDate = shiftDate(defaultEndDate, -29)
+const syncQuery = useQuerySync()
+const { filters, query: filterQuery, restore: restoreFilters } = useOperationFilters()
+const defaultEndDate = ledgerDate()
+const defaultStartDate = shiftLedgerDate(defaultEndDate, -(DEFAULT_RANGE_DAYS - 1))
 
-const filters = ref<OperationFilters>({
-  account_id: String(route.query.account_id ?? ''),
-  strategy_id: String(route.query.strategy_id ?? ''),
-  symbol: String(route.query.symbol ?? '')
-})
 const startDate = ref(String(route.query.start_date ?? defaultStartDate))
 const endDate = ref(String(route.query.end_date ?? defaultEndDate))
 const activeTab = ref(String(route.query.tab ?? 'overview'))
 const summary = ref<PerformanceSummary | null>(null)
 const daily = ref<DailyPnL[]>([])
 const breakdown = ref<PerformanceBreakdownResponse | null>(null)
-const loading = ref(false)
-const error = ref<string | null>(null)
-const refreshedAt = ref<string | null>(null)
 
+/** 绩效按账户归属，account_id 是必填项而不是可选筛选。 */
 const query = computed(() => ({
   account_id: filters.value.account_id.trim(),
-  ...(filters.value.strategy_id.trim() ? { strategy_id: filters.value.strategy_id.trim() } : {}),
-  ...(filters.value.symbol.trim() ? { symbol: filters.value.symbol.trim() } : {}),
+  ...(filterQuery.value.strategy_id ? { strategy_id: filterQuery.value.strategy_id } : {}),
+  ...(filterQuery.value.symbol ? { symbol: filterQuery.value.symbol } : {}),
   start_date: startDate.value,
   end_date: endDate.value
 }))
@@ -55,75 +41,76 @@ const sampleSize = computed(() => (summary.value?.win_count ?? 0) + (summary.val
 const maxDailyAbs = computed(() => Math.max(1, ...daily.value.map((item) => Math.abs(asNumber(item.net_pnl)))))
 const scopeText = computed(() => summary.value?.metric_scope || '完整且已结束的 Campaign / 交易轮次')
 
-async function load() {
+const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
+  // 没选账户时不请求：绩效指标必须落在单个账户上，混算没有意义。
   if (!filters.value.account_id.trim()) {
     summary.value = null
     daily.value = []
-    error.value = null
     return
   }
   if (!startDate.value || !endDate.value || startDate.value > endDate.value) {
-    error.value = '请选择有效的开始和结束日期'
-    return
+    throw new Error('请选择有效的开始和结束日期')
   }
-  loading.value = true
-  error.value = null
-  try {
-    const [performance, points] = await Promise.all([
-      operationsApi.performance({ ...query.value, timezone: 'Asia/Shanghai' }),
-      operationsApi.dailyPnl({ ...query.value, timezone: 'Asia/Shanghai' })
-    ])
-    summary.value = performance
-    daily.value = points
-    if (activeTab.value === 'breakdown') await loadBreakdown()
-    refreshedAt.value = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date())
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '绩效数据加载失败'
-  } finally {
-    loading.value = false
+  const [performance, points] = await Promise.all([
+    operationsApi.performance({ ...query.value, timezone: LEDGER_TIMEZONE }),
+    operationsApi.dailyPnl({ ...query.value, timezone: LEDGER_TIMEZONE })
+  ])
+  if (isStale()) return
+  summary.value = performance
+  daily.value = points
+  if (activeTab.value === 'breakdown') await loadBreakdown()
+}, {
+  fallbackMessage: '绩效数据加载失败',
+  onActivate: () => {
+    restoreFilters()
+    startDate.value = String(route.query.start_date ?? defaultStartDate)
+    endDate.value = String(route.query.end_date ?? defaultEndDate)
+    activeTab.value = String(route.query.tab ?? 'overview')
   }
-}
+})
+
+const BREAKDOWN_DIMENSIONS: PerformanceDimension[] = ['symbol', 'category', 'subcategory', 'side', 'exit_reason']
 
 async function loadBreakdown() {
   if (!filters.value.account_id.trim()) return
-  const groupBy = (String(route.query.group_by ?? 'symbol') as PerformanceDimension)
-  const allowed: PerformanceDimension[] = ['symbol', 'category', 'subcategory', 'side', 'exit_reason']
-  const normalized = allowed.includes(groupBy) ? groupBy : 'symbol'
+  const requested = String(route.query.group_by ?? 'symbol') as PerformanceDimension
+  const groupBy = BREAKDOWN_DIMENSIONS.includes(requested) ? requested : 'symbol'
   breakdown.value = await operationsApi.performanceBreakdown({
     ...query.value,
-    start_date: startDate.value,
-    end_date: endDate.value,
-    timezone: 'Asia/Shanghai',
-    group_by: normalized
+    timezone: LEDGER_TIMEZONE,
+    group_by: groupBy
   })
 }
 
 async function applyFilters() {
-  await router.replace({ query: { ...query.value, tab: activeTab.value } })
-  await load()
+  await syncQuery({ ...query.value, tab: activeTab.value })
+  await reload()
 }
 
 async function changeTab(key: string) {
   activeTab.value = key
-  await router.replace({ query: { ...query.value, tab: key } })
-  if (key === 'breakdown') {
-    try {
-      loading.value = true
-      await loadBreakdown()
-    } catch (caught) {
-      error.value = caught instanceof Error ? caught.message : '绩效分组加载失败'
-    } finally {
-      loading.value = false
-    }
+  await syncQuery({ ...query.value, tab: key })
+  if (key !== 'breakdown') return
+  try {
+    await loadBreakdown()
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : '绩效分组加载失败'
   }
 }
 
-onMounted(load)
+async function changeBreakdownDimension(value: PerformanceDimension) {
+  await router.replace({ query: { ...route.query, group_by: value } })
+  try {
+    await loadBreakdown()
+  } catch (caught) {
+    error.value = caught instanceof Error ? caught.message : '绩效分组加载失败'
+  }
+}
 </script>
 
 <template>
   <main class="operations-page performance-page">
-    <PageHeader eyebrow="ANALYSIS / CAMPAIGN METRICS" title="绩效分析" description="统计单位固定为完整且已结束的 Campaign；胜率和盈亏比用于诊断，不作为策略自动启停门槛。" :loading="loading" :refreshed-at="refreshedAt" @refresh="load" />
+    <PageHeader eyebrow="ANALYSIS / CAMPAIGN METRICS" title="绩效分析" description="统计单位固定为完整且已结束的 Campaign；胜率和盈亏比用于诊断，不作为策略自动启停门槛。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
     <FilterBar v-model="filters" account-required @apply="applyFilters" />
     <div class="date-filter">
       <label><span>开始日期</span><a-date-picker :value="startDate" value-format="YYYY-MM-DD" @update:value="startDate = String($event ?? '')" /></label>
@@ -139,7 +126,7 @@ onMounted(load)
         <a-tab-pane key="quality" tab="交易质量" />
         <a-tab-pane key="breakdown" tab="交易对与分类" />
       </a-tabs>
-      <DataState :loading="loading" :error="error" :empty="!summary" @retry="load">
+      <DataState :loading="loading" :error="error" :empty="!summary" @retry="reload">
         <template v-if="summary">
           <div class="metric-scope"><Info :size="14" /><span>样本口径：<strong>{{ scopeText }}</strong></span><span>时间：{{ startDate }} → {{ endDate }}</span><span>样本：{{ sampleSize }} 轮次 / {{ summary.total_fills }} fills</span><span>成本：净 PnL 仅扣 USDT 手续费；资金费不可用</span></div>
           <a-alert v-if="sampleSize < 30" type="warning" show-icon :message="`样本不足：当前仅 ${sampleSize} 个已结束轮次`" description="指标仍按真实样本展示，但不建议据此自动改变策略准入。" class="sample-warning" />
@@ -195,7 +182,7 @@ onMounted(load)
                   { label: 'Subcategory', value: 'subcategory' },
                   { label: '方向', value: 'side' },
                   { label: '退出原因（不可用）', value: 'exit_reason', disabled: true }
-                ]" @change="(value: PerformanceDimension) => router.replace({ query: { ...route.query, group_by: value } }).then(loadBreakdown)" />
+                ]" @change="changeBreakdownDimension" />
               </div>
               <div class="table-frame breakdown-table"><a-table :data-source="breakdown.items" row-key="dimension_key" :pagination="false" :scroll="{ x: 1100 }" size="middle">
                 <a-table-column key="dimension" title="维度" data-index="dimension_label"><template #default="{ record }"><strong>{{ record.dimension_label || '未分类' }}</strong><small class="table-subtext">{{ record.dimension_key || 'NO ACTIVE ASSOCIATION' }}</small></template></a-table-column>

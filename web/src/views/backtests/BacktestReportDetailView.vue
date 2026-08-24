@@ -7,8 +7,8 @@ import { backtestApi } from '@/api/backtests'
 import type { JsonObject, JsonValue, ReportColumn } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
-import { displayValue } from '@/features/backtests/format'
-import { useBacktestPagination } from '@/features/backtests/pagination'
+import { displayValue } from '@/shared/format'
+import { useBacktestPagination } from '@/features/backtests/useBacktestPagination'
 import { reportLabel } from '@/features/backtests/reportLabels'
 
 const route = useRoute()

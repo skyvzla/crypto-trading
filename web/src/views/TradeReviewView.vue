@@ -1,50 +1,40 @@
 <script setup lang="ts">
-import { computed, h, onActivated, onMounted, ref } from 'vue'
+import { computed, h, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button, Tag, type TableColumnsType, type TablePaginationConfig } from 'ant-design-vue'
 import { operationsApi } from '@/api/operations'
 import type { CampaignSummary } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
 import { campaignRoute } from '@/features/operations/campaignRoute'
-import FilterBar, { type OperationFilters } from '@/features/operations/FilterBar.vue'
+import FilterBar from '@/features/operations/FilterBar.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { formatDateTime, formatMoney, pnlClass } from '@/features/operations/format'
+import {
+  useLedgerLoader,
+  useOperationFilters,
+  usePageParams,
+  useQuerySync
+} from '@/features/operations/useOperationsView'
+import { formatDateTime, formatMoney, pnlClass } from '@/shared/format'
+import { LEDGER_TIMEZONE } from '@/shared/time'
 
-function positiveInt(value: unknown, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
-  const parsed = Number(value)
-  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback
-}
-
+/** Campaign 的账本身份是三段复合键，单独的 campaign_id 并不唯一。 */
 function campaignKey(item: CampaignSummary): string {
   return `${item.account_id}:${item.strategy_id}:${item.campaign_id}`
 }
 
 const route = useRoute()
 const router = useRouter()
-const filters = ref<OperationFilters>({
-  account_id: String(route.query.account_id ?? ''),
-  strategy_id: String(route.query.strategy_id ?? ''),
-  symbol: String(route.query.symbol ?? '')
-})
+const syncQuery = useQuerySync()
+const { filters, query, restore: restoreFilters } = useOperationFilters()
+const { page, pageSize, offset, restore: restorePage, apply: applyPage } = usePageParams({ defaultSize: 50, maxSize: 1000 })
 const selectedDate = ref(String(route.query.date ?? ''))
-const currentPage = ref(positiveInt(route.query.page, 1))
-const pageSize = ref(positiveInt(route.query.page_size, 50, 1000))
 const campaigns = ref<CampaignSummary[]>([])
 const serverTotal = ref(0)
 const unattributedFills = ref(0)
-const loading = ref(false)
-const error = ref<string | null>(null)
-const refreshedAt = ref<string | null>(null)
-let initialActivation = true
 
-const query = computed(() => ({
-  ...(filters.value.account_id.trim() ? { account_id: filters.value.account_id.trim() } : {}),
-  ...(filters.value.strategy_id.trim() ? { strategy_id: filters.value.strategy_id.trim() } : {}),
-  ...(filters.value.symbol.trim() ? { symbol: filters.value.symbol.trim() } : {})
-}))
 const requestedCampaign = computed(() => String(route.query.campaign_id ?? ''))
 const tablePagination = computed<TablePaginationConfig>(() => ({
-  current: currentPage.value,
+  current: page.value,
   pageSize: pageSize.value,
   total: serverTotal.value,
   showSizeChanger: true,
@@ -66,87 +56,67 @@ const campaignColumns: TableColumnsType<CampaignSummary> = [
   { title: '闭合 / 末笔时间', key: 'closed', width: 185, customRender: ({ record }) => formatDateTime(record.closed_at || record.last_fill_at) }
 ]
 
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    const page = await operationsApi.campaigns({
-      ...query.value,
-      ...(requestedCampaign.value ? { campaign_id: requestedCampaign.value } : {}),
-      ...(selectedDate.value ? { start_date: selectedDate.value, end_date: selectedDate.value, timezone: 'Asia/Shanghai' as const } : {}),
-      limit: pageSize.value,
-      offset: (currentPage.value - 1) * pageSize.value
-    })
-    serverTotal.value = page.total
-    const lastPage = Math.max(1, Math.ceil(page.total / pageSize.value))
-    if (currentPage.value > lastPage) {
-      currentPage.value = lastPage
-      await syncRoute()
-      await load()
-      return
-    }
-    campaigns.value = page.items
-    unattributedFills.value = page.unattributed_fills
-    refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '成交复盘加载失败'
-  } finally {
-    loading.value = false
-  }
-}
+const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
+  const result = await operationsApi.campaigns({
+    ...query.value,
+    ...(requestedCampaign.value ? { campaign_id: requestedCampaign.value } : {}),
+    ...(selectedDate.value ? { start_date: selectedDate.value, end_date: selectedDate.value, timezone: LEDGER_TIMEZONE } : {}),
+    limit: pageSize.value,
+    offset: offset.value
+  })
+  if (isStale()) return
+  serverTotal.value = result.total
 
-async function applyFilters() {
-  currentPage.value = 1
-  await syncRoute()
-  await load()
-}
+  // 删除记录后页码可能越界，收敛到最后一页再取一次，而不是显示空表。
+  const lastPage = Math.max(1, Math.ceil(result.total / pageSize.value))
+  if (page.value > lastPage) {
+    page.value = lastPage
+    await syncRoute()
+    await reload()
+    return
+  }
+  campaigns.value = result.items
+  unattributedFills.value = result.unattributed_fills
+}, {
+  fallbackMessage: '成交复盘加载失败',
+  onActivate: () => {
+    restoreFilters()
+    restorePage()
+    selectedDate.value = String(route.query.date ?? '')
+  }
+})
 
 async function syncRoute() {
-  await router.replace({ query: {
+  await syncQuery({
     ...query.value,
     ...(selectedDate.value ? { date: selectedDate.value } : {}),
     ...(requestedCampaign.value ? { campaign_id: requestedCampaign.value } : {}),
-    page: String(currentPage.value),
-    page_size: String(pageSize.value)
-  } })
+    page: page.value,
+    page_size: pageSize.value
+  })
+}
+
+async function applyFilters() {
+  page.value = 1
+  await syncRoute()
+  await reload()
 }
 
 async function changePage(pagination: TablePaginationConfig) {
-  const nextSize = positiveInt(pagination.pageSize, pageSize.value, 1000)
-  currentPage.value = nextSize === pageSize.value
-    ? positiveInt(pagination.current, currentPage.value)
-    : 1
-  pageSize.value = nextSize
+  applyPage({ current: pagination.current ?? undefined, pageSize: pagination.pageSize ?? undefined })
   await syncRoute()
-  await load()
+  await reload()
 }
 
 function openCampaign(group: CampaignSummary) {
   const target = campaignRoute(group)
   if (target) void router.push(target)
 }
-
-onMounted(load)
-onActivated(() => {
-  if (initialActivation) {
-    initialActivation = false
-    return
-  }
-  filters.value = {
-    account_id: String(route.query.account_id ?? ''),
-    strategy_id: String(route.query.strategy_id ?? ''),
-    symbol: String(route.query.symbol ?? '')
-  }
-  selectedDate.value = String(route.query.date ?? '')
-  currentPage.value = positiveInt(route.query.page, 1)
-  pageSize.value = positiveInt(route.query.page_size, 50, 1000)
-  void load()
-})
 </script>
 
 <template>
   <main class="operations-page trade-review-page">
-    <PageHeader eyebrow="ANALYSIS / EXECUTION TRACE" title="成交复盘" description="以服务端完整 Campaign 为浏览单位，下钻到全部账本 fills 和策略审计事件。" :loading="loading" :refreshed-at="refreshedAt" @refresh="load" />
+    <PageHeader eyebrow="ANALYSIS / EXECUTION TRACE" title="成交复盘" description="以服务端完整 Campaign 为浏览单位，下钻到全部账本 fills 和策略审计事件。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
     <FilterBar v-model="filters" @reset="selectedDate = ''" @apply="applyFilters">
       <template #extra-fields>
         <label class="trade-date-filter"><span>成交日期</span><a-date-picker :value="selectedDate || undefined" value-format="YYYY-MM-DD" allow-clear placeholder="全部日期" @update:value="selectedDate = String($event ?? '')" /></label>
@@ -157,7 +127,7 @@ onActivated(() => {
     </div>
     <a-alert v-if="unattributedFills" type="warning" show-icon :message="`${unattributedFills} 笔成交缺少 Campaign 归属`" description="未归属 fills 不参与 Campaign 列表、收益日历或绩效统计，页面不会按时间相邻关系猜测归属。" class="scope-alert" />
     <a-alert v-else type="info" show-icon message="Campaign 由服务端完整聚合" description="分页单位为完整 Campaign；非 USDT 手续费没有权威换算时，净 PnL 明确显示不可用。结果与规范化退出原因筛选仍待权威字段。" class="scope-alert" />
-    <DataState :loading="loading" :error="error" :empty="!campaigns.length" @retry="load">
+    <DataState :loading="loading" :error="error" :empty="!campaigns.length" @retry="reload">
       <div class="table-frame"><a-table :columns="campaignColumns" :data-source="campaigns" :row-key="campaignKey" :pagination="tablePagination" :scroll="{ x: 1670 }" @change="changePage" /></div>
     </DataState>
 

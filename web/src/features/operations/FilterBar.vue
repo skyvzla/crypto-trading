@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed } from 'vue'
+import { useQuery } from '@tanstack/vue-query'
 import { RefreshCw, Search, X } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
-import { collectPageItems } from '@/features/operations/pagination'
+import { collectPageItems } from '@/shared/pagination'
+import type { OperationFilters } from '@/features/operations/useOperationsView'
 
-export interface OperationFilters {
-  account_id: string
-  strategy_id: string
-  symbol: string
-}
+/**
+ * 账户目录变动很慢，缓存 5 分钟。
+ * FilterBar 出现在 5 个页面上，以前每次挂载都会把账户列表整个重拉一遍。
+ */
+const ACCOUNTS_STALE_TIME_MS = 5 * 60_000
 
 const props = withDefaults(defineProps<{
   modelValue: OperationFilters
@@ -35,25 +37,23 @@ const filters = computed({
   set: (value) => emit('update:modelValue', value)
 })
 
-const accountsLoading = ref(false)
-const accountsError = ref(false)
-const accounts = ref<string[]>([])
+const accountsQuery = useQuery({
+  queryKey: ['ledger-accounts'],
+  queryFn: async () => {
+    const page = await collectPageItems((params) => operationsApi.accounts(params))
+    return page.items.map((item) => item.account_id)
+  },
+  staleTime: ACCOUNTS_STALE_TIME_MS
+})
+const accountsLoading = computed(() => accountsQuery.isFetching.value)
+const accountsError = computed(() => Boolean(accountsQuery.error.value))
 const accountOptions = computed(() => [
   ...(props.accountRequired ? [] : [{ label: '全部账户', value: '' }]),
-  ...accounts.value.map((accountId) => ({ label: accountId, value: accountId }))
+  ...(accountsQuery.data.value ?? []).map((accountId) => ({ label: accountId, value: accountId }))
 ])
 
-async function loadAccounts() {
-  accountsLoading.value = true
-  accountsError.value = false
-  try {
-    const page = await collectPageItems((params) => operationsApi.accounts(params))
-    accounts.value = page.items.map((item) => item.account_id)
-  } catch {
-    accountsError.value = true
-  } finally {
-    accountsLoading.value = false
-  }
+function loadAccounts() {
+  void accountsQuery.refetch()
 }
 
 function update(key: keyof OperationFilters, value: string) {
@@ -66,8 +66,6 @@ function reset() {
   emit('reset')
   emit('apply')
 }
-
-onMounted(() => { void loadAccounts() })
 </script>
 
 <template>

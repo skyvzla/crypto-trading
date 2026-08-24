@@ -13,6 +13,7 @@
   "dependencies": {
     "@tanstack/vue-query": "^5.101.4",
     "ant-design-vue": "^4.2.6",
+    "dayjs": "^1.11.21",
     "lightweight-charts": "^5.2.0",
     "lucide-vue-next": "^1.0.0",
     "pinia": "^4.0.2",

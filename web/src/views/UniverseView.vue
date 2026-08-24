@@ -1,17 +1,18 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, h, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { Button, Switch, Tag, message, type TableColumnsType } from 'ant-design-vue'
 import { DatabaseBackup, Search } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
 import type { ExchangeCategory, ExchangeSymbol, ExchangeSymbolSyncStatus, SymbolGlobalAdmissionAudit } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { formatDateTime } from '@/features/operations/format'
-import { collectPageItems } from '@/features/operations/pagination'
+import { collectPageItems } from '@/shared/pagination'
+import { useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
+import { formatDateTime } from '@/shared/format'
 
 const route = useRoute()
-const router = useRouter()
+const syncQuery = useQuerySync()
 const symbols = ref<ExchangeSymbol[]>([])
 const categories = ref<ExchangeCategory[]>([])
 const categorySymbolSet = ref<Set<string> | null>(null)
@@ -20,8 +21,6 @@ const search = ref(String(route.query.q ?? ''))
 const tradingStatus = ref(String(route.query.status ?? ''))
 const admissionStatus = ref(String(route.query.admission ?? ''))
 const categoryKey = ref(String(route.query.category ?? ''))
-const loading = ref(false)
-const error = ref<string | null>(null)
 const updating = ref(new Set<string>())
 const selected = ref<ExchangeSymbol | null>(null)
 const selectedCategories = ref<ExchangeCategory[]>([])
@@ -31,7 +30,6 @@ const confirmOpen = ref(false)
 const pendingEnabled = ref(false)
 const pendingSymbol = ref<ExchangeSymbol | null>(null)
 const reason = ref('')
-const refreshedAt = ref<string | null>(null)
 
 const categoryOptions = computed(() => categories.value.map((item) => ({ label: `${item.category_type === 'SUBCATEGORY' ? '└ ' : ''}${item.name} (${item.symbol_count})`, value: item.category_key })))
 const filtered = computed(() => {
@@ -57,24 +55,26 @@ const columns: TableColumnsType<ExchangeSymbol> = [
   { title: '同步时间', dataIndex: 'synced_at', key: 'sync', width: 185, customRender: ({ text }) => formatDateTime(String(text)) }
 ]
 
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    const [symbolPage, categoryRows, status] = await Promise.all([
-      collectPageItems((params) => operationsApi.exchangeSymbols(params)),
-      collectPageItems((params) => operationsApi.categoriesPage(true, params)).then((page) => page.items),
-      operationsApi.symbolSyncStatus()
-    ])
-    symbols.value = symbolPage.items
-    categories.value = categoryRows
-    syncStatus.value = status
-    refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-    if (categoryKey.value) await filterCategory()
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '交易对数据加载失败'
-  } finally { loading.value = false }
-}
+const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
+  const [symbolPage, categoryRows, status] = await Promise.all([
+    collectPageItems((params) => operationsApi.exchangeSymbols(params)),
+    collectPageItems((params) => operationsApi.categoriesPage(true, params)).then((page) => page.items),
+    operationsApi.symbolSyncStatus()
+  ])
+  if (isStale()) return
+  symbols.value = symbolPage.items
+  categories.value = categoryRows
+  syncStatus.value = status
+  if (categoryKey.value) await filterCategory()
+}, {
+  fallbackMessage: '交易对数据加载失败',
+  onActivate: () => {
+    search.value = String(route.query.q ?? '')
+    tradingStatus.value = String(route.query.status ?? '')
+    admissionStatus.value = String(route.query.admission ?? '')
+    categoryKey.value = String(route.query.category ?? '')
+  }
+})
 
 async function filterCategory() {
   await syncUrl()
@@ -89,12 +89,12 @@ async function filterCategory() {
 }
 
 async function syncUrl() {
-  await router.replace({ query: {
-    ...(search.value.trim() ? { q: search.value.trim() } : {}),
-    ...(tradingStatus.value ? { status: tradingStatus.value } : {}),
-    ...(admissionStatus.value ? { admission: admissionStatus.value } : {}),
-    ...(categoryKey.value ? { category: categoryKey.value } : {})
-  } })
+  await syncQuery({
+    q: search.value.trim(),
+    status: tradingStatus.value,
+    admission: admissionStatus.value,
+    category: categoryKey.value
+  })
 }
 
 function requestAdmissionChange(item: ExchangeSymbol, enabled: boolean) {
@@ -117,7 +117,7 @@ async function saveAdmission() {
     if (selected.value?.symbol === item.symbol) await loadAudits(item.symbol)
   } catch (caught) {
     message.error(caught instanceof Error ? caught.message : '全局准入更新失败')
-    await load()
+    await reload()
   } finally {
     const next = new Set(updating.value); next.delete(item.symbol); updating.value = next
   }
@@ -138,12 +138,11 @@ async function openDetail(item: ExchangeSymbol) {
   if (auditResult.status === 'rejected') message.warning('准入审计记录加载失败')
 }
 
-onMounted(load)
 </script>
 
 <template>
   <main class="operations-page universe-page">
-    <PageHeader eyebrow="REFERENCE DATA / GLOBAL GATE" title="交易对管理" description="只维护交易所标的事实与平台全局准入；策略分类开关已迁移到策略风控。" :loading="loading" :refreshed-at="refreshedAt" @refresh="load" />
+    <PageHeader eyebrow="REFERENCE DATA / GLOBAL GATE" title="交易对管理" description="只维护交易所标的事实与平台全局准入；策略分类开关已迁移到策略风控。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
     <div v-if="syncStatus" :class="['status-strip', { stale: syncStatus.stale, error: syncStatus.status !== 'SUCCESS' }]">
       <DatabaseBackup :size="14" /><span>同步状态 <strong>{{ syncStatus.status }}</strong> · 最近成功 {{ formatDateTime(syncStatus.last_success_at) }} · {{ syncStatus.synced_symbols }} 个交易对 · effective universe {{ syncStatus.effective_universe_ready ? 'ready' : 'not ready' }}</span><a-tag v-if="syncStatus.stale" color="gold">STALE</a-tag><span v-if="syncStatus.last_error">{{ syncStatus.last_error }}</span>
     </div>
@@ -154,7 +153,7 @@ onMounted(load)
       <a-select v-model:value="categoryKey" show-search allow-clear placeholder="Category / Subcategory" :options="categoryOptions" :filter-option="(input: string, option: { label?: string }) => String(option.label || '').toLowerCase().includes(input.toLowerCase())" @change="filterCategory" />
       <span>{{ filtered.length }} / {{ symbols.length }} · 已逐页完整载入</span>
     </div>
-    <DataState :loading="loading" :error="error" :empty="!filtered.length" @retry="load">
+    <DataState :loading="loading" :error="error" :empty="!filtered.length" @retry="reload">
       <div class="table-frame"><a-table :columns="columns" :data-source="filtered" row-key="symbol" :pagination="{ pageSize: 25, showSizeChanger: true, pageSizeOptions: ['25','50','100'] }" :scroll="{ x: 1050 }" /></div>
     </DataState>
 

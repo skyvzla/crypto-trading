@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { asNumber, formatMoney, pnlClass } from './format'
+import dayjs from 'dayjs'
+import { asNumber, formatMoney, pnlClass } from '@/shared/format'
 
 interface DailyPnlRow {
   date: string
@@ -19,24 +20,34 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{ day: [date: string] }>()
 
 const weekdays = ['一', '二', '三', '四', '五', '六', '日']
+
+/**
+ * 月历格子。前导空格按周一开头计算。
+ *
+ * 这里只做「年月 → 该月每一天」的纯日期推算，与时区无关：
+ * 传入的 year/month 已经是账本时区下的自然月。
+ */
 const cells = computed(() => {
-  const firstDay = new Date(Date.UTC(props.year, props.month - 1, 1))
-  const days = new Date(Date.UTC(props.year, props.month, 0)).getUTCDate()
-  const leading = (firstDay.getUTCDay() + 6) % 7
+  const firstDay = dayjs(`${props.year}-${String(props.month).padStart(2, '0')}-01`)
+  const leading = (firstDay.day() + 6) % 7
   const byDate = new Map(props.rows.map((row) => [row.date, row]))
-  const result: Array<{ date: string; day: number; row?: DailyPnlRow } | null> = []
-  for (let index = 0; index < leading; index += 1) result.push(null)
-  for (let day = 1; day <= days; day += 1) {
-    const date = `${props.year}-${String(props.month).padStart(2, '0')}-${String(day).padStart(2, '0')}`
-    result.push({ date, day, row: byDate.get(date) })
-  }
-  return result
+  const blanks: Array<{ date: string; day: number; row?: DailyPnlRow } | null> = Array.from({ length: leading }, () => null)
+  const days = Array.from({ length: firstDay.daysInMonth() }, (_, index) => {
+    const date = firstDay.add(index, 'day').format('YYYY-MM-DD')
+    return { date, day: index + 1, row: byDate.get(date) }
+  })
+  return [...blanks, ...days]
 })
+
+/** 亏盈色块深浅，按当月最大绝对值归一化。 */
+const maxAbsolutePnl = computed(() => Math.max(
+  1,
+  ...props.rows.filter((item) => item.net_pnl != null).map((item) => Math.abs(asNumber(item.net_pnl)))
+))
 
 function intensity(row?: DailyPnlRow): number {
   if (!row || row.net_pnl == null) return 0
-  const max = Math.max(1, ...props.rows.filter((item) => item.net_pnl != null).map((item) => Math.abs(asNumber(item.net_pnl))))
-  return Math.max(.12, Math.min(.58, Math.abs(asNumber(row.net_pnl)) / max * .58))
+  return Math.max(.12, Math.min(.58, Math.abs(asNumber(row.net_pnl)) / maxAbsolutePnl.value * .58))
 }
 </script>
 

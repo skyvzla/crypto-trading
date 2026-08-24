@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { AreaSeries, ColorType, createChart, type IChartApi, type ISeriesApi, type Time, type UTCTimestamp } from 'lightweight-charts'
 import type { EquityPoint, EquityReplayRow } from './equityReplay'
-import { formatNumber, formatPercent, formatTime } from './format'
+import { formatDateTime, formatNumber, formatPercent } from '@/shared/format'
+import { IS_DARK_THEME } from '@/shared/theme'
 import { getChartTheme } from './chartTheme'
 
 const props = defineProps<{ points: EquityPoint[] }>()
 const host = ref<HTMLElement | null>(null)
 const hovered = ref<EquityReplayRow | null>(null)
-const isDarkTheme = inject<Ref<boolean>>('isDarkTheme', ref(false))
+const isDarkTheme = inject(IS_DARK_THEME, computed(() => false))
 let chart: IChartApi | null = null
 let series: ISeriesApi<'Area'> | null = null
 let observer: ResizeObserver | null = null
@@ -58,7 +59,7 @@ onBeforeUnmount(() => { observer?.disconnect(); chart?.remove() })
     <div v-if="hovered" class="equity-tooltip">
       <div><strong>{{ hovered.symbol }}</strong><span>{{ hovered.side || '-' }}</span></div>
       <dl>
-        <dt>结算时间</dt><dd>{{ formatTime(hovered.exit_time) }}</dd>
+        <dt>结算时间</dt><dd>{{ formatDateTime(hovered.exit_time) }}</dd>
         <dt>入场 / 退出</dt><dd>{{ formatNumber(hovered.entry_price, 8) }} / {{ formatNumber(hovered.exit_price, 8) }}</dd>
         <dt>本笔仓位</dt><dd>{{ formatNumber(hovered.positionAmount) }} U</dd>
         <dt>手续费</dt><dd>{{ formatNumber(hovered.feeAmount) }} U</dd>

@@ -4,9 +4,10 @@ import { notificationApi } from '@/api/client'
 import App from '@/App.vue'
 import NotificationsView from '@/views/NotificationsView.vue'
 import { router } from '@/router'
+import { jsonResponse } from './httpMocks'
 
 function response(body: unknown) {
-  return { ok: true, json: () => Promise.resolve(body) } as Response
+  return jsonResponse(body)
 }
 
 function notificationResponse(url: string) {

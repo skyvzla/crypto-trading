@@ -1,35 +1,28 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { RouterLink, useRoute, useRouter } from 'vue-router'
+import { computed, ref } from 'vue'
+import { RouterLink, useRouter } from 'vue-router'
 import { Activity, CalendarDays, CircleAlert, Database, RadioTower, ShieldCheck, WalletCards } from 'lucide-vue-next'
 import { ApiError } from '@/api/client'
 import { operationsApi } from '@/api/operations'
 import type { DailyPnL, Health, LedgerTrade, PnLSummary, StrategyCapitalStatus, StrategyRuntimeStatus } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
 import { campaignRoute } from '@/features/operations/campaignRoute'
-import FilterBar, { type OperationFilters } from '@/features/operations/FilterBar.vue'
+import FilterBar from '@/features/operations/FilterBar.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import PnlCalendar from '@/features/operations/PnlCalendar.vue'
-import { asNumber, formatDateTime, formatMoney, formatPercent, pnlClass } from '@/features/operations/format'
+import { useLedgerLoader, useOperationFilters, useQuerySync } from '@/features/operations/useOperationsView'
+import { asNumber, formatDateTime, formatMoney, formatPercent, pnlClass } from '@/shared/format'
+import { LEDGER_TIMEZONE, ledgerDate, ledgerMonthRange } from '@/shared/time'
 
-const route = useRoute()
 const router = useRouter()
-const nowParts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date()).map((item) => [item.type, item.value]))
-const year = Number(nowParts.year)
-const month = Number(nowParts.month)
-const startDate = `${year}-${String(month).padStart(2, '0')}-01`
-const endDate = `${year}-${String(month).padStart(2, '0')}-${String(new Date(year, month, 0).getDate()).padStart(2, '0')}`
-const today = `${nowParts.year}-${nowParts.month}-${nowParts.day}`
+const syncQuery = useQuerySync()
+const { filters, query, restore: restoreFilters } = useOperationFilters()
+const today = ledgerDate()
+const year = Number(today.slice(0, 4))
+const month = Number(today.slice(5, 7))
+const { startDate, endDate } = ledgerMonthRange(year, month)
 
-const filters = ref<OperationFilters>({
-  account_id: String(route.query.account_id ?? ''),
-  strategy_id: String(route.query.strategy_id ?? ''),
-  symbol: String(route.query.symbol ?? '')
-})
-const loading = ref(false)
-const error = ref<string | null>(null)
-const refreshedAt = ref<string | null>(null)
 const health = ref<Health | null>(null)
 const runtimes = ref<StrategyRuntimeStatus[]>([])
 const capital = ref<StrategyCapitalStatus | null>(null)
@@ -41,11 +34,6 @@ const pnl = ref<PnLSummary | null>(null)
 const daily = ref<DailyPnL[]>([])
 const unavailableSources = ref<string[]>([])
 
-const query = computed(() => ({
-  ...(filters.value.account_id.trim() ? { account_id: filters.value.account_id.trim() } : {}),
-  ...(filters.value.strategy_id.trim() ? { strategy_id: filters.value.strategy_id.trim() } : {}),
-  ...(filters.value.symbol.trim() ? { symbol: filters.value.symbol.trim() } : {})
-}))
 const todayPnl = computed(() => daily.value.find((item) => item.date === today))
 const closedPnlScope = computed(() => {
   const accountId = filters.value.account_id.trim()
@@ -67,69 +55,65 @@ const capitalGate = computed(() => {
   return { label: '允许开仓', color: 'green' }
 })
 
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    const accountId = filters.value.account_id.trim()
-    const strategyId = filters.value.strategy_id.trim()
-    const [healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult, pnlResult, capitalResult] = await Promise.allSettled([
-      operationsApi.health(),
-      operationsApi.runtimeStatus({ ...query.value, limit: 100 }),
-      operationsApi.positions({ ...query.value, limit: 1 }),
-      operationsApi.orders({ ...query.value, active_only: true, limit: 1 }),
-      operationsApi.trades({ ...query.value, limit: 6 }),
-      operationsApi.dailyPnl({
-        ...query.value,
-        start_date: startDate,
-        end_date: endDate,
-        timezone: 'Asia/Shanghai'
-      }),
-      accountId
-        ? operationsApi.pnl({ account_id: accountId, ...query.value })
-        : Promise.resolve(null),
-      accountId && strategyId
-        ? operationsApi.capitalStatus({ account_id: accountId, strategy_id: strategyId })
-        : Promise.resolve(null)
-    ])
-    unavailableSources.value = []
-    capitalNotFound.value = false
-    health.value = healthResult.status === 'fulfilled' ? healthResult.value : null
-    if (healthResult.status === 'rejected') unavailableSources.value.push('账本健康')
-    runtimes.value = runtimeResult.status === 'fulfilled' ? runtimeResult.value.items : []
-    if (runtimeResult.status === 'rejected') unavailableSources.value.push('策略心跳')
-    positionsTotal.value = positionResult.status === 'fulfilled' ? positionResult.value.total : null
-    if (positionResult.status === 'rejected') unavailableSources.value.push('当前持仓')
-    activeOrdersTotal.value = activeOrdersResult.status === 'fulfilled' ? activeOrdersResult.value.total : null
-    if (activeOrdersResult.status === 'rejected') unavailableSources.value.push('活动订单')
-    recentTrades.value = tradeResult.status === 'fulfilled' ? tradeResult.value.items : []
-    if (tradeResult.status === 'rejected') unavailableSources.value.push('最近成交')
-    daily.value = dailyResult.status === 'fulfilled' ? dailyResult.value : []
-    if (dailyResult.status === 'rejected') unavailableSources.value.push('当月已实现收益')
-    pnl.value = pnlResult.status === 'fulfilled' ? pnlResult.value : null
-    if (accountId && pnlResult.status === 'rejected') unavailableSources.value.push('当前浮动收益')
-    capital.value = capitalResult.status === 'fulfilled' ? capitalResult.value : null
-    if (accountId && strategyId && capitalResult.status === 'rejected') {
-      if (capitalResult.reason instanceof ApiError && capitalResult.reason.status === 404) {
-        capitalNotFound.value = true
-      } else {
-        unavailableSources.value.push('策略资金')
-      }
+const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
+  const accountId = filters.value.account_id.trim()
+  const strategyId = filters.value.strategy_id.trim()
+  // 每个数据源独立成败：任何一个挂掉都要明确标成「读取失败」，
+  // 不能当成 0 或空数据，否则运行总览会给出误导性的读数。
+  const [healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult, pnlResult, capitalResult] = await Promise.allSettled([
+    operationsApi.health(),
+    operationsApi.runtimeStatus({ ...query.value, limit: 100 }),
+    operationsApi.positions({ ...query.value, limit: 1 }),
+    operationsApi.orders({ ...query.value, active_only: true, limit: 1 }),
+    operationsApi.trades({ ...query.value, limit: 6 }),
+    operationsApi.dailyPnl({
+      ...query.value,
+      start_date: startDate,
+      end_date: endDate,
+      timezone: LEDGER_TIMEZONE
+    }),
+    accountId
+      ? operationsApi.pnl({ account_id: accountId, ...query.value })
+      : Promise.resolve(null),
+    accountId && strategyId
+      ? operationsApi.capitalStatus({ account_id: accountId, strategy_id: strategyId })
+      : Promise.resolve(null)
+  ])
+  if (isStale()) return
+  const unavailable: string[] = []
+  capitalNotFound.value = false
+  health.value = healthResult.status === 'fulfilled' ? healthResult.value : null
+  if (healthResult.status === 'rejected') unavailable.push('账本健康')
+  runtimes.value = runtimeResult.status === 'fulfilled' ? runtimeResult.value.items : []
+  if (runtimeResult.status === 'rejected') unavailable.push('策略心跳')
+  positionsTotal.value = positionResult.status === 'fulfilled' ? positionResult.value.total : null
+  if (positionResult.status === 'rejected') unavailable.push('当前持仓')
+  activeOrdersTotal.value = activeOrdersResult.status === 'fulfilled' ? activeOrdersResult.value.total : null
+  if (activeOrdersResult.status === 'rejected') unavailable.push('活动订单')
+  recentTrades.value = tradeResult.status === 'fulfilled' ? tradeResult.value.items : []
+  if (tradeResult.status === 'rejected') unavailable.push('最近成交')
+  daily.value = dailyResult.status === 'fulfilled' ? dailyResult.value : []
+  if (dailyResult.status === 'rejected') unavailable.push('当月已实现收益')
+  pnl.value = pnlResult.status === 'fulfilled' ? pnlResult.value : null
+  if (accountId && pnlResult.status === 'rejected') unavailable.push('当前浮动收益')
+  capital.value = capitalResult.status === 'fulfilled' ? capitalResult.value : null
+  if (accountId && strategyId && capitalResult.status === 'rejected') {
+    // 404 表示这对账户/策略还没初始化资金状态，是正常状态而不是故障。
+    if (capitalResult.reason instanceof ApiError && capitalResult.reason.status === 404) {
+      capitalNotFound.value = true
+    } else {
+      unavailable.push('策略资金')
     }
-    if ([healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult].every((item) => item.status === 'rejected')) {
-      throw new Error('运行数据接口均不可用')
-    }
-    refreshedAt.value = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date())
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '运行总览加载失败'
-  } finally {
-    loading.value = false
   }
-}
+  unavailableSources.value = unavailable
+  if ([healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult].every((item) => item.status === 'rejected')) {
+    throw new Error('运行数据接口均不可用')
+  }
+}, { fallbackMessage: '运行总览加载失败', onActivate: restoreFilters })
 
 async function applyFilters() {
-  await router.replace({ query: { ...query.value } })
-  await load()
+  await syncQuery({ ...query.value })
+  await reload()
 }
 
 function openDay(date: string) {
@@ -140,8 +124,6 @@ function openRecentTrade(trade: LedgerTrade) {
   const target = campaignRoute(trade)
   void router.push(target || { name: 'trades', query: { ...query.value } })
 }
-
-onMounted(load)
 </script>
 
 <template>
@@ -152,7 +134,7 @@ onMounted(load)
       description="把账本健康、策略心跳、执行门禁与当月已实现收益放在同一条运行链路上。"
       :loading="loading"
       :refreshed-at="refreshedAt"
-      @refresh="load"
+      @refresh="reload"
     >
       <template #actions>
         <a-tag v-for="mode in runtimeModes" :key="mode" :color="mode === 'live' ? 'red' : 'gold'">{{ mode.toUpperCase() }}</a-tag>
@@ -161,7 +143,7 @@ onMounted(load)
     </PageHeader>
 
     <FilterBar v-model="filters" @apply="applyFilters" />
-    <DataState :loading="loading" :error="error" @retry="load">
+    <DataState :loading="loading" :error="error" @retry="reload">
       <a-alert v-if="unavailableSources.length" type="warning" show-icon :message="`部分数据读取失败：${unavailableSources.join('、')}`" description="失败项显示为“读取失败”，不会当作 0 或空数据。" class="partial-failure" />
       <section class="health-rail" aria-label="运行健康状态">
         <article :class="['health-node', health?.status === 'healthy' ? 'ok' : 'bad']">

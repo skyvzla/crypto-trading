@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatNumber, formatPercent, pnlClass } from '@/features/backtests/format'
+import { formatNumber, formatPercent, pnlClass } from '@/shared/format'
 
 describe('回测数字格式化', () => {
   it('兼容 PostgreSQL NUMERIC 的字符串响应', () => {

@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import { computed, h, onMounted, provide, ref } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, provide, ref } from 'vue'
 import { ArrowLeftRight, Bell, ChartNoAxesCombined, FlaskConical, Gauge, LayoutDashboard, ListChecks, Moon, ShieldCheck, Sun, Tags, WalletCards } from 'lucide-vue-next'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { theme as antdTheme, type MenuProps } from 'ant-design-vue'
 import { useHealthStore } from '@/stores/health'
+import { IS_DARK_THEME } from '@/shared/theme'
+import { STORAGE_KEYS, readStored, writeStored } from '@/shared/storage'
+import { formatLedgerClock } from '@/shared/time'
+
+/** 账本连通性探测间隔。够快能发现服务中断，又不至于把 /health 打满。 */
+const HEALTH_POLL_INTERVAL_MS = 30_000
 
 const route = useRoute()
 const health = useHealthStore()
@@ -27,7 +33,7 @@ const providerTheme = computed(() => ({
     }
   }
 }))
-provide('isDarkTheme', isDarkTheme)
+provide(IS_DARK_THEME, isDarkTheme)
 
 function menuItem(key: string, label: string, to: string, icon: typeof LayoutDashboard) {
   return {
@@ -80,40 +86,46 @@ const sideMenuOptions: MenuProps['items'] = [
   }
 ]
 
+/**
+ * 侧栏高亮项。
+ *
+ * 收益日历和 Campaign 明细是下钻页面，没有独立菜单入口，
+ * 因此高亮它们的来源页，避免侧栏在这些路由上完全不选中。
+ */
 const activeKey = computed(() => {
   const name = String(route.name ?? '')
   if (name.startsWith('backtest')) return 'backtests'
   if (name.startsWith('notifications')) return 'notifications'
   if (name === 'campaign-trade-detail') return 'trades'
+  if (name === 'calendar') return 'overview'
   return name
 })
 const pageTitle = computed(() => String(route.meta.title ?? '运行账本'))
-const healthLabel = computed(
-  () =>
-    ({
-      healthy: '账本服务正常',
-      unhealthy: '账本服务异常',
-      unknown: '未探测'
-    })[health.status]
-)
+
+/** 徽标颜色与文案来自同一处，避免出现「文案异常但徽标常绿」。 */
+const healthPresentation = computed(() => ({
+  healthy: { status: 'success' as const, label: '账本服务正常' },
+  unhealthy: { status: 'error' as const, label: '账本服务异常' },
+  unknown: { status: 'default' as const, label: '未探测' }
+})[health.status])
+const healthCheckedAt = computed(() => health.checkedAt ? `最近探测 ${formatLedgerClock(new Date(health.checkedAt))}` : '尚未探测')
 
 function applyTheme(mode: 'light' | 'dark') {
   themeMode.value = mode
   document.documentElement.dataset.theme = mode
-  try {
-    localStorage.setItem('trade-ledger-theme', mode)
-  } catch {
-    // 浏览器禁用本地存储时，仍保留本次会话的主题选择。
-  }
+  writeStored(STORAGE_KEYS.theme, mode)
 }
 function toggleTheme() { applyTheme(isDarkTheme.value ? 'light' : 'dark') }
+
+let healthTimer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
-  try {
-    applyTheme(localStorage.getItem('trade-ledger-theme') === 'dark' ? 'dark' : 'light')
-  } catch {
-    applyTheme('light')
-  }
-  health.check()
+  applyTheme(readStored(STORAGE_KEYS.theme) === 'dark' ? 'dark' : 'light')
+  void health.check()
+  healthTimer = setInterval(() => void health.check(), HEALTH_POLL_INTERVAL_MS)
+})
+onBeforeUnmount(() => {
+  if (healthTimer !== null) clearInterval(healthTimer)
+  healthTimer = null
 })
 </script>
 
@@ -126,10 +138,12 @@ onMounted(() => {
           <span class="brand-name">Trade Ledger</span>
         </div>
         <a-menu :selected-keys="[activeKey]" :items="sideMenuOptions" mode="inline" theme="dark" class="side-menu" />
-        <div class="rail-status">
-          <a-badge status="processing" />
-          <span>{{ healthLabel }}</span>
-        </div>
+        <a-tooltip :title="healthCheckedAt" placement="right">
+          <div class="rail-status">
+            <a-badge :status="healthPresentation.status" />
+            <span>{{ healthPresentation.label }}</span>
+          </div>
+        </a-tooltip>
       </a-layout-sider>
       <a-layout class="app-body">
         <a-layout-header class="app-header">
@@ -224,9 +238,12 @@ onMounted(() => {
 }
 .side-menu :deep(.ant-menu-item-group-title) { padding-top: 17px; padding-bottom: 5px; color: color-mix(in srgb, var(--color-gold) 68%, transparent); font: var(--menu-group-font-size) var(--font-family-mono); letter-spacing: 0; }
 .app-sider.ant-layout-sider-collapsed .side-menu :deep(.ant-menu-item-group-title) { height: var(--menu-group-font-size); padding: 8px 0 0; overflow: hidden; color: transparent; }
+@media (max-width: 900px) {
+  /* 原先由 base.scss 用 !important 覆盖，现在归组件自己管。 */
+  .workspace { padding: 14px; }
+}
 @media (max-width: 640px) {
   .header-context i { display: none; }
-  .workspace { padding-inline: 12px; }
 }
 @media (max-width: 767px) {
   .app-sider { flex: 0 0 56px !important; width: 56px !important; min-width: 56px !important; max-width: 56px !important; }

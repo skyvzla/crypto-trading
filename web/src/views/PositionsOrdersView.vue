@@ -1,36 +1,41 @@
 <script setup lang="ts">
-import { computed, h, onMounted, ref } from 'vue'
+import { computed, h, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button, Tag, type TableColumnsType, type TablePaginationConfig } from 'ant-design-vue'
 import { operationsApi } from '@/api/operations'
 import type { LedgerOrder, LedgerPosition } from '@/api/types'
 import DataState from '@/features/operations/DataState.vue'
 import { campaignRoute } from '@/features/operations/campaignRoute'
-import FilterBar, { type OperationFilters } from '@/features/operations/FilterBar.vue'
+import FilterBar from '@/features/operations/FilterBar.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { asNumber, formatDateTime, formatMoney, pnlClass, sideLabel } from '@/features/operations/format'
+import {
+  useLedgerLoader,
+  useOperationFilters,
+  usePageParams,
+  useQuerySync
+} from '@/features/operations/useOperationsView'
+import { asNumber, formatDateTime, formatMoney, pnlClass, sideLabel } from '@/shared/format'
 
 type Detail = { kind: 'position'; item: LedgerPosition } | { kind: 'order'; item: LedgerOrder }
+type Tab = 'positions' | 'active' | 'history'
 
 const route = useRoute()
 const router = useRouter()
-const filters = ref<OperationFilters>({
-  account_id: String(route.query.account_id ?? ''),
-  strategy_id: String(route.query.strategy_id ?? ''),
-  symbol: String(route.query.symbol ?? '')
-})
-const activeTab = ref(String(route.query.tab ?? 'positions'))
+const syncQuery = useQuerySync()
+const { filters, query, restore: restoreFilters } = useOperationFilters()
+const { page, pageSize, offset, restore: restorePage, apply: applyPage } = usePageParams({ defaultSize: 25, maxSize: 100 })
+const activeTab = ref<Tab>(readTab())
 const historyStatus = ref(String(route.query.status ?? 'FILLED'))
 const positions = ref<LedgerPosition[]>([])
 const orders = ref<LedgerOrder[]>([])
 const total = ref(0)
-const currentPage = ref(Math.max(1, Number(route.query.page ?? 1) || 1))
-const pageSize = ref(Math.max(10, Math.min(100, Number(route.query.page_size ?? 25) || 25)))
-const loading = ref(false)
-const error = ref<string | null>(null)
-const refreshedAt = ref<string | null>(null)
 const detail = ref<Detail | null>(null)
 const detailOpen = ref(false)
+
+function readTab(): Tab {
+  const requested = String(route.query.tab ?? 'positions')
+  return requested === 'active' || requested === 'history' ? requested : 'positions'
+}
 
 const statusOptions = [
   { label: '全部状态', value: '' },
@@ -40,13 +45,8 @@ const statusOptions = [
   { label: '已过期 EXPIRED', value: 'EXPIRED' }
 ]
 
-const query = computed(() => ({
-  ...(filters.value.account_id.trim() ? { account_id: filters.value.account_id.trim() } : {}),
-  ...(filters.value.strategy_id.trim() ? { strategy_id: filters.value.strategy_id.trim() } : {}),
-  ...(filters.value.symbol.trim() ? { symbol: filters.value.symbol.trim() } : {})
-}))
 const tablePagination = computed<TablePaginationConfig>(() => ({
-  current: currentPage.value,
+  current: page.value,
   pageSize: pageSize.value,
   total: total.value,
   showSizeChanger: true,
@@ -88,56 +88,67 @@ function openCampaign(order: LedgerOrder) {
   if (target) void router.push(target)
 }
 
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    if (activeTab.value === 'positions') {
-      const page = await operationsApi.positions({ ...query.value, limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value })
-      positions.value = page.items
-      total.value = page.total
-    } else if (activeTab.value === 'active') {
-      const page = await operationsApi.orders({ ...query.value, active_only: true, limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value })
-      orders.value = page.items
-      total.value = page.total
-    } else {
-      const page = await operationsApi.orders({ ...query.value, status: historyStatus.value || undefined, limit: pageSize.value, offset: (currentPage.value - 1) * pageSize.value })
-      orders.value = page.items
-      total.value = page.total
-    }
-    refreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-  } catch (caught) {
-    error.value = caught instanceof Error ? caught.message : '持仓与订单加载失败'
-  } finally {
-    loading.value = false
+/** 三个标签页查的是不同资源，只有分页与筛选口径是共用的。 */
+async function fetchActiveTab() {
+  const paging = { limit: pageSize.value, offset: offset.value }
+  if (activeTab.value === 'positions') {
+    return { kind: 'positions' as const, page: await operationsApi.positions({ ...query.value, ...paging }) }
+  }
+  if (activeTab.value === 'active') {
+    return { kind: 'orders' as const, page: await operationsApi.orders({ ...query.value, active_only: true, ...paging }) }
+  }
+  return {
+    kind: 'orders' as const,
+    page: await operationsApi.orders({ ...query.value, status: historyStatus.value || undefined, ...paging })
   }
 }
 
+const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
+  const result = await fetchActiveTab()
+  if (isStale()) return
+  if (result.kind === 'positions') positions.value = result.page.items
+  else orders.value = result.page.items
+  total.value = result.page.total
+}, {
+  fallbackMessage: '持仓与订单加载失败',
+  onActivate: () => {
+    restoreFilters()
+    restorePage()
+    activeTab.value = readTab()
+    historyStatus.value = String(route.query.status ?? 'FILLED')
+  }
+})
+
+async function syncRoute() {
+  await syncQuery({
+    ...query.value,
+    tab: activeTab.value,
+    page: page.value,
+    page_size: pageSize.value,
+    ...(activeTab.value === 'history' && historyStatus.value ? { status: historyStatus.value } : {})
+  })
+}
+
 async function applyFilters() {
-  await router.replace({ query: { ...query.value, tab: activeTab.value, page: currentPage.value, page_size: pageSize.value, ...(activeTab.value === 'history' && historyStatus.value ? { status: historyStatus.value } : {}) } })
-  await load()
+  await syncRoute()
+  await reload()
 }
 
 async function changeTab(key: string) {
-  activeTab.value = key
-  currentPage.value = 1
+  activeTab.value = key === 'active' || key === 'history' ? key : 'positions'
+  page.value = 1
   await applyFilters()
 }
 
 async function onTableChange(pagination: TablePaginationConfig) {
-  const nextSize = pagination.pageSize ?? pageSize.value
-  if (nextSize !== pageSize.value) currentPage.value = 1
-  else currentPage.value = pagination.current ?? 1
-  pageSize.value = nextSize
+  applyPage({ current: pagination.current ?? undefined, pageSize: pagination.pageSize ?? undefined })
   await applyFilters()
 }
-
-onMounted(load)
 </script>
 
 <template>
   <main class="operations-page positions-orders-page">
-    <PageHeader eyebrow="OPERATIONS / EXPOSURE" title="持仓与订单" description="查看当前风险敞口和交易所订单事实；首期仅查询，不在 Web 发起开仓或平仓。" :loading="loading" :refreshed-at="refreshedAt" @refresh="load" />
+    <PageHeader eyebrow="OPERATIONS / EXPOSURE" title="持仓与订单" description="查看当前风险敞口和交易所订单事实；首期仅查询，不在 Web 发起开仓或平仓。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
     <FilterBar
       v-model="filters"
       :show-status="activeTab === 'history'"
@@ -153,7 +164,7 @@ onMounted(load)
       <a-tab-pane key="history" tab="历史订单" />
     </a-tabs>
     <div class="result-ledger"><span>{{ total }} 条记录</span><span v-if="activeTab === 'active'">口径：NEW + PARTIALLY_FILLED</span><span v-else-if="activeTab === 'history'">口径：后端订单状态筛选</span></div>
-    <DataState :loading="loading" :error="error" :empty="activeTab === 'positions' ? !positions.length : !orders.length" @retry="load">
+    <DataState :loading="loading" :error="error" :empty="activeTab === 'positions' ? !positions.length : !orders.length" @retry="reload">
       <div class="table-frame">
         <a-table v-if="activeTab === 'positions'" :columns="positionColumns" :data-source="positions" row-key="id" :pagination="tablePagination" :scroll="{ x: 1180 }" size="middle" @change="onTableChange" />
         <a-table v-else :columns="orderColumns" :data-source="orders" row-key="id" :pagination="tablePagination" :scroll="{ x: 1250 }" size="middle" @change="onTableChange" />

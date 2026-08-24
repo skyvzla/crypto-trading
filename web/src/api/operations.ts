@@ -1,4 +1,5 @@
 import { api } from '@/api/client'
+import { LEDGER_TIMEZONE } from '@/shared/time'
 import type {
   AdmissionUpdate,
   CampaignPage,
@@ -74,7 +75,7 @@ export const operationsApi = {
   dailyPnl: (query: DailyPnLQuery) =>
     api.get<DailyPnL[]>('/pnl/daily', {
       ...query,
-      timezone: query.timezone ?? 'Asia/Shanghai'
+      timezone: query.timezone ?? LEDGER_TIMEZONE
     }),
 
   performance: (query: PerformanceQuery) =>
@@ -95,7 +96,7 @@ export const operationsApi = {
   campaigns: (query: CampaignQuery = {}) =>
     api.get<CampaignPage>('/campaigns', {
       ...query,
-      timezone: query.timezone ?? 'Asia/Shanghai'
+      timezone: query.timezone ?? LEDGER_TIMEZONE
     }),
 
   campaignPnl: (
