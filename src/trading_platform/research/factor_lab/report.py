@@ -35,17 +35,26 @@ def render_factor_report(
         "",
         "## 因子摘要",
         "",
-        "| Factor | Samples | Pearson IC | Spearman IC | ICIR | Peak Horizon | Half-life |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| Factor | Samples | Coverage | Pearson IC | Spearman IC | 95% CI | ICIR | ICIR Bucket | Peak Horizon | Half-life |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for row in summary.itertuples(index=False):
         peak = getattr(row, "peak_horizon_seconds", None)
         half_life = getattr(row, "signal_half_life_seconds", None)
         peak_text = "-" if pd.isna(peak) else f"{int(peak)}s"
         half_life_text = "-" if pd.isna(half_life) else f"{int(half_life)}s"
+        ci_low = getattr(row, "spearman_ci_low", None)
+        ci_high = getattr(row, "spearman_ci_high", None)
+        ci_text = (
+            "-"
+            if pd.isna(ci_low) or pd.isna(ci_high)
+            else f"[{float(ci_low):.4f}, {float(ci_high):.4f}]"
+        )
+        bucket_frequency = getattr(row, "bucket_frequency", None) or "-"
         lines.append(
-            f"| `{row.factor}` | {int(row.samples)} | {_format_float(row.pearson_ic)} | "
-            f"{_format_float(row.spearman_ic)} | {_format_float(row.icir)} | "
+            f"| `{row.factor}` | {int(row.samples)} | {float(row.coverage):.1%} | "
+            f"{_format_float(row.pearson_ic)} | {_format_float(row.spearman_ic)} | "
+            f"{ci_text} | {_format_float(row.icir)} | {bucket_frequency} | "
             f"{peak_text} | {half_life_text} |"
         )
 

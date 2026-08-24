@@ -41,6 +41,7 @@ def analyze_signal_horizon(
             target=target,
             quantiles=5,
             min_bucket_samples=10,
+            bootstrap_resamples=0,
         )
         rows.append({
             "horizon_seconds": seconds,

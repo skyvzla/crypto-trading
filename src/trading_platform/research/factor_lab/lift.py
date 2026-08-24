@@ -2,15 +2,123 @@
 
 IC 只反映排序相关性，不回答"比随机好多少"。本模块全部输出都以
 lift（条件均值 / 全体均值）为核心指标，并附带样本量、地形图分层、
-阈值敏感性与扣费后期望，用于因子初筛和显式规则组合。
+阈值敏感性与 MFE/MAE 潜力诊断，用于因子初筛和显式规则组合。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from itertools import combinations
 
 import numpy as np
 import pandas as pd
+
+
+@dataclass(frozen=True)
+class QuantileBand:
+    """只允许在训练集拟合、之后原样应用到验证/测试集的分位区间。"""
+
+    factor: str
+    quantile: int
+    quantiles: int
+    lower: float | None
+    upper: float | None
+
+
+@dataclass(frozen=True)
+class QuantilePairRule:
+    """两因子分位规则；阈值一旦由训练集拟合便不可在测试集重算。"""
+
+    left: QuantileBand
+    right: QuantileBand
+
+
+def _finite_target(dataset: pd.DataFrame, target: str) -> pd.Series:
+    if target not in dataset.columns:
+        raise ValueError(f"unknown target: {target}")
+    values = pd.to_numeric(dataset[target], errors="coerce")
+    return values.replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def _safe_lift(value: float, base: float) -> float:
+    if not np.isfinite(value) or not np.isfinite(base) or base == 0:
+        return float("nan")
+    return value / base
+
+
+def fit_quantile_band(
+    dataset: pd.DataFrame,
+    factor: str,
+    *,
+    quantile: int,
+    quantiles: int = 3,
+) -> QuantileBand:
+    """在训练集上拟合一个值域分位区间。
+
+    与直接在 test 上 ``qcut`` 不同，该对象保存的是训练期数值阈值，可用于真正的
+    时间外推。对重复值较多的离散因子，边界可能重合；调用者应同时检查覆盖率。
+    """
+    if factor not in dataset.columns:
+        raise ValueError(f"unknown factor: {factor}")
+    if quantiles < 2:
+        raise ValueError("quantiles must be at least 2")
+    if not 1 <= quantile <= quantiles:
+        raise ValueError("quantile must be within [1, quantiles]")
+    values = pd.to_numeric(dataset[factor], errors="coerce").replace(
+        [np.inf, -np.inf], np.nan
+    ).dropna()
+    if values.empty or values.nunique() < 2:
+        raise ValueError(f"factor has insufficient finite variation: {factor}")
+    edges = values.quantile(np.linspace(0.0, 1.0, quantiles + 1)).to_numpy(float)
+    lower = None if quantile == 1 else float(edges[quantile - 1])
+    upper = None if quantile == quantiles else float(edges[quantile])
+    return QuantileBand(
+        factor=factor,
+        quantile=quantile,
+        quantiles=quantiles,
+        lower=lower,
+        upper=upper,
+    )
+
+
+def apply_quantile_band(dataset: pd.DataFrame, band: QuantileBand) -> pd.Series:
+    """把训练期拟合的区间应用到任意后续 Dataset。"""
+    if band.factor not in dataset.columns:
+        raise ValueError(f"unknown factor: {band.factor}")
+    values = pd.to_numeric(dataset[band.factor], errors="coerce")
+    mask = values.notna() & np.isfinite(values)
+    if band.lower is not None:
+        mask &= values.gt(band.lower)
+    if band.upper is not None:
+        mask &= values.le(band.upper)
+    return mask
+
+
+def fit_quantile_pair_rule(
+    train: pd.DataFrame,
+    *,
+    factor_a: str,
+    a_quantile: int,
+    factor_b: str,
+    b_quantile: int,
+    quantiles: int = 3,
+) -> QuantilePairRule:
+    return QuantilePairRule(
+        left=fit_quantile_band(
+            train, factor_a, quantile=a_quantile, quantiles=quantiles
+        ),
+        right=fit_quantile_band(
+            train, factor_b, quantile=b_quantile, quantiles=quantiles
+        ),
+    )
+
+
+def apply_quantile_pair_rule(
+    dataset: pd.DataFrame, rule: QuantilePairRule
+) -> pd.Series:
+    return apply_quantile_band(dataset, rule.left) & apply_quantile_band(
+        dataset, rule.right
+    )
 
 
 def _finite_pair(dataset: pd.DataFrame, factor: str, target: str) -> pd.DataFrame:
@@ -43,10 +151,22 @@ def quantile_lift(
     quantiles: int = 5,
     min_bucket: int = 10,
 ) -> pd.DataFrame:
-    columns = ["quantile", "samples", "mean", "median", "lift_mean", "lift_median"]
+    columns = [
+        "quantile",
+        "samples",
+        "mean",
+        "median",
+        "lift_mean",
+        "lift_median",
+        "lift_valid_mean",
+        "lift_valid_median",
+    ]
     pair = _finite_pair(dataset, factor, target)
-    overall_mean = float(pair[target].mean()) if len(pair) else float("nan")
-    overall_median = float(pair[target].median()) if len(pair) else float("nan")
+    global_target = _finite_target(dataset, target)
+    global_mean = float(global_target.mean()) if len(global_target) else float("nan")
+    global_median = float(global_target.median()) if len(global_target) else float("nan")
+    valid_mean = float(pair[target].mean()) if len(pair) else float("nan")
+    valid_median = float(pair[target].median()) if len(pair) else float("nan")
     if len(pair) < quantiles or pair[factor].nunique() < 2:
         return pd.DataFrame(columns=columns)
     try:
@@ -60,8 +180,23 @@ def quantile_lift(
         "median": grouped.median(),
     }).reset_index(names="quantile")
     frame["quantile"] = frame["quantile"].astype(int) + 1
-    frame["lift_mean"] = np.where(frame["samples"] >= min_bucket, frame["mean"] / overall_mean, np.nan)
-    frame["lift_median"] = np.where(frame["samples"] >= min_bucket, frame["median"] / overall_median, np.nan)
+    eligible = frame["samples"] >= min_bucket
+    frame["lift_mean"] = np.where(
+        eligible, frame["mean"].map(lambda value: _safe_lift(float(value), global_mean)), np.nan
+    )
+    frame["lift_median"] = np.where(
+        eligible,
+        frame["median"].map(lambda value: _safe_lift(float(value), global_median)),
+        np.nan,
+    )
+    frame["lift_valid_mean"] = np.where(
+        eligible, frame["mean"].map(lambda value: _safe_lift(float(value), valid_mean)), np.nan
+    )
+    frame["lift_valid_median"] = np.where(
+        eligible,
+        frame["median"].map(lambda value: _safe_lift(float(value), valid_median)),
+        np.nan,
+    )
     return frame[columns]
 
 
@@ -86,6 +221,10 @@ def scan_factor_lifts(
                 "top_lift_mean": np.nan,
                 "top_lift_median": np.nan,
                 "bottom_lift_mean": np.nan,
+                "top_lift_valid_mean": np.nan,
+                "bottom_lift_valid_mean": np.nan,
+                "best_lift_mean": np.nan,
+                "best_side": None,
                 "monotonic": False,
                 "coverage": float(valid) / total,
             })
@@ -96,19 +235,48 @@ def scan_factor_lifts(
         if len(finite) >= 3:
             diffs = np.diff(finite)
             monotonic = bool(np.all(diffs >= 0) or np.all(diffs <= 0))
+        top_lift = (
+            float(table["lift_mean"].iloc[-1])
+            if np.isfinite(table["lift_mean"].iloc[-1])
+            else np.nan
+        )
+        bottom_lift = (
+            float(table["lift_mean"].iloc[0])
+            if np.isfinite(table["lift_mean"].iloc[0])
+            else np.nan
+        )
+        candidates = {
+            "top": top_lift,
+            "bottom": bottom_lift,
+        }
+        finite_candidates = {
+            side: value for side, value in candidates.items() if np.isfinite(value)
+        }
+        best_side = (
+            max(finite_candidates, key=finite_candidates.get)
+            if finite_candidates
+            else None
+        )
         rows.append({
             "factor": factor,
             "samples": int(table["samples"].sum()),
-            "top_lift_mean": float(table["lift_mean"].iloc[-1]) if np.isfinite(table["lift_mean"].iloc[-1]) else np.nan,
+            "top_lift_mean": top_lift,
             "top_lift_median": float(table["lift_median"].iloc[-1]) if np.isfinite(table["lift_median"].iloc[-1]) else np.nan,
-            "bottom_lift_mean": float(table["lift_mean"].iloc[0]) if np.isfinite(table["lift_mean"].iloc[0]) else np.nan,
+            "bottom_lift_mean": bottom_lift,
+            "top_lift_valid_mean": float(table["lift_valid_mean"].iloc[-1]) if np.isfinite(table["lift_valid_mean"].iloc[-1]) else np.nan,
+            "bottom_lift_valid_mean": float(table["lift_valid_mean"].iloc[0]) if np.isfinite(table["lift_valid_mean"].iloc[0]) else np.nan,
+            "best_lift_mean": finite_candidates.get(best_side, np.nan),
+            "best_side": best_side,
             "monotonic": monotonic,
             "coverage": float(valid) / total,
         })
     summary = pd.DataFrame(rows)
     if not summary.empty:
         summary = summary.sort_values(
-            "top_lift_mean", ascending=False, na_position="last", kind="stable"
+            ["best_lift_mean", "coverage"],
+            ascending=[False, False],
+            na_position="last",
+            kind="stable",
         ).reset_index(drop=True)
     return summary, details
 
@@ -118,8 +286,8 @@ def terrain_table(
     target: str,
     rise_col: str = "rise_5s",
     volume_col: str = "volume_multiple_5s",
-    rise_bins: tuple[float, ...] = (0.05, 0.08, 0.12, 0.20, 1e9),
-    volume_bins: tuple[float, ...] = (5.0, 10.0, 20.0, 50.0, 1e18),
+    rise_bins: tuple[float, ...] = (0.0, 0.03, 0.05, 0.08, 0.12, 0.20, np.inf),
+    volume_bins: tuple[float, ...] = (0.0, 3.0, 5.0, 10.0, 20.0, 50.0, np.inf),
 ) -> pd.DataFrame:
     required = {rise_col, volume_col, target}
     missing = sorted(required - set(dataset.columns))
@@ -133,8 +301,8 @@ def terrain_table(
     def _labels(edges: tuple[float, ...]) -> list[str]:
         labels = []
         for start, end in zip(edges[:-1], edges[1:]):
-            left = f"{start:g}" if start < 1e8 else f"{start:g}"
-            right = "+inf" if end >= 1e8 else f"{end:g}"
+            left = "-inf" if np.isneginf(start) else f"{start:g}"
+            right = "+inf" if np.isposinf(end) else f"{end:g}"
             labels.append(f"({left}, {right}]")
         return labels
 
@@ -161,31 +329,42 @@ def rule_combination_lifts(
 ) -> pd.DataFrame:
     columns = [
         "factor_a", "a_quantile", "factor_b", "b_quantile",
-        "samples", "hit_rate", "mean", "median", "lift_mean",
+        "samples", "coverage", "hit_rate", "mean", "median", "lift_mean",
+        "lift_valid_mean",
     ]
     usable = [f for f in factors if f in dataset.columns]
     if len(usable) < 2:
         return pd.DataFrame(columns=columns)
-    pair_all = dataset[usable + [target]].copy()
-    for column in usable + [target]:
-        pair_all[column] = pd.to_numeric(pair_all[column], errors="coerce")
-    pair_all = pair_all.replace([np.inf, -np.inf], np.nan).dropna()
-    if len(pair_all) < min_samples:
+    global_target = _finite_target(dataset, target)
+    global_mean = float(global_target.mean()) if len(global_target) else float("nan")
+    if len(global_target) < min_samples:
         return pd.DataFrame(columns=columns)
-    overall_mean = float(pair_all[target].mean())
-
-    buckets: dict[str, np.ndarray] = {}
-    for factor in usable:
-        try:
-            bins = pd.qcut(pair_all[factor].rank(method="average"), q=quantiles, labels=False, duplicates="drop")
-        except ValueError:
-            continue
-        buckets[factor] = bins.to_numpy()
-    usable = [f for f in usable if f in buckets]
 
     rows: list[dict[str, object]] = []
     for factor_a, factor_b in combinations(usable, 2):
-        a_bins, b_bins = buckets[factor_a], buckets[factor_b]
+        pair = dataset[[factor_a, factor_b, target]].copy()
+        for column in (factor_a, factor_b, target):
+            pair[column] = pd.to_numeric(pair[column], errors="coerce")
+        pair = pair.replace([np.inf, -np.inf], np.nan).dropna()
+        if len(pair) < min_samples:
+            continue
+        try:
+            a_bins = pd.qcut(
+                pair[factor_a].rank(method="average"),
+                q=quantiles,
+                labels=False,
+                duplicates="drop",
+            ).to_numpy()
+            b_bins = pd.qcut(
+                pair[factor_b].rank(method="average"),
+                q=quantiles,
+                labels=False,
+                duplicates="drop",
+            ).to_numpy()
+        except ValueError:
+            continue
+        valid_mean = float(pair[target].mean())
+        coverage = len(pair) / max(1, len(global_target))
         for i in range(quantiles):
             mask_a = a_bins == i
             if not mask_a.any():
@@ -195,7 +374,7 @@ def rule_combination_lifts(
                 samples = int(mask.sum())
                 if samples < min_samples:
                     continue
-                values = pair_all.loc[mask, target]
+                values = pair.loc[mask, target]
                 mean = float(values.mean())
                 rows.append({
                     "factor_a": factor_a,
@@ -203,10 +382,12 @@ def rule_combination_lifts(
                     "factor_b": factor_b,
                     "b_quantile": j + 1,
                     "samples": samples,
+                    "coverage": coverage,
                     "hit_rate": float((values > 0).mean()),
                     "mean": mean,
                     "median": float(values.median()),
-                    "lift_mean": mean / overall_mean if overall_mean else np.nan,
+                    "lift_mean": _safe_lift(mean, global_mean),
+                    "lift_valid_mean": _safe_lift(mean, valid_mean),
                 })
     result = pd.DataFrame(rows, columns=columns)
     if result.empty:
@@ -218,32 +399,37 @@ def threshold_sensitivity(
     dataset: pd.DataFrame,
     factor: str,
     target: str,
-    base_quantile: float = 0.8,
-    perturbations: tuple[float, ...] = (0.6, 0.7, 0.8, 0.9),
+    quantile_levels: tuple[float, ...] = (0.6, 0.7, 0.8, 0.9),
     min_samples: int = 20,
 ) -> pd.DataFrame:
-    columns = ["perturbation", "threshold", "samples", "mean", "lift_mean"]
+    """观察同一方向在不同分位阈值下是否保持稳定，而不是只挑一个最优切点。"""
+    columns = ["quantile", "threshold", "samples", "mean", "lift_mean"]
     pair = _finite_pair(dataset, factor, target)
     if pair.empty:
         return pd.DataFrame(columns=columns)
-    overall_mean = float(pair[target].mean())
+    global_target = _finite_target(dataset, target)
+    global_mean = float(global_target.mean()) if len(global_target) else float("nan")
     rows: list[dict[str, object]] = []
-    for p in perturbations:
+    for p in quantile_levels:
+        if not 0 < p < 1:
+            raise ValueError("quantile levels must be within (0, 1)")
         threshold = float(pair[factor].quantile(p))
         selected = pair[pair[factor] > threshold][target]
         samples = int(len(selected))
         mean = float(selected.mean()) if samples else np.nan
         rows.append({
-            "perturbation": p,
+            "quantile": p,
             "threshold": threshold,
             "samples": samples,
             "mean": mean,
-            "lift_mean": mean / overall_mean if samples and overall_mean else np.nan,
+            "lift_mean": (
+                _safe_lift(mean, global_mean) if samples >= min_samples else np.nan
+            ),
         })
     return pd.DataFrame(rows, columns=columns)
 
 
-def cost_adjusted_expectancy(
+def mfe_mae_potential_score(
     dataset: pd.DataFrame,
     rule_mask: pd.Series,
     mfe_col: str = "short_mfe_30m",
@@ -251,8 +437,18 @@ def cost_adjusted_expectancy(
     fee_rate: float = 0.0005,
     slippage_rate: float = 0.0005,
 ) -> dict[str, float | int]:
-    """做空视角的扣费期望近似：p_win×avg_win−(1−p_win)×avg_loss−费用。"""
-    empty = {"samples": 0, "p_win": float("nan"), "avg_win": float("nan"), "avg_loss": float("nan"), "expectancy": float("nan")}
+    """仅用于潜力筛选的 MFE/MAE 诊断分数，**不是可交易期望**。
+
+    MFE 和 MAE 不包含触达顺序；先止损再大幅回落的路径也可能同时拥有很高 MFE。
+    因此该分数只能帮助筛掉明显差的规则，最终结论必须来自逐路径 SL/TP 回放。
+    """
+    empty = {
+        "samples": 0,
+        "p_favorable": float("nan"),
+        "median_mfe": float("nan"),
+        "median_mae": float("nan"),
+        "potential_score": float("nan"),
+    }
     if not len(dataset):
         return empty
     mask = pd.Series(rule_mask, index=dataset.index).fillna(False).astype(bool)
@@ -262,16 +458,20 @@ def cost_adjusted_expectancy(
     if selected.empty:
         return empty
     cost = fee_rate + slippage_rate
-    avg_win = float(selected["mfe"].median())
-    avg_loss = float(selected["mae"].median())
-    p_win = float((selected["mfe"] > cost).mean())
-    expectancy = p_win * avg_win - (1 - p_win) * avg_loss - cost
+    median_mfe = float(selected["mfe"].median())
+    median_mae = float(selected["mae"].median())
+    p_favorable = float((selected["mfe"] > cost).mean())
+    potential_score = (
+        p_favorable * median_mfe
+        - (1 - p_favorable) * median_mae
+        - cost
+    )
     return {
         "samples": int(len(selected)),
-        "p_win": p_win,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
-        "expectancy": expectancy,
+        "p_favorable": p_favorable,
+        "median_mfe": median_mfe,
+        "median_mae": median_mae,
+        "potential_score": potential_score,
     }
 
 
@@ -312,7 +512,7 @@ def render_lift_report(
         lines += ["无可分析因子。", ""]
     else:
         lines += [summary.to_string(index=False), ""]
-        strong = summary.dropna(subset=["top_lift_mean"]).head(3)["factor"].tolist()
+        strong = summary.dropna(subset=["best_lift_mean"]).head(3)["factor"].tolist()
         for factor in strong:
             lines += [f"### {factor} 分位明细", "", details[factor].to_string(index=False), ""]
             sensitivity = threshold_sensitivity(dataset, factor, target)
@@ -326,19 +526,25 @@ def render_lift_report(
     else:
         lines += [rules.head(10).to_string(index=False), ""]
         best = rules.iloc[0]
-        mask = (
-            pd.qcut(pd.to_numeric(dataset[best["factor_a"]], errors="coerce").rank(method="average"), q=3, labels=False, duplicates="drop").eq(int(best["a_quantile"]) - 1)
-            & pd.qcut(pd.to_numeric(dataset[best["factor_b"]], errors="coerce").rank(method="average"), q=3, labels=False, duplicates="drop").eq(int(best["b_quantile"]) - 1)
+        fitted_rule = fit_quantile_pair_rule(
+            dataset,
+            factor_a=str(best["factor_a"]),
+            a_quantile=int(best["a_quantile"]),
+            factor_b=str(best["factor_b"]),
+            b_quantile=int(best["b_quantile"]),
+            quantiles=3,
         )
-        costs = cost_adjusted_expectancy(dataset, mask)
+        mask = apply_quantile_pair_rule(dataset, fitted_rule)
+        costs = mfe_mae_potential_score(dataset, mask)
         lines += [
-            "## 最优规则扣费期望（近似，做空视角）", "",
+            "## 最优规则 MFE/MAE 潜力诊断（非可交易期望）", "",
             f"- 规则: `{best['factor_a']}` Q{int(best['a_quantile'])} 且 `{best['factor_b']}` Q{int(best['b_quantile'])}",
             f"- samples: {costs['samples']}",
-            f"- p_win: {costs['p_win']:.2%}" if np.isfinite(costs["p_win"]) else "- p_win: n/a",
-            f"- avg_win(mfe中位): {costs['avg_win']:.4f}" if np.isfinite(costs["avg_win"]) else "- avg_win: n/a",
-            f"- avg_loss(mae中位): {costs['avg_loss']:.4f}" if np.isfinite(costs["avg_loss"]) else "- avg_loss: n/a",
-            f"- expectancy: {costs['expectancy']:.4f}" if np.isfinite(costs["expectancy"]) else "- expectancy: n/a",
+            f"- p_favorable: {costs['p_favorable']:.2%}" if np.isfinite(costs["p_favorable"]) else "- p_favorable: n/a",
+            f"- median MFE: {costs['median_mfe']:.4f}" if np.isfinite(costs["median_mfe"]) else "- median MFE: n/a",
+            f"- median MAE: {costs['median_mae']:.4f}" if np.isfinite(costs["median_mae"]) else "- median MAE: n/a",
+            f"- potential score: {costs['potential_score']:.4f}" if np.isfinite(costs["potential_score"]) else "- potential score: n/a",
+            "- 注意：MFE/MAE 不包含触达顺序；必须通过逐路径 SL/TP 回放才能得出交易期望。",
             "",
         ]
     return "\n".join(lines) + "\n"

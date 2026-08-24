@@ -82,9 +82,18 @@ def attach_short_labels(
                 observations.append(0)
                 continue
             times, closes, highs, lows = series
+            horizon_end = int(row.timestamp_ms) + seconds * 1_000
+            # 右侧数据没有覆盖完整 horizon 时属于 right-censored 样本，不能把一个
+            # 短窗口冒充 30m/1h 标签。chunk 调用方应额外读取完整 future lookahead。
+            if not len(times) or int(times[-1]) < horizon_end:
+                short_returns.append(np.nan)
+                short_mfes.append(np.nan)
+                short_maes.append(np.nan)
+                observations.append(0)
+                continue
             start = np.searchsorted(times, int(row.timestamp_ms) + 1_000, side="left")
             end = np.searchsorted(
-                times, int(row.timestamp_ms) + seconds * 1_000, side="right"
+                times, horizon_end, side="right"
             )
             if end <= start:
                 short_returns.append(np.nan)

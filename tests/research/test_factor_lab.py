@@ -15,14 +15,23 @@ from trading_platform.research.factor_lab.event import SpikeEventConfig
 from trading_platform.research.factor_lab.horizon import analyze_signal_horizon
 from trading_platform.research.factor_lab.labels import SpikeLabelConfig
 from trading_platform.research.factor_lab.lift import (
+    apply_quantile_pair_rule,
     base_rate_stats,
-    cost_adjusted_expectancy,
+    fit_quantile_pair_rule,
+    mfe_mae_potential_score,
     quantile_lift,
     render_lift_report,
     rule_combination_lifts,
     scan_factor_lifts,
     terrain_table,
     threshold_sensitivity,
+)
+from trading_platform.research.factor_lab.pre_event import (
+    add_pre_spike_factors,
+    cooldown_alert_mask,
+    event_capture_stats,
+    future_event_labels,
+    recent_event_mask,
 )
 from trading_platform.research.factor_lab.report import render_factor_report
 
@@ -108,6 +117,25 @@ def test_build_event_dataset_separates_causal_factors_from_future_labels() -> No
     assert event["event_id"] == "TESTUSDT:65000"
 
 
+def test_labels_drop_right_censored_horizon() -> None:
+    bars = _bars(count=80)
+    dataset = build_event_dataset(
+        bars,
+        event_config=SpikeEventConfig(
+            rise_threshold=0.05,
+            volume_multiple_threshold=5.0,
+            cooldown_seconds=60,
+        ),
+        label_config=SpikeLabelConfig(
+            horizons_seconds=(30,),
+            success_horizon_seconds=30,
+        ),
+    )
+    assert len(dataset) == 1
+    assert pd.isna(dataset.iloc[0]["short_mfe_30s"])
+    assert int(dataset.iloc[0]["future_observations_30s"]) == 0
+
+
 def test_event_requires_continuous_history() -> None:
     bars = _bars().drop(index=[40]).reset_index(drop=True)
     dataset = build_event_dataset(
@@ -169,6 +197,30 @@ def test_derivative_join_uses_metrics_available_time_not_snapshot_time() -> None
     assert row["metrics_available_time_ms"] == 300_000
     assert row["sum_open_interest"] == 100.0
     assert row["metrics_age_ms"] == 100_000
+
+
+def test_derivative_join_drops_stale_metrics() -> None:
+    events = pd.DataFrame({
+        "event_id": ["TESTUSDT:1000000"],
+        "symbol": ["TESTUSDT"],
+        "timestamp_ms": [1_000_000],
+        "return_300s": [0.08],
+        "close": [108.0],
+    })
+    metrics = pd.DataFrame({
+        "symbol": ["TESTUSDT"],
+        "snapshot_time_ms": [0],
+        "available_time_ms": [300_000],
+        "sum_open_interest": [100.0],
+        "sum_open_interest_value": [1_000.0],
+        "count_toptrader_long_short_ratio": [1.0],
+        "sum_toptrader_long_short_ratio": [1.0],
+        "count_long_short_ratio": [1.0],
+        "sum_taker_long_short_vol_ratio": [1.0],
+    })
+    joined = attach_derivative_factors(events, metrics, max_age_ms=600_000)
+    assert joined.iloc[0]["metrics_age_ms"] == 700_000
+    assert pd.isna(joined.iloc[0]["sum_open_interest"])
 
 
 def test_factor_analysis_and_correlation_report() -> None:
@@ -259,9 +311,19 @@ def test_base_rate_stats_reports_center_and_success() -> None:
 
 def test_quantile_lift_top_bucket_beats_base() -> None:
     table = quantile_lift(_lift_dataset(), "factor_strong", "short_mfe_30m", quantiles=4, min_bucket=10)
-    assert list(table.columns) == ["quantile", "samples", "mean", "median", "lift_mean", "lift_median"]
+    assert {"lift_mean", "lift_valid_mean", "lift_median", "lift_valid_median"}.issubset(table.columns)
     assert table["lift_mean"].iloc[-1] > 1.0
     assert table["lift_mean"].iloc[0] < 1.0
+
+
+def test_quantile_lift_reports_global_and_valid_subset_bases() -> None:
+    dataset = pd.DataFrame({
+        "factor": [0.0, 1.0, np.nan, np.nan],
+        "target": [1.0, 2.0, 100.0, 100.0],
+    })
+    table = quantile_lift(dataset, "factor", "target", quantiles=2, min_bucket=1)
+    assert table["lift_mean"].iloc[-1] < 1.0
+    assert table["lift_valid_mean"].iloc[-1] > 1.0
 
 
 def test_scan_factor_lifts_orders_by_top_lift() -> None:
@@ -293,19 +355,51 @@ def test_rule_combination_lifts_sorted_descending() -> None:
     assert {"factor_a", "a_quantile", "factor_b", "b_quantile", "hit_rate"}.issubset(rules.columns)
 
 
+def test_rule_combinations_use_pairwise_complete_cases() -> None:
+    dataset = _lift_dataset()
+    dataset["all_missing"] = np.nan
+    rules = rule_combination_lifts(
+        dataset,
+        ["factor_strong", "factor_weak", "all_missing"],
+        "short_mfe_30m",
+        quantiles=3,
+        min_samples=10,
+    )
+    assert not rules.empty
+    assert set(rules["factor_a"]) | set(rules["factor_b"]) <= {
+        "factor_strong",
+        "factor_weak",
+    }
+
+
+def test_quantile_pair_rule_freezes_train_thresholds_for_test() -> None:
+    train = pd.DataFrame({"a": np.arange(90.0), "b": np.arange(90.0)})
+    test = pd.DataFrame({"a": np.arange(100.0, 190.0), "b": np.arange(100.0, 190.0)})
+    rule = fit_quantile_pair_rule(
+        train,
+        factor_a="a",
+        a_quantile=1,
+        factor_b="b",
+        b_quantile=1,
+        quantiles=3,
+    )
+    assert int(apply_quantile_pair_rule(train, rule).sum()) > 0
+    assert int(apply_quantile_pair_rule(test, rule).sum()) == 0
+
+
 def test_threshold_sensitivity_covers_all_perturbations() -> None:
     table = threshold_sensitivity(_lift_dataset(), "factor_strong", "short_mfe_30m")
-    assert list(table["perturbation"]) == [0.6, 0.7, 0.8, 0.9]
+    assert list(table["quantile"]) == [0.6, 0.7, 0.8, 0.9]
     assert list(table["samples"]) == [48, 36, 24, 12]
     assert table["lift_mean"].iloc[0] > 1.0
 
 
-def test_cost_adjusted_expectancy_manual_check() -> None:
+def test_mfe_mae_potential_score_manual_check() -> None:
     dataset = pd.DataFrame({
         "short_mfe_30m": [0.05, 0.03],
         "short_mae_30m": [0.01, 0.02],
     })
-    costs = cost_adjusted_expectancy(
+    costs = mfe_mae_potential_score(
         dataset,
         pd.Series([True, True]),
         fee_rate=0.0005,
@@ -313,7 +407,7 @@ def test_cost_adjusted_expectancy_manual_check() -> None:
     )
     p_win = 1.0
     expected = p_win * 0.04 - 0.0 - 0.001
-    assert costs["expectancy"] == pytest.approx(expected)
+    assert costs["potential_score"] == pytest.approx(expected)
 
 
 def test_render_lift_report_handles_empty_and_keyword_output() -> None:
@@ -327,3 +421,75 @@ def test_render_lift_report_handles_empty_and_keyword_output() -> None:
     )
     for keyword in ("Factor Lift Report", "地形图", "单因子分位 lift", "两因子规则组合"):
         assert keyword in report
+
+
+def test_future_event_labels_do_not_turn_censored_tail_into_negatives() -> None:
+    hits, eligible = future_event_labels(np.array([False, False, True, False]), (2,))[2]
+    assert list(eligible) == [True, True, False, False]
+    assert list(hits[:2]) == [True, True]
+
+
+def test_future_event_labels_do_not_cross_data_gaps() -> None:
+    hits, eligible = future_event_labels(
+        np.array([False, False, True, False]),
+        (2,),
+        segment_ids=np.array([1, 1, 2, 2]),
+    )[2]
+    assert bool(eligible[0]) is False
+    assert bool(hits[0]) is False
+
+
+def test_cooldown_alert_mask_clusters_dense_candidates() -> None:
+    mask = cooldown_alert_mask(
+        np.array([False, True, True, False, True, False, False, True]),
+        cooldown_bars=2,
+    )
+    assert list(np.flatnonzero(mask)) == [1, 7]
+
+
+def test_cooldown_alert_mask_resets_after_data_gap() -> None:
+    mask = cooldown_alert_mask(
+        np.array([False, True, True, True]),
+        cooldown_bars=10,
+        segment_ids=np.array([1, 1, 2, 2]),
+    )
+    assert list(np.flatnonzero(mask)) == [1, 2]
+
+
+def test_recent_event_mask_respects_segments() -> None:
+    recent = recent_event_mask(
+        np.array([False, True, False, False]),
+        lookback_bars=2,
+        segment_ids=np.array([1, 1, 2, 2]),
+    )
+    assert list(recent) == [False, True, False, False]
+
+
+def test_event_capture_stats_reports_recall_and_lead() -> None:
+    stats = event_capture_stats(
+        np.array([False, True, False, False, False]),
+        np.array([False, False, False, True, False]),
+        horizon_bars=3,
+    )
+    assert stats["events"] == 1
+    assert stats["captured_events"] == 1
+    assert stats["recall"] == pytest.approx(1.0)
+    assert stats["mean_lead_bars"] == pytest.approx(2.0)
+
+
+def test_pre_spike_factors_reset_at_one_minute_gap() -> None:
+    count = 90
+    timestamps = np.arange(count, dtype=np.int64) * 60_000
+    timestamps[60:] += 60_000
+    frame = pd.DataFrame({
+        "open_ms": timestamps,
+        "open": np.full(count, 100.0),
+        "high": np.full(count, 101.0),
+        "low": np.full(count, 99.0),
+        "close": np.full(count, 100.0),
+        "volume": np.full(count, 10.0),
+    })
+    factors = add_pre_spike_factors(frame)
+    first_after_gap = factors[factors["open_ms"] == timestamps[60]].iloc[0]
+    assert pd.isna(first_after_gap["atr_mult"])
+    assert pd.isna(first_after_gap["return_5m"])

@@ -119,8 +119,12 @@ def add_derivative_factors(metrics: pd.DataFrame) -> pd.DataFrame:
 def attach_derivative_factors(
     events: pd.DataFrame,
     metrics: pd.DataFrame,
+    *,
+    max_age_ms: int = 10 * 60_000,
 ) -> pd.DataFrame:
     """把事件时点之前已经可见的最近一份 5m metrics 因果拼接到事件。"""
+    if max_age_ms <= 0:
+        raise ValueError("max_age_ms must be positive")
     if events.empty:
         return events.copy()
     if "symbol" not in events.columns or "timestamp_ms" not in events.columns:
@@ -162,6 +166,21 @@ def attach_derivative_factors(
     result["metrics_age_ms"] = result["timestamp_ms"].sub(
         result["metrics_available_time_ms"]
     )
+    stale = result["metrics_age_ms"].gt(max_age_ms)
+    if stale.any():
+        protected = {
+            "event_id",
+            "symbol",
+            "timestamp_ms",
+            "metrics_available_time_ms",
+            "metrics_age_ms",
+        }
+        metric_columns = [
+            column
+            for column in derived.columns
+            if column != "symbol" and column in result.columns and column not in protected
+        ]
+        result.loc[stale, metric_columns] = np.nan
     if {"return_300s", "oi_change_5m"}.issubset(result.columns):
         result["price_oi_joint_5m"] = result["return_300s"].mul(
             result["oi_change_5m"]

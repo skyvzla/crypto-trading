@@ -11,11 +11,17 @@ class FactorAnalysisResult:
     factor: str
     target: str
     samples: int
+    target_samples: int
+    coverage: float
     pearson_ic: float
     spearman_ic: float
+    spearman_ci_low: float
+    spearman_ci_high: float
+    bootstrap_blocks: int
     bucket_ic_mean: float
     bucket_ic_std: float
     icir: float
+    bucket_frequency: str | None
     quantiles: pd.DataFrame
 
     def as_summary(self) -> dict[str, object]:
@@ -23,11 +29,17 @@ class FactorAnalysisResult:
             "factor": self.factor,
             "target": self.target,
             "samples": self.samples,
+            "target_samples": self.target_samples,
+            "coverage": self.coverage,
             "pearson_ic": self.pearson_ic,
             "spearman_ic": self.spearman_ic,
+            "spearman_ci_low": self.spearman_ci_low,
+            "spearman_ci_high": self.spearman_ci_high,
+            "bootstrap_blocks": self.bootstrap_blocks,
             "bucket_ic_mean": self.bucket_ic_mean,
             "bucket_ic_std": self.bucket_ic_std,
             "icir": self.icir,
+            "bucket_frequency": self.bucket_frequency,
         }
 
 
@@ -40,7 +52,7 @@ def _finite_pair(frame: pd.DataFrame, factor: str, target: str) -> pd.DataFrame:
     pair[factor] = pd.to_numeric(pair[factor], errors="coerce")
     pair[target] = pd.to_numeric(pair[target], errors="coerce")
     pair = pair.replace([np.inf, -np.inf], np.nan).dropna(subset=[factor, target])
-    return pair
+    return pair.reset_index(drop=True)
 
 
 def _correlation(pair: pd.DataFrame, factor: str, target: str, method: str) -> float:
@@ -53,6 +65,66 @@ def _correlation(pair: pd.DataFrame, factor: str, target: str, method: str) -> f
     return float(pair[factor].corr(pair[target], method=method))
 
 
+def _bucket_correlations(
+    pair: pd.DataFrame,
+    factor: str,
+    target: str,
+    *,
+    frequency: str,
+    min_bucket_samples: int,
+) -> list[float]:
+    timestamps = pd.to_datetime(pair["timestamp_ms"], unit="ms", utc=True)
+    if frequency == "month":
+        bucket_key = timestamps.dt.strftime("%Y-%m")
+    elif frequency == "day":
+        bucket_key = timestamps.dt.strftime("%Y-%m-%d")
+    else:
+        raise ValueError(f"unsupported bucket frequency: {frequency}")
+    values: list[float] = []
+    for _bucket, bucket in pair.groupby(bucket_key, sort=True):
+        if len(bucket) < min_bucket_samples:
+            continue
+        value = _correlation(bucket, factor, target, "spearman")
+        if np.isfinite(value):
+            values.append(value)
+    return values
+
+
+def _day_block_bootstrap_ci(
+    pair: pd.DataFrame,
+    factor: str,
+    target: str,
+    *,
+    resamples: int,
+    seed: int,
+) -> tuple[float, float, int]:
+    """按 UTC 交易日重采样，保留同日跨 symbol 的共同冲击相关性。"""
+    if resamples <= 0 or pair.empty:
+        return float("nan"), float("nan"), 0
+    days = pd.to_datetime(pair["timestamp_ms"], unit="ms", utc=True).dt.strftime(
+        "%Y-%m-%d"
+    )
+    blocks = [
+        block.index.to_numpy(dtype=np.int64)
+        for _day, block in pair.groupby(days, sort=True)
+    ]
+    if len(blocks) < 5:
+        return float("nan"), float("nan"), len(blocks)
+    rng = np.random.default_rng(seed)
+    correlations: list[float] = []
+    for _ in range(resamples):
+        sampled = rng.integers(0, len(blocks), size=len(blocks))
+        indexes = np.concatenate([blocks[index] for index in sampled])
+        boot = pair.loc[indexes]
+        value = _correlation(boot, factor, target, "spearman")
+        if np.isfinite(value):
+            correlations.append(value)
+    if len(correlations) < max(20, resamples // 4):
+        return float("nan"), float("nan"), len(blocks)
+    low, high = np.quantile(np.asarray(correlations), [0.025, 0.975])
+    return float(low), float(high), len(blocks)
+
+
 def analyze_factor(
     dataset: pd.DataFrame,
     factor: str,
@@ -60,8 +132,10 @@ def analyze_factor(
     target: str = "short_mfe_30m",
     quantiles: int = 5,
     min_bucket_samples: int = 10,
+    bootstrap_resamples: int = 200,
+    bootstrap_seed: int = 0,
 ) -> FactorAnalysisResult:
-    """评价单因子 IC、月度 ICIR 和分位目标表现。"""
+    """评价单因子 IC、覆盖率、分桶稳定性和按日 block-bootstrap 置信区间。"""
     if "timestamp_ms" not in dataset.columns:
         raise ValueError("dataset must contain timestamp_ms")
     if quantiles < 2:
@@ -70,20 +144,42 @@ def analyze_factor(
         raise ValueError("min_bucket_samples must be at least 3")
 
     pair = _finite_pair(dataset, factor, target)
+    target_values = pd.to_numeric(dataset[target], errors="coerce").replace(
+        [np.inf, -np.inf], np.nan
+    ).dropna()
+    target_samples = len(target_values)
+    coverage = len(pair) / target_samples if target_samples else 0.0
     pearson = _correlation(pair, factor, target, "pearson")
     spearman = _correlation(pair, factor, target, "spearman")
+    ci_low, ci_high, bootstrap_blocks = _day_block_bootstrap_ci(
+        pair,
+        factor,
+        target,
+        resamples=bootstrap_resamples,
+        seed=bootstrap_seed,
+    )
 
-    bucket_ics: list[float] = []
-    if not pair.empty:
-        bucket_key = pd.to_datetime(
-            pair["timestamp_ms"], unit="ms", utc=True
-        ).dt.strftime("%Y-%m")
-        for _bucket, bucket in pair.groupby(bucket_key, sort=True):
-            if len(bucket) < min_bucket_samples:
-                continue
-            value = _correlation(bucket, factor, target, "spearman")
-            if np.isfinite(value):
-                bucket_ics.append(value)
+    bucket_frequency: str | None = None
+    bucket_ics = _bucket_correlations(
+        pair,
+        factor,
+        target,
+        frequency="month",
+        min_bucket_samples=min_bucket_samples,
+    ) if not pair.empty else []
+    if len(bucket_ics) >= 3:
+        bucket_frequency = "month"
+    else:
+        daily = _bucket_correlations(
+            pair,
+            factor,
+            target,
+            frequency="day",
+            min_bucket_samples=min_bucket_samples,
+        ) if not pair.empty else []
+        if len(daily) >= 3:
+            bucket_ics = daily
+            bucket_frequency = "day"
     if bucket_ics:
         bucket_mean = float(np.mean(bucket_ics))
         bucket_std = float(np.std(bucket_ics, ddof=1)) if len(bucket_ics) > 1 else float("nan")
@@ -114,11 +210,17 @@ def analyze_factor(
         factor=factor,
         target=target,
         samples=len(pair),
+        target_samples=target_samples,
+        coverage=coverage,
         pearson_ic=pearson,
         spearman_ic=spearman,
+        spearman_ci_low=ci_low,
+        spearman_ci_high=ci_high,
+        bootstrap_blocks=bootstrap_blocks,
         bucket_ic_mean=bucket_mean,
         bucket_ic_std=bucket_std,
         icir=icir,
+        bucket_frequency=bucket_frequency,
         quantiles=quantile_frame,
     )
 
@@ -130,6 +232,7 @@ def analyze_factors(
     target: str = "short_mfe_30m",
     quantiles: int = 5,
     min_bucket_samples: int = 10,
+    bootstrap_resamples: int = 200,
 ) -> tuple[pd.DataFrame, dict[str, FactorAnalysisResult]]:
     """批量分析，并按 |Spearman IC| 降序给出摘要。"""
     results = {
@@ -139,6 +242,7 @@ def analyze_factors(
             target=target,
             quantiles=quantiles,
             min_bucket_samples=min_bucket_samples,
+            bootstrap_resamples=bootstrap_resamples,
         )
         for factor in factors
     }

@@ -616,7 +616,11 @@ def _add_bar_features(frame: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         quote_vol = out["quote_volume"].to_numpy(float)
         signed_delta = buy_vol - sell_vol
         out["signed_volume_delta"] = signed_delta
-        out["cvd"] = np.cumsum(np.where(np.isfinite(signed_delta), signed_delta, 0.0))
+        out["cvd"] = _segmented_cumsum(
+            signed_delta,
+            out["open_ms"].to_numpy(np.int64),
+            max(1, int(round(tf_minutes * MS_1M))),
+        )
         total_taker = buy_vol + sell_vol
         out["taker_buy_ratio"] = buy_vol / np.where(total_taker == 0, np.nan, total_taker)
         out["taker_delta"] = buy_quote - sell_quote
@@ -687,6 +691,32 @@ def _consecutive_count(values: np.ndarray) -> np.ndarray:
     for i, value in enumerate(values):
         out[i] = out[i - 1] + 1 if i and bool(value) else (1 if bool(value) else 0)
     return out
+
+
+def _segmented_cumsum(
+    values: np.ndarray,
+    timestamps_ms: np.ndarray,
+    expected_step_ms: int,
+) -> np.ndarray:
+    """只在连续且有真实观测的区段内累计；缺数据绝不能伪装成 delta=0。"""
+    if expected_step_ms <= 0:
+        raise ValueError("expected_step_ms must be positive")
+    result = np.full(len(values), np.nan, dtype=float)
+    running = 0.0
+    previous_time: int | None = None
+    for index, (value, timestamp) in enumerate(zip(values, timestamps_ms, strict=True)):
+        if not np.isfinite(value):
+            running = 0.0
+            previous_time = None
+            continue
+        current_time = int(timestamp)
+        if previous_time is None or current_time - previous_time != expected_step_ms:
+            running = float(value)
+        else:
+            running += float(value)
+        result[index] = running
+        previous_time = current_time
+    return result
 
 
 def _obv_slope_array(close: np.ndarray, volume: np.ndarray, window: int) -> np.ndarray:
