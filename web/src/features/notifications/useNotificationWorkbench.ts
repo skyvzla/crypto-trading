@@ -112,7 +112,7 @@ export function useNotificationWorkbench() {
   }
 
   const activity = useNotificationActivity({
-    reportError: (text) => { loadError.value = text }
+    setError: (text) => { loadError.value = text }
   })
 
   const connectorById = computed(() => new Map(connectors.value.map((item) => [item.id, item])))
@@ -255,9 +255,21 @@ export function useNotificationWorkbench() {
     loading.value = false
   }
 
+  /** 刷新当前那张表，保持在当前页。 */
   async function loadActivity() {
     if (activityView.value === 'events') await activity.loadEvents()
     else await activity.loadDeliveries()
+  }
+
+  /**
+   * 应用筛选条件，并回到第一页。
+   *
+   * 不能沿用当前 offset：新条件下的结果集通常更短，
+   * 留在第 3 页很可能直接落到一片空白上。
+   */
+  async function applyActivityFilters() {
+    if (activityView.value === 'events') await activity.loadEvents(0)
+    else await activity.loadDeliveries(0)
   }
 
   // ── 表单预填 ───────────────────────────────────────────────────────────
@@ -524,10 +536,13 @@ export function useNotificationWorkbench() {
     eventFilters: activity.eventFilters,
     deliveryFilters: activity.deliveryFilters,
     activityLoading: activity.activityLoading,
+    eventsLoading: activity.eventsLoading,
+    deliveriesLoading: activity.deliveriesLoading,
     changeEventPage: activity.changeEventPage,
     changeDeliveryPage: activity.changeDeliveryPage,
     loadAll,
     loadActivity,
+    applyActivityFilters,
     // 表单
     connectorModalOpen,
     endpointModalOpen,

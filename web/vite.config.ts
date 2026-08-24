@@ -1,10 +1,26 @@
 import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
+import Components from 'unplugin-vue-components/vite'
+import { AntDesignVueResolver } from 'unplugin-vue-components/resolvers'
 import { fileURLToPath, URL } from 'node:url'
 
 export default defineConfig({
   base: '/',
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    // 按需解析模板里的 <a-*> 标签。
+    //
+    // 原先 main.ts 用 `.use(Antd)` 全量注册，104 个组件全部成为全局组件、
+    // 全部被打进入口 chunk，而项目实际只用到 44 个——一半以上是永远不会
+    // 渲染的组件代码。全量注册同时也让 Rollup 无法 tree-shake。
+    //
+    // importStyle: false —— ant-design-vue v4 用运行时 CSS-in-JS，
+    // 不存在按组件引入的样式文件；reset.css 仍由 main.ts 显式引入。
+    Components({
+      dts: false,
+      resolvers: [AntDesignVueResolver({ importStyle: false })]
+    })
+  ],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url))

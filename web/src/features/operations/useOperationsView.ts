@@ -160,15 +160,42 @@ export function usePageParams({ defaultSize, maxSize = 1000 }: PageParamsOptions
   return { page, pageSize, offset, restore, apply }
 }
 
+/** 写回地址栏的归一化：空串与 undefined 都不进 URL。 */
+function toQuery(parts: Record<string, string | number | undefined>): Record<string, string> {
+  const query: Record<string, string> = {}
+  for (const [key, value] of Object.entries(parts)) {
+    if (value === undefined || value === '') continue
+    query[key] = String(value)
+  }
+  return query
+}
+
 /** 把筛选、分页与页面自定义参数合并写回地址栏。 */
 export function useQuerySync() {
   const router = useRouter()
   return async function syncQuery(parts: Record<string, string | number | undefined>): Promise<void> {
-    const query: Record<string, string> = {}
-    for (const [key, value] of Object.entries(parts)) {
-      if (value === undefined || value === '') continue
-      query[key] = String(value)
-    }
-    await router.replace({ query })
+    await router.replace({ query: toQuery(parts) })
   }
+}
+
+/**
+ * 地址栏是否已经是页面状态该写出来的样子。
+ *
+ * 页面用它区分两种 query 变化：一致 = 自己刚写回的（紧接着会自己 reload，
+ * 不该再取一次数），不一致 = 地址栏被外部改了（手改 URL、打开分享链接）。
+ * 这样就不需要记录「这次是谁写的」。
+ *
+ * 只做无状态比较，页面放哪些参数进 URL 由页面自己声明。
+ */
+export function isQuerySynced(
+  current: LocationQuery,
+  parts: Record<string, string | number | undefined>
+): boolean {
+  const expected = toQuery(parts)
+  for (const key of new Set([...Object.keys(expected), ...Object.keys(current)])) {
+    const raw = current[key]
+    const actual = Array.isArray(raw) ? raw[0] : raw
+    if ((actual == null ? '' : String(actual)) !== (expected[key] ?? '')) return false
+  }
+  return true
 }

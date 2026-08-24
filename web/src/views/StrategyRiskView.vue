@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { message } from 'ant-design-vue'
 import { Ban, CheckCircle2, GitBranch, Search, ShieldCheck } from 'lucide-vue-next'
@@ -9,7 +9,7 @@ import DataState from '@/features/operations/DataState.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import { collectPageItems } from '@/shared/pagination'
-import { useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
+import { isQuerySynced, useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
 import { formatDateTime } from '@/shared/format'
 
 /**
@@ -31,8 +31,12 @@ const audits = ref<StrategyCategoryAdmissionAudit[]>([])
 const expanded = ref(new Set<string>())
 const categorySearch = ref(String(route.query.category_q ?? ''))
 const universeSearch = ref(String(route.query.universe_q ?? ''))
-const initialMode = String(route.query.universe_mode ?? 'all')
-const universeMode = ref<'all' | 'effective' | 'excluded'>(initialMode === 'effective' || initialMode === 'excluded' ? initialMode : 'all')
+/** 只接受后端认识的三种取值，其余一律当 all。 */
+function readUniverseMode(): 'all' | 'effective' | 'excluded' {
+  const requested = String(route.query.universe_mode ?? 'all')
+  return requested === 'effective' || requested === 'excluded' ? requested : 'all'
+}
+const universeMode = ref(readUniverseMode())
 const saving = ref(false)
 const confirmOpen = ref(false)
 const pendingCategory = ref<ExchangeCategory | null>(null)
@@ -85,6 +89,24 @@ async function loadCompleteUniverse(): Promise<UniversePreview> {
   return { ...snapshot, items: page.items, limit: page.items.length || snapshot.limit, offset: 0 }
 }
 
+/** 本页放进地址栏的内容。写回与「URL 是否被外部改动」共用这一处声明。 */
+function routeQuery() {
+  return {
+    strategy: strategyId.value,
+    category_q: categorySearch.value.trim(),
+    universe_q: universeSearch.value.trim(),
+    universe_mode: universeMode.value === 'all' ? '' : universeMode.value
+  }
+}
+
+/** 把地址栏状态同步回本地 ref。 */
+function restoreFromRoute() {
+  strategyId.value = String(route.query.strategy ?? strategyId.value)
+  categorySearch.value = String(route.query.category_q ?? '')
+  universeSearch.value = String(route.query.universe_q ?? '')
+  universeMode.value = readUniverseMode()
+}
+
 const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
   // 策略清单只需要拉一次；之后切换策略只重取该策略的准入与交易池。
   if (!strategies.value.length) {
@@ -111,20 +133,24 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale
   audits.value = auditPage.items
 }, {
   fallbackMessage: '策略风控数据加载失败',
-  onActivate: () => {
-    strategyId.value = String(route.query.strategy ?? strategyId.value)
-    categorySearch.value = String(route.query.category_q ?? '')
-    universeSearch.value = String(route.query.universe_q ?? '')
-  }
+  onActivate: restoreFromRoute
+})
+
+
+// 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
+// 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
+//
+// 自己写回的 query 与 routeQuery() 一致，所以这里不会把应用筛选变成两次请求；
+// 路由名变了说明已经切走，被缓存的实例不该再管地址栏。
+const ownRoute = route.name
+watch(() => route.query, () => {
+  if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
+  restoreFromRoute()
+  void reload()
 })
 
 async function syncUrl() {
-  await syncQuery({
-    strategy: strategyId.value,
-    category_q: categorySearch.value.trim(),
-    universe_q: universeSearch.value.trim(),
-    universe_mode: universeMode.value === 'all' ? '' : universeMode.value
-  })
+  await syncQuery(routeQuery())
 }
 
 async function changeStrategy() {

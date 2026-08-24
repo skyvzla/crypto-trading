@@ -94,6 +94,43 @@ let extremaPoints: Array<{ time: UTCTimestamp; price: number; position: 'above' 
 let extremaPricePrecision = 2
 let suppressEdgeRequestsUntil = 0
 
+// 渲染串行化。renderChart 内部有 await，多个 watcher 在同一 tick 触发时会交错：
+// 前一次刚 destroy 还没 createChart，后一次就进来了，最后同一个 host 上挂了两张图，
+// 而模块级 chart 只指向后一张——前一张连同它的 ResizeObserver 永远收不回来。
+let renderChain: Promise<void> = Promise.resolve()
+let renderToken = 0
+let preserveViewRequested = true
+let disposed = false
+
+/**
+ * 请求一次重建，同一 tick 内的多次请求合并成最后一次执行。
+ *
+ * preserveView=false 优先：只要有一个来源要求重新定位（换交易、换数据），
+ * 合并后的这次渲染就不保留旧视窗，否则切换交易后会停在上一笔的缩放位置。
+ */
+function requestRender(preserveView: boolean): Promise<void> {
+  preserveViewRequested = preserveViewRequested && preserveView
+  const token = ++renderToken
+  const next = renderChain.then(async () => {
+    if (disposed || token !== renderToken) return
+    const preserve = preserveViewRequested
+    preserveViewRequested = true
+    await renderChart(preserve ? currentVisibleRange() : null)
+  })
+  renderChain = next.catch(() => undefined)
+  return next
+}
+
+/** 增量更新会读写 renderedCandles 与现有 series，必须和重建排在同一条队列上。 */
+function requestDataUpdate(): Promise<void> {
+  const next = renderChain.then(async () => {
+    if (disposed) return
+    await updateChartData()
+  })
+  renderChain = next.catch(() => undefined)
+  return next
+}
+
 function clampChartHeight(value: number): number {
   const ceiling = Math.max(MIN_CHART_HEIGHT, window.innerHeight - VIEWPORT_HEIGHT_MARGIN)
   return Math.max(MIN_CHART_HEIGHT, Math.min(ceiling, value))
@@ -590,7 +627,7 @@ function createCrosshairHandler(context: {
 async function renderChart(preservedRange: { from: Time; to: Time } | null = null) {
   destroy()
   await nextTick()
-  if (!host.value || !props.candles.length) return
+  if (disposed || !host.value || !props.candles.length) return
   const colors = palette.value
   const data = normalizeCandles(props.candles)
   const pricePrecision = chartPricePrecision(data)
@@ -748,6 +785,9 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   unsubscribeRange = () => timeScale.unsubscribeVisibleLogicalRangeChange(requestMore)
 
   await nextTick()
+  // 这次 await 期间可能已经卸载，onBeforeUnmount 的 destroy 已经收掉上面建的图，
+  // 这里必须停下，不能再往一个已经脱离文档的 host 上挂 observer。
+  if (disposed || !host.value) return
   restorePaneHeights()
   updateExtremaPoints()
   refreshExtremaLabels()
@@ -794,11 +834,10 @@ function focusEntry() { focusEvent(allFills.value[0]?.time ?? props.trade.entry_
 function focusExit() { focusEvent(props.trade.exit_time) }
 
 async function resetSize() {
-  const visibleRange = currentVisibleRange()
   chartHeight.value = null
   removeStored(STORAGE_KEYS.chartHeight)
   removeStored(STORAGE_KEYS.indicatorPaneStretch)
-  await renderChart(visibleRange)
+  await requestRender(true)
 }
 defineExpose({ focusEntry, focusExit, resetSize })
 
@@ -843,21 +882,23 @@ async function updateChartData() {
   requestedEdge = null
 }
 
-watch(() => props.candles, updateChartData, { deep: true })
+watch(() => props.candles, () => void requestDataUpdate(), { deep: true })
 
 // 换了一笔交易或一套 schema 标注 = 换了内容，重新以事件为中心渲染。
-watch(() => [props.trade, props.overlays], () => renderChart(), { immediate: true, deep: true })
+watch(() => [props.trade, props.overlays], () => void requestRender(false), { immediate: true, deep: true })
 
 // 指标增删要重排窗格，只能重建；但保留视窗，避免勾一个指标就丢失缩放位置。
-watch(() => props.indicators, () => renderChart(currentVisibleRange()), { deep: true })
+watch(() => props.indicators, () => void requestRender(true), { deep: true })
 
 // 标线显隐只影响价格线，就地增删，不动图表。
 watch(() => props.lineVisibility, () => applyPriceLines(), { deep: true })
 
 // 主题决定所有 series 颜色，只能重建，同样保留视窗。
-watch(isDarkTheme, () => renderChart(currentVisibleRange()))
+watch(isDarkTheme, () => void requestRender(true))
 
 onBeforeUnmount(() => {
+  // 先置位再销毁：队列里排着的渲染看到它就不会再把图建回来。
+  disposed = true
   stopHeightResize?.()
   document.body.style.userSelect = ''
   destroy()

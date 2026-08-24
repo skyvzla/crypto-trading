@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Button, Switch, Tag, message, type TableColumnsType } from 'ant-design-vue'
 import { DatabaseBackup, Search } from 'lucide-vue-next'
@@ -8,7 +8,7 @@ import type { ExchangeCategory, ExchangeSymbol, ExchangeSymbolSyncStatus, Symbol
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import { collectPageItems } from '@/shared/pagination'
-import { useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
+import { isQuerySynced, useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
 import { formatDateTime } from '@/shared/format'
 
 const route = useRoute()
@@ -55,6 +55,24 @@ const columns: TableColumnsType<ExchangeSymbol> = [
   { title: '同步时间', dataIndex: 'synced_at', key: 'sync', width: 185, customRender: ({ text }) => formatDateTime(String(text)) }
 ]
 
+/** 本页放进地址栏的内容。写回与「URL 是否被外部改动」共用这一处声明。 */
+function routeQuery() {
+  return {
+    q: search.value.trim(),
+    status: tradingStatus.value,
+    admission: admissionStatus.value,
+    category: categoryKey.value
+  }
+}
+
+/** 把地址栏状态同步回本地 ref。 */
+function restoreFromRoute() {
+  search.value = String(route.query.q ?? '')
+  tradingStatus.value = String(route.query.status ?? '')
+  admissionStatus.value = String(route.query.admission ?? '')
+  categoryKey.value = String(route.query.category ?? '')
+}
+
 const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
   const [symbolPage, categoryRows, status] = await Promise.all([
     collectPageItems((params) => operationsApi.exchangeSymbols(params)),
@@ -68,12 +86,7 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale
   if (categoryKey.value) await filterCategory()
 }, {
   fallbackMessage: '交易对数据加载失败',
-  onActivate: () => {
-    search.value = String(route.query.q ?? '')
-    tradingStatus.value = String(route.query.status ?? '')
-    admissionStatus.value = String(route.query.admission ?? '')
-    categoryKey.value = String(route.query.category ?? '')
-  }
+  onActivate: restoreFromRoute
 })
 
 async function filterCategory() {
@@ -88,13 +101,21 @@ async function filterCategory() {
   }
 }
 
+
+// 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
+// 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
+//
+// 自己写回的 query 与 routeQuery() 一致，所以这里不会把应用筛选变成两次请求；
+// 路由名变了说明已经切走，被缓存的实例不该再管地址栏。
+const ownRoute = route.name
+watch(() => route.query, () => {
+  if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
+  restoreFromRoute()
+  void reload()
+})
+
 async function syncUrl() {
-  await syncQuery({
-    q: search.value.trim(),
-    status: tradingStatus.value,
-    admission: admissionStatus.value,
-    category: categoryKey.value
-  })
+  await syncQuery(routeQuery())
 }
 
 function requestAdmissionChange(item: ExchangeSymbol, enabled: boolean) {

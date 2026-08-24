@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Button, Tag, type TableColumnsType, type TablePaginationConfig } from 'ant-design-vue'
 import { operationsApi } from '@/api/operations'
@@ -9,6 +9,7 @@ import { campaignRoute } from '@/features/operations/campaignRoute'
 import FilterBar from '@/features/operations/FilterBar.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import {
+  isQuerySynced,
   useLedgerLoader,
   useOperationFilters,
   usePageParams,
@@ -56,6 +57,24 @@ const campaignColumns: TableColumnsType<CampaignSummary> = [
   { title: '闭合 / 末笔时间', key: 'closed', width: 185, customRender: ({ record }) => formatDateTime(record.closed_at || record.last_fill_at) }
 ]
 
+/** 本页放进地址栏的内容。写回与「URL 是否被外部改动」共用这一处声明。 */
+function routeQuery() {
+  return {
+    ...query.value,
+    ...(selectedDate.value ? { date: selectedDate.value } : {}),
+    ...(requestedCampaign.value ? { campaign_id: requestedCampaign.value } : {}),
+    page: page.value,
+    page_size: pageSize.value
+  }
+}
+
+/** 把地址栏状态同步回本地 ref。 */
+function restoreFromRoute() {
+  restoreFilters()
+  restorePage()
+  selectedDate.value = String(route.query.date ?? '')
+}
+
 const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
   const result = await operationsApi.campaigns({
     ...query.value,
@@ -79,21 +98,24 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale
   unattributedFills.value = result.unattributed_fills
 }, {
   fallbackMessage: '成交复盘加载失败',
-  onActivate: () => {
-    restoreFilters()
-    restorePage()
-    selectedDate.value = String(route.query.date ?? '')
-  }
+  onActivate: restoreFromRoute
+})
+
+
+// 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
+// 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
+//
+// 自己写回的 query 与 routeQuery() 一致，所以这里不会把应用筛选变成两次请求；
+// 路由名变了说明已经切走，被缓存的实例不该再管地址栏。
+const ownRoute = route.name
+watch(() => route.query, () => {
+  if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
+  restoreFromRoute()
+  void reload()
 })
 
 async function syncRoute() {
-  await syncQuery({
-    ...query.value,
-    ...(selectedDate.value ? { date: selectedDate.value } : {}),
-    ...(requestedCampaign.value ? { campaign_id: requestedCampaign.value } : {}),
-    page: page.value,
-    page_size: pageSize.value
-  })
+  await syncQuery(routeQuery())
 }
 
 async function applyFilters() {

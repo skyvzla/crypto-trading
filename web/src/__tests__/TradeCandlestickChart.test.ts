@@ -443,4 +443,56 @@ describe('TradeCandlestickChart', () => {
     expect(localStorage.getItem('backtest-replay-chart-height-v1')).toBeNull()
     expect(localStorage.getItem('backtest-replay-indicator-pane-stretch-v1')).toBeNull()
   })
+
+  it('同一 tick 内多个 prop 同时变化只重建一次，不留下回收不掉的旧图表', async () => {
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 80 }, (_, index) => ({ time: start + index, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }))
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        trade: { id: 't-race', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: (start + 40) * 1000, entry_price: 1.1, net_pnl: 1 },
+        indicators: { volume: false }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const chartsAfterMount = vi.mocked(createChart).mock.calls.length
+    const observersAfterMount = observe.mock.calls.length
+
+    // 换交易和换指标落在同一次 setProps 上，两个 watcher 在同一个 tick 里都要求重建。
+    // 渲染串行化之前，它们会在 destroy 与 createChart 之间互相插进去，各建一张图挂到
+    // 同一个 host 上，而模块级 chart 只留住后一张——前一张连同它的 ResizeObserver
+    // 再也回收不掉。
+    await wrapper.setProps({
+      trade: { id: 't-race-2', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: (start + 50) * 1000, entry_price: 1.2, net_pnl: -1 },
+      indicators: { volume: true }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(vi.mocked(createChart).mock.calls.length).toBe(chartsAfterMount + 1)
+    expect(observe.mock.calls.length).toBe(observersAfterMount + 1)
+
+    // 建了几张就必须销毁几张，卸载后不能有活着的实例残留。
+    wrapper.unmount()
+    expect(remove.mock.calls.length).toBe(vi.mocked(createChart).mock.calls.length)
+  })
+
+  it('卸载时机落在渲染的 await 中间也不会把图表建回来', async () => {
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles: [{ time: 1_754_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }],
+        trade: { id: 't-unmount', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_754_000_000_000, entry_price: 1.1, net_pnl: 1 }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const chartsAfterMount = vi.mocked(createChart).mock.calls.length
+
+    // 重建刚排进队列就卸载。这是 disposed 标记要守住的不变量：
+    // 队列里那次渲染必须放弃，不能往已经脱离文档的 host 上再挂图和 observer。
+    await wrapper.setProps({ indicators: { volume: true } })
+    wrapper.unmount()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(vi.mocked(createChart).mock.calls.length).toBe(chartsAfterMount)
+    expect(remove.mock.calls.length).toBe(chartsAfterMount)
+  })
 })

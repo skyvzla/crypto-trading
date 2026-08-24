@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { BarChart3, Info, Scale } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
 import type { DailyPnL, PerformanceBreakdownResponse, PerformanceDimension, PerformanceSummary } from '@/api/types'
@@ -8,7 +8,7 @@ import DataState from '@/features/operations/DataState.vue'
 import FilterBar from '@/features/operations/FilterBar.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { useLedgerLoader, useOperationFilters, useQuerySync } from '@/features/operations/useOperationsView'
+import { isQuerySynced, useLedgerLoader, useOperationFilters, useQuerySync } from '@/features/operations/useOperationsView'
 import { asNumber, formatMoney, formatPercent, formatRatio, pnlClass } from '@/shared/format'
 import { LEDGER_TIMEZONE, ledgerDate, shiftLedgerDate } from '@/shared/time'
 
@@ -16,15 +16,26 @@ import { LEDGER_TIMEZONE, ledgerDate, shiftLedgerDate } from '@/shared/time'
 const DEFAULT_RANGE_DAYS = 30
 
 const route = useRoute()
-const router = useRouter()
 const syncQuery = useQuerySync()
 const { filters, query: filterQuery, restore: restoreFilters } = useOperationFilters()
 const defaultEndDate = ledgerDate()
 const defaultStartDate = shiftLedgerDate(defaultEndDate, -(DEFAULT_RANGE_DAYS - 1))
 
+const BREAKDOWN_DIMENSIONS: PerformanceDimension[] = ['symbol', 'category', 'subcategory', 'side', 'exit_reason']
+
+/** 只接受后端认识的维度，其余一律当 symbol。 */
+function readGroupBy(): PerformanceDimension {
+  const requested = String(route.query.group_by ?? 'symbol') as PerformanceDimension
+  return BREAKDOWN_DIMENSIONS.includes(requested) ? requested : 'symbol'
+}
+
 const startDate = ref(String(route.query.start_date ?? defaultStartDate))
 const endDate = ref(String(route.query.end_date ?? defaultEndDate))
 const activeTab = ref(String(route.query.tab ?? 'overview'))
+// 分组维度原先只存在于 URL 里，而 syncQuery 是整体替换 query——
+// 结果是在分组页应用一次筛选就把 group_by 冲掉、维度静默退回 symbol。
+// 收成本地状态后它和其他筛选一样由 routeQuery() 统一写回。
+const groupBy = ref<PerformanceDimension>(readGroupBy())
 const summary = ref<PerformanceSummary | null>(null)
 const daily = ref<DailyPnL[]>([])
 const breakdown = ref<PerformanceBreakdownResponse | null>(null)
@@ -40,6 +51,25 @@ const query = computed(() => ({
 const sampleSize = computed(() => (summary.value?.win_count ?? 0) + (summary.value?.loss_count ?? 0) + (summary.value?.flat_count ?? 0))
 const maxDailyAbs = computed(() => Math.max(1, ...daily.value.map((item) => Math.abs(asNumber(item.net_pnl)))))
 const scopeText = computed(() => summary.value?.metric_scope || '完整且已结束的 Campaign / 交易轮次')
+
+/** 本页放进地址栏的内容。写回与「URL 是否被外部改动」共用这一处声明。 */
+function routeQuery() {
+  return {
+    ...query.value,
+    tab: activeTab.value,
+    // group_by 只属于分组页，其他页签不往地址栏里塞它。
+    ...(activeTab.value === 'breakdown' ? { group_by: groupBy.value } : {})
+  }
+}
+
+/** 把地址栏状态同步回本地 ref。 */
+function restoreFromRoute() {
+  restoreFilters()
+  startDate.value = String(route.query.start_date ?? defaultStartDate)
+  endDate.value = String(route.query.end_date ?? defaultEndDate)
+  activeTab.value = String(route.query.tab ?? 'overview')
+  groupBy.value = readGroupBy()
+}
 
 const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
   // 没选账户时不请求：绩效指标必须落在单个账户上，混算没有意义。
@@ -61,35 +91,39 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale
   if (activeTab.value === 'breakdown') await loadBreakdown()
 }, {
   fallbackMessage: '绩效数据加载失败',
-  onActivate: () => {
-    restoreFilters()
-    startDate.value = String(route.query.start_date ?? defaultStartDate)
-    endDate.value = String(route.query.end_date ?? defaultEndDate)
-    activeTab.value = String(route.query.tab ?? 'overview')
-  }
+  onActivate: restoreFromRoute
 })
 
-const BREAKDOWN_DIMENSIONS: PerformanceDimension[] = ['symbol', 'category', 'subcategory', 'side', 'exit_reason']
+
+// 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
+// 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
+//
+// 自己写回的 query 与 routeQuery() 一致，所以这里不会把应用筛选变成两次请求；
+// 路由名变了说明已经切走，被缓存的实例不该再管地址栏。
+const ownRoute = route.name
+watch(() => route.query, () => {
+  if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
+  restoreFromRoute()
+  void reload()
+})
 
 async function loadBreakdown() {
   if (!filters.value.account_id.trim()) return
-  const requested = String(route.query.group_by ?? 'symbol') as PerformanceDimension
-  const groupBy = BREAKDOWN_DIMENSIONS.includes(requested) ? requested : 'symbol'
   breakdown.value = await operationsApi.performanceBreakdown({
     ...query.value,
     timezone: LEDGER_TIMEZONE,
-    group_by: groupBy
+    group_by: groupBy.value
   })
 }
 
 async function applyFilters() {
-  await syncQuery({ ...query.value, tab: activeTab.value })
+  await syncQuery(routeQuery())
   await reload()
 }
 
 async function changeTab(key: string) {
   activeTab.value = key
-  await syncQuery({ ...query.value, tab: key })
+  await syncQuery(routeQuery())
   if (key !== 'breakdown') return
   try {
     await loadBreakdown()
@@ -99,7 +133,8 @@ async function changeTab(key: string) {
 }
 
 async function changeBreakdownDimension(value: PerformanceDimension) {
-  await router.replace({ query: { ...route.query, group_by: value } })
+  groupBy.value = value
+  await syncQuery(routeQuery())
   try {
     await loadBreakdown()
   } catch (caught) {

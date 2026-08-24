@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ChevronDown, ChevronRight, DatabaseBackup, FolderTree, ListFilter, Search } from 'lucide-vue-next'
 import { message } from 'ant-design-vue'
@@ -8,7 +8,7 @@ import type { ExchangeCategory, ExchangeSymbol, ExchangeSymbolSyncStatus } from 
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import { collectPageItems } from '@/shared/pagination'
-import { useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
+import { isQuerySynced, useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
 import { formatDateTime } from '@/shared/format'
 
 /** 详情区每页交易对数量。 */
@@ -36,6 +36,27 @@ const visibleParents = computed(() => {
   return parents.value.filter((parent) => [parent.name, parent.code, ...parent.children.flatMap((child) => [child.name, child.code])].some((value) => value.toLowerCase().includes(query)))
 })
 
+/** 本页放进地址栏的内容。写回与「URL 是否被外部改动」共用这一处声明。 */
+function routeQuery() {
+  const hasDetail = Boolean(selected.value || viewingUnclassified.value)
+  return {
+    q: search.value.trim(),
+    ...(viewingUnclassified.value ? { unclassified: 'true' } : selected.value ? { category: selected.value.category_key } : {}),
+    ...(hasDetail && detailPage.value > 1 ? { detail_page: detailPage.value } : {})
+  }
+}
+
+/**
+ * 把地址栏状态同步回本地 ref。
+ *
+ * 只恢复搜索框与详情页码；选中的分类由加载函数按 URL 重新推导，
+ * 因为它需要先拿到分类列表才能定位。
+ */
+function restoreFromRoute() {
+  search.value = String(route.query.q ?? '')
+  detailPage.value = Math.max(1, Number(route.query.detail_page) || 1)
+}
+
 const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
   const [categoryPage, status] = await Promise.all([
     collectPageItems((params) => operationsApi.categoriesPage(false, params)),
@@ -55,7 +76,7 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale
   }
 }, {
   fallbackMessage: '分类目录加载失败',
-  onActivate: () => { search.value = String(route.query.q ?? '') }
+  onActivate: restoreFromRoute
 })
 
 function toggle(key: string) {
@@ -125,13 +146,21 @@ async function changeDetailPage(page: number) {
   await loadDetailSymbols()
 }
 
+
+// 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
+// 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
+//
+// 自己写回的 query 与 routeQuery() 一致，所以这里不会把应用筛选变成两次请求；
+// 路由名变了说明已经切走，被缓存的实例不该再管地址栏。
+const ownRoute = route.name
+watch(() => route.query, () => {
+  if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
+  restoreFromRoute()
+  void reload()
+})
+
 async function syncUrl() {
-  const hasDetail = Boolean(selected.value || viewingUnclassified.value)
-  await syncQuery({
-    q: search.value.trim(),
-    ...(viewingUnclassified.value ? { unclassified: 'true' } : selected.value ? { category: selected.value.category_key } : {}),
-    ...(hasDetail && detailPage.value > 1 ? { detail_page: detailPage.value } : {})
-  })
+  await syncQuery(routeQuery())
 }
 
 </script>

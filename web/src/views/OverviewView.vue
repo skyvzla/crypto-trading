@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { RouterLink, useRouter } from 'vue-router'
+import { computed, ref, watch } from 'vue'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { Activity, CalendarDays, CircleAlert, Database, RadioTower, ShieldCheck, WalletCards } from 'lucide-vue-next'
 import { ApiError } from '@/api/client'
 import { operationsApi } from '@/api/operations'
@@ -11,10 +11,11 @@ import FilterBar from '@/features/operations/FilterBar.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import PnlCalendar from '@/features/operations/PnlCalendar.vue'
-import { useLedgerLoader, useOperationFilters, useQuerySync } from '@/features/operations/useOperationsView'
+import { isQuerySynced, useLedgerLoader, useOperationFilters, useQuerySync } from '@/features/operations/useOperationsView'
 import { asNumber, formatDateTime, formatMoney, formatPercent, pnlClass } from '@/shared/format'
 import { LEDGER_TIMEZONE, ledgerDate, ledgerMonthRange } from '@/shared/time'
 
+const route = useRoute()
 const router = useRouter()
 const syncQuery = useQuerySync()
 const { filters, query, restore: restoreFilters } = useOperationFilters()
@@ -54,6 +55,16 @@ const capitalGate = computed(() => {
   }
   return { label: '允许开仓', color: 'green' }
 })
+
+/** 本页放进地址栏的内容。写回与「URL 是否被外部改动」共用这一处声明。 */
+function routeQuery() {
+  return { ...query.value }
+}
+
+/** 把地址栏状态同步回本地 ref。 */
+function restoreFromRoute() {
+  restoreFilters()
+}
 
 const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
   const accountId = filters.value.account_id.trim()
@@ -109,10 +120,22 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale
   if ([healthResult, runtimeResult, positionResult, activeOrdersResult, tradeResult, dailyResult].every((item) => item.status === 'rejected')) {
     throw new Error('运行数据接口均不可用')
   }
-}, { fallbackMessage: '运行总览加载失败', onActivate: restoreFilters })
+}, { fallbackMessage: '运行总览加载失败', onActivate: restoreFromRoute })
+
+// 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
+// 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
+//
+// 自己写回的 query 与 routeQuery() 一致，所以这里不会把应用筛选变成两次请求；
+// 路由名变了说明已经切走，被缓存的实例不该再管地址栏。
+const ownRoute = route.name
+watch(() => route.query, () => {
+  if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
+  restoreFromRoute()
+  void reload()
+})
 
 async function applyFilters() {
-  await syncQuery({ ...query.value })
+  await syncQuery(routeQuery())
   await reload()
 }
 

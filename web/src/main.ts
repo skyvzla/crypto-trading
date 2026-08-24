@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import Antd from 'ant-design-vue'
+// 组件本身由 unplugin-vue-components 按需解析（见 vite.config.ts），
+// 这里只保留全局样式重置。
 import 'ant-design-vue/dist/reset.css'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import App from '@/App.vue'
@@ -18,7 +19,6 @@ const queryClient = new QueryClient({
 })
 
 createApp(App)
-  .use(Antd)
   .use(createPinia())
   .use(VueQueryPlugin, { queryClient })
   .use(router)

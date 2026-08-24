@@ -1,8 +1,10 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { notificationApi } from '@/api/client'
+import type { NotificationDelivery, NotificationEvent, Page } from '@/api/types'
 import App from '@/App.vue'
 import NotificationsView from '@/views/NotificationsView.vue'
+import { useNotificationActivity } from '@/features/notifications/useNotificationActivity'
 import { router } from '@/router'
 import { jsonResponse } from './httpMocks'
 
@@ -113,5 +115,89 @@ describe('notification route and view', () => {
     expect((document.querySelector('.ant-modal') as HTMLElement).style.display).toBe('none')
     wrapper.unmount()
     removeTargetRoute()
+  })
+})
+
+describe('notification activity channels', () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    const promise = new Promise<T>((settle) => { resolve = settle })
+    return { promise, resolve }
+  }
+
+  function eventPage(ids: string[], offset = 0): Page<NotificationEvent> {
+    return {
+      items: ids.map((id) => ({ id })) as unknown as NotificationEvent[],
+      total: 50,
+      limit: 8,
+      offset
+    }
+  }
+
+  it('并发加载时只写回最新一次的结果', async () => {
+    const activity = useNotificationActivity({ setError: () => undefined })
+    const slow = deferred<Page<NotificationEvent>>()
+    const fast = deferred<Page<NotificationEvent>>()
+    vi.spyOn(notificationApi, 'events')
+      .mockReturnValueOnce(slow.promise)
+      .mockReturnValueOnce(fast.promise)
+
+    const firstLoad = activity.loadEvents()
+    const secondLoad = activity.loadEvents()
+
+    // 后发的先到，再放先发的：迟到的那次必须被丢掉，
+    // 否则界面会退回上一次筛选条件的结果。
+    fast.resolve(eventPage(['new']))
+    await secondLoad
+    slow.resolve(eventPage(['stale']))
+    await firstLoad
+
+    expect(activity.events.value.items.map((item) => item.id)).toEqual(['new'])
+  })
+
+  it('事件与投递各自持有 loading，一方返回不影响另一方', async () => {
+    const activity = useNotificationActivity({ setError: () => undefined })
+    const events = deferred<Page<NotificationEvent>>()
+    const deliveries = deferred<Page<NotificationDelivery>>()
+    vi.spyOn(notificationApi, 'events').mockReturnValue(events.promise)
+    vi.spyOn(notificationApi, 'deliveries').mockReturnValue(deliveries.promise)
+
+    const eventsLoad = activity.loadEvents()
+    const deliveriesLoad = activity.loadDeliveries()
+    expect(activity.eventsLoading.value).toBe(true)
+    expect(activity.deliveriesLoading.value).toBe(true)
+
+    deliveries.resolve({ items: [], total: 0, limit: 8, offset: 0 })
+    await deliveriesLoad
+
+    // 投递返回不该把仍在飞行中的事件请求标成已完成。
+    expect(activity.deliveriesLoading.value).toBe(false)
+    expect(activity.eventsLoading.value).toBe(true)
+    expect(activity.activityLoading.value).toBe(true)
+
+    events.resolve(eventPage([]))
+    await eventsLoad
+    expect(activity.activityLoading.value).toBe(false)
+  })
+
+  it('改筛选后回到第一页，并在成功后清掉上一次的错误', async () => {
+    const messages: string[] = []
+    const activity = useNotificationActivity({ setError: (text) => messages.push(text) })
+    const events = vi.spyOn(notificationApi, 'events')
+      .mockRejectedValueOnce(new Error('后端不可用'))
+      .mockResolvedValue(eventPage(['e-1']))
+
+    activity.changeEventPage(3)
+    await flushPromises()
+    expect(events.mock.calls[0][0]).toMatchObject({ offset: 16 })
+    expect(messages).toEqual(['后端不可用'])
+
+    // 新条件下的结果集通常更短，留在第 3 页会直接落到空白上。
+    activity.eventFilters.severity = 'critical'
+    await activity.loadEvents(0)
+
+    expect(events.mock.calls[1][0]).toMatchObject({ offset: 0, severity: 'critical' })
+    expect(activity.events.value.offset).toBe(0)
+    expect(messages.at(-1)).toBe('')
   })
 })
