@@ -258,6 +258,67 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="窗口最低点距信号的最短小时数；默认由策略声明决定",
     )
+    # ---- Spike v3（pullback-v3）入场参数（默认 None=策略声明/类默认值）----
+    parser.add_argument(
+        "--rise-3s-threshold",
+        type=float,
+        default=None,
+        help="v3：3 秒暴涨涨幅门槛（小数），默认 0.03",
+    )
+    parser.add_argument(
+        "--vol-multiple",
+        type=float,
+        default=None,
+        help="v3：3 秒成交量相对 60s 中位数倍数门槛，默认 2.0",
+    )
+    parser.add_argument(
+        "--cooldown-seconds",
+        type=int,
+        default=None,
+        help="v3：3s 信号冷却秒数，默认 180",
+    )
+    parser.add_argument(
+        "--min-spike-rise",
+        type=float,
+        default=None,
+        help="v3：插针总涨幅门槛（spike_high/origin-1），默认 0.30",
+    )
+    parser.add_argument(
+        "--retrace-frac",
+        type=float,
+        default=None,
+        help="v3：回吐插针涨幅比例后接空，默认 0.35",
+    )
+    parser.add_argument(
+        "--buy-ratio-entry-min",
+        type=float,
+        default=None,
+        help="v3：接空前 10s 主动买占比轻过滤下限，默认 0.40",
+    )
+    parser.add_argument(
+        "--no-stop-5m-high",
+        action="store_true",
+        default=False,
+        help="v3：关闭 5m 插针高点止损（默认开启）",
+    )
+    parser.add_argument(
+        "--take-profit",
+        type=float,
+        default=None,
+        help="v3：硬止盈比例（小数），默认 0.10",
+    )
+    parser.add_argument(
+        "--max-hold-seconds",
+        type=int,
+        default=None,
+        help="v3：持仓超时秒数，默认 3600",
+    )
+    parser.add_argument(
+        "--wait-seconds",
+        type=int,
+        default=None,
+        help="v3：信号后等待回落的最大秒数，默认 3600",
+    )
     parser.add_argument(
         "--entry-tier-mode",
         choices=("three-tier", "tier3-only", "single-entry"),
@@ -1005,6 +1066,53 @@ def create_spike_engine(
             symbols=[args.symbol],
             total_notional=args.total_notional,
             research_params=params,
+        )
+    elif settings.strategy_definition.name == "pullback-v3":
+        from trading_platform.strategies.spike.pullback import (
+            PullbackV3BacktestStrategy,
+        )
+
+        initial_notional = (
+            settings.capital_config.initial_trading_capital
+            if settings.capital_config is not None
+            else args.total_notional
+        )
+        v3_params = {
+            "rise_3s_threshold": args.rise_3s_threshold,
+            "vol_multiple": args.vol_multiple,
+            "cooldown_seconds": args.cooldown_seconds,
+            "min_spike_rise": args.min_spike_rise,
+            "retrace_frac": args.retrace_frac,
+            "buy_ratio_entry_min": args.buy_ratio_entry_min,
+            "rise_low_lookback_hours": (
+                settings.rise_low_lookback_minutes // 60
+            ),
+            "min_rise_duration_hours": (
+                settings.min_rise_duration_minutes // 60
+            ),
+            "exit_strict_age_ms": settings.exit_strict_age_ms,
+            "exit_flat_agreement": settings.exit_flat_agreement,
+            "time_risk_grace_ms": settings.time_risk_grace_ms,
+            "time_risk_grace_loss_ratio": settings.time_risk_grace_loss_ratio,
+            "strong_strict_age_ms": settings.strong_strict_age_ms,
+            "weak_strict_age_ms": settings.weak_strict_age_ms,
+            "strong_bucket_strict_age_ms": settings.strong_bucket_strict_age_ms,
+            "weak_bucket_strict_age_ms": settings.weak_bucket_strict_age_ms,
+            "profit_unlock_ratio": settings.profit_unlock_ratio,
+            "profit_drawdown_ratio": settings.profit_drawdown_ratio,
+            "profit_drawdown_peak_ratio": settings.profit_drawdown_peak_ratio,
+            "early_profit_unlock_ratio": settings.early_profit_unlock_ratio,
+            "stop_5m_high": not args.no_stop_5m_high,
+            "take_profit": args.take_profit,
+            "max_hold_seconds": args.max_hold_seconds,
+            "wait_seconds": args.wait_seconds,
+        }
+        strategy = PullbackV3BacktestStrategy(
+            symbols=[args.symbol],
+            total_notional=initial_notional,
+            strategy_parameters={
+                key: value for key, value in v3_params.items() if value is not None
+            },
         )
     else:
         strategy_class = settings.strategy_definition.strategy_class

@@ -118,6 +118,15 @@ PARAMETER_FLAGS = {
     "limit_fill_fraction": "--limit-fill-fraction",
     "warmup_hours": "--warmup-hours",
     "bar1s_time_shift_hours": "--bar1s-time-shift-hours",
+    "rise_3s_threshold": "--rise-3s-threshold",
+    "vol_multiple": "--vol-multiple",
+    "cooldown_seconds": "--cooldown-seconds",
+    "min_spike_rise": "--min-spike-rise",
+    "retrace_frac": "--retrace-frac",
+    "buy_ratio_entry_min": "--buy-ratio-entry-min",
+    "take_profit": "--take-profit",
+    "max_hold_seconds": "--max-hold-seconds",
+    "wait_seconds": "--wait-seconds",
 }
 SUPPORTED_MATRIX_KEYS = set(PARAMETER_FLAGS)
 EXECUTION_FLAGS = {

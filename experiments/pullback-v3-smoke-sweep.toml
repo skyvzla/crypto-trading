@@ -1,0 +1,32 @@
+name = "pullback-v3-smoke-sweep"
+start = "2025-08-01T00:00:00+00:00"
+end = "2026-08-01T00:00:00+00:00"
+duckdb_path = "data/market/candles/candles.duckdb"
+output = "reports/pullback-v3-smoke-sweep"
+
+[universe]
+mode = "explicit"
+require_database_allowed = false
+symbols = [
+    "SIRENUSDT",
+    "RAVEUSDT",
+    "NAORISUSDT",
+]
+
+[execution]
+memory_limit_enabled = false
+chunk_hours = 4320
+fetch_batch_size = 10000
+duckdb_threads = 1
+resume = true
+
+[fixed]
+strategy = "trading_platform.strategies.spike.pullback:PullbackV3"
+total_notional = 1000
+exit_policy = "candidate-v1"
+warmup_hours = 40
+rise_low_lookback_hours = 24
+min_rise_duration_hours = 6
+min_spike_rise = 0.40
+retrace_frac = 0.30
+take_profit = 0.15
