@@ -2,12 +2,17 @@ import json
 from pathlib import Path
 import sys
 
+import pytest
+
 from trading_platform.backtest import benchmark
+from trading_platform.backtest import run_spike_sweep_symbol as symbol_runner
 from trading_platform.backtest.benchmark import (
     CommandRun,
+    BenchmarkError,
     _reproducibility_metadata,
     _events_per_second,
     _read_event_count,
+    _sweep_factory,
     choose_symbol,
     measure_command,
     run_cli,
@@ -365,3 +370,208 @@ def test_reproducibility_metadata_marks_git_unavailable(tmp_path: Path, monkeypa
     assert metadata["git_available"] is False
     assert metadata["git_revision"] is None
     assert metadata["git_dirty"] is None
+
+
+def test_symbol_sweep_forwards_numeric_parameter_and_allows_one_value(
+    tmp_path: Path,
+):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--symbol", "AKEUSDT",
+        "--strategy", "trading_platform.strategies.spike.v1_1:V11",
+        "--sweep-parameter", "rise_5s_threshold_percent",
+        "--sweep-values", "5",
+    ])
+
+    factory = _sweep_factory(
+        args,
+        {"kind": "symbol-sweep"},
+        "test-invocation",
+    )
+    spec = factory(0, tmp_path)
+    task = json.loads((tmp_path / "task.json").read_text(encoding="utf-8"))
+
+    assert len(task["runs"]) == 1
+    run_arguments = task["runs"][0]["arguments"]
+    assert "--rise-5s-threshold-percent" in run_arguments
+    assert run_arguments[run_arguments.index("--rise-5s-threshold-percent") + 1] == "5"
+    assert "--prior-high-lookback-hours" not in run_arguments
+    assert "trading_platform.strategies.spike.v1_1:V11" in run_arguments
+    assert spec.event_mode == "shared"
+
+
+def test_symbol_sweep_keeps_prior_high_parameter(tmp_path: Path):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--symbol", "AKEUSDT",
+        "--strategy", "trading_platform.strategies.spike.v1:V1",
+        "--sweep-parameter", "prior_high_lookback_hours",
+        "--sweep-values", "4",
+    ])
+
+    factory = _sweep_factory(args, {"kind": "symbol-sweep"}, "test-invocation")
+    factory(0, tmp_path)
+    task = json.loads((tmp_path / "task.json").read_text(encoding="utf-8"))
+    run_arguments = task["runs"][0]["arguments"]
+
+    assert run_arguments[
+        run_arguments.index("--prior-high-lookback-hours") + 1
+    ] == "4"
+
+
+def test_v2_sweep_forwards_profit_unlock_parameter(tmp_path: Path):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--symbol", "AKEUSDT",
+        "--strategy", "trading_platform.strategies.spike.v2:V2",
+        "--exit-policy", "candidate-v1",
+        "--sweep-parameter", "profit_unlock_percent",
+        "--sweep-values", "1.5,3",
+    ])
+
+    factory = _sweep_factory(args, {"kind": "symbol-sweep"}, "test-invocation")
+    factory(0, tmp_path)
+    task = json.loads((tmp_path / "task.json").read_text(encoding="utf-8"))
+
+    assert [
+        run["arguments"][run["arguments"].index("--profit-unlock-percent") + 1]
+        for run in task["runs"]
+    ] == ["1.5", "3"]
+    assert all(
+        run["arguments"][run["arguments"].index("--exit-policy") + 1]
+        == "candidate-v1"
+        for run in task["runs"]
+    )
+
+
+def test_single_value_sweep_reaches_symbol_runner_task_chain(
+    tmp_path: Path, monkeypatch
+):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--symbol", "AKEUSDT",
+        "--strategy", "trading_platform.strategies.spike.v1_1:V11",
+        "--metrics-root", str(tmp_path / "metrics"),
+        "--sweep-parameter", "rise_5s_threshold_percent",
+        "--sweep-values", "5",
+    ])
+    factory = _sweep_factory(args, {"kind": "symbol-sweep"}, "test-invocation")
+    factory(0, tmp_path)
+    task = json.loads((tmp_path / "task.json").read_text(encoding="utf-8"))
+
+    plans = []
+    monkeypatch.setattr(
+        symbol_runner,
+        "load_metrics_series",
+        lambda *_args: [],
+    )
+    monkeypatch.setattr(
+        symbol_runner,
+        "create_spike_engine",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        symbol_runner,
+        "_run_shift_group",
+        lambda group: plans.append(group) or set(),
+    )
+
+    assert symbol_runner.run_symbol_task(task) == 0
+    assert len(plans) == 1
+    assert len(plans[0]) == 1
+    assert plans[0][0].args.rise_5s_threshold_percent == 5
+    assert plans[0][0].args.metrics_root == tmp_path / "metrics"
+
+
+@pytest.mark.parametrize(
+    "parameter",
+    [
+        "rise_5s_threshold",
+        "rise_5s_threshold_percen",
+        "entry_tier_mode",
+        "chunk_hours",
+        "stop_5m_high",
+    ],
+)
+def test_sweep_rejects_unsupported_parameters_before_archive_lookup(
+    parameter: str, tmp_path: Path, monkeypatch
+):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--strategy", "trading_platform.strategies.spike.v1:V1",
+        "--sweep-parameter", parameter,
+        "--sweep-values", "5",
+    ])
+    monkeypatch.setattr(
+        benchmark,
+        "discover_duckdb_path",
+        lambda *_args: pytest.fail("archive lookup must not run"),
+    )
+
+    with pytest.raises(BenchmarkError, match="--sweep-parameter"):
+        benchmark._prepare_args(args)
+
+
+@pytest.mark.parametrize(
+    ("parameter", "value"),
+    [
+        ("rise_5s_threshold_percent", "not-a-number"),
+        ("prior_high_lookback_hours", "4.5"),
+    ],
+)
+def test_sweep_rejects_non_numeric_values_before_archive_lookup(
+    parameter: str, value: str, monkeypatch
+):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--strategy", "trading_platform.strategies.spike.v1:V1",
+        "--sweep-parameter", parameter,
+        "--sweep-values", value,
+    ])
+    monkeypatch.setattr(
+        benchmark,
+        "discover_duckdb_path",
+        lambda *_args: pytest.fail("archive lookup must not run"),
+    )
+
+    with pytest.raises(BenchmarkError, match="--sweep-values"):
+        benchmark._prepare_args(args)
+
+
+def test_run_cli_rejects_invalid_strategy_before_archive_lookup(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        benchmark,
+        "discover_duckdb_path",
+        lambda *_args: pytest.fail("archive lookup must not run"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        benchmark.run_cli([
+            "--workload", "symbol-sweep",
+            "--strategy", " : V11 ",
+            "--sweep-parameter", "prior_high_lookback_hours",
+        ])
+
+    assert error.value.code == 2
+    assert "module:attribute" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (" trading_platform.strategies.spike.v1:V1 ",
+         "trading_platform.strategies.spike.v1:V1"),
+        ("trading_platform.strategies.spike.v1 : V1",
+         "trading_platform.strategies.spike.v1:V1"),
+    ],
+)
+def test_strategy_path_strips_outer_and_colon_whitespace(raw, expected):
+    assert benchmark._validate_strategy_path(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["v1_1", ":V1", "module:", " : "])
+def test_strategy_path_rejects_empty_module_or_attribute(raw):
+    with pytest.raises(BenchmarkError, match="module:attribute"):
+        benchmark._validate_strategy_path(raw)

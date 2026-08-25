@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import os
@@ -46,6 +47,11 @@ _DEFAULT_START = "2026-07-01T00:00:00+00:00"
 _DEFAULT_END = "2026-07-02T00:00:00+00:00"
 _DEFAULT_STRATEGY = "trading_platform.strategies.spike.v1:V1"
 _DEFAULT_SWEEP_VALUES = ("0", "4")
+_SWEEP_PARAMETERS = {
+    "prior_high_lookback_hours": ("--prior-high-lookback-hours", int),
+    "rise_5s_threshold_percent": ("--rise-5s-threshold-percent", Decimal),
+    "profit_unlock_percent": ("--profit-unlock-percent", Decimal),
+}
 _REQUIRED_TIMEFRAMES = ("1s", "1m", "5m")
 
 EventMode: TypeAlias = Literal["single", "shared", "none"]
@@ -59,6 +65,7 @@ class Workload(TypedDict, total=False):
     start: str
     end: str
     duckdb_path: str
+    metrics_root: str | None
     archive_index: str
     strategy: str
     total_notional: str
@@ -743,8 +750,59 @@ def _base_spike_arguments(args: argparse.Namespace) -> list[str]:
         "--fetch-batch-size", str(args.fetch_batch_size),
         "--duckdb-threads", str(args.duckdb_threads),
     ]
+    if args.metrics_root:
+        values.extend(("--metrics-root", str(args.metrics_root)))
     if args.duckdb_memory_limit:
         values.extend(("--duckdb-memory-limit", args.duckdb_memory_limit))
+    return values
+
+
+def _validate_strategy_path(value: str) -> str:
+    """Require the strategy declaration syntax used by the backtest loader."""
+
+    if not isinstance(value, str) or value.count(":") != 1:
+        raise BenchmarkError("--strategy must use module:attribute format")
+    module_name, attribute = (part.strip() for part in value.split(":", 1))
+    if not module_name or not attribute:
+        raise BenchmarkError("--strategy must use module:attribute format")
+    return f"{module_name}:{attribute}"
+
+
+def _sweep_parameter_flag(parameter: str) -> str:
+    """Return the CLI flag for a supported numeric benchmark parameter."""
+
+    normalized = parameter.strip() if isinstance(parameter, str) else ""
+    try:
+        return _SWEEP_PARAMETERS[normalized][0]
+    except KeyError as exc:
+        supported = ", ".join(sorted(_SWEEP_PARAMETERS))
+        raise BenchmarkError(
+            f"--sweep-parameter must be one of: {supported}"
+        ) from exc
+
+
+def _sweep_values(value: str) -> tuple[str, ...]:
+    values = tuple(part.strip() for part in value.split(",") if part.strip())
+    if not values:
+        raise BenchmarkError("symbol-sweep requires at least one --sweep-values")
+    return values
+
+
+def _validate_sweep_values(
+    parameter: str, values: tuple[str, ...]
+) -> tuple[str, ...]:
+    parser = _SWEEP_PARAMETERS[parameter][1]
+    for value in values:
+        try:
+            parsed = parser(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise BenchmarkError(
+                f"--sweep-values must be numeric for {parameter}"
+            ) from exc
+        if isinstance(parsed, Decimal) and not parsed.is_finite():
+            raise BenchmarkError(
+                f"--sweep-values must be finite for {parameter}"
+            )
     return values
 
 
@@ -772,13 +830,9 @@ def _single_factory(args: argparse.Namespace, workload: Workload, invocation: st
 
 def _sweep_factory(args: argparse.Namespace, workload: Workload, invocation: str):
     base = _base_spike_arguments(args)
-    values = tuple(value.strip() for value in args.sweep_values.split(",") if value.strip())
-    if len(values) < 2:
-        raise BenchmarkError("symbol-sweep requires at least two --sweep-values")
-    if args.sweep_parameter != "prior_high_lookback_hours":
-        raise BenchmarkError(
-            "当前 benchmark 仅支持 sweep 参数 prior_high_lookback_hours"
-        )
+    parameter = args.sweep_parameter.strip()
+    parameter_flag = _sweep_parameter_flag(parameter)
+    values = _validate_sweep_values(parameter, _sweep_values(args.sweep_values))
 
     def factory(repeat: int, run_root: Path) -> CommandRun:
         task_path = run_root / "task.json"
@@ -791,7 +845,7 @@ def _sweep_factory(args: argparse.Namespace, workload: Workload, invocation: str
                 "run_id": f"{invocation}-{repeat + 1:03d}-{index + 1:02d}",
                 "arguments": [
                     *base,
-                    "--prior-high-lookback-hours", value,
+                    parameter_flag, value,
                     "--output", str(output),
                 ],
             })
@@ -825,6 +879,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, default=Path("reports/benchmarks/p0"))
     parser.add_argument("--report", type=Path, default=None, help="可选 JSON 报告路径")
     parser.add_argument("--duckdb-path", type=Path, default=None)
+    parser.add_argument("--metrics-root", type=Path, default=None)
     parser.add_argument("--archive-index", type=Path, default=None)
     parser.add_argument("--symbol", default=None)
     parser.add_argument("--start", default=_DEFAULT_START)
@@ -870,6 +925,13 @@ def _prepare_args(args: argparse.Namespace) -> argparse.Namespace:
         if not args.command:
             raise BenchmarkError("--command must not be empty")
         return args
+    args.strategy = _validate_strategy_path(args.strategy)
+    if args.workload == "symbol-sweep":
+        args.sweep_parameter = args.sweep_parameter.strip()
+        _sweep_parameter_flag(args.sweep_parameter)
+        _validate_sweep_values(
+            args.sweep_parameter, _sweep_values(args.sweep_values)
+        )
     args.duckdb_path = discover_duckdb_path(args.duckdb_path)
     args.archive_index = discover_archive_index(args.duckdb_path, args.archive_index)
     args.symbol = args.symbol or choose_symbol(
@@ -914,6 +976,9 @@ def run_cli(argv: Sequence[str] | None = None) -> tuple[int, dict[str, object] |
                 "start": args.start,
                 "end": args.end,
                 "duckdb_path": str(args.duckdb_path),
+                "metrics_root": (
+                    str(args.metrics_root) if args.metrics_root else None
+                ),
                 "archive_index": str(args.archive_index),
                 "strategy": args.strategy,
                 "total_notional": str(args.total_notional),
@@ -924,11 +989,7 @@ def run_cli(argv: Sequence[str] | None = None) -> tuple[int, dict[str, object] |
                 "duckdb_memory_limit": args.duckdb_memory_limit,
                 "duckdb_threads": args.duckdb_threads,
                 "sweep_parameter": args.sweep_parameter,
-                "sweep_values": [
-                    value.strip()
-                    for value in args.sweep_values.split(",")
-                    if value.strip()
-                ],
+                "sweep_values": list(_sweep_values(args.sweep_values)),
                 "repeats": args.repeats,
                 "timeout_seconds": args.timeout_seconds,
                 "output_root": str(args.output_root.resolve()),
