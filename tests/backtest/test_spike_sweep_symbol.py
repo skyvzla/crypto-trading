@@ -6,11 +6,60 @@ from types import SimpleNamespace
 import pytest
 
 from trading_platform.backtest.strategy_definition import FeatureSpec
+from trading_platform.backtest.result import BacktestResult, ResultAnalyzer
 from trading_platform.shared.events import Bar1s, Kline
+from trading_platform.shared.config import BacktestConfig
 from trading_platform.backtest import run_spike_sweep_symbol as symbol_runner
 from trading_platform.backtest import run_spike_short
 from trading_platform.backtest.sweep import RunSpec, _collect_signal_audit_events
 from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
+
+
+def test_save_backtest_result_reuses_summary_for_persisting(monkeypatch, tmp_path):
+    calls = {"analyze": 0, "saved_summary": None}
+    expected = {"pnl": {"net_pnl": 1.25}}
+
+    class FakeAnalyzer:
+        def __init__(self, result):
+            assert result is sentinel_result
+
+        def analyze(self):
+            calls["analyze"] += 1
+            return expected
+
+        def save_results(self, parent, name, *, summary=None):
+            calls["saved_summary"] = summary
+
+    sentinel_result = object()
+    monkeypatch.setattr(run_spike_short, "ResultAnalyzer", FakeAnalyzer)
+
+    assert run_spike_short.save_backtest_result(
+        sentinel_result, tmp_path / "run"
+    ) is expected
+    assert calls == {"analyze": 1, "saved_summary": expected}
+
+
+def test_save_results_does_not_reanalyze_when_summary_is_provided(
+    monkeypatch, tmp_path
+):
+    result = BacktestResult(
+        virtual_time_start=0,
+        virtual_time_end=1_000,
+        orders=[],
+        fills=[],
+        positions=[],
+        config=BacktestConfig(),
+    )
+    analyzer = ResultAnalyzer(result)
+    expected = {"pnl": {"net_pnl": 1.25}}
+
+    def fail_analyze():
+        pytest.fail("save_results re-analyzed an explicitly supplied summary")
+
+    monkeypatch.setattr(analyzer, "analyze", fail_analyze)
+    analyzer.save_results(str(tmp_path), "run", summary=expected)
+
+    assert json.loads((tmp_path / "run" / "summary.json").read_text()) == expected
 
 
 def test_symbol_runner_keeps_the_one_hundred_eighty_day_default_read_window():

@@ -1213,7 +1213,9 @@ def create_spike_engine(
 def save_backtest_result(result, output_path: Path) -> dict:
     analyzer = ResultAnalyzer(result)
     summary = analyzer.analyze()
-    analyzer.save_results(str(output_path.parent), output_path.name)
+    analyzer.save_results(
+        str(output_path.parent), output_path.name, summary=summary
+    )
     return summary
 
 

@@ -826,7 +826,13 @@ class ResultAnalyzer:
 
         return float(sharpe_annualized)
 
-    def save_results(self, output_dir: str, run_id: str) -> None:
+    def save_results(
+        self,
+        output_dir: str,
+        run_id: str,
+        *,
+        summary: dict[str, Any] | None = None,
+    ) -> None:
         """
         保存回测结果到文件
 
@@ -851,7 +857,8 @@ class ResultAnalyzer:
         dfs['trades'].to_csv(output_path / 'trades.csv', index=False)
 
         # 保存汇总指标
-        summary = self.analyze()
+        if summary is None:
+            summary = self.analyze()
         with open(output_path / 'summary.json', 'w') as f:
             json.dump(summary, f, indent=2)
 
