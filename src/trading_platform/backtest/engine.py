@@ -102,6 +102,7 @@ class BacktestEngine:
 
         # 订单管理
         self.orders: dict[str, Order] = {}
+        self._active_orders_by_symbol: dict[str, dict[str, Order]] = {}
         self.fills: list[Fill] = []
 
         # 持仓管理
@@ -241,6 +242,29 @@ class BacktestEngine:
     def cancel_order(self, order_id: str) -> bool:
         return self.executor.cancel_order(order_id)
 
+    def _register_active_order(self, order: Order) -> None:
+        """将仍可成交的订单加入按币种维护的撮合索引。"""
+        self._active_orders_by_symbol.setdefault(order.symbol, {})[order.order_id] = order
+
+    def _remove_active_order(self, order: Order) -> None:
+        """从撮合索引移除终态订单，但保留全量订单历史。"""
+        symbol_orders = self._active_orders_by_symbol.get(order.symbol)
+        if symbol_orders is None:
+            return
+        symbol_orders.pop(order.order_id, None)
+        if not symbol_orders:
+            self._active_orders_by_symbol.pop(order.symbol, None)
+
+    def iter_active_orders(self, symbol: str | None = None) -> tuple[Order, ...]:
+        """返回指定币种或全账户当前可成交的订单。"""
+        if symbol is not None:
+            return tuple(self._active_orders_by_symbol.get(symbol, {}).values())
+        return tuple(
+            order
+            for symbol_orders in self._active_orders_by_symbol.values()
+            for order in symbol_orders.values()
+        )
+
     def _check_fills(self, event: Event) -> None:
         """
         检查当前事件是否触发挂单成交
@@ -262,9 +286,14 @@ class BacktestEngine:
 
         symbol = event.symbol
 
-        # 遍历该币种的所有活跃订单
-        for order_id, order in list(self.orders.items()):
-            if order.symbol != symbol or order.status not in {'NEW', 'PARTIALLY_FILLED'}:
+        # 只遍历活跃索引；终态订单保留在 self.orders 供查询和结果分析。
+        for order in self.iter_active_orders(symbol):
+            # 成交回调可能在同一 Bar 内撤销或替换后续订单；快照项必须复查当前索引。
+            if (
+                order.status not in {'NEW', 'PARTIALLY_FILLED'}
+                or self._active_orders_by_symbol.get(symbol, {}).get(order.order_id)
+                is not order
+            ):
                 continue
 
             # 1. 先检查 TTL 是否过期（在价格检查之前）
@@ -376,6 +405,10 @@ class BacktestEngine:
         if expire_remainder:
             order.status = 'EXPIRED'
             order.cancel_time = self.virtual_time_ms
+        if order.status == 'PARTIALLY_FILLED':
+            self._register_active_order(order)
+        else:
+            self._remove_active_order(order)
 
         # 更新持仓（支持多档累加）
         self._update_position(fill)
@@ -396,6 +429,7 @@ class BacktestEngine:
         """
         order.status = 'EXPIRED'
         order.cancel_time = self.virtual_time_ms
+        self._remove_active_order(order)
 
         logger.debug(
             f"Order expired: {order.order_id} at {self.virtual_time_ms}"

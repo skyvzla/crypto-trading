@@ -184,6 +184,101 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertEqual(len(engine.orders), 1)
         self.assertEqual(len(engine.order_records), 1)
 
+    def test_client_order_id_is_idempotent_after_order_is_terminal(self):
+        """终态订单仍应参与 clientOrderId 幂等查找。"""
+        for terminal_state in ('FILLED', 'EXPIRED', 'CANCELLED'):
+            with self.subTest(terminal_state=terminal_state):
+                engine = BacktestEngine(MockStrategy(), [], BacktestConfig())
+                intent = OrderIntent(
+                    symbol='BTCUSDT',
+                    side='SELL',
+                    price=Decimal('100'),
+                    quantity=Decimal('1'),
+                    client_order_id=f'terminal-{terminal_state}',
+                )
+                first = engine.executor.place_order(intent)
+
+                if terminal_state == 'FILLED':
+                    engine._execute_fill(first, Bar1s(
+                        symbol='BTCUSDT', timestamp=0, available_time=1_000,
+                        open=Decimal('100'), high=Decimal('101'), low=Decimal('99'),
+                        close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+                        vwap=Decimal('100'),
+                    ))
+                elif terminal_state == 'EXPIRED':
+                    engine._expire_order(first)
+                else:
+                    self.assertTrue(engine.cancel_order(first.order_id))
+
+                second = engine.executor.place_order(intent)
+
+                self.assertIs(second, first)
+                self.assertEqual(len(engine.orders), 1)
+                self.assertEqual(len(engine.order_records), 1)
+
+    def test_check_fills_does_not_scan_terminal_order_history(self):
+        """撮合只应读取活跃索引，不应遍历终态订单历史。"""
+        engine = BacktestEngine(MockStrategy(), [], BacktestConfig())
+        terminal = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='SELL', price=Decimal('100'),
+            quantity=Decimal('1'), client_order_id='terminal-history',
+        ))
+        active = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='SELL', price=Decimal('100'),
+            quantity=Decimal('1'), client_order_id='active-order',
+        ))
+        self.assertTrue(engine.cancel_order(terminal.order_id))
+
+        class HistoryMustNotBeScanned(dict):
+            def items(self):
+                raise AssertionError('terminal order history was scanned')
+
+        engine.orders = HistoryMustNotBeScanned(engine.orders)
+        engine.virtual_time_ms = 1_000
+        engine._check_fills(Bar1s(
+            symbol='BTCUSDT', timestamp=0, available_time=1_000,
+            open=Decimal('100'), high=Decimal('101'), low=Decimal('99'),
+            close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('100'),
+        ))
+
+        self.assertEqual(active.status, 'FILLED')
+        self.assertIs(engine.get_order(terminal.order_id), terminal)
+        self.assertEqual(terminal.status, 'CANCELLED')
+
+    def test_fill_callback_cancelling_sibling_order_skips_snapshot_entry(self):
+        """首单成交回调撤销同 Bar 兄弟单后，兄弟单不应继续成交。"""
+        class CancelSiblingOnFill(MockStrategy):
+            def on_fill(self, fill):
+                self.fills_received.append(fill)
+                self.engine.cancel_order(self.sibling_order_id)
+
+        strategy = CancelSiblingOnFill()
+        engine = BacktestEngine(strategy, [], BacktestConfig())
+        strategy.engine = engine
+        first = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='SELL', price=Decimal('100'),
+            quantity=Decimal('1'), client_order_id='first-order',
+        ))
+        sibling = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='SELL', price=Decimal('100'),
+            quantity=Decimal('1'), client_order_id='sibling-order',
+        ))
+        strategy.sibling_order_id = sibling.order_id
+        engine.virtual_time_ms = 1_000
+
+        engine._check_fills(Bar1s(
+            symbol='BTCUSDT', timestamp=0, available_time=1_000,
+            open=Decimal('100'), high=Decimal('101'), low=Decimal('99'),
+            close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('100'),
+        ))
+
+        self.assertEqual(first.status, 'FILLED')
+        self.assertEqual(sibling.status, 'CANCELLED')
+        self.assertEqual(len(engine.fills), 1)
+        self.assertEqual(len(strategy.fills_received), 1)
+
     def test_limit_order_can_fill_deterministically_across_multiple_bars(self):
         class PartialFillStrategy(MockStrategy):
             def on_bar1s(self, bar):

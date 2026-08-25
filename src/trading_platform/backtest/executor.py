@@ -47,6 +47,7 @@ class BacktestExecutor:
         self.account_id = account_id
         self.symbol_rules = symbol_rules
         self._order_counter = 0
+        self._orders_by_client_id: dict[tuple[str, str], Order] = {}
 
     def place_order(self, order_intent: OrderIntent) -> Order:
         """
@@ -65,12 +66,11 @@ class BacktestExecutor:
             )
 
         # clientOrderId 是执行幂等键：同一账户下重复提交时返回已有订单。
-        for existing in self.engine.orders.values():
-            if (
-                existing.account_id == self.account_id
-                and existing.client_order_id == order_intent.client_order_id
-            ):
-                return existing
+        existing = self._orders_by_client_id.get(
+            (self.account_id, order_intent.client_order_id)
+        )
+        if existing is not None:
+            return existing
 
         if order_intent.reduce_only:
             self._validate_reduce_only(order_intent)
@@ -101,6 +101,8 @@ class BacktestExecutor:
 
         # 加入引擎订单簿
         self.engine.orders[order.order_id] = order
+        self.engine._register_active_order(order)
+        self._orders_by_client_id[(self.account_id, order.client_order_id)] = order
         self.engine.order_records.append(order)
 
         logger.debug(
@@ -122,9 +124,8 @@ class BacktestExecutor:
         reserved = sum(
             (
                 order.quantity - order.filled_quantity
-                for order in self.engine.orders.values()
-                if order.symbol == intent.symbol
-                and order.reduce_only
+                for order in self.engine.iter_active_orders(intent.symbol)
+                if order.reduce_only
                 and order.status in {"NEW", "PARTIALLY_FILLED"}
             ),
             start=Decimal("0"),
@@ -161,6 +162,7 @@ class BacktestExecutor:
         # 立即生效
         order.status = 'CANCELLED'
         order.cancel_time = self.engine.virtual_time_ms
+        self.engine._remove_active_order(order)
 
         logger.debug(f"Order cancelled: {order_id}")
         return True
@@ -177,8 +179,8 @@ class BacktestExecutor:
         """
         cancelled_count = 0
 
-        for order in list(self.engine.orders.values()):
-            if order.symbol == symbol and order.status in {'NEW', 'PARTIALLY_FILLED'}:
+        for order in self.engine.iter_active_orders(symbol):
+            if order.status in {'NEW', 'PARTIALLY_FILLED'}:
                 if self.cancel_order(order.order_id):
                     cancelled_count += 1
 
@@ -193,7 +195,7 @@ class BacktestExecutor:
         """
         cancelled_count = 0
 
-        for order in list(self.engine.orders.values()):
+        for order in self.engine.iter_active_orders():
             if order.status in {'NEW', 'PARTIALLY_FILLED'}:
                 if self.cancel_order(order.order_id):
                     cancelled_count += 1
