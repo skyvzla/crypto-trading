@@ -71,6 +71,10 @@ class Workload(TypedDict, total=False):
     total_notional: str
     warmup_hours: float
     exit_policy: str
+    effective_load_start_ms: int | list[int]
+    required_timeframes: list[str]
+    effective_exit_policy: str | list[str]
+    effective_settings: list[dict[str, object]]
     chunk_hours: float
     fetch_batch_size: int
     duckdb_memory_limit: str | None
@@ -222,12 +226,16 @@ def choose_symbol(
     preferred: str | None = "AKEUSDT",
     start_ms: int | None = None,
     end_ms: int | None = None,
+    required_timeframes: Sequence[str] = _REQUIRED_TIMEFRAMES,
 ) -> str:
-    """从 index 选择覆盖所需 timeframe 的稳定 symbol，优先 AKEUSDT。"""
+    """从 index 选择完整覆盖指定 timeframe 的稳定 symbol。"""
 
     frame = load_archive_index(Path(archive_index))
     if start_ms is None or end_ms is None or start_ms >= end_ms:
         raise BenchmarkError("choose_symbol requires a valid start_ms/end_ms interval")
+    timeframes = tuple(dict.fromkeys(required_timeframes))
+    if not timeframes:
+        raise BenchmarkError("choose_symbol requires at least one timeframe")
     if start_ms is not None and end_ms is not None:
         frame = frame[
             (frame["first_open_ms"] < end_ms)
@@ -254,10 +262,10 @@ def choose_symbol(
 
     covered_symbols: list[str] = []
     for symbol, group in frame.groupby("symbol"):
-        if not set(_REQUIRED_TIMEFRAMES).issubset(set(group["timeframe"])):
+        if not set(timeframes).issubset(set(group["timeframe"])):
             continue
         complete = True
-        for timeframe in _REQUIRED_TIMEFRAMES:
+        for timeframe in timeframes:
             parts = group[group["timeframe"] == timeframe]
             complete = complete and has_contiguous_coverage(parts)
         if complete:
@@ -274,7 +282,7 @@ def choose_symbol(
             return symbol
     raise BenchmarkError(
         "archive index 中没有同时覆盖 "
-        f"{', '.join(_REQUIRED_TIMEFRAMES)} 的可用 symbol"
+        f"{', '.join(timeframes)} 的可用 symbol"
     )
 
 
@@ -666,6 +674,66 @@ def _source_content_fingerprint() -> str | None:
     return digest.hexdigest()
 
 
+def _file_fingerprint(path: Path) -> dict[str, object]:
+    try:
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        stat = path.stat()
+    except OSError:
+        return {
+            "path": str(path),
+            "exists": False,
+            "size": None,
+            "mtime_ns": None,
+            "sha256": None,
+        }
+    return {
+        "path": str(path),
+        "exists": True,
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": _sha256_file(path),
+    }
+
+
+def _metrics_root_fingerprint(path: str | Path | None) -> dict[str, object]:
+    """Fingerprint only the published metrics index and its completion metadata."""
+
+    if path is None:
+        return {
+            "path": None,
+            "status": "not_configured",
+            "files": {},
+            "combined_sha256": None,
+        }
+    root = Path(path).resolve()
+    index_path = root / "metrics_index.parquet"
+    meta_path = root / "metrics_index.meta.json"
+    files = {
+        "index": _file_fingerprint(index_path),
+        "meta": _file_fingerprint(meta_path),
+    }
+    if not all(file_info["exists"] for file_info in files.values()):
+        return {
+            "path": str(root),
+            "status": "missing",
+            "files": files,
+            "combined_sha256": None,
+        }
+    digest = hashlib.sha256()
+    for name in ("index", "meta"):
+        digest.update(name.encode("ascii"))
+        digest.update(b"\0")
+        digest.update(str(files[name]["sha256"]).encode("ascii"))
+        digest.update(b"\0")
+    return {
+        "path": str(root),
+        "status": "present",
+        "files": files,
+        "combined_sha256": digest.hexdigest(),
+    }
+
+
 def _git_value(*arguments: str) -> str | None:
     try:
         completed = subprocess.run(
@@ -732,12 +800,18 @@ def _reproducibility_metadata(
         "path": str(index_path) if index_path else None,
         "content_sha256": _sha256_file(index_path) if index_path else None,
     }
+    metrics_root = workload.get("metrics_root")
+    metadata["metrics_root"] = _metrics_root_fingerprint(metrics_root)
+    dependency_lock = _project_root() / "uv.lock"
+    metadata["dependency_lock"] = {
+        "path": str(dependency_lock),
+        "content_sha256": _sha256_file(dependency_lock),
+    }
     return metadata
 
 
 def _base_spike_arguments(args: argparse.Namespace) -> list[str]:
     values = [
-        "--symbol", args.symbol,
         "--start", args.start,
         "--end", args.end,
         "--duckdb-path", str(args.duckdb_path),
@@ -745,11 +819,14 @@ def _base_spike_arguments(args: argparse.Namespace) -> list[str]:
         "--strategy", args.strategy,
         "--total-notional", str(args.total_notional),
         "--warmup-hours", str(args.warmup_hours),
-        "--exit-policy", args.exit_policy,
         "--chunk-hours", str(args.chunk_hours),
         "--fetch-batch-size", str(args.fetch_batch_size),
         "--duckdb-threads", str(args.duckdb_threads),
     ]
+    if args.symbol is not None:
+        values[0:0] = ["--symbol", args.symbol]
+    if args.exit_policy is not None:
+        values.extend(("--exit-policy", args.exit_policy))
     if args.metrics_root:
         values.extend(("--metrics-root", str(args.metrics_root)))
     if args.duckdb_memory_limit:
@@ -786,6 +863,71 @@ def _sweep_values(value: str) -> tuple[str, ...]:
     if not values:
         raise BenchmarkError("symbol-sweep requires at least one --sweep-values")
     return values
+
+
+def _resolve_effective_settings(
+    args: argparse.Namespace,
+    *,
+    sweep_value: str | None = None,
+):
+    """通过真实 runner API 解析策略默认值和实际行情需求。"""
+
+    from trading_platform.backtest.run_spike_short import (
+        parse_args as parse_run_args,
+        resolve_settings,
+    )
+
+    runner_arguments = _base_spike_arguments(args)
+    if sweep_value is not None:
+        runner_arguments.extend(
+            (_sweep_parameter_flag(args.sweep_parameter), sweep_value)
+        )
+    runner_arguments.extend(("--output", str(args.output_root / "_preflight")))
+    try:
+        runner_args = parse_run_args(runner_arguments)
+        return resolve_settings(runner_args)
+    except (SystemExit, TypeError, ValueError) as exc:
+        raise BenchmarkError(f"无法解析策略有效设置: {exc}") from exc
+
+
+def _preflight_settings(args: argparse.Namespace) -> list[object]:
+    if args.workload != "symbol-sweep":
+        return [_resolve_effective_settings(args)]
+    values = _validate_sweep_values(
+        args.sweep_parameter, _sweep_values(args.sweep_values)
+    )
+    return [
+        _resolve_effective_settings(args, sweep_value=value)
+        for value in values
+    ]
+
+
+def _setting_timeframes(setting: object) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(
+        (("1s",) if getattr(setting, "requires_bar1s") else ())
+        + tuple(getattr(setting, "required_kline_intervals"))
+    ))
+
+
+def _effective_setting_records(
+    args: argparse.Namespace, settings: Sequence[object]
+) -> tuple[list[dict[str, object]], tuple[str, ...]]:
+    records: list[dict[str, object]] = []
+    required_timeframes: list[str] = []
+    for setting in settings:
+        timeframes = _setting_timeframes(setting)
+        for timeframe in timeframes:
+            if timeframe not in required_timeframes:
+                required_timeframes.append(timeframe)
+        exit_policy = args.exit_policy
+        if exit_policy is None:
+            exit_policy = setting.strategy_definition.defaults.exit_policy
+        records.append({
+            "load_start_ms": int(setting.load_start_ms),
+            "required_timeframes": list(timeframes),
+            "exit_policy": exit_policy,
+        })
+    return records, tuple(required_timeframes)
 
 
 def _validate_sweep_values(
@@ -887,7 +1029,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--strategy", default=_DEFAULT_STRATEGY)
     parser.add_argument("--total-notional", default="1000")
     parser.add_argument("--warmup-hours", type=float, default=16.0)
-    parser.add_argument("--exit-policy", default="confirmed")
+    parser.add_argument(
+        "--exit-policy",
+        default=None,
+    )
     parser.add_argument("--chunk-hours", type=float, default=4320.0)
     parser.add_argument("--fetch-batch-size", type=int, default=10_000)
     parser.add_argument("--duckdb-memory-limit", default=None)
@@ -925,6 +1070,8 @@ def _prepare_args(args: argparse.Namespace) -> argparse.Namespace:
         if not args.command:
             raise BenchmarkError("--command must not be empty")
         return args
+    if args.symbol is not None and not args.symbol.strip():
+        raise BenchmarkError("--symbol must not be blank")
     args.strategy = _validate_strategy_path(args.strategy)
     if args.workload == "symbol-sweep":
         args.sweep_parameter = args.sweep_parameter.strip()
@@ -932,12 +1079,51 @@ def _prepare_args(args: argparse.Namespace) -> argparse.Namespace:
         _validate_sweep_values(
             args.sweep_parameter, _sweep_values(args.sweep_values)
         )
+    settings = _preflight_settings(args)
+    effective_settings, required_timeframes = _effective_setting_records(args, settings)
+    required_start_ms = min(item["load_start_ms"] for item in effective_settings)
+    if any(
+        setting.strategy_definition.data_requirements.metrics_5m
+        for setting in settings
+    ):
+        from trading_platform.market.archive.metrics import load_metrics_index
+
+        try:
+            load_metrics_index(args.metrics_root, verify_files=False)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise BenchmarkError(f"metrics archive is unavailable: {exc}") from exc
+    args._preflight_settings = tuple(settings)
+    args._effective_settings = effective_settings
+    args._required_timeframes = required_timeframes
+    args._required_start_ms = required_start_ms
     args.duckdb_path = discover_duckdb_path(args.duckdb_path)
     args.archive_index = discover_archive_index(args.duckdb_path, args.archive_index)
-    args.symbol = args.symbol or choose_symbol(
-        args.archive_index, start_ms=start_ms - int(args.warmup_hours * 3_600_000), end_ms=end_ms
+    explicit_symbol = (
+        None if args.symbol is None else args.symbol.strip().upper()
     )
-    args.symbol = args.symbol.strip().upper()
+    try:
+        selected_symbol = choose_symbol(
+            args.archive_index,
+            preferred=explicit_symbol,
+            start_ms=required_start_ms,
+            end_ms=end_ms,
+            required_timeframes=required_timeframes,
+        )
+    except BenchmarkError as exc:
+        if explicit_symbol:
+            raise BenchmarkError(
+                f"symbol {explicit_symbol} lacks required archive coverage "
+                f"from {required_start_ms} to {end_ms} for "
+                f"{', '.join(required_timeframes)}"
+            ) from exc
+        raise
+    if explicit_symbol and selected_symbol != explicit_symbol:
+        raise BenchmarkError(
+            f"symbol {explicit_symbol} lacks required archive coverage "
+            f"from {required_start_ms} to {end_ms} for "
+            f"{', '.join(required_timeframes)}"
+        )
+    args.symbol = selected_symbol
     return args
 
 
@@ -983,7 +1169,24 @@ def run_cli(argv: Sequence[str] | None = None) -> tuple[int, dict[str, object] |
                 "strategy": args.strategy,
                 "total_notional": str(args.total_notional),
                 "warmup_hours": args.warmup_hours,
-                "exit_policy": args.exit_policy,
+                "effective_load_start_ms": (
+                    args._effective_settings[0]["load_start_ms"]
+                    if args.workload == "single"
+                    else [
+                        setting["load_start_ms"]
+                        for setting in args._effective_settings
+                    ]
+                ),
+                "required_timeframes": list(args._required_timeframes),
+                "effective_exit_policy": (
+                    args._effective_settings[0]["exit_policy"]
+                    if args.workload == "single"
+                    else [
+                        setting["exit_policy"]
+                        for setting in args._effective_settings
+                    ]
+                ),
+                "effective_settings": args._effective_settings,
                 "chunk_hours": args.chunk_hours,
                 "fetch_batch_size": args.fetch_batch_size,
                 "duckdb_memory_limit": args.duckdb_memory_limit,
@@ -996,6 +1199,8 @@ def run_cli(argv: Sequence[str] | None = None) -> tuple[int, dict[str, object] |
                 "report": str(args.report.resolve()) if args.report else None,
                 "event_mode": "single" if args.workload == "single" else "shared",
             }
+            if args.exit_policy is not None:
+                workload["exit_policy"] = args.exit_policy
             invocation = f"{int(time.time())}-{os.getpid()}"
             factory = (
                 _single_factory(args, workload, invocation)

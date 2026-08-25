@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -318,6 +319,85 @@ def test_choose_symbol_rejects_middle_partition_gap(tmp_path: Path, monkeypatch)
     assert choose_symbol(tmp_path / "index.parquet", start_ms=0, end_ms=300) == "CONTIGUOUS"
 
 
+def _benchmark_archive_frame(
+    *,
+    symbol: str,
+    timeframes: tuple[str, ...],
+    first_open_ms: int,
+    last_close_ms: int,
+):
+    import pandas as pd
+
+    return pd.DataFrame([
+        {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "first_open_ms": first_open_ms,
+            "last_close_ms": last_close_ms,
+        }
+        for timeframe in timeframes
+    ])
+
+
+def test_prepare_args_auto_symbol_checks_strategy_declared_timeframes(
+    tmp_path: Path, monkeypatch
+):
+    start_ms = benchmark._iso_to_ms("2026-07-08T00:00:00+00:00")
+    end_ms = benchmark._iso_to_ms("2026-07-09T00:00:00+00:00")
+    frame = _benchmark_archive_frame(
+        symbol="V2ONLY",
+        timeframes=("1s", "1m", "5m"),
+        first_open_ms=start_ms - 168 * 3_600_000,
+        last_close_ms=end_ms - 1,
+    )
+    duckdb_path = tmp_path / "candles.duckdb"
+    archive_index = tmp_path / "archive_index.parquet"
+    monkeypatch.setattr(benchmark, "discover_duckdb_path", lambda *_args: duckdb_path)
+    monkeypatch.setattr(
+        benchmark, "discover_archive_index", lambda *_args: archive_index
+    )
+    monkeypatch.setattr(benchmark, "load_archive_index", lambda _path: frame)
+    args = benchmark._build_parser().parse_args([
+        "--workload", "single",
+        "--strategy", "trading_platform.strategies.spike.v2:V2",
+        "--start", "2026-07-08T00:00:00+00:00",
+        "--end", "2026-07-09T00:00:00+00:00",
+    ])
+
+    with pytest.raises(BenchmarkError, match="15m"):
+        benchmark._prepare_args(args)
+
+
+def test_prepare_args_explicit_symbol_checks_effective_strategy_warmup(
+    tmp_path: Path, monkeypatch
+):
+    start_ms = benchmark._iso_to_ms("2026-07-08T00:00:00+00:00")
+    end_ms = benchmark._iso_to_ms("2026-07-09T00:00:00+00:00")
+    frame = _benchmark_archive_frame(
+        symbol="V2ONLY",
+        timeframes=("1s", "1m", "5m", "15m"),
+        first_open_ms=start_ms - 16 * 3_600_000,
+        last_close_ms=end_ms - 1,
+    )
+    duckdb_path = tmp_path / "candles.duckdb"
+    archive_index = tmp_path / "archive_index.parquet"
+    monkeypatch.setattr(benchmark, "discover_duckdb_path", lambda *_args: duckdb_path)
+    monkeypatch.setattr(
+        benchmark, "discover_archive_index", lambda *_args: archive_index
+    )
+    monkeypatch.setattr(benchmark, "load_archive_index", lambda _path: frame)
+    args = benchmark._build_parser().parse_args([
+        "--workload", "single",
+        "--symbol", "V2ONLY",
+        "--strategy", "trading_platform.strategies.spike.v2:V2",
+        "--start", "2026-07-08T00:00:00+00:00",
+        "--end", "2026-07-09T00:00:00+00:00",
+    ])
+
+    with pytest.raises(BenchmarkError, match="coverage"):
+        benchmark._prepare_args(args)
+
+
 def test_cli_mixed_failure_is_nonzero_and_writes_report(tmp_path: Path):
     code, payload = run_cli([
         "--workload", "command",
@@ -356,6 +436,79 @@ def test_reproducibility_metadata_contains_fingerprints_and_runtime(tmp_path: Pa
     assert metadata["python"]["version"]
     assert metadata["platform"]["cpu_count"]
     assert metadata["workload_parameters"] == workload
+
+
+def test_reproducibility_metadata_contains_metrics_and_dependency_fingerprints(
+    tmp_path: Path,
+):
+    index = tmp_path / "archive_index.parquet"
+    index.write_bytes(b"stable-index")
+    metrics_root = tmp_path / "metrics"
+    metrics_root.mkdir()
+    (metrics_root / "metrics_index.parquet").write_bytes(b"metrics-index-v1")
+    (metrics_root / "metrics_index.meta.json").write_text(
+        json.dumps({"completed": True}), encoding="utf-8"
+    )
+    workload = {
+        "kind": "metadata-fixture",
+        "archive_index": str(index),
+        "metrics_root": str(metrics_root),
+    }
+
+    first = _reproducibility_metadata(workload, archive_index=index)
+    (metrics_root / "metrics_index.parquet").write_bytes(b"metrics-index-v2")
+    second = _reproducibility_metadata(workload, archive_index=index)
+
+    assert first["metrics_root"]["path"] == str(metrics_root)
+    assert first["metrics_root"]["status"] == "present"
+    assert first["metrics_root"]["files"]["index"]["sha256"]
+    assert first["metrics_root"]["combined_sha256"]
+    assert (
+        first["metrics_root"]["combined_sha256"]
+        != second["metrics_root"]["combined_sha256"]
+    )
+    assert first["dependency_lock"]["path"].endswith("uv.lock")
+    assert len(first["dependency_lock"]["content_sha256"]) == 64
+
+
+def test_metrics_root_fingerprint_only_reads_canonical_files(
+    tmp_path: Path, monkeypatch
+):
+    metrics_root = tmp_path / "metrics"
+    metrics_root.mkdir()
+    index_path = metrics_root / "metrics_index.parquet"
+    meta_path = metrics_root / "metrics_index.meta.json"
+    index_path.write_bytes(b"metrics-index-v1")
+    meta_path.write_bytes(b"metrics-meta-v1")
+
+    monkeypatch.setattr(
+        Path,
+        "rglob",
+        lambda *_args, **_kwargs: pytest.fail("metrics fingerprint must not scan partitions"),
+    )
+    first = benchmark._metrics_root_fingerprint(metrics_root)
+
+    index_stat = index_path.stat()
+    index_path.write_bytes(b"metrics-index-v2")
+    os.utime(index_path, ns=(index_stat.st_atime_ns, index_stat.st_mtime_ns))
+    second = benchmark._metrics_root_fingerprint(metrics_root)
+
+    assert first["status"] == "present"
+    assert first["files"]["index"]["size"] == second["files"]["index"]["size"]
+    assert first["files"]["index"]["mtime_ns"] == second["files"]["index"]["mtime_ns"]
+    assert first["files"]["index"]["sha256"] != second["files"]["index"]["sha256"]
+    assert first["combined_sha256"] != second["combined_sha256"]
+
+
+def test_metrics_root_fingerprint_marks_missing_canonical_file(tmp_path: Path):
+    metrics_root = tmp_path / "metrics"
+    metrics_root.mkdir()
+    (metrics_root / "metrics_index.meta.json").write_text("{}", encoding="utf-8")
+
+    fingerprint = benchmark._metrics_root_fingerprint(metrics_root)
+
+    assert fingerprint["status"] == "missing"
+    assert fingerprint["files"]["index"]["exists"] is False
 
 
 def test_reproducibility_metadata_marks_git_unavailable(tmp_path: Path, monkeypatch):
@@ -442,6 +595,184 @@ def test_v2_sweep_forwards_profit_unlock_parameter(tmp_path: Path):
         == "candidate-v1"
         for run in task["runs"]
     )
+
+
+def test_benchmark_leaves_strategy_exit_policy_default_unset(tmp_path: Path):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--symbol", "AKEUSDT",
+        "--strategy", "trading_platform.strategies.spike.v2:V2",
+        "--sweep-parameter", "prior_high_lookback_hours",
+        "--sweep-values", "4",
+    ])
+
+    assert args.exit_policy is None
+    factory = _sweep_factory(args, {"kind": "symbol-sweep"}, "test-invocation")
+    factory(0, tmp_path)
+    task = json.loads((tmp_path / "task.json").read_text(encoding="utf-8"))
+
+    assert all("--exit-policy" not in run["arguments"] for run in task["runs"])
+
+
+def test_benchmark_workload_records_only_explicit_exit_policy(
+    tmp_path: Path, monkeypatch
+):
+    start_ms = benchmark._iso_to_ms("2026-07-01T00:00:00+00:00")
+    end_ms = benchmark._iso_to_ms("2026-07-02T00:00:00+00:00")
+    frame = _benchmark_archive_frame(
+        symbol="V1ONLY",
+        timeframes=("1s", "1m", "5m", "15m"),
+        first_open_ms=start_ms - 16 * 3_600_000,
+        last_close_ms=end_ms - 1,
+    )
+    monkeypatch.setattr(
+        benchmark, "discover_duckdb_path", lambda *_args: tmp_path / "candles.duckdb"
+    )
+    monkeypatch.setattr(
+        benchmark, "discover_archive_index", lambda *_args: tmp_path / "index.parquet"
+    )
+    monkeypatch.setattr(benchmark, "load_archive_index", lambda _path: frame)
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        benchmark,
+        "_reproducibility_metadata",
+        lambda workload, **_kwargs: {"workload_parameters": workload},
+    )
+
+    def fake_run_repeated(_factory, *, workload, **_kwargs):
+        seen.append(workload)
+        return {"failed_count": 0, "invalid_count": 0}
+
+    monkeypatch.setattr(benchmark, "run_repeated", fake_run_repeated)
+    code, _payload = run_cli([
+        "--workload", "single",
+        "--symbol", "V1ONLY",
+        "--output-root", str(tmp_path / "default"),
+    ])
+    assert code == 0
+    assert "exit_policy" not in seen[-1]
+
+    code, _payload = run_cli([
+        "--workload", "single",
+        "--symbol", "V1ONLY",
+        "--exit-policy", "candidate-v1",
+        "--output-root", str(tmp_path / "explicit"),
+    ])
+    assert code == 0
+    assert seen[-1]["exit_policy"] == "candidate-v1"
+
+
+def test_run_cli_preflights_v2_and_records_effective_workload(
+    tmp_path: Path, monkeypatch
+):
+    start_ms = benchmark._iso_to_ms("2026-07-08T00:00:00+00:00")
+    end_ms = benchmark._iso_to_ms("2026-07-09T00:00:00+00:00")
+    frame = _benchmark_archive_frame(
+        symbol="V2ONLY",
+        timeframes=("1s", "1m", "5m", "15m"),
+        first_open_ms=start_ms - 168 * 3_600_000,
+        last_close_ms=end_ms - 1,
+    )
+    monkeypatch.setattr(
+        benchmark, "discover_duckdb_path", lambda *_args: tmp_path / "candles.duckdb"
+    )
+    monkeypatch.setattr(
+        benchmark, "discover_archive_index", lambda *_args: tmp_path / "index.parquet"
+    )
+    monkeypatch.setattr(benchmark, "load_archive_index", lambda _path: frame)
+    monkeypatch.setattr(
+        benchmark,
+        "_reproducibility_metadata",
+        lambda workload, **_kwargs: {"workload_parameters": workload},
+    )
+    seen: list[dict[str, object]] = []
+
+    def fake_run_repeated(_factory, *, workload, **_kwargs):
+        seen.append(workload)
+        return {"failed_count": 0, "invalid_count": 0}
+
+    monkeypatch.setattr(benchmark, "run_repeated", fake_run_repeated)
+
+    code, payload = run_cli([
+        "--workload", "single",
+        "--strategy", "trading_platform.strategies.spike.v2:V2",
+        "--start", "2026-07-08T00:00:00+00:00",
+        "--end", "2026-07-09T00:00:00+00:00",
+        "--output-root", str(tmp_path / "output"),
+    ])
+
+    assert code == 0
+    assert payload is not None
+    workload = seen[-1]
+    assert workload["symbol"] == "V2ONLY"
+    assert workload["effective_exit_policy"] == "candidate-v1"
+    assert workload["effective_load_start_ms"] == start_ms - 168 * 3_600_000
+    assert workload["required_timeframes"] == ["1s", "1m", "5m", "15m"]
+    assert workload["effective_settings"] == [{
+        "load_start_ms": start_ms - 168 * 3_600_000,
+        "required_timeframes": ["1s", "1m", "5m", "15m"],
+        "exit_policy": "candidate-v1",
+    }]
+    assert "exit_policy" not in workload
+
+
+def test_prepare_args_required_metrics_checks_canonical_index_only(
+    tmp_path: Path, monkeypatch
+):
+    start_ms = benchmark._iso_to_ms("2026-07-08T00:00:00+00:00")
+    end_ms = benchmark._iso_to_ms("2026-07-09T00:00:00+00:00")
+    frame = _benchmark_archive_frame(
+        symbol="V11ONLY",
+        timeframes=("1s", "1m", "5m", "15m"),
+        first_open_ms=start_ms - 16 * 3_600_000,
+        last_close_ms=end_ms - 1,
+    )
+    metrics_root = tmp_path / "metrics"
+    calls: list[tuple[Path, bool]] = []
+    monkeypatch.setattr(
+        benchmark, "discover_duckdb_path", lambda *_args: tmp_path / "candles.duckdb"
+    )
+    monkeypatch.setattr(
+        benchmark, "discover_archive_index", lambda *_args: tmp_path / "index.parquet"
+    )
+    monkeypatch.setattr(benchmark, "load_archive_index", lambda _path: frame)
+
+    def fake_load_metrics_index(root, *, verify_files=False):
+        calls.append((Path(root), verify_files))
+        return object()
+
+    monkeypatch.setattr(
+        "trading_platform.market.archive.metrics.load_metrics_index",
+        fake_load_metrics_index,
+    )
+    args = benchmark._build_parser().parse_args([
+        "--workload", "single",
+        "--symbol", "V11ONLY",
+        "--strategy", "trading_platform.strategies.spike.v1_1:V11",
+        "--metrics-root", str(metrics_root),
+        "--start", "2026-07-08T00:00:00+00:00",
+        "--end", "2026-07-09T00:00:00+00:00",
+    ])
+
+    prepared = benchmark._prepare_args(args)
+
+    assert prepared.symbol == "V11ONLY"
+    assert calls == [(metrics_root, False)]
+
+
+def test_prepare_args_rejects_blank_symbol_before_auto_selection(monkeypatch):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "single",
+        "--symbol", "   ",
+    ])
+    monkeypatch.setattr(
+        benchmark,
+        "choose_symbol",
+        lambda *_args, **_kwargs: pytest.fail("blank symbol must not auto-select"),
+    )
+
+    with pytest.raises(BenchmarkError, match="must not be blank"):
+        benchmark._prepare_args(args)
 
 
 def test_single_value_sweep_reaches_symbol_runner_task_chain(
