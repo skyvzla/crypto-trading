@@ -260,31 +260,41 @@ def _resume_summary(
 ) -> dict[str, Any] | None:
     """Return a summary only when the complete sweep identity is verifiable."""
     summary_path = run_dir / "summary.json"
+    marker_path = run_dir / ".sweep_identity.json"
     metadata_path = run_dir / "run_meta.json"
     if (
         code_fingerprint is None
         or archive_index_fingerprint is None
         or (config.get("metrics_root") and metrics_fingerprint is None)
         or not summary_path.is_file()
+        or not marker_path.is_file()
         or not metadata_path.is_file()
+        or summary_path.is_symlink()
+        or marker_path.is_symlink()
+        or metadata_path.is_symlink()
     ):
         return None
     try:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(summary, dict) or not isinstance(metadata, dict):
+    if (
+        not isinstance(summary, dict)
+        or not isinstance(marker, dict)
+        or not isinstance(metadata, dict)
+    ):
         return None
-    if metadata.get("run_id") != spec.run_id:
-        return None
-    if metadata.get("sweep_identity") != _run_identity(
+    if marker != _run_identity(
         spec,
         config,
         code_fingerprint=code_fingerprint,
         archive_index_fingerprint=archive_index_fingerprint,
         metrics_fingerprint=metrics_fingerprint,
     ):
+        return None
+    if metadata.get("run_id") != spec.run_id:
         return None
     return summary
 
@@ -390,7 +400,6 @@ def _fresh_run_summary(
         or not isinstance(metadata, dict)
         or marker != identity
         or metadata.get("run_id") != spec.run_id
-        or metadata.get("sweep_identity") != identity
     ):
         return None
     return summary

@@ -48,7 +48,8 @@ def _write_worker_run_meta(output: Path) -> None:
     (output / "run_meta.json").write_text(
         json.dumps({
             "run_id": identity["run_id"],
-            "sweep_identity": identity,
+            "virtual_time_start": 0,
+            "virtual_time_end": 1,
         }),
         encoding="utf-8",
     )
@@ -701,15 +702,18 @@ def test_resume_is_disabled_when_metrics_index_is_unreliable(tmp_path: Path):
         '"pnl":{"net_pnl":0,"total_profit":0,'
         '"total_loss":0,"total_commission":0}}'
     )
+    identity = sweep._run_identity(
+        spec,
+        config,
+        code_fingerprint=sweep._backtest_code_fingerprint(),
+        archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+        metrics_fingerprint=None,
+    )
+    sweep._write_run_identity_marker(run_dir, identity)
     (run_dir / "run_meta.json").write_text(json.dumps({
         "run_id": spec.run_id,
-        "sweep_identity": sweep._run_identity(
-            spec,
-            config,
-            code_fingerprint=sweep._backtest_code_fingerprint(),
-            archive_index_fingerprint=sweep._archive_index_fingerprint(config),
-            metrics_fingerprint=None,
-        ),
+        "virtual_time_start": 0,
+        "virtual_time_end": 1,
     }))
 
     assert sweep._resume_summary(
@@ -776,6 +780,100 @@ def test_run_symbol_rejects_summary_only_worker_output(
     assert rows[0]["status"] == "failed"
     assert "summary.json missing" in rows[0]["error"]
     assert not (run_dir / "run_meta.json").exists()
+
+
+def test_run_symbol_accepts_real_worker_run_meta_without_sweep_identity(
+    tmp_path: Path, monkeypatch
+):
+    index_path = tmp_path / "archive_index.parquet"
+    index_path.write_bytes(b"archive")
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code")
+    spec = sweep.RunSpec("run-worker-meta", "AKEUSDT", {"total_notional": 1000})
+
+    class RealWorkerProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            self.stdout = StringIO("")
+            self.stderr = StringIO("")
+            task = json.loads(Path(command[-1]).read_text())
+            for run in task["runs"]:
+                arguments = run["arguments"]
+                output = Path(arguments[arguments.index("--output") + 1])
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "summary.json").write_text(
+                    '{"positions":{"total":0,"profitable":0},'
+                    '"pnl":{"net_pnl":0,"total_profit":0,'
+                    '"total_loss":0,"total_commission":0}}'
+                )
+                _write_worker_run_meta(output)
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(sweep.subprocess, "Popen", RealWorkerProcess)
+
+    rows, _ = _run_symbol(
+        [spec],
+        {
+            "start": "2026-07-01",
+            "end": "2026-08-01",
+            "duckdb_path": "history.duckdb",
+            "archive_index_path": str(index_path),
+            "execution": {"resume": True},
+        },
+        tmp_path,
+    )
+
+    assert rows[0]["status"] == "ok"
+    metadata = json.loads(
+        (tmp_path / "runs" / spec.run_id / "run_meta.json").read_text()
+    )
+    assert metadata["run_id"] == spec.run_id
+    assert "sweep_identity" not in metadata
+
+
+def test_resume_rejects_mismatched_attempt_identity_marker(
+    tmp_path: Path, monkeypatch
+):
+    index_path = tmp_path / "archive_index.parquet"
+    index_path.write_bytes(b"archive")
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code")
+    spec = sweep.RunSpec("run-marker-mismatch", "AKEUSDT", {"total_notional": 1000})
+    config = {
+        "start": "2026-07-01",
+        "end": "2026-08-01",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(index_path),
+    }
+    run_dir = tmp_path / "runs" / spec.run_id
+    run_dir.mkdir(parents=True)
+    identity = sweep._run_identity(
+        spec,
+        config,
+        code_fingerprint="code",
+        archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+    )
+    sweep._write_run_identity_marker(
+        run_dir,
+        {**identity, "end": "2026-08-02"},
+    )
+    (run_dir / "summary.json").write_text(
+        '{"positions":{"total":0,"profitable":0},'
+        '"pnl":{"net_pnl":0,"total_profit":0,'
+        '"total_loss":0,"total_commission":0}}'
+    )
+    (run_dir / "run_meta.json").write_text(
+        json.dumps({"run_id": spec.run_id, "virtual_time_start": 0})
+    )
+
+    assert sweep._resume_summary(
+        spec,
+        config,
+        run_dir,
+        code_fingerprint="code",
+        archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+    ) is None
 
 
 @pytest.mark.parametrize("unsafe_target", ["run_id", "runs", "run_dir"])
@@ -1116,14 +1214,17 @@ def test_run_symbol_marks_fully_resumed_specs_complete_in_dashboard(tmp_path: Pa
             '"pnl":{"net_pnl":0,"total_profit":0,'
             '"total_loss":0,"total_commission":0}}'
         )
+        identity = sweep._run_identity(
+            spec,
+            config,
+            code_fingerprint=sweep._backtest_code_fingerprint(),
+            archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+        )
+        sweep._write_run_identity_marker(run_dir, identity)
         (run_dir / "run_meta.json").write_text(json.dumps({
             "run_id": spec.run_id,
-            "sweep_identity": sweep._run_identity(
-                spec,
-                config,
-                code_fingerprint=sweep._backtest_code_fingerprint(),
-                archive_index_fingerprint=sweep._archive_index_fingerprint(config),
-            ),
+            "virtual_time_start": 0,
+            "virtual_time_end": 1,
         }))
     dashboard = RecordingDashboard()
 
@@ -1199,14 +1300,17 @@ def test_run_symbol_counts_resumed_and_new_specs_in_dashboard(
         '"pnl":{"net_pnl":0,"total_profit":0,'
         '"total_loss":0,"total_commission":0}}'
     )
+    identity = sweep._run_identity(
+        resumed,
+        config,
+        code_fingerprint=sweep._backtest_code_fingerprint(),
+        archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+    )
+    sweep._write_run_identity_marker(resumed_dir, identity)
     (resumed_dir / "run_meta.json").write_text(json.dumps({
         "run_id": resumed.run_id,
-        "sweep_identity": sweep._run_identity(
-            resumed,
-            config,
-            code_fingerprint=sweep._backtest_code_fingerprint(),
-            archive_index_fingerprint=sweep._archive_index_fingerprint(config),
-        ),
+        "virtual_time_start": 0,
+        "virtual_time_end": 1,
     }))
     dashboard = RecordingDashboard()
 
