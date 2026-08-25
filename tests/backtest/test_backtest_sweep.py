@@ -41,6 +41,19 @@ from trading_platform.backtest.process_lock import (
 from trading_platform.market.archive.index import build_archive_index
 
 
+def _write_worker_run_meta(output: Path) -> None:
+    identity = json.loads(
+        (output / ".sweep_identity.json").read_text(encoding="utf-8")
+    )
+    (output / "run_meta.json").write_text(
+        json.dumps({
+            "run_id": identity["run_id"],
+            "sweep_identity": identity,
+        }),
+        encoding="utf-8",
+    )
+
+
 def test_configure_duckdb_connection_limits_threads():
     connection = duckdb.connect(":memory:")
     try:
@@ -624,6 +637,251 @@ def test_expand_specs_is_deterministic_and_period_sensitive():
     )
 
 
+def test_expand_specs_run_id_tracks_code_and_archive_content(monkeypatch, tmp_path):
+    index_path = tmp_path / "archive_index.parquet"
+    index_path.write_bytes(b"archive-v1")
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code-v1")
+    config = {
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-08-01T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(index_path),
+        "fixed": {"total_notional": 1000},
+    }
+
+    first = expand_specs(config, ["AKEUSDT"])
+    index_path.touch()
+    same_content = expand_specs(config, ["AKEUSDT"])
+
+    assert first == same_content
+
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code-v2")
+    assert first[0].run_id != expand_specs(config, ["AKEUSDT"])[0].run_id
+
+    index_path.write_bytes(b"archive-v2")
+    assert first[0].run_id != expand_specs(config, ["AKEUSDT"])[0].run_id
+
+
+def test_backtest_code_fingerprint_tracks_shared_source_content(
+    monkeypatch, tmp_path
+):
+    source_root = tmp_path / "src" / "trading_platform"
+    fake_sweep = source_root / "backtest" / "sweep.py"
+    shared_source = source_root / "shared" / "events.py"
+    fake_sweep.parent.mkdir(parents=True)
+    shared_source.parent.mkdir(parents=True)
+    fake_sweep.write_text("# sweep\n", encoding="utf-8")
+    shared_source.write_text("EVENT_VERSION = 1\n", encoding="utf-8")
+    monkeypatch.setattr(sweep, "__file__", str(fake_sweep))
+
+    first = sweep._backtest_code_fingerprint()
+    shared_source.write_text("EVENT_VERSION = 2\n", encoding="utf-8")
+
+    assert first is not None
+    assert first != sweep._backtest_code_fingerprint()
+
+
+def test_resume_is_disabled_when_metrics_index_is_unreliable(tmp_path: Path):
+    archive_index_path = tmp_path / "archive_index.parquet"
+    archive_index_path.write_bytes(b"archive")
+    metrics_root = tmp_path / "metrics"
+    metrics_root.mkdir()
+    spec = sweep.RunSpec("run-metrics", "AKEUSDT", {"total_notional": 1000})
+    config = {
+        "start": "2026-07-01",
+        "end": "2026-08-01",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(archive_index_path),
+        "metrics_root": str(metrics_root),
+    }
+    run_dir = tmp_path / "runs" / spec.run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        '{"positions":{"total":0,"profitable":0},'
+        '"pnl":{"net_pnl":0,"total_profit":0,'
+        '"total_loss":0,"total_commission":0}}'
+    )
+    (run_dir / "run_meta.json").write_text(json.dumps({
+        "run_id": spec.run_id,
+        "sweep_identity": sweep._run_identity(
+            spec,
+            config,
+            code_fingerprint=sweep._backtest_code_fingerprint(),
+            archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+            metrics_fingerprint=None,
+        ),
+    }))
+
+    assert sweep._resume_summary(
+        spec,
+        config,
+        run_dir,
+        code_fingerprint=sweep._backtest_code_fingerprint(),
+        archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+        metrics_fingerprint=sweep._metrics_input_fingerprint(config),
+    ) is None
+
+
+def test_run_symbol_rejects_summary_only_worker_output(
+    tmp_path: Path, monkeypatch
+):
+    index_path = tmp_path / "archive_index.parquet"
+    index_path.write_bytes(b"archive")
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code")
+    spec = sweep.RunSpec("run-resume", "AKEUSDT", {"total_notional": 1000})
+    run_dir = tmp_path / "runs" / spec.run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "summary.json").write_text(
+        '{"positions":{"total":0,"profitable":0},'
+        '"pnl":{"net_pnl":0,"total_profit":0,'
+        '"total_loss":0,"total_commission":0}}'
+    )
+    process_commands = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            process_commands.append(command)
+            self.stdout = StringIO("")
+            self.stderr = StringIO("")
+            task = json.loads(Path(command[-1]).read_text())
+            for run in task["runs"]:
+                arguments = run["arguments"]
+                output = Path(arguments[arguments.index("--output") + 1])
+                (output / "summary.json").write_text(
+                    '{"positions":{"total":0,"profitable":0},'
+                    '"pnl":{"net_pnl":0,"total_profit":0,'
+                    '"total_loss":0,"total_commission":0}}'
+                )
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(sweep.subprocess, "Popen", FakeProcess)
+
+    rows, _ = _run_symbol(
+        [spec],
+        {
+            "start": "2026-07-01",
+            "end": "2026-08-01",
+            "duckdb_path": "history.duckdb",
+            "archive_index_path": str(index_path),
+            "execution": {"resume": True},
+        },
+        tmp_path,
+    )
+
+    assert process_commands
+    assert rows[0]["status"] == "failed"
+    assert "summary.json missing" in rows[0]["error"]
+    assert not (run_dir / "run_meta.json").exists()
+
+
+@pytest.mark.parametrize("unsafe_target", ["run_id", "runs", "run_dir"])
+def test_reset_run_dir_rejects_unsafe_paths_and_preserves_files(
+    tmp_path: Path, unsafe_target: str
+):
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    parent_file = output_root / "parent.keep"
+    parent_file.write_text("parent", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    external_file = outside / "external.keep"
+    external_file.write_text("external", encoding="utf-8")
+    runs_dir = output_root / "runs"
+
+    if unsafe_target == "run_id":
+        runs_dir.mkdir()
+        run_id = ".."
+        run_dir = runs_dir / run_id
+    elif unsafe_target == "runs":
+        runs_dir.symlink_to(outside, target_is_directory=True)
+        run_id = "run-safe"
+        run_dir = runs_dir / run_id
+    else:
+        runs_dir.mkdir()
+        linked_run = outside / "linked-run"
+        linked_run.mkdir()
+        run_id = "run-safe"
+        run_dir = runs_dir / run_id
+        run_dir.symlink_to(linked_run, target_is_directory=True)
+
+    with pytest.raises(ValueError):
+        sweep._reset_run_dir(
+            run_dir,
+            output_root=output_root,
+            run_id=run_id,
+        )
+
+    assert parent_file.read_text(encoding="utf-8") == "parent"
+    assert external_file.read_text(encoding="utf-8") == "external"
+
+
+def test_run_symbol_partial_success_ignores_leftover_outputs(
+    tmp_path: Path, monkeypatch
+):
+    process_commands = []
+
+    class PartiallyFailedProcess:
+        returncode = 7
+
+        def __init__(self, command, **kwargs):
+            process_commands.append(command)
+            self.stdout = StringIO("")
+            self.stderr = StringIO("worker failed")
+            task = json.loads(Path(command[-1]).read_text())
+            for run in task["runs"][:1]:
+                arguments = run["arguments"]
+                output = Path(arguments[arguments.index("--output") + 1])
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "summary.json").write_text(
+                    '{"positions":{"total":1,"profitable":1},'
+                    '"pnl":{"net_pnl":99,"total_profit":99,'
+                    '"total_loss":0,"total_commission":0}}'
+                )
+                _write_worker_run_meta(output)
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(sweep.subprocess, "Popen", PartiallyFailedProcess)
+    specs = [
+        sweep.RunSpec(f"run-{name}", "AKEUSDT", {"total_notional": 1000})
+        for name in ("ok", "failed")
+    ]
+    stale_dir = tmp_path / "runs" / specs[1].run_id
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "trades.csv").write_text("stale\n")
+    (stale_dir / "audit_events.parquet").write_bytes(b"stale")
+    (stale_dir / "summary.json").write_text(
+        '{"positions":{"total":1,"profitable":1},'
+        '"pnl":{"net_pnl":999,"total_profit":999,'
+        '"total_loss":0,"total_commission":0}}'
+    )
+
+    rows, _ = _run_symbol(
+        specs,
+        {
+            "start": "2026-07-01",
+            "end": "2026-08-01",
+            "duckdb_path": "history.duckdb",
+            "execution": {"resume": False},
+        },
+        tmp_path,
+    )
+
+    assert process_commands
+    by_id = {row["run_id"]: row for row in rows}
+    assert by_id[specs[0].run_id]["status"] == "ok"
+    assert by_id[specs[1].run_id]["status"] == "failed"
+    assert by_id[specs[1].run_id]["returncode"] == 7
+    assert not (stale_dir / "summary.json").exists()
+    assert not (stale_dir / "trades.csv").exists()
+    assert not (stale_dir / "audit_events.parquet").exists()
+
+
 def test_run_arguments_use_symbol_effective_start(tmp_path: Path):
     spec = sweep.RunSpec("run-new", "NEWUSDT", {"total_notional": 1000})
     config = {
@@ -788,6 +1046,7 @@ def test_symbol_task_uses_one_subprocess_for_multiple_parameters(
                     '"pnl":{"net_pnl":0,"total_profit":0,'
                     '"total_loss":0,"total_commission":0}}'
                 )
+                _write_worker_run_meta(output)
 
         def wait(self):
             return self.returncode
@@ -840,6 +1099,15 @@ def test_run_symbol_marks_fully_resumed_specs_complete_in_dashboard(tmp_path: Pa
         })
         for lookback in (4, 8)
     ]
+    archive_index_path = tmp_path / "archive_index.parquet"
+    archive_index_path.write_bytes(b"archive")
+    config = {
+        "start": "2026-07-01",
+        "end": "2026-08-01",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(archive_index_path),
+        "execution": {"resume": True},
+    }
     for spec in specs:
         run_dir = tmp_path / "runs" / spec.run_id
         run_dir.mkdir(parents=True)
@@ -848,11 +1116,20 @@ def test_run_symbol_marks_fully_resumed_specs_complete_in_dashboard(tmp_path: Pa
             '"pnl":{"net_pnl":0,"total_profit":0,'
             '"total_loss":0,"total_commission":0}}'
         )
+        (run_dir / "run_meta.json").write_text(json.dumps({
+            "run_id": spec.run_id,
+            "sweep_identity": sweep._run_identity(
+                spec,
+                config,
+                code_fingerprint=sweep._backtest_code_fingerprint(),
+                archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+            ),
+        }))
     dashboard = RecordingDashboard()
 
     rows, _ = _run_symbol(
         specs,
-        {"execution": {"resume": True}},
+        config,
         tmp_path,
         dashboard=dashboard,
     )
@@ -892,6 +1169,7 @@ def test_run_symbol_counts_resumed_and_new_specs_in_dashboard(
                     '"pnl":{"net_pnl":0,"total_profit":0,'
                     '"total_loss":0,"total_commission":0}}'
                 )
+                _write_worker_run_meta(output)
 
         def wait(self):
             return self.returncode
@@ -905,6 +1183,15 @@ def test_run_symbol_counts_resumed_and_new_specs_in_dashboard(
         "total_notional": 1000,
         "prior_high_lookback_hours": 8,
     })
+    archive_index_path = tmp_path / "archive_index.parquet"
+    archive_index_path.write_bytes(b"archive")
+    config = {
+        "start": "2026-07-01",
+        "end": "2026-08-01",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(archive_index_path),
+        "execution": {"resume": True},
+    }
     resumed_dir = tmp_path / "runs" / resumed.run_id
     resumed_dir.mkdir(parents=True)
     (resumed_dir / "summary.json").write_text(
@@ -912,16 +1199,20 @@ def test_run_symbol_counts_resumed_and_new_specs_in_dashboard(
         '"pnl":{"net_pnl":0,"total_profit":0,'
         '"total_loss":0,"total_commission":0}}'
     )
+    (resumed_dir / "run_meta.json").write_text(json.dumps({
+        "run_id": resumed.run_id,
+        "sweep_identity": sweep._run_identity(
+            resumed,
+            config,
+            code_fingerprint=sweep._backtest_code_fingerprint(),
+            archive_index_fingerprint=sweep._archive_index_fingerprint(config),
+        ),
+    }))
     dashboard = RecordingDashboard()
 
     rows, _ = _run_symbol(
         [resumed, new],
-        {
-            "start": "2026-07-01",
-            "end": "2026-08-01",
-            "duckdb_path": "history.duckdb",
-            "execution": {"resume": True},
-        },
+        config,
         tmp_path,
         dashboard=dashboard,
     )
@@ -931,8 +1222,8 @@ def test_run_symbol_counts_resumed_and_new_specs_in_dashboard(
     assert dashboard.done == [("AKEUSDT", "OK", 1)]
 
 
-def test_run_symbol_marks_started_task_failed_when_resume_metadata_is_invalid(
-    tmp_path: Path,
+def test_run_symbol_reruns_when_resume_metadata_is_invalid(
+    tmp_path: Path, monkeypatch
 ):
     class RecordingDashboard:
         def __init__(self):
@@ -942,8 +1233,8 @@ def test_run_symbol_marks_started_task_failed_when_resume_metadata_is_invalid(
         def task_start(self, name):
             self.started.append(name)
 
-        def task_failed(self, name, *, increment):
-            self.failed.append((name, increment))
+        def task_done(self, name, status, *, count_as_sample, increment):
+            self.done = (name, status, increment)
 
     specs = [
         sweep.RunSpec(f"run-{lookback}", "AKEUSDT", {
@@ -952,21 +1243,52 @@ def test_run_symbol_marks_started_task_failed_when_resume_metadata_is_invalid(
         })
         for lookback in (4, 8)
     ]
+    archive_index_path = tmp_path / "archive_index.parquet"
+    archive_index_path.write_bytes(b"archive")
     run_dir = tmp_path / "runs" / specs[0].run_id
     run_dir.mkdir(parents=True)
     (run_dir / "summary.json").write_text("not json")
     dashboard = RecordingDashboard()
 
-    with pytest.raises(json.JSONDecodeError):
-        _run_symbol(
-            specs,
-            {"execution": {"resume": True}},
-            tmp_path,
-            dashboard=dashboard,
-        )
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            self.stdout = StringIO("")
+            self.stderr = StringIO("")
+            task = json.loads(Path(command[-1]).read_text())
+            for run in task["runs"]:
+                arguments = run["arguments"]
+                output = Path(arguments[arguments.index("--output") + 1])
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "summary.json").write_text(
+                    '{"positions":{"total":0,"profitable":0},'
+                    '"pnl":{"net_pnl":0,"total_profit":0,'
+                    '"total_loss":0,"total_commission":0}}'
+                )
+                _write_worker_run_meta(output)
+
+        def wait(self):
+            return self.returncode
+
+    monkeypatch.setattr(sweep.subprocess, "Popen", FakeProcess)
+
+    rows, _ = _run_symbol(
+        specs,
+        {
+            "start": "2026-07-01",
+            "end": "2026-08-01",
+            "duckdb_path": "history.duckdb",
+            "archive_index_path": str(archive_index_path),
+            "execution": {"resume": True},
+        },
+        tmp_path,
+        dashboard=dashboard,
+    )
 
     assert dashboard.started == ["AKEUSDT"]
-    assert dashboard.failed == [("AKEUSDT", 1)]
+    assert [row["status"] for row in rows] == ["ok", "ok"]
+    assert dashboard.done == ("AKEUSDT", "OK", 1)
 
 
 def test_child_process_registry_terminates_running_subprocess():
@@ -1044,6 +1366,179 @@ def test_collision_summary_uses_lowest_trade_as_conservative_result():
     assert collisions.iloc[0]["independent_pnl"] == -4.0
     assert collisions.iloc[0]["conservative_pnl"] == -12.0
     assert summary.iloc[0]["conservative_net_pnl"] == -12.0
+
+
+def test_parameter_summary_win_rate_uses_closed_trades_and_names_open_counts():
+    spec = sweep.RunSpec("run-open", "AKEUSDT", {"total_notional": 1000})
+    comparison = pd.DataFrame([
+        sweep._summary_row(spec, {
+            "positions": {
+                "total": 2,
+                "closed": 1,
+                "open": 1,
+                "profitable": 1,
+                "win_rate": 1.0,
+            },
+            "pnl": {
+                "net_pnl": 5.0,
+                "total_profit": 5.0,
+                "total_loss": 0.0,
+                "total_commission": 0.0,
+            },
+        }, "ok")
+    ])
+
+    summary = _parameter_summary(comparison, pd.DataFrame())
+
+    assert comparison.iloc[0]["total_trades"] == 2
+    assert comparison.iloc[0]["closed_trades"] == 1
+    assert comparison.iloc[0]["open_trades"] == 1
+    assert comparison.iloc[0]["win_rate"] == 1.0
+    assert summary.iloc[0]["total_trades"] == 2
+    assert summary.iloc[0]["closed_trades"] == 1
+    assert summary.iloc[0]["open_trades"] == 1
+    assert summary.iloc[0]["win_rate"] == 1.0
+
+
+def test_parameter_summary_win_rate_is_zero_when_no_positions_closed():
+    spec = sweep.RunSpec("run-open-only", "AKEUSDT", {"total_notional": 1000})
+    comparison = pd.DataFrame([
+        sweep._summary_row(spec, {
+            "positions": {"total": 2, "closed": 0, "open": 2, "profitable": 0},
+            "pnl": {},
+        }, "ok")
+    ])
+
+    summary = _parameter_summary(comparison, pd.DataFrame())
+
+    assert summary.iloc[0]["total_trades"] == 2
+    assert summary.iloc[0]["closed_trades"] == 0
+    assert summary.iloc[0]["open_trades"] == 2
+    assert summary.iloc[0]["win_rate"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("stop_5m_high", "expected_flag"),
+    [(False, "--no-stop-5m-high"), (True, None)],
+)
+def test_run_arguments_maps_stop_5m_high_to_opt_out_flag(
+    tmp_path: Path, stop_5m_high, expected_flag
+):
+    spec = sweep.RunSpec(
+        "run-stop-5m-high", "AKEUSDT",
+        {"total_notional": 1000, "stop_5m_high": stop_5m_high},
+    )
+
+    arguments = sweep._run_arguments(spec, {
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-07-02T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+    }, tmp_path)
+
+    assert (expected_flag in arguments) is (expected_flag is not None)
+    if expected_flag is None:
+        assert "--no-stop-5m-high" not in arguments
+
+
+def test_expand_specs_accepts_stop_5m_high_matrix_values(tmp_path: Path):
+    specs = sweep.expand_specs({
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-07-02T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "fixed": {"total_notional": 1000},
+        "matrix": {"stop_5m_high": [False, True]},
+    }, ["AKEUSDT"])
+
+    arguments = {
+        spec.params["stop_5m_high"]: sweep._run_arguments(spec, {
+            "start": "2026-07-01T00:00:00+00:00",
+            "end": "2026-07-02T00:00:00+00:00",
+            "duckdb_path": "history.duckdb",
+        }, tmp_path)
+        for spec in specs
+    }
+
+    assert set(arguments) == {False, True}
+    assert "--no-stop-5m-high" in arguments[False]
+    assert "--no-stop-5m-high" not in arguments[True]
+
+
+def test_sweep_does_not_abort_on_high_memory_estimate(
+    tmp_path: Path, monkeypatch
+):
+    class RecordingDashboard:
+        def __init__(self, **kwargs):
+            self.closed = []
+
+        def start(self, **kwargs):
+            pass
+
+        def close(self, **kwargs):
+            self.closed.append(kwargs)
+
+        def error(self, message):
+            pass
+
+    class FakeFuture:
+        def __init__(self, result):
+            self._result = result
+
+        def result(self):
+            return self._result
+
+        def cancel(self):
+            pass
+
+    class FakePool:
+        def __init__(self, **kwargs):
+            pass
+
+        def submit(self, function, *args):
+            return FakeFuture(function(*args))
+
+        def shutdown(self, **kwargs):
+            pass
+
+    config_path = tmp_path / "sweep.toml"
+    config_path.write_text("name = 'test'", encoding="utf-8")
+    spec = sweep.RunSpec("run-memory", "AKEUSDT", {"total_notional": 1000})
+    config = {
+        "name": "test",
+        "output": str(tmp_path / "output"),
+        "duckdb_path": "history.duckdb",
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-07-02T00:00:00+00:00",
+        "execution": {"duckdb_threads": 1, "worker_memory_budget": "2GB"},
+    }
+    seen_config = {}
+    monkeypatch.setattr(sweep.tomllib, "loads", lambda _: config)
+    monkeypatch.setattr(
+        sweep, "resolve_universe", lambda _: (["AKEUSDT"], [{
+            "symbol": "AKEUSDT", "selected": True,
+            "effective_start": config["start"],
+        }])
+    )
+    monkeypatch.setattr(sweep, "expand_specs", lambda *_: [spec])
+    monkeypatch.setattr(sweep, "archive_root_from_catalog", lambda _: tmp_path)
+    monkeypatch.setattr(
+        sweep, "_symbol_worker_resources", lambda *args: (1, "2GB", "1024MB")
+    )
+    monkeypatch.setattr(
+        sweep, "_estimate_monthly_memory",
+        lambda *args, **kwargs: pd.DataFrame({"estimated_stream_peak_gb": [3.0]}),
+    )
+
+    def fake_run_symbol(specs, run_config, *_args):
+        seen_config.update(run_config)
+        return ([sweep._summary_row(specs[0], {"positions": {}, "pnl": {}}, "ok")], 0.0)
+
+    monkeypatch.setattr(sweep, "_run_symbol", fake_run_symbol)
+    monkeypatch.setattr(sweep, "TaskDashboard", RecordingDashboard)
+    monkeypatch.setattr(sweep, "ThreadPoolExecutor", FakePool)
+    monkeypatch.setattr(sweep, "as_completed", lambda futures: list(futures))
+
+    assert sweep._main(["--config", str(config_path)]) == 0
+    assert seen_config["execution"]["duckdb_memory_limit"] == "1024MB"
 
 
 def test_simultaneous_signal_groups_require_multiple_symbols():

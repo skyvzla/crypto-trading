@@ -16,6 +16,7 @@ import multiprocessing
 import os
 import shlex
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -127,6 +128,7 @@ PARAMETER_FLAGS = {
     "take_profit": "--take-profit",
     "max_hold_seconds": "--max-hold-seconds",
     "wait_seconds": "--wait-seconds",
+    "stop_5m_high": "--no-stop-5m-high",
 }
 SUPPORTED_MATRIX_KEYS = set(PARAMETER_FLAGS)
 EXECUTION_FLAGS = {
@@ -148,6 +150,250 @@ class RunSpec:
     run_id: str
     symbol: str
     params: dict[str, Any]
+
+
+def _backtest_code_fingerprint() -> str | None:
+    """Hash the source that can change a sweep's backtest behaviour."""
+    source_root = Path(__file__).resolve().parents[1]
+    files = sorted(
+        path
+        for path in source_root.rglob("*.py")
+        if path.is_file()
+    )
+    if not files:
+        return None
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(source_root).as_posix().encode())
+        digest.update(b"\0")
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            return None
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _archive_index_fingerprint(config: dict[str, Any]) -> str | None:
+    index_path = config.get("archive_index_path")
+    if not index_path:
+        return None
+    try:
+        return hashlib.sha256(Path(index_path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _metrics_input_fingerprint(config: dict[str, Any]) -> str | None:
+    """Hash the published metrics index generation used by a backtest.
+
+    The index and its metadata are the small, published manifest for the
+    metrics archive.  A metrics root without both files is intentionally not
+    resumable: hashing a directory path or its mtime cannot prove that the
+    input data is unchanged.
+    """
+    metrics_root = config.get("metrics_root")
+    if not metrics_root:
+        return None
+    root = Path(metrics_root)
+    index_path = root / "metrics_index.parquet"
+    metadata_path = root / "metrics_index.meta.json"
+    if not index_path.is_file() or not metadata_path.is_file():
+        return None
+    try:
+        index_content = index_path.read_bytes()
+        metadata_content = metadata_path.read_bytes()
+        metadata = json.loads(metadata_content.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not index_content or not isinstance(metadata, dict) or not metadata.get(
+        "completed"
+    ):
+        return None
+    digest = hashlib.sha256()
+    for name, content in (
+        ("metrics_index.parquet", index_content),
+        ("metrics_index.meta.json", metadata_content),
+    ):
+        digest.update(name.encode())
+        digest.update(b"\0")
+        digest.update(content)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _canonical_json(value: Any) -> Any:
+    return json.loads(json.dumps(value, sort_keys=True, default=str))
+
+
+def _run_identity(
+    spec: RunSpec,
+    config: dict[str, Any],
+    *,
+    code_fingerprint: str | None,
+    archive_index_fingerprint: str | None,
+    metrics_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "run_id": spec.run_id,
+        "symbol": spec.symbol,
+        "params": _canonical_json(spec.params),
+        "start": config.get("symbol_start_times", {}).get(
+            spec.symbol, config.get("start")
+        ),
+        "end": config.get("end"),
+        "duckdb_path": config.get("duckdb_path"),
+        "code_fingerprint": code_fingerprint,
+        "archive_index_fingerprint": archive_index_fingerprint,
+        "metrics_fingerprint": metrics_fingerprint,
+    }
+
+
+def _resume_summary(
+    spec: RunSpec,
+    config: dict[str, Any],
+    run_dir: Path,
+    *,
+    code_fingerprint: str | None,
+    archive_index_fingerprint: str | None,
+    metrics_fingerprint: str | None = None,
+) -> dict[str, Any] | None:
+    """Return a summary only when the complete sweep identity is verifiable."""
+    summary_path = run_dir / "summary.json"
+    metadata_path = run_dir / "run_meta.json"
+    if (
+        code_fingerprint is None
+        or archive_index_fingerprint is None
+        or (config.get("metrics_root") and metrics_fingerprint is None)
+        or not summary_path.is_file()
+        or not metadata_path.is_file()
+    ):
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(summary, dict) or not isinstance(metadata, dict):
+        return None
+    if metadata.get("run_id") != spec.run_id:
+        return None
+    if metadata.get("sweep_identity") != _run_identity(
+        spec,
+        config,
+        code_fingerprint=code_fingerprint,
+        archive_index_fingerprint=archive_index_fingerprint,
+        metrics_fingerprint=metrics_fingerprint,
+    ):
+        return None
+    return summary
+
+
+def _validate_run_dir(
+    output_root: Path,
+    run_id: str,
+    *,
+    create_runs: bool,
+) -> Path:
+    """Return a real, direct ``output_root/runs/<run_id>`` path."""
+    if (
+        not isinstance(run_id, str)
+        or not run_id
+        or run_id in {".", ".."}
+        or Path(run_id).name != run_id
+        or "/" in run_id
+        or "\\" in run_id
+    ):
+        raise ValueError("run directory must be a direct safe child of output_root/runs")
+
+    output_root = Path(os.path.abspath(os.fspath(output_root)))
+    for path in (*reversed(output_root.parents), output_root):
+        if path.is_symlink():
+            raise ValueError("output_root contains a symlink")
+    if not output_root.is_dir():
+        raise ValueError("output_root must be a real directory")
+
+    runs_dir = output_root / "runs"
+    if runs_dir.is_symlink():
+        raise ValueError("output_root/runs must be a real directory")
+    if not runs_dir.exists():
+        if not create_runs:
+            raise ValueError("output_root/runs must be a real directory")
+        runs_dir.mkdir()
+    if runs_dir.is_symlink() or not runs_dir.is_dir():
+        raise ValueError("output_root/runs must be a real directory")
+
+    run_dir = runs_dir / run_id
+    if run_dir.is_symlink():
+        raise ValueError("run directory must not be a symlink")
+    if run_dir.exists() and not run_dir.is_dir():
+        raise ValueError("run directory must be a real directory")
+    return run_dir
+
+
+def _reset_run_dir(
+    run_dir: Path,
+    *,
+    output_root: Path | None = None,
+    run_id: str | None = None,
+) -> Path:
+    """Start an active run only after validating its safe directory boundary."""
+    requested_dir = Path(run_dir)
+    if output_root is None:
+        output_root = requested_dir.parent.parent
+    if run_id is None:
+        run_id = requested_dir.name
+    safe_run_dir = _validate_run_dir(output_root, run_id, create_runs=True)
+    if Path(os.path.abspath(os.fspath(requested_dir))) != safe_run_dir:
+        raise ValueError("run directory must be a direct child of output_root/runs")
+    if safe_run_dir.exists():
+        shutil.rmtree(safe_run_dir)
+    safe_run_dir.mkdir()
+    return safe_run_dir
+
+
+def _write_run_identity_marker(run_dir: Path, identity: dict[str, Any]) -> None:
+    """Record the expected identity before the child process starts."""
+    (run_dir / ".sweep_identity.json").write_text(
+        json.dumps(identity, indent=2, ensure_ascii=False, default=str) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _fresh_run_summary(
+    spec: RunSpec,
+    run_dir: Path,
+    identity: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Load only a result produced for this active run attempt."""
+    summary_path = run_dir / "summary.json"
+    marker_path = run_dir / ".sweep_identity.json"
+    metadata_path = run_dir / "run_meta.json"
+    if (
+        not summary_path.is_file()
+        or not marker_path.is_file()
+        or not metadata_path.is_file()
+        or summary_path.is_symlink()
+        or marker_path.is_symlink()
+        or metadata_path.is_symlink()
+    ):
+        return None
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(summary, dict)
+        or not isinstance(marker, dict)
+        or not isinstance(metadata, dict)
+        or marker != identity
+        or metadata.get("run_id") != spec.run_id
+        or metadata.get("sweep_identity") != identity
+    ):
+        return None
+    return summary
 
 
 class ChildProcessRegistry:
@@ -690,6 +936,9 @@ def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
         if not expanded:
             raise ValueError(f"matrix parameter {key} must not be empty")
         values.append(expanded)
+    code_fingerprint = _backtest_code_fingerprint()
+    archive_index_fingerprint = _archive_index_fingerprint(config)
+    metrics_fingerprint = _metrics_input_fingerprint(config)
     specs = []
     for symbol, combination in itertools.product(symbols, itertools.product(*values) if values else [()]):
         params = {**fixed, **dict(zip(keys, combination))}
@@ -701,6 +950,9 @@ def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
             ),
             "end": config.get("end"),
             "duckdb_path": config.get("duckdb_path"),
+            "code_fingerprint": code_fingerprint,
+            "archive_index_fingerprint": archive_index_fingerprint,
+            "metrics_fingerprint": metrics_fingerprint,
         }, sort_keys=True, default=str)
         digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
         specs.append(RunSpec(f"{digest}_{symbol}", symbol, params))
@@ -732,6 +984,11 @@ def _run_arguments(
     for key, flag in {**PARAMETER_FLAGS, **EXECUTION_FLAGS}.items():
         if key not in params or params[key] is None:
             continue
+        if key == "stop_5m_high":
+            # CLI exposes the opt-out flag, so the config's False means pass it.
+            if params[key] is False:
+                arguments.append(flag)
+            continue
         if isinstance(params[key], bool):
             # 布尔开关：仅 True 时传 flag（如 --reject-below-current）
             if params[key]:
@@ -751,7 +1008,8 @@ def _failed_summary_row(
         "run_id": spec.run_id, "symbol": spec.symbol, "status": "failed",
         "returncode": returncode,
         "parameters": json.dumps(spec.params, sort_keys=True, default=str),
-        "trades": 0, "wins": 0, "win_rate": 0.0, "net_pnl": 0.0,
+        "trades": 0, "total_trades": 0, "closed_trades": 0, "open_trades": 0,
+        "wins": 0, "win_rate": 0.0, "net_pnl": 0.0,
         "total_profit": 0.0, "total_loss": 0.0, "commission": 0.0,
         "max_drawdown": 0.0, "profit_factor": 0.0,
     }
@@ -802,15 +1060,44 @@ def _run_symbol(
         dashboard.task_start(symbol)
     try:
         resume = config.get("execution", {}).get("resume", True)
+        code_fingerprint = _backtest_code_fingerprint()
+        archive_index_fingerprint = _archive_index_fingerprint(config)
+        metrics_fingerprint = _metrics_input_fingerprint(config)
         for spec in specs:
-            run_dir = output_root / "runs" / spec.run_id
-            summary_path = run_dir / "summary.json"
-            if resume and summary_path.exists():
+            run_dir = _validate_run_dir(
+                output_root,
+                spec.run_id,
+                create_runs=True,
+            )
+            identity = _run_identity(
+                spec,
+                config,
+                code_fingerprint=code_fingerprint,
+                archive_index_fingerprint=archive_index_fingerprint,
+                metrics_fingerprint=metrics_fingerprint,
+            )
+            if resume:
+                summary = _resume_summary(
+                    spec,
+                    config,
+                    run_dir,
+                    code_fingerprint=code_fingerprint,
+                    archive_index_fingerprint=archive_index_fingerprint,
+                    metrics_fingerprint=metrics_fingerprint,
+                )
+            else:
+                summary = None
+            if summary is not None:
                 rows.append(_summary_row(
-                    spec, json.loads(summary_path.read_text()), "resumed"
+                    spec, summary, "resumed"
                 ))
                 continue
-            run_dir.mkdir(parents=True, exist_ok=True)
+            run_dir = _reset_run_dir(
+                run_dir,
+                output_root=output_root,
+                run_id=spec.run_id,
+            )
+            _write_run_identity_marker(run_dir, identity)
             active.append((spec, run_dir, _run_arguments(spec, config, run_dir)))
         if not active:
             if dashboard is not None:
@@ -849,6 +1136,7 @@ def _run_symbol(
             if processes is not None:
                 processes.remove(process)
 
+        returncode = process.returncode
         for spec, run_dir, arguments in active:
             standalone_command = [
                 sys.executable,
@@ -864,17 +1152,22 @@ def _run_symbol(
             )
             (run_dir / "stdout.log").write_text(stdout)
             (run_dir / "stderr.log").write_text(stderr)
-            summary_path = run_dir / "summary.json"
-            if summary_path.exists():
-                rows.append(_summary_row(
-                    spec, json.loads(summary_path.read_text()), "ok"
-                ))
-            else:
+            identity = _run_identity(
+                spec,
+                config,
+                code_fingerprint=code_fingerprint,
+                archive_index_fingerprint=archive_index_fingerprint,
+                metrics_fingerprint=metrics_fingerprint,
+            )
+            summary = _fresh_run_summary(spec, run_dir, identity)
+            if summary is None:
                 rows.append(_failed_summary_row(
                     spec,
-                    returncode=process.returncode,
-                    error=stderr.strip() or None,
+                    returncode=returncode,
+                    error=stderr.strip() or "summary.json missing, invalid, or identity mismatch",
                 ))
+                continue
+            rows.append(_summary_row(spec, summary, "ok"))
         failed_runs = sum(
             row["status"] not in {"ok", "resumed"} for row in rows
         )
@@ -897,11 +1190,19 @@ def _run_symbol(
 def _summary_row(spec: RunSpec, summary: dict[str, Any], status: str) -> dict[str, Any]:
     positions = summary.get("positions", {})
     pnl = summary.get("pnl", {})
+    total_trades = int(positions.get("total", 0) or 0)
+    closed_trades = int(positions.get("closed", total_trades) or 0)
+    open_trades = int(positions.get("open", total_trades - closed_trades) or 0)
+    wins = int(positions.get("profitable", 0) or 0)
     return {
         "run_id": spec.run_id, "symbol": spec.symbol, "status": status,
         "parameters": json.dumps(spec.params, sort_keys=True, default=str),
-        "trades": positions.get("total", 0), "wins": positions.get("profitable", 0),
-        "win_rate": positions.get("win_rate", 0),
+        # Keep trades as the legacy total-count alias; the explicit fields make
+        # the denominator and the open-position count unambiguous.
+        "trades": total_trades, "total_trades": total_trades,
+        "closed_trades": closed_trades, "open_trades": open_trades,
+        "wins": wins,
+        "win_rate": wins / closed_trades if closed_trades > 0 else 0.0,
         "net_pnl": pnl.get("net_pnl", 0), "total_profit": pnl.get("total_profit", 0),
         "total_loss": pnl.get("total_loss", 0),
         "commission": pnl.get("total_commission", 0),
@@ -1419,17 +1720,32 @@ def _parameter_summary(
     successful = comparison[comparison["status"].isin(["ok", "resumed"])].copy()
     if successful.empty:
         return pd.DataFrame()
+    # Older comparison files only have `trades`; treat that as total and keep
+    # their results readable while using closed positions as the win-rate base.
+    if "total_trades" not in successful:
+        successful["total_trades"] = successful["trades"]
+    if "closed_trades" not in successful:
+        successful["closed_trades"] = successful["total_trades"]
+    if "open_trades" not in successful:
+        successful["open_trades"] = (
+            successful["total_trades"] - successful["closed_trades"]
+        )
     summary = successful.groupby("parameters", dropna=False).agg(
         runs=("run_id", "size"),
         symbols=("symbol", "nunique"),
-        trades=("trades", "sum"),
+        total_trades=("total_trades", "sum"),
+        closed_trades=("closed_trades", "sum"),
+        open_trades=("open_trades", "sum"),
         wins=("wins", "sum"),
         net_pnl=("net_pnl", "sum"),
         total_profit=("total_profit", "sum"),
         total_loss=("total_loss", "sum"),
         commission=("commission", "sum"),
     ).reset_index()
-    summary["win_rate"] = summary["wins"] / summary["trades"].replace(0, math.nan)
+    summary["trades"] = summary["total_trades"]
+    summary["win_rate"] = (
+        summary["wins"] / summary["closed_trades"].replace(0, math.nan)
+    ).fillna(0.0)
     summary["profit_factor"] = summary["total_profit"] / summary["total_loss"].replace(0, math.nan)
     summary["collision_groups"] = 0
     summary["collision_trades"] = 0
@@ -1492,7 +1808,8 @@ def _write_report(
     ]
     if not summary.empty:
         display_columns = [
-            "parameters", "symbols", "trades", "win_rate", "net_pnl",
+            "parameters", "symbols", "total_trades", "closed_trades",
+            "open_trades", "win_rate", "net_pnl",
             "collision_groups", "conservative_net_pnl",
         ]
         lines.extend(["## 参数汇总", "", "| " + " | ".join(display_columns) + " |"])
@@ -1597,21 +1914,6 @@ def _main(argv: list[str] | None = None) -> int:
         fetch_batch_size=int(execution.get("fetch_batch_size", 10_000)),
     )
     memory_estimate.to_csv(output_root / "memory_estimate.csv", index=False)
-    memory_limit_bytes = (
-        _memory_bytes(worker_memory_budget)
-        if worker_memory_budget is not None
-        else None
-    )
-    if (
-        memory_limit_bytes is not None
-        and not memory_estimate.empty
-        and memory_estimate["estimated_stream_peak_gb"].max() * 1024**3
-        > memory_limit_bytes
-    ):
-        raise RuntimeError(
-            "estimated stream peak exceeds execution.worker_memory_budget; "
-            "reduce chunk_hours or raise the worker budget"
-        )
     rows = []
     processes = ChildProcessRegistry()
     pool = ThreadPoolExecutor(max_workers=workers)
@@ -1697,8 +1999,16 @@ def _main(argv: list[str] | None = None) -> int:
         )
         comparison.to_csv(output_root / "comparison.csv", index=False)
         print("回测任务已结束，正在合并逐笔交易和信号...", flush=True)
+        successful_run_ids = {
+            row["run_id"]
+            for row in rows
+            if row["status"] in {"ok", "resumed"}
+        }
+        successful_specs = [
+            spec for spec in specs if spec.run_id in successful_run_ids
+        ]
         all_trades = []
-        for spec in specs:
+        for spec in successful_specs:
             path = output_root / "runs" / spec.run_id / "trades.csv"
             if path.exists():
                 frame = pd.read_csv(path)
@@ -1736,7 +2046,7 @@ def _main(argv: list[str] | None = None) -> int:
         )
         trades.to_csv(output_root / "all_trades.csv", index=False)
         collisions.to_csv(output_root / "collisions.csv", index=False)
-        signals = _collect_signal_audit_events(output_root, specs)
+        signals = _collect_signal_audit_events(output_root, successful_specs)
         signals.to_csv(output_root / "all_signals.csv", index=False)
         triggered_signals = (
             signals[signals["event_type"] == "signal_triggered"]
