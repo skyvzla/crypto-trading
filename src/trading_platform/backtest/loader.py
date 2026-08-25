@@ -1,6 +1,6 @@
 """从只读 DuckDB 历史归档加载回测事件流。"""
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from decimal import Decimal
 from pathlib import Path
 from typing import Union
@@ -15,6 +15,7 @@ from trading_platform.market.archive.index import (
 )
 from trading_platform.market.archive.metrics import load_metrics_index
 from trading_platform.market.archive.parquet import (
+    CANDLE_BASE_COLUMNS,
     CANDLE_FEATURE_COLUMNS,
     archive_root_from_catalog,
 )
@@ -118,6 +119,7 @@ class BacktestDataLoader:
         required_kline_intervals: list[str] | None = None,
         archive_index_path: str | None = None,
         bar1s_time_shift_ms: int = 0,
+        bar1s_feature_columns: Collection[str] | None = None,
     ):
         if start_ms >= end_ms:
             raise ValueError("start_ms must be earlier than end_ms")
@@ -131,6 +133,22 @@ class BacktestDataLoader:
         self.required_kline_intervals = set(required_kline_intervals or [])
         if "1s" in self.required_kline_intervals:
             raise ValueError("use require_aggtrades for 1s market data")
+        if bar1s_feature_columns is None:
+            self.bar1s_feature_columns = None
+            self._selected_bar1s_feature_columns = CANDLE_FEATURE_COLUMNS
+        else:
+            requested_features = frozenset(bar1s_feature_columns)
+            unknown_features = requested_features.difference(CANDLE_FEATURE_COLUMNS)
+            if unknown_features:
+                names = ", ".join(sorted(unknown_features))
+                raise ValueError(
+                    "unknown projected 1s feature columns: "
+                    f"{names}"
+                )
+            self.bar1s_feature_columns = requested_features
+            self._selected_bar1s_feature_columns = tuple(
+                name for name in CANDLE_FEATURE_COLUMNS if name in requested_features
+            )
         self.duckdb_path = Path(duckdb_path)
         self.archive_index_path = (
             Path(archive_index_path) if archive_index_path else None
@@ -274,6 +292,39 @@ class BacktestDataLoader:
                 "relative_path"
             )
             verify_archive_index_files(selected, self.archive_index_path.parent)
+            connection = self._require_duckdb_connection()
+            for row in selected.itertuples(index=False):
+                relative_path = str(row.relative_path)
+                physical_path = str(
+                    self.archive_index_path.parent / relative_path
+                )
+                physical_columns = {
+                    str(column[0])
+                    for column in connection.execute(
+                        "DESCRIBE SELECT * FROM read_parquet(?)",
+                        [[physical_path]],
+                    ).fetchall()
+                }
+                required_columns = set(CANDLE_BASE_COLUMNS)
+                if str(row.timeframe) == "1s":
+                    required_columns.update(self.bar1s_feature_columns or ())
+                missing_columns = sorted(required_columns - physical_columns)
+                if missing_columns:
+                    missing_features = sorted(
+                        set(missing_columns).intersection(
+                            self.bar1s_feature_columns or ()
+                        )
+                    )
+                    if missing_features:
+                        raise ValueError(
+                            "projected/requested 1s feature columns missing from "
+                            f"physical source schema {relative_path}: "
+                            f"{', '.join(missing_features)}"
+                        )
+                    raise ValueError(
+                        "base columns missing from physical source schema "
+                        f"{relative_path}: {', '.join(missing_columns)}"
+                    )
             self._source_index = selected
 
     def _execute_stream_query(
@@ -306,8 +357,13 @@ class BacktestDataLoader:
             ).fetchall()
         }
         feature_select = []
-        for name in CANDLE_FEATURE_COLUMNS:
+        for name in self._selected_bar1s_feature_columns:
             if name not in source_columns:
+                if self.bar1s_feature_columns is not None:
+                    raise ValueError(
+                        "projected/requested 1s feature column is missing from "
+                        f"the source schema: {name}"
+                    )
                 feature_select.append(f"NULL AS {name}")
             elif name in _DECIMAL_BAR1S_FEATURES:
                 feature_select.append(f"CAST({name} AS VARCHAR) AS {name}")
@@ -318,13 +374,16 @@ class BacktestDataLoader:
             "THEN epoch_ms(open_time) + 1000 + ? "
             "ELSE epoch_ms(close_time) + 1 END"
         )
+        select_columns = [
+            "symbol", "timeframe", "epoch_ms(open_time)",
+            "epoch_ms(close_time)", "CAST(open AS VARCHAR)",
+            "CAST(high AS VARCHAR)", "CAST(low AS VARCHAR)",
+            "CAST(close AS VARCHAR)", "CAST(volume AS VARCHAR)",
+            f"{available_time_sql} AS available_time",
+            *feature_select,
+        ]
         query = (
-            "SELECT symbol, timeframe, epoch_ms(open_time), epoch_ms(close_time), "
-            "CAST(open AS VARCHAR), CAST(high AS VARCHAR), "
-            "CAST(low AS VARCHAR), CAST(close AS VARCHAR), "
-            "CAST(volume AS VARCHAR), "
-            f"{available_time_sql} AS available_time, "
-            + ", ".join(feature_select)
+            "SELECT " + ", ".join(select_columns)
             + " "
             + f"FROM {source_sql} "
             f"WHERE symbol IN ({placeholders}) "
@@ -389,7 +448,14 @@ class BacktestDataLoader:
                     f"{shifted_open}..{shifted_close}"
                 )
             close_decimal = _decimal_value(close)
-            feature_values = dict(zip(CANDLE_FEATURE_COLUMNS, row[10:], strict=True))
+            feature_values = dict.fromkeys(CANDLE_FEATURE_COLUMNS)
+            feature_values.update(
+                zip(
+                    self._selected_bar1s_feature_columns,
+                    row[10:],
+                    strict=True,
+                )
+            )
             vwap = _optional_decimal_value(feature_values["vwap"]) or close_decimal
             return Bar1s(
                 symbol=symbol, timestamp=shifted_open,
@@ -475,6 +541,14 @@ class BacktestDataLoader:
         if missing:
             raise ValueError(
                 f"{self.duckdb_path} candles missing columns: {', '.join(missing)}"
+            )
+        missing_features = sorted(
+            (self.bar1s_feature_columns or frozenset()).difference(columns)
+        )
+        if missing_features:
+            raise ValueError(
+                "projected/requested 1s feature columns missing from source schema: "
+                f"{', '.join(missing_features)}"
             )
 
     def _require_duckdb_connection(self) -> duckdb.DuckDBPyConnection:

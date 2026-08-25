@@ -31,6 +31,8 @@ def _args(tmp_path):
 
 
 def test_runner_closes_dashboard_when_interrupted(tmp_path, monkeypatch):
+    loader_kwargs = []
+
     class RecordingDashboard:
         def __init__(self, **kwargs):
             self.started = []
@@ -51,7 +53,7 @@ def test_runner_closes_dashboard_when_interrupted(tmp_path, monkeypatch):
 
     class FakeLoader:
         def __init__(self, **kwargs):
-            pass
+            loader_kwargs.append(kwargs)
 
         def iter_all(self, **kwargs):
             return iter([object()])
@@ -86,6 +88,7 @@ def test_runner_closes_dashboard_when_interrupted(tmp_path, monkeypatch):
     assert dashboard.started == ["minimal BTCUSDT"]
     assert dashboard.failed == [("minimal BTCUSDT", 1)]
     assert dashboard.closed == [("interrupted", None)]
+    assert "bar1s_feature_columns" not in loader_kwargs[0]
 
 
 def test_runner_writes_debug_records_to_log_file_at_info_console_level(

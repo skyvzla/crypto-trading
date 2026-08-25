@@ -113,6 +113,19 @@ def _run_shift_group(plans: list[SymbolRunPlan]) -> set[str]:
         for interval in plan.settings.required_kline_intervals
     })
     requires_bar1s = any(plan.settings.requires_bar1s for plan in plans)
+    feature_requirements = [
+        getattr(
+            plan.settings.strategy_definition.data_requirements,
+            "bar1s_feature_columns",
+            None,
+        )
+        for plan in plans
+    ]
+    bar1s_feature_columns = (
+        None
+        if any(requirement is None for requirement in feature_requirements)
+        else frozenset().union(*feature_requirements)
+    )
     loader = BacktestDataLoader(
         duckdb_path=settings.duckdb_path,
         symbols=[args.symbol],
@@ -122,6 +135,7 @@ def _run_shift_group(plans: list[SymbolRunPlan]) -> set[str]:
         required_kline_intervals=required_intervals,
         archive_index_path=args.archive_index,
         bar1s_time_shift_ms=settings.bar1s_time_shift_ms,
+        bar1s_feature_columns=bar1s_feature_columns,
     )
     events = loader.iter_all(
         chunk_hours=args.chunk_hours,

@@ -1251,6 +1251,11 @@ def main() -> None:
         required_kline_intervals=list(settings.required_kline_intervals),
         archive_index_path=args.archive_index,
         bar1s_time_shift_ms=settings.bar1s_time_shift_ms,
+        bar1s_feature_columns=getattr(
+            settings.strategy_definition.data_requirements,
+            "bar1s_feature_columns",
+            None,
+        ),
     )
     event_iter = loader.iter_all(
         chunk_hours=args.chunk_hours,

@@ -2,9 +2,13 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from trading_platform.backtest.loader import BacktestDataLoader, MetricsDataLoader
+from trading_platform.market.archive.index import build_archive_index
+from trading_platform.market.archive.parquet import create_duckdb_catalog
 from trading_platform.market.archive.metrics import MetricsArchive, MetricsSnapshot
 from trading_platform.shared.events import Bar1s, Kline
 
@@ -75,6 +79,230 @@ def test_duckdb_loader_reads_candles_without_mutating_archive(tmp_path):
         assert check.execute("SELECT count(*) FROM candles").fetchone()[0] == 3
     finally:
         check.close()
+
+
+def test_duckdb_loader_supports_explicit_empty_one_second_projection(tmp_path):
+    archive = tmp_path / "history.duckdb"
+    _write_candle_archive(archive)
+
+    events = list(BacktestDataLoader(
+        duckdb_path=str(archive),
+        symbols=["AKEUSDT"],
+        start_ms=0,
+        end_ms=400_000,
+        require_aggtrades=True,
+        bar1s_feature_columns=[],
+    ).iter_all())
+
+    bar = next(event for event in events if isinstance(event, Bar1s))
+    assert bar.trade_count == 0
+    assert bar.vwap == Decimal("11.0")
+    assert bar.quote_volume is None
+
+
+def test_duckdb_loader_rejects_unknown_projected_one_second_feature():
+    with pytest.raises(ValueError, match="unknown projected 1s feature columns"):
+        BacktestDataLoader(
+            duckdb_path="missing.duckdb",
+            symbols=["AKEUSDT"],
+            start_ms=0,
+            end_ms=1_000,
+            bar1s_feature_columns=["not_a_feature"],
+        )
+
+
+def test_duckdb_loader_canonicalizes_projected_feature_order(tmp_path):
+    archive = tmp_path / "projected.duckdb"
+    connection = duckdb.connect(str(archive))
+    try:
+        connection.execute(
+            """
+            CREATE TABLE candles (
+                symbol VARCHAR,
+                timeframe VARCHAR,
+                open_time TIMESTAMPTZ,
+                open DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                close DOUBLE,
+                volume DOUBLE,
+                close_time TIMESTAMPTZ,
+                vwap DOUBLE,
+                quote_volume DOUBLE,
+                trade_count BIGINT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO candles VALUES (
+                'AKEUSDT', '1s', to_timestamp(1000 / 1000.0),
+                100, 102, 99, 101, 5, to_timestamp(1999 / 1000.0),
+                101.25, 404.5, 7
+            )
+            """
+        )
+    finally:
+        connection.close()
+
+    event = next(iter(BacktestDataLoader(
+        duckdb_path=str(archive),
+        symbols=["AKEUSDT"],
+        start_ms=0,
+        end_ms=4_000,
+        require_aggtrades=True,
+        bar1s_feature_columns=["trade_count", "vwap", "quote_volume"],
+    ).iter_all()))
+
+    assert isinstance(event, Bar1s)
+    assert event.trade_count == 7
+    assert event.vwap == Decimal("101.25")
+    assert event.quote_volume == Decimal("404.5")
+
+
+def test_duckdb_loader_rejects_missing_projected_feature_before_yield(tmp_path):
+    archive = tmp_path / "missing-feature.duckdb"
+    _write_candle_archive(archive)
+    loader = BacktestDataLoader(
+        duckdb_path=str(archive),
+        symbols=["AKEUSDT"],
+        start_ms=0,
+        end_ms=4_000,
+        require_aggtrades=True,
+        bar1s_feature_columns=["trade_count"],
+    )
+
+    with pytest.raises(ValueError, match="projected/requested 1s feature columns"):
+        list(loader.iter_all())
+
+
+def test_duckdb_loader_checks_projected_features_in_physical_archive_schema(tmp_path):
+    root = tmp_path / "history"
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    base_columns = {
+        "symbol": ["AKEUSDT"],
+        "timeframe": ["1s"],
+        "open_time": pa.array([start], type=pa.timestamp("ms", tz="UTC")),
+        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+        "volume": [1.0],
+        "close_time": pa.array([
+            start.replace(microsecond=999_000)
+        ], type=pa.timestamp("ms", tz="UTC")),
+    }
+    first_partition = root / "AKEUSDT" / "1s" / "2026" / "08" / "01"
+    first_partition.mkdir(parents=True)
+    pq.write_table(pa.table(base_columns), first_partition / "candles.parquet")
+    second_start = start + timedelta(days=1)
+    second_columns = {
+        **base_columns,
+        "open_time": pa.array([second_start], type=pa.timestamp("ms", tz="UTC")),
+        "close_time": pa.array([
+            second_start.replace(microsecond=999_000)
+        ], type=pa.timestamp("ms", tz="UTC")),
+        "trade_count": [1],
+    }
+    second_partition = root / "AKEUSDT" / "1s" / "2026" / "08" / "02"
+    second_partition.mkdir(parents=True)
+    pq.write_table(pa.table(second_columns), second_partition / "candles.parquet")
+    build_archive_index(root, workers=1)
+    catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
+
+    loader = BacktestDataLoader(
+        duckdb_path=str(catalog),
+        symbols=["AKEUSDT"],
+        start_ms=int(start.timestamp() * 1_000),
+        end_ms=int((start + timedelta(days=2)).timestamp() * 1_000),
+        require_aggtrades=True,
+        bar1s_feature_columns=["trade_count"],
+    )
+
+    with pytest.raises(ValueError, match="physical source schema"):
+        list(loader.iter_all())
+
+
+def test_duckdb_loader_full_and_projected_events_preserve_requested_values(tmp_path):
+    archive = tmp_path / "full-vs-projected.duckdb"
+    connection = duckdb.connect(str(archive))
+    try:
+        connection.execute(
+            """
+            CREATE TABLE candles (
+                symbol VARCHAR, timeframe VARCHAR, open_time TIMESTAMPTZ,
+                open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE,
+                volume DOUBLE, close_time TIMESTAMPTZ, vwap DOUBLE,
+                quote_volume DOUBLE, trade_count BIGINT, first_trade_id BIGINT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO candles VALUES
+                ('AKEUSDT', '1s', to_timestamp(1000 / 1000.0),
+                 100, 102, 99, 101, 5, to_timestamp(1999 / 1000.0),
+                 101.25, 404.5, 7, 12345),
+                ('AKEUSDT', '1s', to_timestamp(2000 / 1000.0),
+                 101, 103, 100, 102, 6, to_timestamp(2999 / 1000.0),
+                 102.25, 505.5, 8, 12346),
+                ('AKEUSDT', '1m', to_timestamp(1000 / 1000.0),
+                 100, 104, 98, 103, 30, to_timestamp(60999 / 1000.0),
+                 NULL, NULL, NULL, NULL)
+            """
+        )
+    finally:
+        connection.close()
+
+    full = list(BacktestDataLoader(
+        duckdb_path=str(archive), symbols=["AKEUSDT"], start_ms=0, end_ms=100_000,
+        require_aggtrades=True, required_kline_intervals=["1m"],
+    ).iter_all())
+    projected = list(BacktestDataLoader(
+        duckdb_path=str(archive), symbols=["AKEUSDT"], start_ms=0, end_ms=100_000,
+        require_aggtrades=True, required_kline_intervals=["1m"],
+        bar1s_feature_columns=["vwap", "trade_count"],
+    ).iter_all())
+
+    assert [type(event) for event in projected] == [type(event) for event in full]
+    assert len(full) == 3
+    for expected, actual in zip(full, projected, strict=True):
+        if isinstance(expected, Bar1s):
+            assert isinstance(actual, Bar1s)
+            assert (
+                actual.symbol, actual.timestamp, actual.available_time,
+                actual.open, actual.high, actual.low, actual.close, actual.volume,
+                actual.type_priority, actual.sequence,
+                actual.trade_count, actual.vwap,
+            ) == (
+                expected.symbol, expected.timestamp, expected.available_time,
+                expected.open, expected.high, expected.low, expected.close,
+                expected.volume, expected.type_priority, expected.sequence,
+                expected.trade_count, expected.vwap,
+            )
+            for feature_name in (
+                "quote_volume", "raw_trade_count", "taker_buy_volume",
+                "taker_sell_volume", "taker_buy_quote_volume",
+                "taker_sell_quote_volume", "taker_buy_trade_count",
+                "taker_sell_trade_count", "taker_buy_agg_trade_count",
+                "taker_sell_agg_trade_count", "max_agg_trade_quantity",
+                "max_taker_buy_agg_trade_quantity",
+                "max_taker_sell_agg_trade_quantity",
+                "first_aggregate_trade_id", "last_aggregate_trade_id",
+                "first_trade_id", "last_trade_id",
+            ):
+                assert getattr(actual, feature_name) is None
+        else:
+            assert isinstance(expected, Kline)
+            assert isinstance(actual, Kline)
+            assert actual == expected
+    assert [event.timestamp for event in full if isinstance(event, Bar1s)] == [
+        1_000, 2_000
+    ]
+    assert [event.trade_count for event in full if isinstance(event, Bar1s)] == [7, 8]
+    assert [event.quote_volume for event in full if isinstance(event, Bar1s)] == [
+        Decimal("404.5"), Decimal("505.5")
+    ]
+    assert [event.first_trade_id for event in full if isinstance(event, Bar1s)] == [
+        12345, 12346
+    ]
 
 
 def test_metrics_loader_uses_available_time_for_strategy_visibility(tmp_path):

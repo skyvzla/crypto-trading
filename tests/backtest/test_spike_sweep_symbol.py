@@ -12,6 +12,7 @@ from trading_platform.shared.config import BacktestConfig
 from trading_platform.backtest import run_spike_sweep_symbol as symbol_runner
 from trading_platform.backtest import run_spike_short
 from trading_platform.backtest.sweep import RunSpec, _collect_signal_audit_events
+from trading_platform.strategies.spike.definition import load_strategy_definition
 from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
 
 
@@ -72,6 +73,132 @@ def test_symbol_runner_keeps_the_one_hundred_eighty_day_default_read_window():
     ])
 
     assert args.chunk_hours == 4320
+
+
+def test_spike_short_passes_declared_bar1s_feature_projection(monkeypatch, tmp_path):
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-01T00:01:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--total-notional", "1000",
+    ])
+    feature_columns = frozenset({"trade_count"})
+    settings = SimpleNamespace(
+        duckdb_path="history.duckdb",
+        start_ms=1_000,
+        load_start_ms=0,
+        end_ms=2_000,
+        prior_high_lookback_minutes=0,
+        strategy_version="test",
+        bar1s_time_shift_ms=0,
+        requires_bar1s=True,
+        required_kline_intervals=(),
+        output_path=tmp_path / "output",
+        strategy_definition=SimpleNamespace(
+            data_requirements=SimpleNamespace(
+                bar1s_feature_columns=feature_columns,
+            )
+        ),
+    )
+    loader_calls = []
+
+    class FakeLoader:
+        def __init__(self, **kwargs):
+            loader_calls.append(kwargs)
+
+        def iter_all(self, **kwargs):
+            return iter([Bar1s(
+                symbol="AKEUSDT", timestamp=0, available_time=1_000,
+                open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                close=Decimal("1"), volume=Decimal("1"), trade_count=1,
+                vwap=Decimal("1"),
+            )])
+
+    class FakeEngine:
+        def run(self):
+            return object()
+
+    monkeypatch.setattr(run_spike_short, "parse_args", lambda: args)
+    monkeypatch.setattr(run_spike_short, "resolve_settings", lambda _args: settings)
+    monkeypatch.setattr(run_spike_short, "BacktestDataLoader", FakeLoader)
+    monkeypatch.setattr(run_spike_short, "create_spike_engine", lambda *a, **k: FakeEngine())
+    monkeypatch.setattr(
+        run_spike_short,
+        "save_backtest_result",
+        lambda *a, **k: {
+            "orders": {"total": 0, "filled": 0},
+            "positions": {"total": 0},
+            "liquidation_risk": {"total": 0, "rate": 0.0},
+            "pnl": {"net_pnl": 0.0},
+        },
+    )
+
+    run_spike_short.main()
+
+    assert loader_calls[0]["bar1s_feature_columns"] == feature_columns
+
+
+@pytest.mark.parametrize(
+    "strategy_path",
+    [
+        "trading_platform.strategies.spike.v2:V2",
+        "trading_platform.strategies.spike.v2_1:V21",
+        "trading_platform.strategies.spike.v2_2:V22",
+    ],
+)
+def test_spike_short_passes_real_v2_family_projection(
+    strategy_path, monkeypatch, tmp_path
+):
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-01T00:01:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--total-notional", "1000",
+        "--strategy", strategy_path,
+        *(["--metrics-root", str(tmp_path / "metrics")]
+          if strategy_path != "trading_platform.strategies.spike.v2:V2"
+          else []),
+    ])
+    loader_calls = []
+
+    class FakeLoader:
+        def __init__(self, **kwargs):
+            loader_calls.append(kwargs)
+
+        def iter_all(self, **kwargs):
+            return iter([Bar1s(
+                symbol="AKEUSDT", timestamp=0, available_time=1_000,
+                open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                close=Decimal("1"), volume=Decimal("1"), trade_count=1,
+                vwap=Decimal("1"),
+            )])
+
+    class FakeEngine:
+        def run(self):
+            return object()
+
+    monkeypatch.setattr(run_spike_short, "BacktestDataLoader", FakeLoader)
+    monkeypatch.setattr(run_spike_short, "create_spike_engine", lambda *a, **k: FakeEngine())
+    monkeypatch.setattr(
+        run_spike_short,
+        "save_backtest_result",
+        lambda *a, **k: {
+            "orders": {"total": 0, "filled": 0},
+            "positions": {"total": 0},
+            "liquidation_risk": {"total": 0, "rate": 0.0},
+            "pnl": {"net_pnl": 0.0},
+        },
+    )
+    monkeypatch.setattr(run_spike_short, "parse_args", lambda: args)
+
+    run_spike_short.main()
+
+    definition = load_strategy_definition(strategy_path)
+    assert definition.data_requirements.bar1s_feature_columns == frozenset()
+    assert not hasattr(definition, "bar1s_feature_columns")
+    assert loader_calls[0]["bar1s_feature_columns"] == frozenset()
 
 
 def test_v2_resolves_confirmed_defaults_and_seven_day_warmup():
@@ -506,6 +633,206 @@ def test_symbol_runner_reads_market_data_once_for_multiple_parameters(
     assert engines["confirmed"].events == [bar]
     assert engines["candidate"].events == [early_bar, bar, kline_15m]
     assert saved == [("confirmed", "confirmed"), ("candidate", "candidate")]
+
+
+def test_symbol_runner_projects_union_of_shift_group_feature_requirements(
+    monkeypatch,
+):
+    feature_a = "trade_count"
+    feature_b = "vwap"
+    loader_calls = []
+    definition = SimpleNamespace(
+        data_requirements=SimpleNamespace(
+            shared_features=frozenset(),
+            bar1s_feature_columns=frozenset({feature_a}),
+        )
+    )
+    definition_b = SimpleNamespace(
+        data_requirements=SimpleNamespace(
+            shared_features=frozenset(),
+            bar1s_feature_columns=frozenset({feature_b}),
+        )
+    )
+
+    def plan(run_id, strategy_definition):
+        settings = SimpleNamespace(
+            strategy_definition=strategy_definition,
+            load_start_ms=0,
+            end_ms=2_000,
+            duckdb_path="history.duckdb",
+            required_kline_intervals=(),
+            requires_bar1s=True,
+            bar1s_time_shift_ms=0,
+            chunk_hours=1,
+            fetch_batch_size=1,
+            duckdb_memory_limit=None,
+            duckdb_threads=1,
+            output_path=Path(run_id),
+        )
+        return symbol_runner.SymbolRunPlan(
+            run_id=run_id,
+            args=SimpleNamespace(
+                symbol="AKEUSDT", research=False, archive_index=None,
+                chunk_hours=1, fetch_batch_size=1,
+                duckdb_memory_limit=None, duckdb_threads=1,
+            ),
+            settings=settings,
+            engine=SimpleNamespace(
+                strategy=object(),
+                process_event=lambda _event: None,
+                finish=lambda: object(),
+            ),
+        )
+
+    class FakeLoader:
+        def __init__(self, **kwargs):
+            loader_calls.append(kwargs)
+
+        def iter_all(self, **kwargs):
+            return iter([Bar1s(
+                symbol="AKEUSDT", timestamp=0, available_time=1_000,
+                open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                close=Decimal("1"), volume=Decimal("1"), trade_count=1,
+                vwap=Decimal("1"),
+            )])
+
+    monkeypatch.setattr(symbol_runner, "BacktestDataLoader", FakeLoader)
+    monkeypatch.setattr(symbol_runner, "save_backtest_result", lambda *a, **k: None)
+
+    symbol_runner._run_shift_group([
+        plan("a", definition),
+        plan("b", definition_b),
+    ])
+
+    assert loader_calls[0]["bar1s_feature_columns"] == frozenset({feature_a, feature_b})
+
+
+def test_symbol_runner_uses_full_features_when_shift_group_has_default_requirement(
+    monkeypatch,
+):
+    loader_calls = []
+
+    def plan(requirement):
+        definition = SimpleNamespace(
+            data_requirements=SimpleNamespace(
+                shared_features=frozenset(),
+                bar1s_feature_columns=requirement,
+            )
+        )
+        settings = SimpleNamespace(
+            strategy_definition=definition,
+            load_start_ms=0,
+            end_ms=2_000,
+            duckdb_path="history.duckdb",
+            required_kline_intervals=(),
+            requires_bar1s=True,
+            bar1s_time_shift_ms=0,
+            chunk_hours=1,
+            fetch_batch_size=1,
+            duckdb_memory_limit=None,
+            duckdb_threads=1,
+            output_path=Path("output"),
+        )
+        return symbol_runner.SymbolRunPlan(
+            run_id=str(len(loader_calls)),
+            args=SimpleNamespace(
+                symbol="AKEUSDT", research=False, archive_index=None,
+                chunk_hours=1, fetch_batch_size=1,
+                duckdb_memory_limit=None, duckdb_threads=1,
+            ),
+            settings=settings,
+            engine=SimpleNamespace(
+                strategy=object(),
+                process_event=lambda _event: None,
+                finish=lambda: object(),
+            ),
+        )
+
+    class FakeLoader:
+        def __init__(self, **kwargs):
+            loader_calls.append(kwargs)
+
+        def iter_all(self, **kwargs):
+            return iter([Bar1s(
+                symbol="AKEUSDT", timestamp=0, available_time=1_000,
+                open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                close=Decimal("1"), volume=Decimal("1"), trade_count=1,
+                vwap=Decimal("1"),
+            )])
+
+    monkeypatch.setattr(symbol_runner, "BacktestDataLoader", FakeLoader)
+    monkeypatch.setattr(symbol_runner, "save_backtest_result", lambda *a, **k: None)
+
+    symbol_runner._run_shift_group([plan(frozenset()), plan(None)])
+
+    assert loader_calls[0]["bar1s_feature_columns"] is None
+
+
+def test_shift_group_projects_real_v2_family_requirements(monkeypatch):
+    paths = [
+        "trading_platform.strategies.spike.v2:V2",
+        "trading_platform.strategies.spike.v2_1:V21",
+        "trading_platform.strategies.spike.v2_2:V22",
+    ]
+    definitions = [load_strategy_definition(path) for path in paths]
+    loader_calls = []
+
+    def plan(index, definition):
+        settings = SimpleNamespace(
+            strategy_definition=definition,
+            load_start_ms=0,
+            end_ms=2_000,
+            duckdb_path="history.duckdb",
+            required_kline_intervals=("1m", "5m", "15m"),
+            requires_bar1s=True,
+            bar1s_time_shift_ms=0,
+            output_path=Path(f"output-{index}"),
+        )
+        strategy = SimpleNamespace(
+            strategies={},
+            bind_shared_feature_provider=lambda _provider: None,
+        )
+        engine = SimpleNamespace(
+            strategy=strategy,
+            process_event=lambda _event: None,
+            finish=lambda: object(),
+        )
+        args = SimpleNamespace(
+            symbol="AKEUSDT", archive_index=None, research=False,
+            chunk_hours=1, fetch_batch_size=1,
+            duckdb_memory_limit=None, duckdb_threads=1,
+        )
+        return symbol_runner.SymbolRunPlan(
+            run_id=str(index), args=args, settings=settings, engine=engine
+        )
+
+    class FakeLoader:
+        def __init__(self, **kwargs):
+            loader_calls.append(kwargs)
+
+        def iter_all(self, **kwargs):
+            return iter([Bar1s(
+                symbol="AKEUSDT", timestamp=0, available_time=1_000,
+                open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                close=Decimal("1"), volume=Decimal("1"), trade_count=1,
+                vwap=Decimal("1"),
+            )])
+
+    monkeypatch.setattr(symbol_runner, "BacktestDataLoader", FakeLoader)
+    monkeypatch.setattr(symbol_runner, "save_backtest_result", lambda *a, **k: None)
+
+    symbol_runner._run_shift_group([
+        plan(index, definition)
+        for index, definition in enumerate(definitions)
+    ])
+
+    assert len(loader_calls) == 1
+    assert loader_calls[0]["bar1s_feature_columns"] == frozenset()
+    assert all(
+        definition.data_requirements.bar1s_feature_columns == frozenset()
+        and not hasattr(definition, "bar1s_feature_columns")
+        for definition in definitions
+    )
 
 
 def test_shared_feature_providers_are_opt_in_and_grouped_by_replay_context():
