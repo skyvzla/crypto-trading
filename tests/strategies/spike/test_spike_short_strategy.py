@@ -1196,6 +1196,35 @@ class TestDynamicSpikeShortStrategy:
         strategy.klines_1m.insert(1, kline_at(60_000))
         assert strategy._min_low_1m(minute_start, 3) == Decimal("99")
 
+    def test_box_filter_retains_seven_days_when_rise_low_window_is_shorter(self):
+        strategy = DynamicSpikeShortStrategy(
+            "BTCUSDT",
+            total_notional=Decimal("1000"),
+            box_duration_min_minutes=4 * 60,
+            rise_low_lookback_minutes=0,
+        )
+        minute = 60_000
+        for index in range(7 * 24 * 60):
+            open_time = index * minute
+            strategy.on_kline(Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=open_time,
+                close_time=open_time + minute - 1,
+                available_time=open_time + minute,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            ))
+
+        assert len(strategy.klines_1m) >= 7 * 24 * 60
+        box_break = strategy._box_breakthrough(
+            7 * 24 * 60 * minute, Decimal("100")
+        )
+        assert box_break is not None
+
     def test_atr_rejects_a_five_minute_gap(self):
         strategy = DynamicSpikeShortStrategy(
             "BTCUSDT", total_notional=Decimal("1000")

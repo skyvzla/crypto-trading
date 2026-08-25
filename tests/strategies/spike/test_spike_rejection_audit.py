@@ -254,3 +254,20 @@ class TestBoxPrematureOrLogic:
         rejected = [e for e in audit if e.event_type == "signal_rejected"]
         assert rejected
         assert rejected[-1].details["rejection_stage"] == "premature_spike_entry_filter"
+
+    def test_box_data_insufficient_is_a_hard_rejection_with_distinct_reason(self):
+        strategy = _build_triggering_strategy()
+        strategy.box_duration_min_minutes = 4 * 60
+        strategy._box_breakthrough = lambda minute_start, current_close: None
+
+        signal = strategy._detect_signal(strategy.bars_1s[-1])
+
+        assert signal is None
+        rejected = [
+            event
+            for event in strategy.drain_audit_events()
+            if event.event_type == "signal_rejected"
+        ]
+        assert rejected
+        assert rejected[0].details["rejection_stage"] == "box_breakthrough_entry_filter"
+        assert rejected[0].details["rejection_reasons"] == ["box_data_insufficient"]

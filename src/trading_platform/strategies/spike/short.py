@@ -1295,7 +1295,11 @@ class DynamicSpikeShortStrategy:
         """处理已完成 K 线事件"""
         if self._shared_feature_provider is None:
             if kline.interval == "1m":
-                retained_minutes = max(30 * 60, self.rise_low_lookback_minutes)
+                retained_minutes = max(
+                    30 * 60,
+                    self.rise_low_lookback_minutes,
+                    7 * 24 * 60 if self.box_duration_min_minutes > 0 else 0,
+                )
                 cutoff = kline.close_time - retained_minutes * MS_PER_MINUTE
                 self._append_kline_and_evict_expired(
                     "1m", self.klines_1m, kline, cutoff
@@ -1757,7 +1761,26 @@ class DynamicSpikeShortStrategy:
         box_break = None
         if self.box_duration_min_minutes > 0:
             box_break = self._box_breakthrough(minute_start, current.close)
-            if box_break is not None and box_break["box_break_minutes"] >= self.box_duration_min_minutes:
+            if box_break is None:
+                self._record_signal_rejection(
+                    event_time=current.timestamp,
+                    rejection_stage="box_breakthrough_entry_filter",
+                    rejection_reasons=("box_data_insufficient",),
+                    trigger_price=current.close,
+                    rise_5s=rise_5s,
+                    rise_window_returns=rise_window_returns,
+                    volume_5s=volume_5s,
+                    median_volume_1s=median_volume,
+                    volume_multiple_5s=volume_multiple_5s,
+                    low_12h=low_12h,
+                    rise_from_12h_low=rise_from_12h_low,
+                    extra={
+                        "box_break_minutes": None,
+                        "box_duration_min_minutes": self.box_duration_min_minutes,
+                    },
+                )
+                return None
+            if box_break["box_break_minutes"] >= self.box_duration_min_minutes:
                 box_passed = True
             else:
                 self._record_signal_rejection(
