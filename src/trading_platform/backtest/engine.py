@@ -274,8 +274,9 @@ class BacktestEngine:
         2. TTL 检查在价格检查之前
         3. 做空限价单：bar.high > order.price（严格穿透）
         4. 做多限价单：bar.low < order.price（严格穿透）
-        5. SELL 成交价 = max(挂单价, 触发 bar 开盘价)；BUY 成交价 = 挂单价
-        6. 全部成交，不模拟部分成交
+        5. LIMIT SELL 成交价 = max(挂单价, 触发 bar 开盘价)；LIMIT BUY 成交价 = 挂单价
+        6. MARKET 以订单意图价（SELL 沿用开盘价基准）施加方向不利滑点
+        7. 全部成交，不模拟部分成交
 
         Args:
             event: 当前事件
@@ -335,12 +336,24 @@ class BacktestEngine:
         Returns:
             成交记录
         """
-        # 成交价：SELL 限价单按触发成交的 1s bar 开盘价成交（不差于挂单价），
-        # 反映现价已高于挂单价时以更优市价卖出的情况；其余按挂单价（保守）。
+        # 先沿用历史基准：SELL 沿用入场的保守开盘价口径，BUY 使用订单意图价。
+        # MARKET 再施加方向不利的显式滑点；LIMIT 不进入该分支，保持原有穿价逻辑。
         if order.side == 'SELL':
-            fill_price = max(order.price, event.open)
+            baseline_price = max(order.price, event.open)
         else:
-            fill_price = order.price
+            baseline_price = order.price
+        if order.type == 'MARKET' and self.config.market_slippage_bps:
+            slippage_rate = (
+                Decimal(str(self.config.market_slippage_bps))
+                / Decimal('10000')
+            )
+            fill_price = baseline_price * (
+                Decimal('1') + slippage_rate
+                if order.side == 'BUY'
+                else Decimal('1') - slippage_rate
+            )
+        else:
+            fill_price = baseline_price
         remaining_qty = order.quantity - order.filled_quantity
         fill_qty = remaining_qty
         if order.type == 'LIMIT':

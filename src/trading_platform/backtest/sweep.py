@@ -7,6 +7,7 @@ import argparse
 import asyncio
 from bisect import bisect_left
 import csv
+from decimal import Decimal, InvalidOperation
 import hashlib
 import itertools
 import json
@@ -117,6 +118,7 @@ PARAMETER_FLAGS = {
     "min_volume_multiple_5m": "--min-volume-multiple-5m",
     "prior_high_tolerance_percent": "--prior-high-tolerance-percent",
     "limit_fill_fraction": "--limit-fill-fraction",
+    "market_slippage_bps": "--market-slippage-bps",
     "warmup_hours": "--warmup-hours",
     "bar1s_time_shift_hours": "--bar1s-time-shift-hours",
     "rise_3s_threshold": "--rise-3s-threshold",
@@ -220,6 +222,21 @@ def _metrics_input_fingerprint(config: dict[str, Any]) -> str | None:
         digest.update(content)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _normalize_market_slippage(params: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(params)
+    value = normalized.get("market_slippage_bps")
+    if isinstance(value, (str, int, float, Decimal)):
+        try:
+            parsed = Decimal(str(value).strip())
+        except (InvalidOperation, ValueError):
+            # Keep invalid values intact for the existing runner validation.
+            pass
+        else:
+            if parsed.is_zero():
+                normalized["market_slippage_bps"] = 0.0
+    return normalized
 
 
 def _canonical_json(value: Any) -> Any:
@@ -950,7 +967,9 @@ def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
     metrics_fingerprint = _metrics_input_fingerprint(config)
     specs = []
     for symbol, combination in itertools.product(symbols, itertools.product(*values) if values else [()]):
-        params = {**fixed, **dict(zip(keys, combination))}
+        params = _normalize_market_slippage({
+            **fixed, **dict(zip(keys, combination))
+        })
         identity = json.dumps({
             "symbol": symbol,
             "params": params,
@@ -1799,6 +1818,7 @@ def _write_report(
     workers: int,
     worker_memory_budget: str | None,
     duckdb_memory_limit: str | None,
+    market_slippage_bps: Collection[Any] = (0,),
 ) -> None:
     worker_budget_label = worker_memory_budget or "关闭"
     duckdb_limit_label = duckdb_memory_limit or "关闭"
@@ -1809,6 +1829,9 @@ def _write_report(
         f"- 实际 worker：{workers}",
         f"- 每 worker 总内存预算：{worker_budget_label}",
         f"- 每 worker DuckDB 内存上限：{duckdb_limit_label}",
+        "- MARKET 滑点（bps）：" + ", ".join(
+            str(value) for value in market_slippage_bps
+        ),
         "- 行情：DuckDB 只读流式窗口；同交易对且相同 1s 时间偏移的参数实例共享一次读取",
         "- 预检：Parquet sidecar 索引（仅用于覆盖校验，不作为行情源）",
         "- 交易对：PostgreSQL 主库只读有效集合与历史归档集合的交集",
@@ -2100,6 +2123,10 @@ def _main(argv: list[str] | None = None) -> int:
             workers=workers,
             worker_memory_budget=worker_memory_budget,
             duckdb_memory_limit=actual_memory_limit,
+            market_slippage_bps=sorted({
+                spec.params.get("market_slippage_bps", 0)
+                for spec in specs
+            }, key=str),
         )
         public_config = {
             key: value for key, value in config.items() if key != "database_dsn"

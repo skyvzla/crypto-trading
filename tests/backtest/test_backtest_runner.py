@@ -1,5 +1,6 @@
 import argparse
 import logging
+import sys
 
 import pytest
 
@@ -20,6 +21,7 @@ def _args(tmp_path):
         total_notional=None,
         warmup_hours=None,
         limit_fill_fraction=1.0,
+        market_slippage_bps=0.0,
         exchange_info=None,
         chunk_hours=24.0,
         fetch_batch_size=10_000,
@@ -89,6 +91,63 @@ def test_runner_closes_dashboard_when_interrupted(tmp_path, monkeypatch):
     assert dashboard.failed == [("minimal BTCUSDT", 1)]
     assert dashboard.closed == [("interrupted", None)]
     assert "bar1s_feature_columns" not in loader_kwargs[0]
+
+
+def test_standard_cli_passes_market_slippage_to_backtest_config(
+    tmp_path, monkeypatch
+):
+    configs = []
+
+    class RecordingDashboard:
+        def start(self, **kwargs):
+            pass
+
+        def task_start(self, name):
+            pass
+
+        def task_failed(self, name, *, increment=1):
+            pass
+
+        def close(self, **kwargs):
+            pass
+
+    class FakeLoader:
+        def __init__(self, **kwargs):
+            pass
+
+        def iter_all(self, **kwargs):
+            return iter([object()])
+
+    class CapturingEngine:
+        def __init__(self, **kwargs):
+            configs.append(kwargs["config"])
+
+        def run(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(sys, "argv", [
+        "backtest-runner",
+        "--strategy", "minimal",
+        "--symbols", "BTCUSDT",
+        "--start", "2026-07-01",
+        "--end", "2026-07-02",
+        "--duckdb-path", "history.duckdb",
+        "--output", str(tmp_path / "output"),
+        "--market-slippage-bps", "12.5",
+    ])
+    monkeypatch.setattr(
+        runner, "TaskDashboard", lambda **kwargs: RecordingDashboard()
+    )
+    monkeypatch.setattr(runner, "BacktestDataLoader", FakeLoader)
+    monkeypatch.setattr(runner, "load_strategy", lambda *args, **kwargs: object())
+    monkeypatch.setattr(runner, "BacktestEngine", CapturingEngine)
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.main()
+
+    assert len(configs) == 1
+    assert isinstance(configs[0], runner.BacktestConfig)
+    assert configs[0].market_slippage_bps == 12.5
 
 
 def test_runner_writes_debug_records_to_log_file_at_info_console_level(

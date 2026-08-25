@@ -61,6 +61,24 @@ def test_save_results_does_not_reanalyze_when_summary_is_provided(
     analyzer.save_results(str(tmp_path), "run", summary=expected)
 
     assert json.loads((tmp_path / "run" / "summary.json").read_text()) == expected
+    run_meta = json.loads((tmp_path / "run" / "run_meta.json").read_text())
+    assert run_meta["config"]["market_slippage_bps"] == 0.0
+
+
+def test_save_results_records_market_slippage_in_run_meta(tmp_path):
+    result = BacktestResult(
+        virtual_time_start=0,
+        virtual_time_end=1_000,
+        orders=[],
+        fills=[],
+        positions=[],
+        config=BacktestConfig(market_slippage_bps=12.5),
+    )
+
+    ResultAnalyzer(result).save_results(str(tmp_path), "run")
+
+    run_meta = json.loads((tmp_path / "run" / "run_meta.json").read_text())
+    assert run_meta["config"]["market_slippage_bps"] == 12.5
 
 
 def test_symbol_runner_keeps_the_one_hundred_eighty_day_default_read_window():

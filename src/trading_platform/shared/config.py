@@ -2,9 +2,13 @@
 配置管理模块
 使用 pydantic-settings 加载环境变量和配置文件
 """
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Literal
+
+
+# 10% is a stress-test ceiling; normal experiments should use far smaller values.
+MARKET_SLIPPAGE_MAX_BPS = 1_000.0
 
 
 class DatabaseConfig(BaseSettings):
@@ -93,6 +97,10 @@ class BacktestConfig(BaseSettings):
     output_dir: str = 'reports'
     maker_fee_rate: float = 0.0002  # 0.02%
     taker_fee_rate: float = 0.0004  # 0.04%
+    # MARKET 成交的方向不利价格冲击；0 保持历史回测口径。
+    market_slippage_bps: float = Field(
+        default=0.0, ge=0, le=MARKET_SLIPPAGE_MAX_BPS
+    )
     trading_start_ms: int | None = None  # 此前事件只用于指标预热
     limit_fill_fraction_per_bar: float = Field(default=1.0, gt=0, le=1)
     bar1s_time_shift_ms: int = 0  # 历史源已证实存在偏移时才显式设置
@@ -103,6 +111,12 @@ class BacktestConfig(BaseSettings):
     spike_rise_low_lookback_minutes: int = 0
     spike_min_rise_duration_minutes: int = 0
     spike_early_profit_unlock_ratio: float | None = None
+
+    @field_validator("market_slippage_bps", mode="after")
+    @classmethod
+    def normalize_market_slippage_bps(cls, value: float) -> float:
+        """Keep zero-valued identities stable regardless of their sign."""
+        return 0.0 if value == 0 else value
 
 
 def load_config() -> dict:

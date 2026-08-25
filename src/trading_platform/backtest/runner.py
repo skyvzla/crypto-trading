@@ -178,6 +178,12 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help='每根穿价 1s Bar 最多成交 LIMIT 原数量的比例（0, 1]，默认 1',
     )
+    parser.add_argument(
+        '--market-slippage-bps',
+        type=float,
+        default=0.0,
+        help='MARKET 成交方向不利滑点（bps，默认 0；允许范围 0-1000）',
+    )
 
     parser.add_argument(
         '--exchange-info',
@@ -375,6 +381,7 @@ def main():
             taker_fee_rate=args.taker_fee,
             trading_start_ms=start_ms,
             limit_fill_fraction_per_bar=args.limit_fill_fraction,
+            market_slippage_bps=args.market_slippage_bps,
         )
         engine = BacktestEngine(
             strategy=strategy,

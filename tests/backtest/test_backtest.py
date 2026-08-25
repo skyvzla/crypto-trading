@@ -499,6 +499,150 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertFalse(result.fills[0].is_maker)
         self.assertEqual(result.orders[0].type, 'MARKET')
 
+    def test_market_slippage_moves_fill_against_both_sides(self):
+        class MarketStrategy(MockStrategy):
+            def __init__(self, side):
+                super().__init__()
+                self.side = side
+
+            def on_bar1s(self, bar):
+                return [OrderIntent(
+                    symbol=bar.symbol,
+                    side=self.side,
+                    price=bar.close,
+                    quantity=Decimal('1'),
+                    client_order_id=f'market-{self.side.lower()}',
+                    order_type='MARKET',
+                )]
+
+        event = Bar1s(
+            symbol='BTCUSDT', timestamp=1_000, available_time=2_000,
+            open=Decimal('90'), high=Decimal('110'), low=Decimal('90'),
+            close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('100'),
+        )
+
+        for side, expected in (
+            ('BUY', Decimal('101')),
+            ('SELL', Decimal('99')),
+        ):
+            with self.subTest(side=side):
+                result = BacktestEngine(
+                    MarketStrategy(side),
+                    [event],
+                    BacktestConfig(market_slippage_bps=100),
+                ).run()
+
+                self.assertEqual(result.fills[0].price, expected)
+
+    def test_sell_market_slippage_uses_open_baseline_before_adverse_adjustment(self):
+        class SellMarketStrategy(MockStrategy):
+            def on_bar1s(self, bar):
+                return [OrderIntent(
+                    symbol=bar.symbol,
+                    side='SELL',
+                    price=Decimal('100'),
+                    quantity=Decimal('1'),
+                    client_order_id='sell-market-open-baseline',
+                    order_type='MARKET',
+                )]
+
+        event = Bar1s(
+            symbol='BTCUSDT', timestamp=1_000, available_time=2_000,
+            open=Decimal('110'), high=Decimal('112'), low=Decimal('109'),
+            close=Decimal('111'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('110.5'),
+        )
+
+        result = BacktestEngine(
+            SellMarketStrategy(),
+            [event],
+            BacktestConfig(market_slippage_bps=100),
+        ).run()
+
+        self.assertEqual(result.fills[0].price, Decimal('108.9'))
+
+    def test_market_slippage_zero_preserves_historical_fill_price(self):
+        class MarketStrategy(MockStrategy):
+            def on_bar1s(self, bar):
+                return [OrderIntent(
+                    symbol=bar.symbol,
+                    side='BUY',
+                    price=bar.close,
+                    quantity=Decimal('1'),
+                    client_order_id='market-zero',
+                    order_type='MARKET',
+                )]
+
+        event = Bar1s(
+            symbol='BTCUSDT', timestamp=1_000, available_time=2_000,
+            open=Decimal('90'), high=Decimal('110'), low=Decimal('90'),
+            close=Decimal('100'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('100'),
+        )
+        default_result = BacktestEngine(
+            MarketStrategy(), [event], BacktestConfig()
+        ).run()
+        explicit_zero_result = BacktestEngine(
+            MarketStrategy(), [event], BacktestConfig(market_slippage_bps=0)
+        ).run()
+
+        self.assertEqual(
+            default_result.fills[0].price,
+            explicit_zero_result.fills[0].price,
+        )
+        self.assertEqual(explicit_zero_result.fills[0].price, Decimal('100'))
+
+    def test_market_slippage_does_not_change_limit_fill_price(self):
+        engine = BacktestEngine(
+            MockStrategy(), [], BacktestConfig(market_slippage_bps=100)
+        )
+        order = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='SELL', price=Decimal('100'),
+            quantity=Decimal('1'), client_order_id='limit-no-slippage',
+        ))
+
+        fill = engine._execute_fill(order, Bar1s(
+            symbol='BTCUSDT', timestamp=0, available_time=1_000,
+            open=Decimal('101'), high=Decimal('102'), low=Decimal('99'),
+            close=Decimal('101'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('101'),
+        ))
+
+        assert fill is not None
+        self.assertEqual(fill.price, Decimal('101'))
+
+    def test_market_slippage_is_applied_after_symbol_quantity_normalization(self):
+        rules = BinanceSymbolRules(
+            symbol='BTCUSDT', tick_size=Decimal('0.1'),
+            min_price=Decimal('1'), max_price=Decimal('1000000'),
+            lot_step_size=Decimal('0.01'), min_quantity=Decimal('0.01'),
+            max_quantity=Decimal('1000'), market_step_size=Decimal('0.1'),
+            market_min_quantity=Decimal('0.1'),
+            market_max_quantity=Decimal('1000'), min_notional=Decimal('5'),
+        )
+        engine = BacktestEngine(
+            MockStrategy(), [], BacktestConfig(market_slippage_bps=100),
+            symbol_rules=BinanceSymbolRuleBook({'BTCUSDT': rules}),
+        )
+        order = engine.executor.place_order(OrderIntent(
+            symbol='BTCUSDT', side='BUY', price=Decimal('100.01'),
+            quantity=Decimal('1.09'), client_order_id='market-normalized',
+            order_type='MARKET',
+        ))
+
+        fill = engine._execute_fill(order, Bar1s(
+            symbol='BTCUSDT', timestamp=0, available_time=1_000,
+            open=Decimal('100'), high=Decimal('102'), low=Decimal('99'),
+            close=Decimal('100.01'), volume=Decimal('1'), trade_count=1,
+            vwap=Decimal('100'),
+        ))
+
+        assert fill is not None
+        self.assertEqual(order.quantity, Decimal('1.0'))
+        self.assertEqual(fill.quantity, Decimal('1.0'))
+        self.assertEqual(fill.price, Decimal('101.0101'))
+
     def test_warmup_events_update_strategy_without_creating_orders(self):
         class WarmupAwareStrategy(MockStrategy):
             def __init__(self):

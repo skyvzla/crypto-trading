@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from io import StringIO
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import trading_platform.backtest.sweep as sweep
+from trading_platform.backtest import run_spike_short
 from trading_platform.backtest.sweep import (
     _annotate_collisions,
     _archive_coverage,
@@ -30,6 +32,7 @@ from trading_platform.backtest.sweep import (
     _symbol_worker_memory_plan,
     _symbol_worker_resources,
     _worker_memory_plan,
+    _write_report,
     _write_tier3_only_projection_summary,
     _write_tier_fill_summary,
     expand_specs,
@@ -39,6 +42,7 @@ from trading_platform.backtest.process_lock import (
     BacktestProcessLock,
 )
 from trading_platform.market.archive.index import build_archive_index
+from trading_platform.shared.config import BacktestConfig
 
 
 def _write_worker_run_meta(output: Path) -> None:
@@ -658,9 +662,174 @@ def test_expand_specs_run_id_tracks_code_and_archive_content(monkeypatch, tmp_pa
 
     monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code-v2")
     assert first[0].run_id != expand_specs(config, ["AKEUSDT"])[0].run_id
-
     index_path.write_bytes(b"archive-v2")
     assert first[0].run_id != expand_specs(config, ["AKEUSDT"])[0].run_id
+
+
+def test_expand_specs_run_id_tracks_market_slippage_bps(monkeypatch, tmp_path):
+    index_path = tmp_path / "archive_index.parquet"
+    index_path.write_bytes(b"archive")
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code")
+    base = {
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-08-01T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(index_path),
+        "fixed": {"total_notional": 1000, "market_slippage_bps": 0},
+    }
+
+    zero = expand_specs(base, ["AKEUSDT"])[0]
+    changed = expand_specs({
+        **base,
+        "fixed": {"total_notional": 1000, "market_slippage_bps": 25},
+    }, ["AKEUSDT"])[0]
+
+    assert zero.run_id != changed.run_id
+
+
+def test_expand_specs_run_id_normalizes_negative_zero_slippage(
+    monkeypatch, tmp_path
+):
+    index_path = tmp_path / "archive_index.parquet"
+    index_path.write_bytes(b"archive")
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code")
+    base = {
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-08-01T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(index_path),
+        "fixed": {"total_notional": 1000},
+    }
+
+    negative_zero = expand_specs({
+        **base,
+        "fixed": {
+            "total_notional": 1000,
+            "entry_premium_mult": -0.0,
+            "market_slippage_bps": -0.0,
+        },
+    }, ["AKEUSDT"])[0]
+    positive_zero = expand_specs({
+        **base,
+        "fixed": {
+            "total_notional": 1000,
+            "entry_premium_mult": -0.0,
+            "market_slippage_bps": 0.0,
+        },
+    }, ["AKEUSDT"])[0]
+
+    assert negative_zero == positive_zero
+    assert negative_zero.params["market_slippage_bps"] == 0.0
+    assert str(negative_zero.params["market_slippage_bps"]) == "0.0"
+    assert str(negative_zero.params["entry_premium_mult"]) == "-0.0"
+    identity_kwargs = {
+        "code_fingerprint": "code",
+        "archive_index_fingerprint": sweep._archive_index_fingerprint(base),
+    }
+    assert sweep._run_identity(
+        negative_zero, base, **identity_kwargs
+    ) == sweep._run_identity(positive_zero, base, **identity_kwargs)
+
+    unrelated_positive_zero = expand_specs({
+        **base,
+        "fixed": {
+            "total_notional": 1000,
+            "entry_premium_mult": 0.0,
+            "market_slippage_bps": 0.0,
+        },
+    }, ["AKEUSDT"])[0]
+    assert negative_zero.run_id != unrelated_positive_zero.run_id
+
+
+@pytest.mark.parametrize(
+    "zero_value",
+    ["-0.0", "+0.0", Decimal("-0.0"), Decimal("+0.0")],
+    ids=(
+        "string-negative",
+        "string-positive",
+        "decimal-negative",
+        "decimal-positive",
+    ),
+)
+def test_expand_specs_normalizes_config_accepted_zero_representations(
+    zero_value, monkeypatch, tmp_path
+):
+    assert BacktestConfig(
+        market_slippage_bps=zero_value
+    ).market_slippage_bps == 0.0
+    index_path = tmp_path / "archive_index.parquet"
+    index_path.write_bytes(b"archive")
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code")
+    base = {
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-08-01T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(index_path),
+    }
+    candidate = expand_specs({
+        **base,
+        "fixed": {"total_notional": 1000, "market_slippage_bps": zero_value},
+    }, ["AKEUSDT"])[0]
+    canonical = expand_specs({
+        **base,
+        "fixed": {"total_notional": 1000, "market_slippage_bps": 0.0},
+    }, ["AKEUSDT"])[0]
+
+    assert candidate == canonical
+    assert candidate.params["market_slippage_bps"] == 0.0
+    assert str(candidate.params["market_slippage_bps"]) == "0.0"
+    identity_kwargs = {
+        "code_fingerprint": "code",
+        "archive_index_fingerprint": sweep._archive_index_fingerprint(base),
+    }
+    assert sweep._run_identity(
+        candidate, base, **identity_kwargs
+    ) == sweep._run_identity(canonical, base, **identity_kwargs)
+
+
+@pytest.mark.parametrize(
+    "value", ["12.5", Decimal("12.5"), "invalid", Decimal("NaN")]
+)
+def test_market_slippage_normalization_preserves_nonzero_and_invalid_values(value):
+    params = {"total_notional": 1000, "market_slippage_bps": value}
+
+    normalized = sweep._normalize_market_slippage(params)
+
+    assert normalized["market_slippage_bps"] is value
+    assert params["market_slippage_bps"] is value
+
+
+def test_invalid_market_slippage_remains_visible_to_runner_validation(tmp_path):
+    spec = sweep.RunSpec(
+        "invalid-slippage",
+        "AKEUSDT",
+        {"total_notional": 1000, "market_slippage_bps": "invalid"},
+    )
+    config = {
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-07-02T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+    }
+    arguments = sweep._run_arguments(spec, config, tmp_path)
+
+    assert arguments[arguments.index("--market-slippage-bps") + 1] == "invalid"
+    with pytest.raises(SystemExit):
+        run_spike_short.parse_args(arguments)
+
+
+def test_sweep_report_records_market_slippage_values(tmp_path):
+    _write_report(
+        tmp_path,
+        pd.DataFrame(),
+        run_count=2,
+        workers=1,
+        worker_memory_budget=None,
+        duckdb_memory_limit=None,
+        market_slippage_bps=[0, 25],
+    )
+
+    report = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "MARKET 滑点（bps）：0, 25" in report
 
 
 def test_backtest_code_fingerprint_tracks_shared_source_content(

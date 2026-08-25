@@ -553,6 +553,154 @@ def test_symbol_sweep_forwards_numeric_parameter_and_allows_one_value(
     assert spec.event_mode == "shared"
 
 
+def test_symbol_sweep_forwards_market_slippage_and_records_workload_identity(
+    tmp_path: Path,
+):
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--symbol", "AKEUSDT",
+        "--market-slippage-bps", "25",
+        "--strategy", "trading_platform.strategies.spike.v1:V1",
+        "--sweep-parameter", "market_slippage_bps",
+        "--sweep-values", "25,50",
+    ])
+
+    factory = _sweep_factory(args, {"kind": "symbol-sweep"}, "test-invocation")
+    factory(0, tmp_path)
+    task = json.loads((tmp_path / "task.json").read_text(encoding="utf-8"))
+
+    assert [
+        run["arguments"][run["arguments"].index("--market-slippage-bps") + 1]
+        for run in task["runs"]
+    ] == ["25", "50"]
+
+
+def test_benchmark_normalizes_negative_zero_slippage_in_workload_identity(
+    tmp_path: Path, monkeypatch
+):
+    start_ms = benchmark._iso_to_ms("2026-07-01T00:00:00+00:00")
+    end_ms = benchmark._iso_to_ms("2026-07-02T00:00:00+00:00")
+    frame = _benchmark_archive_frame(
+        symbol="V1ONLY",
+        timeframes=("1s", "1m", "5m", "15m"),
+        first_open_ms=start_ms - 16 * 3_600_000,
+        last_close_ms=end_ms - 1,
+    )
+    monkeypatch.setattr(
+        benchmark, "discover_duckdb_path", lambda *_args: tmp_path / "candles.duckdb"
+    )
+    monkeypatch.setattr(
+        benchmark, "discover_archive_index", lambda *_args: tmp_path / "index.parquet"
+    )
+    monkeypatch.setattr(benchmark, "load_archive_index", lambda _path: frame)
+    monkeypatch.setattr(
+        benchmark,
+        "_reproducibility_metadata",
+        lambda workload, **_kwargs: {"workload_parameters": workload},
+    )
+    seen: list[dict[str, object]] = []
+
+    def fake_run_repeated(_factory, *, workload, **_kwargs):
+        seen.append(workload)
+        return {"failed_count": 0, "invalid_count": 0}
+
+    monkeypatch.setattr(benchmark, "run_repeated", fake_run_repeated)
+
+    for value in ("-0.0", "0.0"):
+        code, _payload = run_cli([
+            "--workload", "single",
+            "--symbol", "V1ONLY",
+            "--market-slippage-bps", value,
+            "--output-root", str(tmp_path / "same-output"),
+        ])
+        assert code == 0
+
+    assert seen[0] == seen[1]
+    assert seen[0]["market_slippage_bps"] == 0.0
+    assert str(seen[0]["market_slippage_bps"]) == "0.0"
+
+
+def test_symbol_sweep_normalizes_negative_zero_across_reproducibility_inputs(
+    tmp_path: Path, monkeypatch
+):
+    start_ms = benchmark._iso_to_ms("2026-07-01T00:00:00+00:00")
+    end_ms = benchmark._iso_to_ms("2026-07-02T00:00:00+00:00")
+    frame = _benchmark_archive_frame(
+        symbol="V1ONLY",
+        timeframes=("1s", "1m", "5m", "15m"),
+        first_open_ms=start_ms - 16 * 3_600_000,
+        last_close_ms=end_ms - 1,
+    )
+    monkeypatch.setattr(
+        benchmark, "discover_duckdb_path", lambda *_args: tmp_path / "candles.duckdb"
+    )
+    monkeypatch.setattr(
+        benchmark,
+        "discover_archive_index",
+        lambda *_args: tmp_path / "index.parquet",
+    )
+    monkeypatch.setattr(benchmark, "load_archive_index", lambda _path: frame)
+    monkeypatch.setattr(
+        benchmark,
+        "_reproducibility_metadata",
+        lambda workload, **_kwargs: {"workload_parameters": workload},
+    )
+    seen: list[dict[str, object]] = []
+
+    def fake_run_repeated(factory, *, workload, metadata, **_kwargs):
+        run_root = tmp_path / f"run-{len(seen)}"
+        run_root.mkdir()
+        factory(0, run_root)
+        task = json.loads((run_root / "task.json").read_text(encoding="utf-8"))
+        arguments = task["runs"][0]["arguments"]
+        seen.append({
+            "workload": workload,
+            "metadata": metadata,
+            "command_slippage": arguments[
+                arguments.index("--market-slippage-bps") + 1
+            ],
+        })
+        return {"failed_count": 0, "invalid_count": 0}
+
+    monkeypatch.setattr(benchmark, "run_repeated", fake_run_repeated)
+
+    for value in ("-0.0", "0.0"):
+        code, _payload = run_cli([
+            "--workload", "symbol-sweep",
+            "--symbol", "V1ONLY",
+            "--sweep-parameter", "market_slippage_bps",
+            f"--sweep-values={value}",
+            "--output-root", str(tmp_path / "same-output"),
+        ])
+        assert code == 0
+
+    assert seen[0] == seen[1]
+    workload = seen[0]["workload"]
+    assert isinstance(workload, dict)
+    assert workload["sweep_values"] == ["0.0"]
+    assert workload["effective_settings"][0]["market_slippage_bps"] == 0.0
+    metadata = seen[0]["metadata"]
+    assert isinstance(metadata, dict)
+    assert metadata["workload_parameters"] == workload
+    assert seen[0]["command_slippage"] == "0.0"
+
+
+def test_normalized_sweep_values_do_not_reuse_stale_namespace_state():
+    args = benchmark._build_parser().parse_args([
+        "--workload", "symbol-sweep",
+        "--sweep-parameter", "market_slippage_bps",
+        "--sweep-values=-0.0",
+    ])
+
+    assert benchmark._normalized_sweep_values(
+        args.sweep_parameter, args.sweep_values
+    ) == ("0.0",)
+    args.sweep_values = "25"
+    assert benchmark._normalized_sweep_values(
+        args.sweep_parameter, args.sweep_values
+    ) == ("25",)
+
+
 def test_symbol_sweep_keeps_prior_high_parameter(tmp_path: Path):
     args = benchmark._build_parser().parse_args([
         "--workload", "symbol-sweep",
@@ -712,6 +860,7 @@ def test_run_cli_preflights_v2_and_records_effective_workload(
         "load_start_ms": start_ms - 168 * 3_600_000,
         "required_timeframes": ["1s", "1m", "5m", "15m"],
         "exit_policy": "candidate-v1",
+        "market_slippage_bps": 0.0,
     }]
     assert "exit_policy" not in workload
 

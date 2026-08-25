@@ -39,6 +39,7 @@ import tempfile
 import time
 from typing import Callable, Literal, Sequence, TypeAlias, TypedDict
 
+from trading_platform.shared.config import BacktestConfig
 from trading_platform.market.archive.index import load_archive_index
 
 
@@ -51,6 +52,7 @@ _SWEEP_PARAMETERS = {
     "prior_high_lookback_hours": ("--prior-high-lookback-hours", int),
     "rise_5s_threshold_percent": ("--rise-5s-threshold-percent", Decimal),
     "profit_unlock_percent": ("--profit-unlock-percent", Decimal),
+    "market_slippage_bps": ("--market-slippage-bps", Decimal),
 }
 _REQUIRED_TIMEFRAMES = ("1s", "1m", "5m")
 
@@ -70,6 +72,7 @@ class Workload(TypedDict, total=False):
     strategy: str
     total_notional: str
     warmup_hours: float
+    market_slippage_bps: float
     exit_policy: str
     effective_load_start_ms: int | list[int]
     required_timeframes: list[str]
@@ -819,6 +822,9 @@ def _base_spike_arguments(args: argparse.Namespace) -> list[str]:
         "--strategy", args.strategy,
         "--total-notional", str(args.total_notional),
         "--warmup-hours", str(args.warmup_hours),
+        "--market-slippage-bps", str(BacktestConfig(
+            market_slippage_bps=args.market_slippage_bps
+        ).market_slippage_bps),
         "--chunk-hours", str(args.chunk_hours),
         "--fetch-batch-size", str(args.fetch_batch_size),
         "--duckdb-threads", str(args.duckdb_threads),
@@ -893,8 +899,8 @@ def _resolve_effective_settings(
 def _preflight_settings(args: argparse.Namespace) -> list[object]:
     if args.workload != "symbol-sweep":
         return [_resolve_effective_settings(args)]
-    values = _validate_sweep_values(
-        args.sweep_parameter, _sweep_values(args.sweep_values)
+    values = _normalized_sweep_values(
+        args.sweep_parameter, args.sweep_values
     )
     return [
         _resolve_effective_settings(args, sweep_value=value)
@@ -926,6 +932,7 @@ def _effective_setting_records(
             "load_start_ms": int(setting.load_start_ms),
             "required_timeframes": list(timeframes),
             "exit_policy": exit_policy,
+            "market_slippage_bps": float(setting.market_slippage_bps),
         })
     return records, tuple(required_timeframes)
 
@@ -934,6 +941,7 @@ def _validate_sweep_values(
     parameter: str, values: tuple[str, ...]
 ) -> tuple[str, ...]:
     parser = _SWEEP_PARAMETERS[parameter][1]
+    normalized: list[str] = []
     for value in values:
         try:
             parsed = parser(value)
@@ -945,7 +953,14 @@ def _validate_sweep_values(
             raise BenchmarkError(
                 f"--sweep-values must be finite for {parameter}"
             )
-    return values
+        normalized.append(
+            "0.0" if parameter == "market_slippage_bps" and parsed == 0 else value
+        )
+    return tuple(normalized)
+
+
+def _normalized_sweep_values(parameter: str, value: str) -> tuple[str, ...]:
+    return _validate_sweep_values(parameter.strip(), _sweep_values(value))
 
 
 def _single_factory(args: argparse.Namespace, workload: Workload, invocation: str):
@@ -974,7 +989,10 @@ def _sweep_factory(args: argparse.Namespace, workload: Workload, invocation: str
     base = _base_spike_arguments(args)
     parameter = args.sweep_parameter.strip()
     parameter_flag = _sweep_parameter_flag(parameter)
-    values = _validate_sweep_values(parameter, _sweep_values(args.sweep_values))
+    if parameter_flag in base:
+        flag_index = base.index(parameter_flag)
+        del base[flag_index:flag_index + 2]
+    values = _normalized_sweep_values(parameter, args.sweep_values)
 
     def factory(repeat: int, run_root: Path) -> CommandRun:
         task_path = run_root / "task.json"
@@ -1030,6 +1048,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--total-notional", default="1000")
     parser.add_argument("--warmup-hours", type=float, default=16.0)
     parser.add_argument(
+        "--market-slippage-bps",
+        type=float,
+        default=0.0,
+        help="MARKET 成交方向不利滑点（bps，默认 0；允许范围 0-1000）",
+    )
+    parser.add_argument(
         "--exit-policy",
         default=None,
     )
@@ -1070,15 +1094,19 @@ def _prepare_args(args: argparse.Namespace) -> argparse.Namespace:
         if not args.command:
             raise BenchmarkError("--command must not be empty")
         return args
+    try:
+        args.market_slippage_bps = BacktestConfig(
+            market_slippage_bps=args.market_slippage_bps
+        ).market_slippage_bps
+    except ValueError as exc:
+        raise BenchmarkError(f"invalid market slippage: {exc}") from exc
     if args.symbol is not None and not args.symbol.strip():
         raise BenchmarkError("--symbol must not be blank")
     args.strategy = _validate_strategy_path(args.strategy)
     if args.workload == "symbol-sweep":
         args.sweep_parameter = args.sweep_parameter.strip()
         _sweep_parameter_flag(args.sweep_parameter)
-        _validate_sweep_values(
-            args.sweep_parameter, _sweep_values(args.sweep_values)
-        )
+        _normalized_sweep_values(args.sweep_parameter, args.sweep_values)
     settings = _preflight_settings(args)
     effective_settings, required_timeframes = _effective_setting_records(args, settings)
     required_start_ms = min(item["load_start_ms"] for item in effective_settings)
@@ -1169,6 +1197,7 @@ def run_cli(argv: Sequence[str] | None = None) -> tuple[int, dict[str, object] |
                 "strategy": args.strategy,
                 "total_notional": str(args.total_notional),
                 "warmup_hours": args.warmup_hours,
+                "market_slippage_bps": args.market_slippage_bps,
                 "effective_load_start_ms": (
                     args._effective_settings[0]["load_start_ms"]
                     if args.workload == "single"
@@ -1192,7 +1221,13 @@ def run_cli(argv: Sequence[str] | None = None) -> tuple[int, dict[str, object] |
                 "duckdb_memory_limit": args.duckdb_memory_limit,
                 "duckdb_threads": args.duckdb_threads,
                 "sweep_parameter": args.sweep_parameter,
-                "sweep_values": list(_sweep_values(args.sweep_values)),
+                "sweep_values": list(
+                    _normalized_sweep_values(
+                        args.sweep_parameter, args.sweep_values
+                    )
+                    if args.workload == "symbol-sweep"
+                    else _sweep_values(args.sweep_values)
+                ),
                 "repeats": args.repeats,
                 "timeout_seconds": args.timeout_seconds,
                 "output_root": str(args.output_root.resolve()),

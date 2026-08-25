@@ -87,3 +87,28 @@ def test_engine_uses_dynamic_initial_trading_capital(monkeypatch):
 
     assert isinstance(engine.strategy, CapitalManagedSpikeStrategy)
     assert engine.strategy.delegate.strategies["BTCUSDT"].total_notional == Decimal("50")
+
+
+def test_market_slippage_bps_flows_from_spike_cli_to_engine_config(monkeypatch):
+    args = arguments("--market-slippage-bps", "12.5")
+    settings = resolve_settings(args)
+    monkeypatch.setattr(run_spike_short, "load_symbol_rules", lambda *_: None)
+
+    engine = create_spike_engine(args, settings, [])
+
+    assert settings.market_slippage_bps == 12.5
+    assert engine.config.market_slippage_bps == 12.5
+
+
+@pytest.mark.parametrize("value", [-0.0, 0.0])
+def test_market_slippage_bps_normalizes_zero_sign(value):
+    normalized = resolve_settings(arguments("--market-slippage-bps", str(value)))
+
+    assert normalized.market_slippage_bps == 0.0
+    assert str(normalized.market_slippage_bps) == "0.0"
+
+
+@pytest.mark.parametrize("value", ["-0.01", "1000.01", "nan", "inf"])
+def test_market_slippage_bps_rejects_invalid_bounds(value):
+    with pytest.raises(ValueError, match="market_slippage_bps"):
+        resolve_settings(arguments("--market-slippage-bps", value))

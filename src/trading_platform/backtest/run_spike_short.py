@@ -73,6 +73,7 @@ class SpikeBacktestSettings:
     rise_low_lookback_minutes: int
     min_rise_duration_minutes: int
     box_duration_min_minutes: int
+    market_slippage_bps: float
     spike_avg_deviation_max_pct: float
     spike_range_max_pct: float
     spike_vwap_deviation_max_pct: float
@@ -212,6 +213,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0,
         help="每根穿价 1s Bar 最多成交 LIMIT 原数量的比例（0, 1]",
+    )
+    parser.add_argument(
+        "--market-slippage-bps",
+        type=float,
+        default=0.0,
+        help="MARKET 成交方向不利滑点（bps，默认 0；允许范围 0-1000）",
     )
     parser.add_argument(
         "--bar1s-time-shift-hours",
@@ -822,6 +829,11 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
             "are not supported with --exit-policy legacy-script"
         )
 
+    # 与实际引擎复用同一 Pydantic 校验，避免 CLI/settings 分叉。
+    market_slippage_bps = BacktestConfig(
+        market_slippage_bps=args.market_slippage_bps
+    ).market_slippage_bps
+
     if prior_high_lookback_hours < 0:
         raise ValueError("--prior-high-lookback-hours must not be negative")
     if rise_low_lookback_hours < 0 or min_rise_duration_hours < 0:
@@ -875,6 +887,7 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         rise_low_lookback_minutes=rise_low_lookback_hours * 60,
         min_rise_duration_minutes=min_rise_duration_hours * 60,
         box_duration_min_minutes=box_duration_min_hours * 60,
+        market_slippage_bps=market_slippage_bps,
         spike_avg_deviation_max_pct=spike_avg_deviation_max_pct,
         spike_range_max_pct=spike_range_max_pct,
         spike_vwap_deviation_max_pct=spike_vwap_deviation_max_pct,
@@ -984,6 +997,7 @@ def create_spike_engine(
         output_dir=str(settings.output_path),
         trading_start_ms=settings.start_ms,
         limit_fill_fraction_per_bar=args.limit_fill_fraction,
+        market_slippage_bps=settings.market_slippage_bps,
         bar1s_time_shift_ms=settings.bar1s_time_shift_ms,
         prior_high_lookback_minutes=(
             settings.prior_high_lookback_minutes or 1
