@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from trading_platform.backtest.strategy_definition import FeatureSpec
+from trading_platform.backtest.strategy_definition import FeatureSpec, SharedMetricSpec
 from trading_platform.backtest.result import BacktestResult, ResultAnalyzer
 from trading_platform.shared.events import Bar1s, Kline
 from trading_platform.shared.config import BacktestConfig
@@ -803,6 +803,9 @@ def test_shift_group_projects_real_v2_family_requirements(monkeypatch):
             duckdb_path="history.duckdb",
             required_kline_intervals=("1m", "5m", "15m"),
             requires_bar1s=True,
+            prior_high_lookback_minutes=6 * 60,
+            rise_low_lookback_minutes=7 * 24 * 60,
+            box_duration_min_minutes=0,
             bar1s_time_shift_ms=0,
             output_path=Path(f"output-{index}"),
         )
@@ -857,8 +860,9 @@ def test_shared_feature_providers_are_opt_in_and_grouped_by_replay_context():
     created = []
 
     class FakeProvider:
-        def __init__(self, *, shared_features):
+        def __init__(self, *, shared_features, retained_1m_minutes):
             self.shared_features = shared_features
+            self.retained_1m_minutes = retained_1m_minutes
             self.consumers = []
             created.append(self)
 
@@ -868,7 +872,11 @@ def test_shared_feature_providers_are_opt_in_and_grouped_by_replay_context():
     feature = FeatureSpec(name="rise_5s", timeframe="1s")
     definition = SimpleNamespace(
         shared_feature_provider=FakeProvider,
-        data_requirements=SimpleNamespace(shared_features=frozenset({feature})),
+        data_requirements=SimpleNamespace(
+            shared_features=frozenset({feature}),
+            shared_metrics=(),
+            resolve_retention_minutes=lambda _settings: 30 * 60,
+        ),
     )
 
     def plan(run_id, load_start_ms, *, feature_definition=definition):
@@ -887,7 +895,11 @@ def test_shared_feature_providers_are_opt_in_and_grouped_by_replay_context():
         )
 
     no_features = SimpleNamespace(
-        data_requirements=SimpleNamespace(shared_features=frozenset())
+        data_requirements=SimpleNamespace(
+            shared_features=frozenset(),
+            shared_metrics=(),
+            resolve_retention_minutes=lambda _settings: 30 * 60,
+        )
     )
     plans = [
         plan("five-percent", 1_000),
@@ -902,6 +914,303 @@ def test_shared_feature_providers_are_opt_in_and_grouped_by_replay_context():
     assert len(created) == 2
     assert sorted(len(provider.consumers) for provider in created) == [1, 2]
     assert all(provider.shared_features == frozenset({feature}) for provider in created)
+
+
+def test_shared_metric_only_requirements_create_a_provider_group():
+    created = []
+
+    class FakeProvider:
+        def __init__(self, *, shared_features, shared_metrics, retained_1m_minutes):
+            self.shared_features = shared_features
+            self.shared_metrics = shared_metrics
+            self.retained_1m_minutes = retained_1m_minutes
+            self.consumers = []
+            created.append(self)
+
+        def bind(self, consumer):
+            self.consumers.append(consumer)
+
+    def count_window(window):
+        return len(window)
+
+    metric = SharedMetricSpec(
+        FeatureSpec(name="window_metric", timeframe="1m"),
+        count_window,
+        lambda settings: settings.metric_retention_minutes,
+    )
+    definition = SimpleNamespace(
+        shared_feature_provider=FakeProvider,
+        data_requirements=SimpleNamespace(
+            shared_features=frozenset(),
+            shared_metrics=(metric,),
+            resolve_retention_minutes=lambda _settings: 30 * 60,
+        ),
+    )
+    settings = SimpleNamespace(
+        strategy_definition=definition,
+        load_start_ms=1_000,
+        required_kline_intervals=("1m",),
+        requires_bar1s=False,
+        metric_retention_minutes=48 * 60,
+    )
+    plan = symbol_runner.SymbolRunPlan(
+        run_id="metric-only",
+        args=SimpleNamespace(),
+        settings=settings,
+        engine=SimpleNamespace(strategy=object()),
+    )
+
+    groups = symbol_runner._build_shared_provider_groups([plan])
+
+    assert len(groups) == 1
+    assert created[0].shared_features == frozenset()
+    assert created[0].shared_metrics == (metric,)
+    assert created[0].retained_1m_minutes == 48 * 60
+    assert created[0].consumers == [plan.engine.strategy]
+
+
+def test_shared_metric_retention_stays_paired_with_its_declaring_plan():
+    created = []
+    resolver_calls = []
+
+    class FakeProvider:
+        def __init__(self, *, shared_features, shared_metrics, retained_1m_minutes):
+            self.shared_features = shared_features
+            self.shared_metrics = shared_metrics
+            self.retained_1m_minutes = retained_1m_minutes
+            created.append(self)
+
+        def bind(self, _consumer):
+            pass
+
+    def retention_a(settings):
+        resolver_calls.append(("a", settings.a_retention))
+        return settings.a_retention
+
+    def retention_b(settings):
+        resolver_calls.append(("b", settings.b_retention))
+        return settings.b_retention
+
+    metric_a = SharedMetricSpec(
+        FeatureSpec(name="metric_a", timeframe="1m"),
+        lambda window: len(window),
+        retention_a,
+    )
+    metric_b = SharedMetricSpec(
+        FeatureSpec(name="metric_b", timeframe="1m"),
+        lambda window: len(window),
+        retention_b,
+    )
+
+    def plan(name, metric, **retention_setting):
+        definition = SimpleNamespace(
+            name=name,
+            shared_feature_provider=FakeProvider,
+            data_requirements=SimpleNamespace(
+                shared_features=frozenset(),
+                shared_metrics=(metric,),
+                resolve_retention_minutes=lambda _settings: 30,
+            ),
+        )
+        settings = SimpleNamespace(
+            strategy_definition=definition,
+            load_start_ms=0,
+            required_kline_intervals=("1m",),
+            requires_bar1s=False,
+            **retention_setting,
+        )
+        return symbol_runner.SymbolRunPlan(
+            run_id=name,
+            args=SimpleNamespace(),
+            settings=settings,
+            engine=SimpleNamespace(strategy=object()),
+        )
+
+    groups = symbol_runner._build_shared_provider_groups([
+        plan("strategy-a", metric_a, a_retention=60),
+        plan("strategy-b", metric_b, b_retention=120),
+    ])
+
+    assert len(groups) == 1
+    assert created[0].shared_metrics == (metric_a, metric_b)
+    assert created[0].retained_1m_minutes == 120
+    assert resolver_calls == [("a", 60), ("b", 120)]
+
+
+def test_shared_metric_specs_are_deduplicated_before_provider_creation():
+    created = []
+    resolver_calls = []
+
+    class FakeProvider:
+        def __init__(self, *, shared_features, shared_metrics, retained_1m_minutes):
+            self.shared_metrics = shared_metrics
+            self.retained_1m_minutes = retained_1m_minutes
+            created.append(self)
+
+        def bind(self, _consumer):
+            pass
+
+    def retention(settings):
+        resolver_calls.append(settings.metric_retention)
+        return settings.metric_retention
+
+    metric = SharedMetricSpec(
+        FeatureSpec(name="same_metric", timeframe="1m"),
+        lambda window: len(window),
+        retention,
+    )
+    definition = SimpleNamespace(
+        name="same-strategy",
+        shared_feature_provider=FakeProvider,
+        data_requirements=SimpleNamespace(
+            shared_features=frozenset(),
+            shared_metrics=(metric, metric),
+            resolve_retention_minutes=lambda _settings: 30,
+        ),
+    )
+
+    def plan(name, retention_minutes):
+        settings = SimpleNamespace(
+            strategy_definition=definition,
+            load_start_ms=0,
+            required_kline_intervals=("1m",),
+            requires_bar1s=False,
+            metric_retention=retention_minutes,
+        )
+        return symbol_runner.SymbolRunPlan(
+            run_id=name,
+            args=SimpleNamespace(),
+            settings=settings,
+            engine=SimpleNamespace(strategy=object()),
+        )
+
+    symbol_runner._build_shared_provider_groups([
+        plan("first", 60),
+        plan("second", 120),
+    ])
+
+    assert created[0].shared_metrics == (metric,)
+    assert created[0].retained_1m_minutes == 120
+    assert resolver_calls == [60, 120]
+
+
+def test_shared_metric_group_rejects_conflicting_specs_before_resolving_retention():
+    created = []
+    resolver_calls = []
+
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            created.append(self)
+
+    feature = FeatureSpec(name="conflict", timeframe="1m")
+
+    def retention(_settings):
+        resolver_calls.append(True)
+        return 60
+
+    metrics = (
+        SharedMetricSpec(feature, lambda _window: 1, retention),
+        SharedMetricSpec(feature, lambda _window: 2, retention),
+    )
+    plans = []
+    for index, metric in enumerate(metrics):
+        definition = SimpleNamespace(
+            name=f"strategy-{index}",
+            shared_feature_provider=FakeProvider,
+            data_requirements=SimpleNamespace(
+                shared_features=frozenset(),
+                shared_metrics=(metric,),
+                resolve_retention_minutes=lambda _settings: 30,
+            ),
+        )
+        settings = SimpleNamespace(
+            strategy_definition=definition,
+            load_start_ms=0,
+            required_kline_intervals=("1m",),
+            requires_bar1s=False,
+        )
+        plans.append(symbol_runner.SymbolRunPlan(
+            run_id=str(index),
+            args=SimpleNamespace(),
+            settings=settings,
+            engine=SimpleNamespace(strategy=object()),
+        ))
+
+    with pytest.raises(ValueError, match="conflicting shared metric definitions"):
+        symbol_runner._build_shared_provider_groups(plans)
+
+    assert resolver_calls == []
+    assert created == []
+
+
+@pytest.mark.parametrize("timeframe", ("5m", "15m"))
+def test_shared_metric_group_rejects_declared_non_1m_metric_before_provider_creation(
+    timeframe,
+):
+    created = []
+
+    class FakeProvider:
+        def __init__(self, **_kwargs):
+            created.append(self)
+
+    metric = SharedMetricSpec(
+        FeatureSpec(name="high_48h", timeframe=timeframe),
+        lambda window: len(window),
+        48 * 60,
+    )
+    definition = SimpleNamespace(
+        name="unsupported-5m-metric",
+        shared_feature_provider=FakeProvider,
+        data_requirements=SimpleNamespace(
+            shared_features=frozenset(),
+            shared_metrics=(metric,),
+            resolve_retention_minutes=lambda _settings: 30 * 60,
+        ),
+    )
+    settings = SimpleNamespace(
+        strategy_definition=definition,
+        load_start_ms=0,
+        required_kline_intervals=(timeframe,),
+        requires_bar1s=False,
+    )
+    plan = symbol_runner.SymbolRunPlan(
+        run_id="unsupported-5m-metric",
+        args=SimpleNamespace(),
+        settings=settings,
+        engine=SimpleNamespace(strategy=object()),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=rf"only the 1m timeframe: high_48h@{timeframe}",
+    ):
+        symbol_runner._build_shared_provider_groups([plan])
+
+    assert created == []
+
+
+def test_shared_provider_group_rejects_missing_formal_metric_declaration():
+    feature = FeatureSpec(name="rise_5s", timeframe="1s")
+    definition = SimpleNamespace(
+        name="invalid",
+        shared_feature_provider=object,
+        data_requirements=SimpleNamespace(shared_features=frozenset({feature})),
+    )
+    settings = SimpleNamespace(
+        strategy_definition=definition,
+        load_start_ms=0,
+        required_kline_intervals=("1s",),
+        requires_bar1s=True,
+    )
+    plan = symbol_runner.SymbolRunPlan(
+        run_id="invalid",
+        args=SimpleNamespace(),
+        settings=settings,
+        engine=SimpleNamespace(strategy=object()),
+    )
+
+    with pytest.raises(ValueError, match="shared_metrics"):
+        symbol_runner._build_shared_provider_groups([plan])
 
 
 def test_v11_shared_features_keep_threshold_decisions_per_strategy(

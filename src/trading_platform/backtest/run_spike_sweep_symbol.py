@@ -12,7 +12,11 @@ from typing import Any, Sequence
 
 from trading_platform.backtest.engine import BacktestEngine, Event
 from trading_platform.backtest.loader import BacktestDataLoader
-from trading_platform.backtest.strategy_definition import SharedFeatureProvider
+from trading_platform.backtest.strategy_definition import (
+    SharedFeatureProvider,
+    aggregate_shared_metric_retention,
+    normalize_shared_metric_specs,
+)
 from trading_platform.backtest.run_spike_short import (
     SpikeBacktestSettings,
     create_spike_engine,
@@ -75,8 +79,22 @@ def _build_shared_provider_groups(
     for plan in plans:
         definition = plan.settings.strategy_definition
         factory = getattr(definition, "shared_feature_provider", None)
-        requirements = definition.data_requirements.shared_features
-        if factory is None or not requirements:
+        requirements = definition.data_requirements
+        if factory is None:
+            if hasattr(requirements, "shared_metrics") and requirements.shared_metrics:
+                raise ValueError(
+                    f"strategy {definition.name} declares shared metrics without "
+                    "shared_feature_provider"
+                )
+            continue
+        try:
+            shared_metrics = requirements.shared_metrics
+        except AttributeError as error:
+            raise ValueError(
+                f"strategy {definition.name} has a shared_feature_provider but "
+                "does not declare data_requirements.shared_metrics"
+            ) from error
+        if not (requirements.shared_features or shared_metrics):
             continue
         key = (
             factory,
@@ -92,10 +110,50 @@ def _build_shared_provider_groups(
             plan.settings.strategy_definition.data_requirements.shared_features
             for plan in bucket
         ))
-        provider = getattr(
+        metric_consumers = tuple(
+            (metric, plan.settings)
+            for plan in bucket
+            for metric in normalize_shared_metric_specs(
+                plan.settings.strategy_definition.data_requirements.shared_metrics
+            )
+        )
+        shared_metrics = normalize_shared_metric_specs(
+            metric for metric, _settings in metric_consumers
+        )
+        provider_factory = getattr(
             bucket[0].settings.strategy_definition,
             "shared_feature_provider",
-        )(shared_features=shared_features)
+        )
+        retention_values = []
+        for plan in bucket:
+            plan_definition = plan.settings.strategy_definition
+            try:
+                resolver = (
+                    plan_definition.data_requirements.resolve_retention_minutes
+                )
+            except AttributeError as error:
+                raise ValueError(
+                    f"strategy {plan_definition.name} does not declare a "
+                    "retention resolver"
+                ) from error
+            retention_values.append(resolver(plan.settings))
+        retention = max(retention_values)
+        if shared_metrics:
+            retention = max(
+                retention,
+                max(
+                    aggregate_shared_metric_retention(
+                        metric_consumers,
+                    ).values()
+                ),
+            )
+        provider_kwargs = {
+            "shared_features": shared_features,
+            "retained_1m_minutes": retention,
+        }
+        if shared_metrics:
+            provider_kwargs["shared_metrics"] = shared_metrics
+        provider = provider_factory(**provider_kwargs)
         for plan in bucket:
             provider.bind(plan.engine.strategy)
         groups.append(SharedProviderGroup(bucket[0], provider))

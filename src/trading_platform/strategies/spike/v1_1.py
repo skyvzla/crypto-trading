@@ -7,6 +7,7 @@ from decimal import Decimal
 from trading_platform.strategies.spike.definition import (
     SPIKE_CANDIDATE_EXIT_FEATURE,
     SPIKE_RISE_5S_FEATURE,
+    SPIKE_V2_SHARED_METRICS,
     SpikeDataRequirements,
     SpikeStrategyDefaults,
 )
@@ -162,6 +163,7 @@ class V11:
             SPIKE_RISE_5S_FEATURE,
             SPIKE_CANDIDATE_EXIT_FEATURE,
         }),
+        shared_metrics=SPIKE_V2_SHARED_METRICS,
         metrics_5m=True,
     )
     shared_feature_provider = SpikeSharedFeatureProvider

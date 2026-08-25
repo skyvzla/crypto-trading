@@ -138,9 +138,11 @@ def _strategy(
     rise_threshold: str = "0.05",
     metrics_series: list[tuple[int, float, float]] | None = None,
     max_oi_change_pct: float = 0.0,
+    prior_high_lookback_minutes: int = 4 * 60,
+    box_duration_min_minutes: int = 60,
 ) -> DynamicSpikeBacktestStrategy:
     parameters: dict[str, object] = {
-        "box_duration_min_minutes": 60,
+        "box_duration_min_minutes": box_duration_min_minutes,
         "rise_5s_threshold": Decimal(rise_threshold),
     }
     if metrics_series is not None:
@@ -155,7 +157,7 @@ def _strategy(
         [SYMBOL],
         Decimal("1000"),
         exit_policy="candidate-v1",
-        prior_high_lookback_minutes=4 * 60,
+        prior_high_lookback_minutes=prior_high_lookback_minutes,
         rise_low_lookback_minutes=3 * 60,
         min_rise_duration_minutes=60,
         strategy_class=strategy_class,
@@ -178,6 +180,7 @@ def _run(
     events: list[Bar1s | Kline],
     provider: SpikeSharedFeatureProvider | None = None,
     state_trace: list[tuple[object, ...]] | None = None,
+    business_trace: list[object] | None = None,
 ) -> BacktestEngine:
     engine = BacktestEngine(
         strategy,
@@ -192,6 +195,8 @@ def _run(
         engine.process_event(event)
         if state_trace is not None:
             state_trace.append(_private_state(strategy))
+        if business_trace is not None:
+            business_trace.append(_business_snapshot(engine))
     return engine
 
 
@@ -200,6 +205,7 @@ def _run_shared(
     events: list[Bar1s | Kline],
     provider: SpikeSharedFeatureProvider,
     state_traces: list[list[tuple[object, ...]]] | None = None,
+    business_traces: list[list[object]] | None = None,
 ) -> list[BacktestEngine]:
     engines = [
         BacktestEngine(
@@ -217,7 +223,43 @@ def _run_shared(
             engine.process_event(event)
             if state_traces is not None:
                 state_traces[index].append(_private_state(strategies[index]))
+            if business_traces is not None:
+                business_traces[index].append(_business_snapshot(engine))
     return engines
+
+
+def _business_snapshot(engine: BacktestEngine) -> tuple[object, ...]:
+    """复制逐事件可观察的订单、成交、持仓和审计业务产物。"""
+    orders = tuple(
+        (
+            order_id,
+            order.status,
+            order.filled_quantity,
+            order.price,
+            order.reduce_only,
+            order.trigger_reason,
+        )
+        for order_id, order in sorted(engine.orders.items())
+    )
+    fills = tuple(
+        (fill.order_id, fill.side, fill.price, fill.quantity, fill.fill_time)
+        for fill in engine.fill_records
+    )
+    positions = tuple(
+        (
+            symbol,
+            position.side,
+            position.quantity,
+            position.entry_price,
+            position.realized_pnl,
+        )
+        for symbol, position in sorted(engine.positions.items())
+    )
+    audits = tuple(
+        (audit.event_time, audit.event_type, audit.campaign_id, audit.details)
+        for audit in engine.audit_records
+    )
+    return orders, fills, positions, audits
 
 
 def _snapshot(engine: BacktestEngine) -> dict[str, object]:
@@ -361,7 +403,9 @@ def test_shared_spike_replay_matches_isolated_engine_records(definition_path):
         for index, strategy in enumerate(isolated_strategies)
     ]
     provider = SpikeSharedFeatureProvider(
-        shared_features=definition.data_requirements.shared_features
+        shared_features=definition.data_requirements.shared_features,
+        shared_metrics=definition.data_requirements.shared_metrics,
+        retained_1m_minutes=7 * 24 * 60,
     )
     shared_traces = [[] for _ in shared_strategies]
     shared = _run_shared(
@@ -395,3 +439,56 @@ def test_shared_spike_replay_matches_isolated_engine_records(definition_path):
             True,
             f"spike_short:{SYMBOL}:{signal_minute}",
         )
+
+
+def test_shared_spike_replay_retains_declared_48h_prior_high_and_matches_each_event():
+    definition = load_strategy_definition("trading_platform.strategies.spike.v2:V2")
+    signal_minute = WARMUP_MINUTES * MINUTE
+    marker_time = signal_minute - 36 * 60 * MINUTE
+    events = _events(signal_minute=signal_minute)
+    events = [
+        Kline(
+            symbol=event.symbol,
+            interval=event.interval,
+            open_time=event.open_time,
+            close_time=event.close_time,
+            available_time=event.available_time,
+            open=event.open,
+            high=Decimal("200"),
+            low=event.low,
+            close=event.close,
+            volume=event.volume,
+        )
+        if isinstance(event, Kline)
+        and event.interval == "1m"
+        and event.open_time == marker_time
+        else event
+        for event in events
+    ]
+    isolated_strategy = _strategy(
+        definition.strategy_class,
+        prior_high_lookback_minutes=48 * 60,
+        box_duration_min_minutes=0,
+    )
+    shared_strategy = _strategy(
+        definition.strategy_class,
+        prior_high_lookback_minutes=48 * 60,
+        box_duration_min_minutes=0,
+    )
+    isolated_trace: list[object] = []
+    shared_trace: list[object] = []
+    _run(isolated_strategy, events, business_trace=isolated_trace)
+    provider = SpikeSharedFeatureProvider(
+        shared_features=definition.data_requirements.shared_features,
+        shared_metrics=definition.data_requirements.shared_metrics,
+        retained_1m_minutes=48 * 60,
+    )
+    _run_shared(
+        [shared_strategy],
+        events,
+        provider,
+        business_traces=[shared_trace],
+    )
+
+    assert shared_trace == isolated_trace
+    assert provider.retained_1m_minutes == 48 * 60

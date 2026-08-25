@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from trading_platform.strategies.spike.definition import (
+    SPIKE_V2_SHARED_METRICS,
     SPIKE_V2_SHARED_FEATURES,
     SpikeDataRequirements,
     SpikeStrategyDefaults,
@@ -647,6 +648,7 @@ class V21:
         metrics_5m=True,
         bar1s_feature_columns=frozenset(),
         shared_features=SPIKE_V2_SHARED_FEATURES,
+        shared_metrics=SPIKE_V2_SHARED_METRICS,
     )
     defaults = SpikeStrategyDefaults(
         exit_policy=V2.defaults.exit_policy,

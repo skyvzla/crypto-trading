@@ -2,11 +2,16 @@ from decimal import Decimal
 
 import pytest
 
-from trading_platform.backtest.strategy_definition import FeatureSpec
+from trading_platform.backtest.strategy_definition import FeatureSpec, SharedMetricSpec
 from trading_platform.shared.events import Bar1s, Kline
 from trading_platform.strategies.spike.exit_features import CandidateFeatureConfig
 from trading_platform.strategies.spike.shared_features import (
     SpikeSharedFeatureProvider,
+)
+from trading_platform.strategies.spike.definition import (
+    SPIKE_MIN_LOW_1M_FEATURE,
+    SPIKE_PRIOR_HIGH_1M_FEATURE,
+    SPIKE_V2_SHARED_METRICS,
 )
 from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
 from trading_platform.strategies.spike.v1_1 import SpikeV11Strategy
@@ -62,7 +67,8 @@ def _kline(interval: str, index: int, duration: int) -> Kline:
 
 def test_shared_bar_features_keep_exact_scalar_window_semantics():
     provider = SpikeSharedFeatureProvider(
-        shared_features={FeatureSpec("rise_5s", "1s")}
+        shared_features={FeatureSpec("rise_5s", "1s")},
+        retained_1m_minutes=30 * 60,
     )
     bars = [_bar(index) for index in range(61)]
     bars[-1] = _bar(60, close="107", volume="15")
@@ -84,7 +90,8 @@ def test_shared_bar_features_keep_exact_scalar_window_semantics():
 
 def test_unrequested_1s_feature_has_no_1s_cache_or_calculation():
     provider = SpikeSharedFeatureProvider(
-        shared_features={FeatureSpec("candidate_exit", "1m")}
+        shared_features={FeatureSpec("candidate_exit", "1m")},
+        retained_1m_minutes=30 * 60,
     )
     bar = _bar(0)
 
@@ -96,7 +103,8 @@ def test_unrequested_1s_feature_has_no_1s_cache_or_calculation():
 
 def test_orderflow_feature_builds_rolling_cvd_from_archivable_bar_fields():
     provider = SpikeSharedFeatureProvider(
-        shared_features={FeatureSpec("orderflow", "1s")}
+        shared_features={FeatureSpec("orderflow", "1s")},
+        retained_1m_minutes=30 * 60,
     )
     bars = [
         _bar(
@@ -126,7 +134,8 @@ def test_orderflow_feature_builds_rolling_cvd_from_archivable_bar_fields():
 
 def test_orderflow_feature_rejects_gapped_windows():
     provider = SpikeSharedFeatureProvider(
-        shared_features={FeatureSpec("orderflow", "1s")}
+        shared_features={FeatureSpec("orderflow", "1s")},
+        retained_1m_minutes=30 * 60,
     )
     bars = [
         _bar(
@@ -154,7 +163,8 @@ def test_orderflow_feature_rejects_gapped_windows():
 def test_spike_provider_rejects_features_owned_by_other_strategies():
     with pytest.raises(ValueError, match="unsupported Spike shared features"):
         SpikeSharedFeatureProvider(
-            shared_features={FeatureSpec("other_strategy_signal", "1s")}
+            shared_features={FeatureSpec("other_strategy_signal", "1s")},
+            retained_1m_minutes=30 * 60,
         )
 
 
@@ -170,7 +180,8 @@ def test_candidate_features_are_cached_per_kline_version(monkeypatch):
         fake_snapshot,
     )
     provider = SpikeSharedFeatureProvider(
-        shared_features={FeatureSpec("candidate_exit", "1m")}
+        shared_features={FeatureSpec("candidate_exit", "1m")},
+        retained_1m_minutes=30 * 60,
     )
     config = CandidateFeatureConfig()
     minute = _kline("1m", 0, 60_000)
@@ -187,7 +198,8 @@ def test_candidate_features_are_cached_per_kline_version(monkeypatch):
 
 def test_shared_kline_cache_evicts_expired_late_candle():
     provider = SpikeSharedFeatureProvider(
-        shared_features={FeatureSpec("candidate_exit", "1m")}
+        shared_features={FeatureSpec("candidate_exit", "1m")},
+        retained_1m_minutes=40 * 60,
     )
     duration = 300_000
     retention = 40 * 60 * 60_000
@@ -296,12 +308,19 @@ def test_shared_features_match_isolated_strategies_with_different_thresholds():
         shared_features={
             FeatureSpec("rise_5s", "1s"),
             FeatureSpec("candidate_exit", "1m"),
-        }
+        },
+        retained_1m_minutes=30 * 60,
     )
     for item in shared:
         provider.bind(item)
     for event in [*klines, *bars]:
         provider.process_event(event)
+        for item in shared:
+            leaf = item.strategies["BTCUSDT"]
+            if isinstance(event, Kline):
+                leaf.on_kline(event)
+            else:
+                leaf._update_cache(event)
 
     isolated_signals = [
         item.strategies["BTCUSDT"]._detect_signal(bars[-1])
@@ -342,7 +361,8 @@ def test_shared_provider_retention_covers_each_requirement_exactly(
         shared_features={
             FeatureSpec("rise_5s", "1s"),
             FeatureSpec("candidate_exit", "1m"),
-        }
+        },
+        retained_1m_minutes=expected_retention,
     )
 
     provider.bind(adapter)
@@ -365,3 +385,233 @@ def test_shared_provider_evicts_1m_candles_at_exact_retention_boundary():
     provider.process_event(latest)
 
     assert list(provider.klines_1m) == [boundary, latest]
+
+
+def test_window_metrics_share_one_completed_window_per_event_and_keep_parameter_keys():
+    metric_feature = FeatureSpec("count_window", "1m")
+    calls = []
+
+    def count_window(window):
+        calls.append(tuple(window))
+        return len(window)
+
+    provider = SpikeSharedFeatureProvider(
+        shared_metrics=(SharedMetricSpec(metric_feature, count_window, 10),),
+        retained_1m_minutes=10,
+    )
+    candles = []
+    for index in range(10):
+        candles.append(
+            Kline(
+                symbol="BTCUSDT",
+                interval="1m",
+                open_time=index * 60_000,
+                close_time=(index + 1) * 60_000 - 1,
+                available_time=(index + 1) * 60_000,
+                open=Decimal("100"),
+                high=Decimal(str(100 + index)),
+                low=Decimal(str(90 + index)),
+                close=Decimal("100"),
+                volume=Decimal("1"),
+            )
+        )
+    for candle in candles:
+        provider.process_event(candle)
+
+    assert provider.window_metric(metric_feature, 10 * 60_000, 3) == 3
+    assert provider.window_metric(metric_feature, 10 * 60_000, 3) == 3
+    assert provider.window_metric(metric_feature, 10 * 60_000, 2) == 2
+    assert [len(window) for window in calls] == [3, 2]
+
+
+class _MutableButHashable:
+    __hash__ = object.__hash__
+
+    def __init__(self):
+        self.values = []
+
+
+@pytest.mark.parametrize(
+    "result_factory",
+    (
+        pytest.param(lambda: ["mutable"], id="list"),
+        pytest.param(lambda: {"mutable": True}, id="dict"),
+        pytest.param(lambda: ("nested", ["mutable"]), id="nested-mutable-tuple"),
+        pytest.param(lambda: (item for item in ()), id="generator"),
+        pytest.param(_MutableButHashable, id="mutable-but-hashable"),
+    ),
+)
+def test_shared_metric_rejects_mutable_results_before_cross_strategy_caching(
+    result_factory,
+):
+    metric_feature = FeatureSpec("mutable_result", "1m")
+    compute_calls = 0
+
+    def compute(_window):
+        nonlocal compute_calls
+        compute_calls += 1
+        return result_factory()
+
+    class Consumer:
+        def bind_shared_feature_provider(self, provider):
+            self.provider = provider
+
+        def read_metric(self):
+            return self.provider.window_metric(metric_feature, 60_000, 1)
+
+    provider = SpikeSharedFeatureProvider(
+        shared_metrics=(
+            SharedMetricSpec(metric_feature, compute, 1),
+        ),
+        retained_1m_minutes=1,
+    )
+    consumers = (Consumer(), Consumer())
+    for consumer in consumers:
+        provider.bind(consumer)
+    provider.process_event(_kline("1m", 0, 60_000))
+
+    for consumer in consumers:
+        with pytest.raises(
+            TypeError,
+            match=r"immutable SharedMetricResult: mutable_result@1m returned",
+        ):
+            consumer.read_metric()
+
+    assert compute_calls == 2
+    assert provider._window_metric_cache == {}
+
+
+def test_shared_metric_accepts_recursively_immutable_results():
+    metric_feature = FeatureSpec("immutable_result", "1m")
+    expected = (
+        None,
+        True,
+        1,
+        1.5,
+        "value",
+        b"value",
+        Decimal("1.25"),
+        (Decimal("2.5"), 2),
+    )
+    provider = SpikeSharedFeatureProvider(
+        shared_metrics=(
+            SharedMetricSpec(metric_feature, lambda _window: expected, 1),
+        ),
+        retained_1m_minutes=1,
+    )
+    provider.process_event(_kline("1m", 0, 60_000))
+
+    assert provider.window_metric(metric_feature, 60_000, 1) is expected
+
+
+def test_non_1m_events_do_not_invalidate_1m_metric_cache():
+    metric_feature = FeatureSpec("count_window", "1m")
+    compute_calls = 0
+
+    def count_window(window):
+        nonlocal compute_calls
+        compute_calls += 1
+        return len(window)
+
+    provider = SpikeSharedFeatureProvider(
+        shared_metrics=(SharedMetricSpec(metric_feature, count_window, 1),),
+        retained_1m_minutes=1,
+    )
+    provider.process_event(_kline("1m", 0, 60_000))
+    assert provider.window_metric(metric_feature, 60_000, 1) == 1
+
+    provider.process_event(_kline("5m", 0, 5 * 60_000))
+    assert provider.window_metric(metric_feature, 60_000, 1) == 1
+    provider.process_event(_kline("15m", 0, 15 * 60_000))
+    assert provider.window_metric(metric_feature, 60_000, 1) == 1
+
+    assert compute_calls == 1
+
+
+@pytest.mark.parametrize("timeframe", ("5m", "15m"))
+def test_shared_metric_provider_rejects_non_1m_metrics_directly(timeframe):
+    metric_feature = FeatureSpec("high_48h", timeframe)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"only the 1m timeframe: high_48h@{timeframe}",
+    ):
+        SpikeSharedFeatureProvider(
+            shared_metrics=(
+                SharedMetricSpec(metric_feature, lambda window: len(window), 48 * 60),
+            ),
+            retained_1m_minutes=48 * 60,
+        )
+
+
+def test_shared_and_isolated_window_metrics_match_at_each_available_event():
+    provider = SpikeSharedFeatureProvider(
+        shared_features={SPIKE_MIN_LOW_1M_FEATURE, SPIKE_PRIOR_HIGH_1M_FEATURE},
+        shared_metrics=SPIKE_V2_SHARED_METRICS,
+        retained_1m_minutes=10,
+    )
+    isolated = []
+    for index in range(10):
+        candle = _kline("1m", index, 60_000)
+        candle = Kline(
+            symbol=candle.symbol,
+            interval=candle.interval,
+            open_time=candle.open_time,
+            close_time=candle.close_time,
+            available_time=candle.available_time,
+            open=candle.open,
+            high=Decimal(str(100 + index)),
+            low=Decimal(str(90 + index)),
+            close=candle.close,
+            volume=candle.volume,
+        )
+        isolated.append(candle)
+        provider.process_event(candle)
+        minute_start = (index + 1) * 60_000
+        if index < 2:
+            continue
+        window = isolated[-3:]
+        expected_low = min(window, key=lambda item: (item.low, -item.open_time))
+        expected_high = max(window, key=lambda item: (item.high, item.open_time))
+        assert provider.min_low_point_1m(minute_start, 3) == (
+            expected_low.low,
+            expected_low.open_time,
+        )
+        assert provider.prior_high_point_1m(minute_start, 3) == (
+            expected_high.high,
+            expected_high.open_time,
+        )
+
+
+def test_provider_requires_explicit_metric_declarations_for_metric_features():
+    with pytest.raises(ValueError, match="missing shared metric declarations"):
+        SpikeSharedFeatureProvider(
+            shared_features={SPIKE_MIN_LOW_1M_FEATURE},
+            retained_1m_minutes=30 * 60,
+        )
+
+
+def test_shared_metric_provider_does_not_alias_mutable_strategy_market_caches():
+    strategy = DynamicSpikeBacktestStrategy(
+        ["BTCUSDT"],
+        total_notional=Decimal("1000"),
+        strategy_class=SpikeV21Strategy,
+    )
+    provider = SpikeSharedFeatureProvider(
+        shared_features={SPIKE_MIN_LOW_1M_FEATURE, SPIKE_PRIOR_HIGH_1M_FEATURE},
+        shared_metrics=SPIKE_V2_SHARED_METRICS,
+        retained_1m_minutes=30 * 60,
+    )
+
+    provider.bind(strategy)
+    leaf = strategy.strategies["BTCUSDT"]
+
+    assert leaf.bars_1s is not provider.bars_1s
+    assert leaf.klines_1m is not provider.klines_1m
+    assert leaf.klines_5m is not provider.klines_5m
+    assert leaf.klines_15m is not provider.klines_15m
+
+    candle = _kline("1m", 0, 60_000)
+    provider.process_event(candle)
+    assert list(leaf.klines_1m) == []
+    assert list(provider.klines_1m) == [candle]

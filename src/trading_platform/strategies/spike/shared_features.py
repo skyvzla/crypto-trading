@@ -10,13 +10,21 @@ from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
 from itertools import pairwise
-from typing import Iterable
+from typing import Iterable, Sequence
 
-from trading_platform.backtest.strategy_definition import FeatureSpec
+from trading_platform.backtest.strategy_definition import (
+    FeatureSpec,
+    SharedMetricResult,
+    SharedMetricSpec,
+    is_shared_metric_result,
+    normalize_shared_metric_specs,
+)
 from trading_platform.shared.events import Bar1s, Kline
 from trading_platform.strategies.spike.definition import (
     SPIKE_CANDIDATE_EXIT_FEATURE,
     SPIKE_ORDERFLOW_FEATURE,
+    SPIKE_MIN_LOW_1M_FEATURE,
+    SPIKE_PRIOR_HIGH_1M_FEATURE,
     SPIKE_RISE_5S_FEATURE,
 )
 from trading_platform.strategies.spike.exit_features import (
@@ -31,6 +39,8 @@ SUPPORTED_FEATURES = frozenset({
     SPIKE_RISE_5S_FEATURE,
     SPIKE_ORDERFLOW_FEATURE,
     SPIKE_CANDIDATE_EXIT_FEATURE,
+    SPIKE_MIN_LOW_1M_FEATURE,
+    SPIKE_PRIOR_HIGH_1M_FEATURE,
 })
 
 
@@ -95,9 +105,25 @@ class SpikeSharedFeatureProvider:
         self,
         *,
         shared_features: Iterable[FeatureSpec] = (),
-        retained_1m_minutes: int = 30 * 60,
+        shared_metrics: Iterable[SharedMetricSpec] = (),
+        retained_1m_minutes: int,
     ) -> None:
         self.shared_features = frozenset(shared_features)
+        self.shared_metrics = normalize_shared_metric_specs(shared_metrics)
+        metric_by_feature = {
+            metric.feature: metric for metric in self.shared_metrics
+        }
+        self._metric_by_feature = metric_by_feature
+        required_metrics = {
+            SPIKE_MIN_LOW_1M_FEATURE,
+            SPIKE_PRIOR_HIGH_1M_FEATURE,
+        } & self.shared_features
+        missing_metrics = required_metrics - metric_by_feature.keys()
+        if missing_metrics:
+            names = ", ".join(
+                sorted(f"{feature.name}@{feature.timeframe}" for feature in missing_metrics)
+            )
+            raise ValueError(f"missing shared metric declarations: {names}")
         unsupported = self.shared_features - SUPPORTED_FEATURES
         if unsupported:
             names = ", ".join(
@@ -108,13 +134,18 @@ class SpikeSharedFeatureProvider:
             {SPIKE_RISE_5S_FEATURE, SPIKE_ORDERFLOW_FEATURE}
             & self.shared_features
         )
-        self._requires_kline = SPIKE_CANDIDATE_EXIT_FEATURE in self.shared_features
+        self._requires_kline = bool(
+            SPIKE_CANDIDATE_EXIT_FEATURE in self.shared_features
+            or self._metric_by_feature
+        )
         self.bars_1s: list[Bar1s] = []
         self.klines_1m: deque[Kline] = deque()
         self.klines_5m: deque[Kline] = deque()
         self.klines_15m: deque[Kline] = deque()
         self._kline_cache_time_ordered = {"1m": True, "5m": True, "15m": True}
-        self.retained_1m_minutes = max(30 * 60, int(retained_1m_minutes))
+        if isinstance(retained_1m_minutes, bool) or retained_1m_minutes <= 0:
+            raise ValueError("retained_1m_minutes must be positive")
+        self.retained_1m_minutes = int(retained_1m_minutes)
         self._latest_bar: Bar1s | None = None
         self._latest_bar_features: SpikeBarFeatures | None = None
         self._first_bar1s_timestamp: int | None = None
@@ -122,31 +153,19 @@ class SpikeSharedFeatureProvider:
         self._candidate_cache: dict[
             tuple[int, CandidateFeatureConfig], CandidateFeatureSnapshot | None
         ] = {}
+        self._kline_window_versions = {"1m": 0, "5m": 0, "15m": 0}
+        self._window_metric_cache: dict[
+            tuple[FeatureSpec, int, int, int], SharedMetricResult
+        ] = {}
+        self._completed_window_cache: dict[
+            tuple[str, int, int, int], Sequence[Kline]
+        ] = {}
 
     def bind(self, consumer: object) -> None:
-        """绑定一个策略消费者，并在首个事件前扩大共享保留窗口。"""
+        """绑定一个策略消费者；保留窗口必须由声明在构造时显式提供。"""
         binder = getattr(consumer, "bind_shared_feature_provider", None)
         if not callable(binder):
             raise TypeError("shared feature consumer does not support binding")
-        strategies = getattr(consumer, "strategies", {})
-        for strategy in strategies.values():
-            accel_window = (
-                int(getattr(strategy, "accel_prev_minutes", 0))
-                + int(getattr(strategy, "accel_prev2_minutes", 0))
-                + 1
-            )
-            box_window = (
-                7 * 24 * 60
-                if int(getattr(strategy, "box_duration_min_minutes", 0)) > 0
-                else 0
-            )
-            self.retained_1m_minutes = max(
-                self.retained_1m_minutes,
-                int(getattr(strategy, "rise_low_lookback_minutes", 0)),
-                int(getattr(strategy, "prior_high_lookback_minutes", 0)),
-                accel_window,
-                box_window,
-            )
         binder(self)
 
     def process_event(self, event: Bar1s | Kline) -> None:
@@ -172,6 +191,9 @@ class SpikeSharedFeatureProvider:
                 event,
                 event.close_time - self.retained_1m_minutes * MS_PER_MINUTE,
             )
+            self._kline_window_versions["1m"] += 1
+            self._window_metric_cache.clear()
+            self._completed_window_cache.clear()
         elif event.interval in {"5m", "15m"}:
             cache = self.klines_5m if event.interval == "5m" else self.klines_15m
             self._append_and_evict(
@@ -180,7 +202,82 @@ class SpikeSharedFeatureProvider:
                 event,
                 event.close_time - 40 * 60 * 60 * MS_PER_SECOND,
             )
+            self._kline_window_versions[event.interval] += 1
         self._candidate_version += 1
+
+    def supports_metric(self, feature: FeatureSpec) -> bool:
+        """返回该 provider 是否声明了指定的纯行情窗口指标。"""
+        return feature in self._metric_by_feature
+
+    def window_metric(
+        self, feature: FeatureSpec, minute_start: int, minutes: int
+    ) -> SharedMetricResult:
+        """按稳定的指标/事件版本/窗口 key 共享一次窗口计算结果。"""
+        if minutes <= 0:
+            raise ValueError("shared metric window must be positive")
+        if feature not in self._metric_by_feature:
+            raise KeyError(f"shared metric is not enabled: {feature.name}")
+        interval = feature.timeframe
+        if interval not in self._kline_window_versions:
+            raise ValueError(f"unsupported shared metric timeframe: {interval}")
+        version = self._kline_window_versions[interval]
+        key = (feature, version, minute_start, minutes)
+        if key not in self._window_metric_cache:
+            window_key = (interval, version, minute_start, minutes)
+            if window_key not in self._completed_window_cache:
+                self._completed_window_cache[window_key] = self._completed_window(
+                    interval, minute_start, minutes
+                )
+            window = self._completed_window_cache[window_key]
+            result = self._metric_by_feature[feature].compute(window)
+            if not is_shared_metric_result(result):
+                raise TypeError(
+                    "shared metric compute must return an immutable SharedMetricResult: "
+                    f"{feature.name}@{feature.timeframe} returned "
+                    f"{type(result).__name__}"
+                )
+            self._window_metric_cache[key] = result
+        return self._window_metric_cache[key]
+
+    def min_low_point_1m(
+        self, minute_start: int, minutes: int
+    ) -> tuple[Decimal, int] | None:
+        return self.window_metric(SPIKE_MIN_LOW_1M_FEATURE, minute_start, minutes)
+
+    def prior_high_point_1m(
+        self, minute_start: int, minutes: int
+    ) -> tuple[Decimal, int] | None:
+        return self.window_metric(SPIKE_PRIOR_HIGH_1M_FEATURE, minute_start, minutes)
+
+    def _compute_completed_1m_window(
+        self, minute_start: int, minutes: int
+    ) -> Sequence[Kline]:
+        """返回连续完整的 1m 窗口；缺任一分钟时返回空序列。"""
+        return self._completed_window("1m", minute_start, minutes)
+
+    def _completed_window(
+        self, interval: str, window_end: int, periods: int
+    ) -> Sequence[Kline]:
+        interval_ms = {
+            "1m": MS_PER_MINUTE,
+            "5m": 5 * MS_PER_MINUTE,
+            "15m": 15 * MS_PER_MINUTE,
+        }[interval]
+        cache = {
+            "1m": self.klines_1m,
+            "5m": self.klines_5m,
+            "15m": self.klines_15m,
+        }[interval]
+        window_start = window_end - periods * interval_ms
+        by_open_time = {
+            k.open_time: k
+            for k in cache
+            if window_start <= k.open_time < window_end
+        }
+        expected_times = range(window_start, window_end, interval_ms)
+        if any(open_time not in by_open_time for open_time in expected_times):
+            return ()
+        return tuple(by_open_time[open_time] for open_time in expected_times)
 
     def _append_and_evict(
         self, interval: str, cache: deque[Kline], kline: Kline, cutoff: int

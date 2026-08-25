@@ -1,6 +1,7 @@
 """Spike v2 冻结策略声明（不包含后续指标过滤研究）。"""
 
 from trading_platform.strategies.spike.definition import (
+    SPIKE_V2_SHARED_METRICS,
     SPIKE_V2_SHARED_FEATURES,
     SpikeDataRequirements,
     SpikeStrategyDefaults,
@@ -23,6 +24,7 @@ class V2:
         metrics_5m=False,
         bar1s_feature_columns=frozenset(),
         shared_features=SPIKE_V2_SHARED_FEATURES,
+        shared_metrics=SPIKE_V2_SHARED_METRICS,
     )
     defaults = SpikeStrategyDefaults(
         exit_policy="candidate-v1",

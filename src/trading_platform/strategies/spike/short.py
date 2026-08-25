@@ -42,6 +42,11 @@ from trading_platform.strategies.spike.entry_features import (
 from trading_platform.strategies.spike.shared_features import (
     append_kline_and_evict_expired,
 )
+from trading_platform.strategies.spike.definition import (
+    SPIKE_MIN_LOW_1M_FEATURE,
+    SPIKE_PRIOR_HIGH_1M_FEATURE,
+    spike_1m_retention_minutes,
+)
 
 if TYPE_CHECKING:
     from trading_platform.strategies.spike.shared_features import (
@@ -547,10 +552,6 @@ class DynamicSpikeShortStrategy:
         if self.bars_1s or self.klines_1m or self.klines_5m or self.klines_15m:
             raise RuntimeError("shared features must be bound before market events")
         self._shared_feature_provider = provider
-        self.bars_1s = provider.bars_1s
-        self.klines_1m = provider.klines_1m
-        self.klines_5m = provider.klines_5m
-        self.klines_15m = provider.klines_15m
 
     def set_trading_enabled(self, enabled: bool) -> None:
         """预热阶段只更新数据缓存，不检测或推进交易信号。"""
@@ -1293,29 +1294,22 @@ class DynamicSpikeShortStrategy:
 
     def on_kline(self, kline: Kline) -> List[OrderIntent]:
         """处理已完成 K 线事件"""
-        if self._shared_feature_provider is None:
-            if kline.interval == "1m":
-                retained_minutes = max(
-                    30 * 60,
-                    self.rise_low_lookback_minutes,
-                    7 * 24 * 60 if self.box_duration_min_minutes > 0 else 0,
-                )
-                cutoff = kline.close_time - retained_minutes * MS_PER_MINUTE
-                self._append_kline_and_evict_expired(
-                    "1m", self.klines_1m, kline, cutoff
-                )
+        if kline.interval == "1m":
+            retained_minutes = spike_1m_retention_minutes(
+                rise_low_lookback_minutes=self.rise_low_lookback_minutes,
+                prior_high_lookback_minutes=self.prior_high_lookback_minutes,
+                box_duration_min_minutes=self.box_duration_min_minutes,
+            )
+            cutoff = kline.close_time - retained_minutes * MS_PER_MINUTE
+            self._append_kline_and_evict_expired("1m", self.klines_1m, kline, cutoff)
 
-            elif kline.interval == "5m":
-                cutoff = kline.close_time - 40 * 3600 * MS_PER_SECOND
-                self._append_kline_and_evict_expired(
-                    "5m", self.klines_5m, kline, cutoff
-                )
+        elif kline.interval == "5m":
+            cutoff = kline.close_time - 40 * 3600 * MS_PER_SECOND
+            self._append_kline_and_evict_expired("5m", self.klines_5m, kline, cutoff)
 
-            elif kline.interval == "15m":
-                cutoff = kline.close_time - 40 * 3600 * MS_PER_SECOND
-                self._append_kline_and_evict_expired(
-                    "15m", self.klines_15m, kline, cutoff
-                )
+        elif kline.interval == "15m":
+            cutoff = kline.close_time - 40 * 3600 * MS_PER_SECOND
+            self._append_kline_and_evict_expired("15m", self.klines_15m, kline, cutoff)
 
         if (
             self.exit_policy == "candidate-v1"
@@ -1593,8 +1587,6 @@ class DynamicSpikeShortStrategy:
     # ------------------------------------------------------------------
 
     def _update_cache(self, bar: Bar1s) -> None:
-        if self._shared_feature_provider is not None:
-            return
         self.bars_1s.append(bar)
         if len(self.bars_1s) > self.BAR_BUFFER:
             # 原地删除过期前缀，避免每秒重新分配并复制整个窗口。
@@ -2306,6 +2298,13 @@ class DynamicSpikeShortStrategy:
         self, minute_start: int, minutes: int
     ) -> tuple[Decimal, int] | None:
         """返回窗口最低点；相同低价取最近一次，避免低估上涨持续时间。"""
+        if (
+            self._shared_feature_provider is not None
+            and self._shared_feature_provider.supports_metric(SPIKE_MIN_LOW_1M_FEATURE)
+        ):
+            return self._shared_feature_provider.window_metric(
+                SPIKE_MIN_LOW_1M_FEATURE, minute_start, minutes
+            )
         window = self._completed_1m_window(minute_start, minutes)
         if not window:
             return None
@@ -2330,6 +2329,15 @@ class DynamicSpikeShortStrategy:
     def _prior_high_point(
         self, minute_start: int
     ) -> tuple[Decimal, int] | None:
+        if (
+            self._shared_feature_provider is not None
+            and self._shared_feature_provider.supports_metric(SPIKE_PRIOR_HIGH_1M_FEATURE)
+        ):
+            return self._shared_feature_provider.window_metric(
+                SPIKE_PRIOR_HIGH_1M_FEATURE,
+                minute_start,
+                self.prior_high_lookback_minutes,
+            )
         completed = self._completed_1m_window(
             minute_start, self.prior_high_lookback_minutes
         )

@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from trading_platform.backtest.strategy_definition import FeatureSpec
 from trading_platform.strategies.spike.definition import load_strategy_definition
 
@@ -59,6 +61,8 @@ def test_shared_features_are_opt_in_per_strategy():
 def test_v2_family_declares_the_shared_spike_provider_contract():
     rise = FeatureSpec(name="rise_5s", timeframe="1s")
     candidate = FeatureSpec(name="candidate_exit", timeframe="1m")
+    min_low = FeatureSpec(name="min_low_1m", timeframe="1m")
+    prior_high = FeatureSpec(name="prior_high_1m", timeframe="1m")
 
     for path in (
         "trading_platform.strategies.spike.v2:V2",
@@ -70,8 +74,19 @@ def test_v2_family_declares_the_shared_spike_provider_contract():
         assert not hasattr(definition, "bar1s_feature_columns")
         assert definition.data_requirements.bar1s_feature_columns == frozenset()
         assert definition.data_requirements.shared_features == frozenset(
-            {rise, candidate}
+            {rise, candidate, min_low, prior_high}
         )
+        assert {
+            metric.feature
+            for metric in definition.data_requirements.shared_metrics
+        } == {min_low, prior_high}
+        assert definition.data_requirements.resolve_retention_minutes(
+            SimpleNamespace(
+                rise_low_lookback_minutes=3 * 60,
+                prior_high_lookback_minutes=48 * 60,
+                box_duration_min_minutes=0,
+            )
+        ) == 48 * 60
 
     for path in (
         "trading_platform.strategies.spike.v1:V1",
