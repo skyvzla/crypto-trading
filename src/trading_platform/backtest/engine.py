@@ -114,6 +114,9 @@ class BacktestEngine:
         self.fill_records: list[Fill] = []
         self.position_records: list[Position] = []
         self.audit_records: list[StrategyAuditEvent] = []
+        # Keep drawdown online instead of retaining one equity sample per bar.
+        self._portfolio_equity_peak = Decimal('0')
+        self._portfolio_max_drawdown = Decimal('0')
 
         # 执行层
         self.executor = BacktestExecutor(self, account_id, symbol_rules=symbol_rules)
@@ -191,6 +194,9 @@ class BacktestEngine:
         self._check_fills(event)
         # 同一 Bar 内无法还原穿价先后，成交后按保守口径记录该 Bar 的最不利价。
         self._update_position_risk(event)
+        # Capture the adverse path before strategy-generated exits remove the
+        # position from the live portfolio.
+        self._update_portfolio_drawdown(event)
         order_intents: list[OrderIntent] | None = None
         if isinstance(event, Bar1s):
             order_intents = self.strategy.on_bar1s(event)
@@ -209,7 +215,37 @@ class BacktestEngine:
                     if self._on_fill is not None:
                         self._on_fill(fill)
             self._update_position_risk(event)
+        self._update_portfolio_drawdown(event)
         self._collect_strategy_audit_events()
+
+    def _portfolio_equity(self, event: Event | None = None) -> Decimal:
+        """Return current account PnL marked to the current adverse bar prices."""
+        equity = Decimal('0')
+        for position in (*self.position_records, *self.positions.values()):
+            net_realized = position.realized_pnl - position.total_commission
+            equity += net_realized
+            if position.status == 'OPEN':
+                mark = self.last_prices.get(position.symbol)
+                if event is not None and event.symbol == position.symbol:
+                    event_timeframe = (
+                        '1s' if isinstance(event, Bar1s) else event.interval
+                    )
+                    if event_timeframe == self.execution_timeframe:
+                        mark = event.high if position.side == 'SHORT' else event.low
+                if mark is not None:
+                    if position.side == 'SHORT':
+                        equity += (position.entry_price - mark) * position.quantity
+                    else:
+                        equity += (mark - position.entry_price) * position.quantity
+        return equity
+
+    def _update_portfolio_drawdown(self, event: Event | None = None) -> None:
+        equity = self._portfolio_equity(event)
+        if equity > self._portfolio_equity_peak:
+            self._portfolio_equity_peak = equity
+        drawdown = equity - self._portfolio_equity_peak
+        if drawdown < self._portfolio_max_drawdown:
+            self._portfolio_max_drawdown = drawdown
 
     def finish(self) -> BacktestResult:
         """结束事件流并生成一次最终结果；重复调用返回同一结果。"""
@@ -608,4 +644,5 @@ class BacktestEngine:
             config=self.config,
             events_processed=self._events_processed,
             audit_events=self.audit_records,
+            portfolio_max_drawdown=self._portfolio_max_drawdown,
         )

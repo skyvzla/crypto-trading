@@ -16,7 +16,7 @@ from trading_platform.shared.events import Bar1s, Kline, OrderIntent, Fill, Posi
 from trading_platform.shared.config import BacktestConfig
 from trading_platform.backtest.engine import BacktestEngine
 from trading_platform.backtest.executor import BacktestExecutor
-from trading_platform.backtest.result import ResultAnalyzer
+from trading_platform.backtest.result import BacktestResult, ResultAnalyzer
 from trading_platform.shared.binance.symbol_rules import (
     BinanceSymbolRuleBook,
     BinanceSymbolRules,
@@ -154,6 +154,65 @@ class TestBacktestEngine(unittest.TestCase):
         self.assertTrue(trade['full_position_liquidation'])
         self.assertGreater(trade['net_pnl'], 0)
         self.assertEqual(analyzer.analyze()['liquidation_risk']['total'], 1)
+
+    def test_drawdown_includes_intrabar_unrealized_loss(self):
+        """回撤应包含持仓浮亏，而不只看最终平仓收益。"""
+        class ShortThenRecover(MockStrategy):
+            def on_bar1s(self, bar):
+                self.bars_received.append(bar)
+                if len(self.bars_received) == 1:
+                    return [OrderIntent(
+                        symbol=bar.symbol,
+                        side='SELL',
+                        price=Decimal('100'),
+                        quantity=Decimal('1'),
+                        client_order_id='drawdown-entry',
+                        order_type='MARKET',
+                    )]
+                if len(self.bars_received) == 3:
+                    return [OrderIntent(
+                        symbol=bar.symbol,
+                        side='BUY',
+                        price=Decimal('100'),
+                        quantity=Decimal('1'),
+                        client_order_id='drawdown-exit',
+                        order_type='MARKET',
+                        reduce_only=True,
+                    )]
+                return []
+
+        bars = [
+            Bar1s(
+                symbol='BTCUSDT', timestamp=i * 1_000, available_time=(i + 1) * 1_000,
+                open=Decimal(str(open_)), high=Decimal(str(high)),
+                low=Decimal(str(low)), close=Decimal(str(close)),
+                volume=Decimal('1'), trade_count=1, vwap=Decimal(str(close)),
+            )
+            for i, (open_, high, low, close) in enumerate(
+                ((100, 100, 100, 100), (100, 110, 100, 105), (105, 130, 100, 100))
+            )
+        ]
+        result = BacktestEngine(
+            ShortThenRecover(), bars,
+            BacktestConfig(taker_fee_rate=0, maker_fee_rate=0),
+        ).run()
+        summary = ResultAnalyzer(result).analyze()
+
+        self.assertEqual(result.positions[0].realized_pnl, Decimal('0'))
+        self.assertEqual(summary['pnl']['max_drawdown_basis'], 'portfolio_mark_to_market')
+        self.assertEqual(summary['pnl']['max_drawdown'], -30.0)
+
+    def test_drawdown_uses_portfolio_equity_for_overlapping_positions(self):
+        """组合回撤应按同一权益曲线计算，而非逐笔回撤再相加。"""
+        result = BacktestResult(
+            virtual_time_start=0,
+            virtual_time_end=3_000,
+            orders=[], fills=[], positions=[], config=BacktestConfig(),
+            portfolio_max_drawdown=Decimal('-7'),
+        )
+        summary = ResultAnalyzer(result).analyze()
+        self.assertEqual(summary['pnl']['max_drawdown'], -7.0)
+        self.assertEqual(summary['pnl']['max_drawdown_basis'], 'portfolio_mark_to_market')
 
     def test_strategy_is_bound_to_engine(self):
         """支持回测适配能力的策略会在引擎初始化时完成绑定。"""

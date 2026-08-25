@@ -70,6 +70,9 @@ class BacktestResult:
     config: BacktestConfig
     events_processed: int = 0
     audit_events: list[StrategyAuditEvent] = field(default_factory=list)
+    # Online mark-to-market drawdown calculated by the engine. ``None`` keeps
+    # compatibility with results constructed by callers before this field.
+    portfolio_max_drawdown: Decimal | None = None
 
     def to_dataframes(self) -> dict[str, pd.DataFrame]:
         """
@@ -701,13 +704,19 @@ class ResultAnalyzer:
         positions_df = self.dfs['positions']
 
         if positions_df.empty:
+            max_drawdown = float(self.result.portfolio_max_drawdown or 0)
             return {
                 'total_realized': 0.0,
                 'total_unrealized': 0.0,
                 'total_commission': 0.0,
                 'net_pnl': 0.0,
                 'profit_factor': 0.0,
-                'max_drawdown': 0.0,
+                'max_drawdown': max_drawdown,
+                'max_drawdown_basis': (
+                    'portfolio_mark_to_market'
+                    if self.result.portfolio_max_drawdown is not None
+                    else 'closed_positions'
+                ),
                 'sharpe_ratio': 0.0,
                 'total_profit': 0.0,
                 'total_loss': 0.0,
@@ -752,6 +761,11 @@ class ResultAnalyzer:
             'net_pnl': float(net_pnl),
             'profit_factor': float(profit_factor) if profit_factor != float('inf') else 999.0,
             'max_drawdown': float(max_drawdown),
+            'max_drawdown_basis': (
+                'portfolio_mark_to_market'
+                if self.result.portfolio_max_drawdown is not None
+                else 'closed_positions'
+            ),
             'sharpe_ratio': float(sharpe_ratio),
             'total_profit': float(total_profit),
             'total_loss': float(total_loss),
@@ -767,6 +781,9 @@ class ResultAnalyzer:
         Returns:
             最大回撤（负数）
         """
+        if self.result.portfolio_max_drawdown is not None:
+            return float(self.result.portfolio_max_drawdown)
+
         if positions_df.empty:
             return 0.0
 
