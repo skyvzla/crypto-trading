@@ -225,6 +225,7 @@ class BacktestDataLoader:
         """在开始 yield 前完整校验必需数据集，避免半程失败。"""
         if self.archive_index_path is not None:
             self._validate_stream_datasets_from_index()
+            self._validate_indexed_source_schemas()
             return
         connection = self._require_duckdb_connection()
         placeholders = ", ".join("?" for _ in self.symbols)
@@ -292,40 +293,43 @@ class BacktestDataLoader:
                 "relative_path"
             )
             verify_archive_index_files(selected, self.archive_index_path.parent)
-            connection = self._require_duckdb_connection()
-            for row in selected.itertuples(index=False):
-                relative_path = str(row.relative_path)
-                physical_path = str(
-                    self.archive_index_path.parent / relative_path
-                )
-                physical_columns = {
-                    str(column[0])
-                    for column in connection.execute(
-                        "DESCRIBE SELECT * FROM read_parquet(?)",
-                        [[physical_path]],
-                    ).fetchall()
-                }
-                required_columns = set(CANDLE_BASE_COLUMNS)
-                if str(row.timeframe) == "1s":
-                    required_columns.update(self.bar1s_feature_columns or ())
-                missing_columns = sorted(required_columns - physical_columns)
-                if missing_columns:
-                    missing_features = sorted(
-                        set(missing_columns).intersection(
-                            self.bar1s_feature_columns or ()
-                        )
-                    )
-                    if missing_features:
-                        raise ValueError(
-                            "projected/requested 1s feature columns missing from "
-                            f"physical source schema {relative_path}: "
-                            f"{', '.join(missing_features)}"
-                        )
-                    raise ValueError(
-                        "base columns missing from physical source schema "
-                        f"{relative_path}: {', '.join(missing_columns)}"
-                    )
             self._source_index = selected
+
+    def _validate_indexed_source_schemas(self) -> None:
+        """校验索引选中的物理分区 schema；调用时 DuckDB 连接必须已打开。"""
+        if self._source_index is None:
+            return
+        connection = self._require_duckdb_connection()
+        for row in self._source_index.itertuples(index=False):
+            relative_path = str(row.relative_path)
+            physical_path = str(self.archive_index_path.parent / relative_path)
+            physical_columns = {
+                str(column[0])
+                for column in connection.execute(
+                    "DESCRIBE SELECT * FROM read_parquet(?)",
+                    [[physical_path]],
+                ).fetchall()
+            }
+            required_columns = set(CANDLE_BASE_COLUMNS)
+            if str(row.timeframe) == "1s":
+                required_columns.update(self.bar1s_feature_columns or ())
+            missing_columns = sorted(required_columns - physical_columns)
+            if missing_columns:
+                missing_features = sorted(
+                    set(missing_columns).intersection(
+                        self.bar1s_feature_columns or ()
+                    )
+                )
+                if missing_features:
+                    raise ValueError(
+                        "projected/requested 1s feature columns missing from "
+                        f"physical source schema {relative_path}: "
+                        f"{', '.join(missing_features)}"
+                    )
+                raise ValueError(
+                    "base columns missing from physical source schema "
+                    f"{relative_path}: {', '.join(missing_columns)}"
+                )
 
     def _execute_stream_query(
         self, *, chunk_start_ms: int, chunk_end_ms: int
