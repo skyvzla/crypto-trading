@@ -14,6 +14,7 @@ class SpikeV1Strategy(DynamicSpikeShortStrategy):
 class V1:
     name = "v1"
     strategy_class = SpikeV1Strategy
+    shared_feature_provider = None
     data_requirements = SpikeDataRequirements(
         market_timeframes=("1s", "1m", "5m"), metrics_5m=False
     )

@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from trading_platform.strategies.spike.definition import (
+    SPIKE_V2_SHARED_FEATURES,
     SpikeDataRequirements,
     SpikeStrategyDefaults,
 )
@@ -17,6 +18,9 @@ from trading_platform.shared.events import OrderIntent
 from trading_platform.strategies.spike.short import (
     DynamicSpikeShortStrategy,
     build_exit_client_order_id,
+)
+from trading_platform.strategies.spike.shared_features import (
+    SpikeSharedFeatureProvider,
 )
 from trading_platform.strategies.spike.scoring import (
     compute_score,
@@ -638,7 +642,12 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
 class V21:
     name = "v2.1"
     strategy_class = SpikeV21Strategy
-    data_requirements = SpikeDataRequirements(metrics_5m=True)
+    shared_feature_provider = SpikeSharedFeatureProvider
+    data_requirements = SpikeDataRequirements(
+        metrics_5m=True,
+        bar1s_feature_columns=frozenset(),
+        shared_features=SPIKE_V2_SHARED_FEATURES,
+    )
     defaults = SpikeStrategyDefaults(
         exit_policy=V2.defaults.exit_policy,
         prior_high_lookback_hours=V2.defaults.prior_high_lookback_hours,

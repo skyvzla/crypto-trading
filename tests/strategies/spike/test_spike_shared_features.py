@@ -10,6 +10,8 @@ from trading_platform.strategies.spike.shared_features import (
 )
 from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
 from trading_platform.strategies.spike.v1_1 import SpikeV11Strategy
+from trading_platform.strategies.spike.v2 import SpikeV2Strategy
+from trading_platform.strategies.spike.v2_1 import SpikeV21Strategy
 
 
 def _bar(
@@ -315,3 +317,51 @@ def test_shared_features_match_isolated_strategies_with_different_thresholds():
     assert shared_signals[1] is None
     first = provider.bar_features(bars[-1])
     assert provider.bar_features(bars[-1]) is first
+
+
+@pytest.mark.parametrize(
+    ("box_duration", "rise_low", "expected_retention"),
+    (
+        (0, 3 * 60, 30 * 60),
+        (60, 3 * 60, 7 * 24 * 60),
+        (0, 72 * 60, 72 * 60),
+    ),
+)
+def test_shared_provider_retention_covers_each_requirement_exactly(
+    box_duration, rise_low, expected_retention
+):
+    adapter = DynamicSpikeBacktestStrategy(
+        ["BTCUSDT"],
+        total_notional=Decimal("1000"),
+        strategy_class=SpikeV21Strategy,
+        rise_low_lookback_minutes=rise_low,
+        min_rise_duration_minutes=60,
+        strategy_parameters={"box_duration_min_minutes": box_duration},
+    )
+    provider = SpikeSharedFeatureProvider(
+        shared_features={
+            FeatureSpec("rise_5s", "1s"),
+            FeatureSpec("candidate_exit", "1m"),
+        }
+    )
+
+    provider.bind(adapter)
+
+    assert provider.retained_1m_minutes == expected_retention
+
+
+def test_shared_provider_evicts_1m_candles_at_exact_retention_boundary():
+    retained = 30 * 60
+    provider = SpikeSharedFeatureProvider(
+        shared_features={FeatureSpec("candidate_exit", "1m")},
+        retained_1m_minutes=retained,
+    )
+    boundary = _kline("1m", 0, 60_000)
+    expired = _kline("1m", -1, 60_000)
+    latest = _kline("1m", retained, 60_000)
+
+    provider.process_event(expired)
+    provider.process_event(boundary)
+    provider.process_event(latest)
+
+    assert list(provider.klines_1m) == [boundary, latest]

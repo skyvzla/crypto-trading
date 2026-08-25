@@ -17,6 +17,10 @@ SPIKE_ORDERFLOW_FEATURE = FeatureSpec(name="orderflow", timeframe="1s")
 SPIKE_CANDIDATE_EXIT_FEATURE = FeatureSpec(
     name="candidate_exit", timeframe="1m"
 )
+SPIKE_V2_SHARED_FEATURES = frozenset({
+    SPIKE_RISE_5S_FEATURE,
+    SPIKE_CANDIDATE_EXIT_FEATURE,
+})
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,7 @@ class SpikeStrategyDefinition(Protocol):
     name: str
     strategy_class: type
     data_requirements: SpikeDataRequirements
+    shared_feature_provider: type | None
     defaults: SpikeStrategyDefaults
     supported_parameters: frozenset[str]
     internal_parameters: frozenset[str]
@@ -64,6 +69,7 @@ def load_strategy_definition(path: str) -> SpikeStrategyDefinition:
         "name",
         "strategy_class",
         "data_requirements",
+        "shared_feature_provider",
         "defaults",
         "supported_parameters",
         "internal_parameters",

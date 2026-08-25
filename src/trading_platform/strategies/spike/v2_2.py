@@ -22,6 +22,7 @@ from trading_platform.strategies.spike.v2_1 import SpikeV21Strategy, V21
 class V22:
     name = "v2.2"
     strategy_class = SpikeV21Strategy
+    shared_feature_provider = V21.shared_feature_provider
     data_requirements = V21.data_requirements
     defaults = SpikeStrategyDefaults(
         exit_policy="candidate-v1",

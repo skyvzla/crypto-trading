@@ -1,8 +1,12 @@
 """Spike v2 冻结策略声明（不包含后续指标过滤研究）。"""
 
 from trading_platform.strategies.spike.definition import (
+    SPIKE_V2_SHARED_FEATURES,
     SpikeDataRequirements,
     SpikeStrategyDefaults,
+)
+from trading_platform.strategies.spike.shared_features import (
+    SpikeSharedFeatureProvider,
 )
 from trading_platform.strategies.spike.short import DynamicSpikeShortStrategy
 
@@ -14,7 +18,12 @@ class SpikeV2Strategy(DynamicSpikeShortStrategy):
 class V2:
     name = "v2"
     strategy_class = SpikeV2Strategy
-    data_requirements = SpikeDataRequirements(metrics_5m=False)
+    shared_feature_provider = SpikeSharedFeatureProvider
+    data_requirements = SpikeDataRequirements(
+        metrics_5m=False,
+        bar1s_feature_columns=frozenset(),
+        shared_features=SPIKE_V2_SHARED_FEATURES,
+    )
     defaults = SpikeStrategyDefaults(
         exit_policy="candidate-v1",
         prior_high_lookback_hours=6,

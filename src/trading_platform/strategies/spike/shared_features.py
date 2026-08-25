@@ -130,9 +130,22 @@ class SpikeSharedFeatureProvider:
             raise TypeError("shared feature consumer does not support binding")
         strategies = getattr(consumer, "strategies", {})
         for strategy in strategies.values():
+            accel_window = (
+                int(getattr(strategy, "accel_prev_minutes", 0))
+                + int(getattr(strategy, "accel_prev2_minutes", 0))
+                + 1
+            )
+            box_window = (
+                7 * 24 * 60
+                if int(getattr(strategy, "box_duration_min_minutes", 0)) > 0
+                else 0
+            )
             self.retained_1m_minutes = max(
                 self.retained_1m_minutes,
                 int(getattr(strategy, "rise_low_lookback_minutes", 0)),
+                int(getattr(strategy, "prior_high_lookback_minutes", 0)),
+                accel_window,
+                box_window,
             )
         binder(self)
 

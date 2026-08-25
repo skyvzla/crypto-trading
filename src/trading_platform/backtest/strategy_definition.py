@@ -21,6 +21,7 @@ class MarketDataRequirements:
     market_timeframes: tuple[str, ...]
     execution_timeframe: str
     shared_features: frozenset[FeatureSpec] = frozenset()
+    bar1s_feature_columns: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if not self.market_timeframes:
@@ -29,6 +30,12 @@ class MarketDataRequirements:
             raise ValueError("execution_timeframe must be included in market_timeframes")
         shared_features = frozenset(self.shared_features)
         object.__setattr__(self, "shared_features", shared_features)
+        if self.bar1s_feature_columns is not None:
+            object.__setattr__(
+                self,
+                "bar1s_feature_columns",
+                frozenset(self.bar1s_feature_columns),
+            )
         invalid_timeframes = {
             feature.timeframe
             for feature in shared_features

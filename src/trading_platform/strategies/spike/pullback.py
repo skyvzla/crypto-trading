@@ -813,6 +813,7 @@ class PullbackV3:
 
     name = "pullback-v3"
     strategy_class = PullbackV3Strategy
+    shared_feature_provider = None
     data_requirements = SpikeDataRequirements(
         market_timeframes=("1s", "1m", "5m", "15m"), metrics_5m=False
     )

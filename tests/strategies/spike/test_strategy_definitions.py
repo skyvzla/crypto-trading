@@ -45,17 +45,37 @@ def test_strategy_data_requirements_include_execution_timeframe():
 
 
 def test_shared_features_are_opt_in_per_strategy():
-    definitions = [
+    unshared = [
         load_strategy_definition("trading_platform.strategies.spike.v1:V1"),
-        load_strategy_definition("trading_platform.strategies.spike.v2:V2"),
-        load_strategy_definition("trading_platform.strategies.spike.v2_1:V21"),
+        load_strategy_definition(
+            "trading_platform.strategies.spike.pullback:PullbackV3"
+        ),
     ]
+    assert all(definition.data_requirements.shared_features == frozenset()
+               for definition in unshared)
+    assert all(definition.shared_feature_provider is None for definition in unshared)
 
-    assert all(
-        definition.data_requirements.shared_features == frozenset()
-        for definition in definitions
-    )
-    assert all(
-        not hasattr(definition, "shared_feature_provider")
-        for definition in definitions
-    )
+
+def test_v2_family_declares_the_shared_spike_provider_contract():
+    rise = FeatureSpec(name="rise_5s", timeframe="1s")
+    candidate = FeatureSpec(name="candidate_exit", timeframe="1m")
+
+    for path in (
+        "trading_platform.strategies.spike.v2:V2",
+        "trading_platform.strategies.spike.v2_1:V21",
+        "trading_platform.strategies.spike.v2_2:V22",
+    ):
+        definition = load_strategy_definition(path)
+        assert definition.shared_feature_provider is not None
+        assert not hasattr(definition, "bar1s_feature_columns")
+        assert definition.data_requirements.bar1s_feature_columns == frozenset()
+        assert definition.data_requirements.shared_features == frozenset(
+            {rise, candidate}
+        )
+
+    for path in (
+        "trading_platform.strategies.spike.v1:V1",
+        "trading_platform.strategies.spike.pullback:PullbackV3",
+    ):
+        definition = load_strategy_definition(path)
+        assert definition.shared_feature_provider is None
