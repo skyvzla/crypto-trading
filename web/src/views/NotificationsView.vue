@@ -36,7 +36,7 @@ function changeActivityView(key: NotificationViewKey | 'events' | 'deliveries') 
 </script>
 
 <template>
-  <main class="notification-page">
+  <main class="operations-page">
     <PageHeader
       eyebrow="SYSTEM / NOTIFICATIONS"
       title="通知中心"
@@ -165,13 +165,6 @@ function changeActivityView(key: NotificationViewKey | 'events' | 'deliveries') 
 
 <style scoped lang="scss">
 /* 只保留页面骨架样式；各面板的样式已随组件一起下沉到组件内部。 */
-.notification-page {
-  width: 100%;
-  min-width: 0;
-  max-width: 1440px;
-  margin: 0 auto;
-  overflow-x: hidden;
-}
 .view-switcher :deep(.ant-tabs-nav) { margin: 0 0 15px; }
 .view-switcher :deep(.ant-tabs-content-holder) { display: none; }
 .notification-tab-label { display: inline-flex; align-items: center; gap: 7px; }

@@ -73,6 +73,16 @@ describe('notification route and view', () => {
     expect(router.resolve('/notifications/activity?tab=deliveries').name).toBe('notifications-activity')
   })
 
+  it('uses the shared operations page sizing without a private max width', () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input)))
+    const wrapper = mount(NotificationsView)
+    const page = wrapper.get('main')
+
+    expect(page.classes()).toContain('operations-page')
+    expect(getComputedStyle(page.element).maxWidth || 'none').toBe('none')
+    wrapper.unmount()
+  })
+
   it('loads the workbench and opens the connector form from the channel view', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input)))
     const wrapper = mount(NotificationsView)
