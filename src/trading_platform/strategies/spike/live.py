@@ -597,6 +597,13 @@ class SpikeExecutionCoordinator:
             self.strategy.on_fill(fill)
             await self._publish_audit()
 
+    async def reconcile_position(self, symbol: str) -> None:
+        async with self._lock:
+            hook = getattr(self.strategy, "reconcile_position", None)
+            if callable(hook):
+                hook(symbol)
+            await self._publish_audit()
+
     async def reconcile_entry_expirations(self) -> None:
         """从 WAL 恢复未终态入场单 TTL；过期订单立即进入撤单流程。"""
         cancel_due = False
@@ -1457,6 +1464,7 @@ class SpikeRuntimeCallbacks:
             await self.account.handle_account_update(event)
             positions = event.get("a", {}).get("P", [])
             for symbol in {str(item.get("s") or "") for item in positions} - {""}:
+                await self.coordinator.reconcile_position(symbol)
                 await self.coordinator.maybe_release_campaign(symbol)
         except BaseException:
             self.gate.set_condition("execution", False)

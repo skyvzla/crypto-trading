@@ -170,6 +170,7 @@ class PullbackV3Strategy:
         self._spike_high: Decimal | None = None
         self._campaign_origin_price: Decimal | None = None
         self._pending_entry_meta: _PendingEntry | None = None
+        self._active_campaign_id: str | None = None
 
         # candidate-v1 退出状态
         self.exit_strict_age_ms = exit_strict_age_ms
@@ -294,6 +295,7 @@ class PullbackV3Strategy:
         if fill.side == "SELL" and self.first_fill_time is None:
             meta = self._pending_entry_meta
             if meta is not None:
+                self._active_campaign_id = _campaign_id(self.symbol, meta.signal_ms)
                 self.first_fill_time = fill.fill_time
                 self.entry_price = fill.price
                 self._spike_high = meta.spike_high
@@ -303,7 +305,7 @@ class PullbackV3Strategy:
                 self._record_audit(
                     fill.fill_time,
                     "pullback_entry_filled",
-                    _campaign_id(self.symbol, meta.signal_ms),
+                    self._active_campaign_id,
                     {
                         "entry_price": str(fill.price),
                         "origin_price": str(meta.origin_price),
@@ -311,12 +313,21 @@ class PullbackV3Strategy:
                     },
                 )
         elif fill.side == "BUY" and self.first_fill_time is not None:
+            campaign_id = self._campaign_id_for_timing
             self._record_audit(
                 fill.fill_time,
                 "pullback_exit_filled",
-                self._campaign_id_for_timing,
+                campaign_id,
                 {"exit_price": str(fill.price), "quantity": str(fill.quantity)},
             )
+            self.reconcile_position()
+
+    def reconcile_position(self) -> None:
+        if self.first_fill_time is None or self._account is None:
+            return
+        position = self._account.get_position(self.symbol)
+        if position is None or position.quantity <= 0:
+            self._clear_campaign_state()
 
     # ------------------------------------------------------------------
     # 1s 主流程
@@ -525,10 +536,16 @@ class PullbackV3Strategy:
 
     @property
     def _campaign_id_for_timing(self) -> str | None:
-        if self.first_fill_time is None:
-            return None
-        signal_ms = self.first_fill_time
-        return _campaign_id(self.symbol, signal_ms)
+        return self._active_campaign_id
+
+    def _clear_campaign_state(self) -> None:
+        self.first_fill_time = None
+        self.entry_price = None
+        self._spike_high = None
+        self._campaign_origin_price = None
+        self._pending_entry_meta = None
+        self._active_campaign_id = None
+        self._reset_candidate_state()
 
     def _reset_candidate_state(self) -> None:
         self._candidate_exit_state = SpikeExitPolicyState()
@@ -619,6 +636,7 @@ class PullbackV3Strategy:
             reduce_only=True,
             strategy_id=self.strategy_name,
             trigger_reason=reason,
+            campaign_id=self._active_campaign_id,
         )
 
     def _candidate_exit(
@@ -800,6 +818,11 @@ class PullbackV3BacktestStrategy:
         strategy = self.strategies.get(fill.symbol)
         if strategy is not None:
             strategy.on_fill(fill)
+
+    def reconcile_position(self, symbol: str) -> None:
+        strategy = self.strategies.get(symbol)
+        if strategy is not None:
+            strategy.reconcile_position()
 
     def drain_audit_events(self) -> List[StrategyAuditEvent]:
         events: List[StrategyAuditEvent] = []

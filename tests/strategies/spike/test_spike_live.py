@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from trading_platform.shared.binance.strategy_account import BinanceStrategyAccount
-from trading_platform.shared.events import Bar1s, OrderIntent, StrategyAuditEvent
+from trading_platform.shared.events import Bar1s, Fill, OrderIntent, StrategyAuditEvent
 from trading_platform.shared.execution_recovery import (
     OrderWAL,
     Resolution,
@@ -28,6 +28,10 @@ from trading_platform.strategies.spike.main import (
     SpikeLiveProcess,
     _snapshot_from_database,
     require_viable_entry_notional,
+)
+from trading_platform.strategies.spike.pullback import (
+    PullbackV3BacktestStrategy,
+    _PendingEntry,
 )
 from trading_platform.strategies.universe import ExchangeSymbolSnapshot
 
@@ -1832,6 +1836,133 @@ async def test_trade_fill_blocks_campaign_release_until_account_update(tmp_path)
     assert account.has_pending_position_update("BTCUSDT") is False
     assert await coordinator.maybe_release_campaign("BTCUSDT") is False
     store.release.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_account_update_reconciles_pullback_after_execution_report(tmp_path):
+    symbol = "BTCUSDT"
+    rest = Mock(get_position_risk=AsyncMock(return_value=[]))
+    risk = RiskGuard("spike-test", RiskConfig())
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    account = BinanceStrategyAccount(
+        rest,
+        wal,
+        account_id="spike-test",
+        strategy_id="spike_short",
+        risk_guard=risk,
+    )
+    await account.handle_account_update(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "T": 1_000,
+            "a": {
+                "P": [
+                    {
+                        "s": symbol,
+                        "pa": "-2",
+                        "ep": "100",
+                        "up": "0",
+                        "ps": "BOTH",
+                    }
+                ]
+            },
+        }
+    )
+    strategy = PullbackV3BacktestStrategy([symbol], Decimal("200"), account=account)
+    pullback = strategy.strategies[symbol]
+    pullback._pending_entry_meta = _PendingEntry(
+        signal_ms=900,
+        origin_price=Decimal("80"),
+        spike_high=Decimal("120"),
+    )
+    strategy.on_fill(
+        Fill(
+            fill_id="entry-fill",
+            order_id="entry-order",
+            symbol=symbol,
+            side="SELL",
+            price=Decimal("100"),
+            quantity=Decimal("2"),
+            commission=Decimal("0"),
+            commission_asset="USDT",
+            fill_time=1_000,
+            is_maker=False,
+        )
+    )
+    exit_intent = OrderIntent(
+        symbol=symbol,
+        side="BUY",
+        price=Decimal("100"),
+        quantity=Decimal("2"),
+        client_order_id="pullback-exit",
+        order_type="MARKET",
+        reduce_only=True,
+        strategy_id="spike_short",
+        campaign_id="pullback_v3:BTCUSDT:900",
+    )
+    record = wal.record_intent(exit_intent, account_id="spike-test", recorded_at=1_500)
+    wal.record_exchange_status(
+        record, {"status": "FILLED", "orderId": 42}, recorded_at=2_000
+    )
+    gate = CompositeEntryGate(strategy)
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=account,
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+    )
+    coordinator.reconcile_entry_expirations = AsyncMock()
+    coordinator.reconcile_exchange_symbol_admission = AsyncMock()
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=Mock(
+            handle_execution_report=AsyncMock(),
+            handle_account_update=AsyncMock(),
+        ),
+        account=account,
+        coordinator=coordinator,
+        gate=gate,
+    )
+
+    await callbacks.handle_execution_report(
+        {
+            "s": symbol,
+            "c": exit_intent.client_order_id,
+            "x": "TRADE",
+            "X": "FILLED",
+            "l": "2",
+            "L": "100",
+            "t": 8,
+            "T": 2_000,
+        }
+    )
+
+    assert account.get_position(symbol).quantity == Decimal("2")
+    assert pullback.first_fill_time == 1_000
+
+    await callbacks.handle_account_update(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "T": 2_000,
+            "a": {
+                "P": [
+                    {
+                        "s": symbol,
+                        "pa": "0",
+                        "ep": "0",
+                        "up": "0",
+                        "ps": "BOTH",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert account.get_position(symbol) is None
+    assert pullback.first_fill_time is None
+    assert pullback._active_campaign_id is None
 
 
 @pytest.mark.asyncio
