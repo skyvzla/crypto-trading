@@ -15,6 +15,7 @@ from trading_platform.shared.events import Kline
 
 
 SPIKE_RISE_5S_FEATURE = FeatureSpec(name="rise_5s", timeframe="1s")
+SPIKE_RISE_60S_FEATURE = FeatureSpec(name="rise_60s", timeframe="1s")
 SPIKE_ORDERFLOW_FEATURE = FeatureSpec(name="orderflow", timeframe="1s")
 SPIKE_CANDIDATE_EXIT_FEATURE = FeatureSpec(
     name="candidate_exit", timeframe="1m"

@@ -25,6 +25,7 @@ from trading_platform.strategies.spike.definition import (
     SPIKE_ORDERFLOW_FEATURE,
     SPIKE_MIN_LOW_1M_FEATURE,
     SPIKE_PRIOR_HIGH_1M_FEATURE,
+    SPIKE_RISE_60S_FEATURE,
     SPIKE_RISE_5S_FEATURE,
 )
 from trading_platform.strategies.spike.exit_features import (
@@ -37,6 +38,7 @@ MS_PER_SECOND = 1_000
 MS_PER_MINUTE = 60_000
 SUPPORTED_FEATURES = frozenset({
     SPIKE_RISE_5S_FEATURE,
+    SPIKE_RISE_60S_FEATURE,
     SPIKE_ORDERFLOW_FEATURE,
     SPIKE_CANDIDATE_EXIT_FEATURE,
     SPIKE_MIN_LOW_1M_FEATURE,
@@ -80,6 +82,8 @@ class SpikeBarFeatures:
     timestamp: int
     continuous: bool
     rise_5s: Decimal
+    continuous_60s: bool = False
+    rise_60s: Decimal | None = None
     volume_ready: bool = False
     volume_5s: Decimal | None = None
     median_volume_1s: Decimal | None = None
@@ -131,9 +135,14 @@ class SpikeSharedFeatureProvider:
             )
             raise ValueError(f"unsupported Spike shared features: {names}")
         self._requires_1s = bool(
-            {SPIKE_RISE_5S_FEATURE, SPIKE_ORDERFLOW_FEATURE}
+            {
+                SPIKE_RISE_5S_FEATURE,
+                SPIKE_RISE_60S_FEATURE,
+                SPIKE_ORDERFLOW_FEATURE,
+            }
             & self.shared_features
         )
+        self._requires_rise_60s = SPIKE_RISE_60S_FEATURE in self.shared_features
         self._requires_kline = bool(
             SPIKE_CANDIDATE_EXIT_FEATURE in self.shared_features
             or self._metric_by_feature
@@ -149,6 +158,8 @@ class SpikeSharedFeatureProvider:
         self._latest_bar: Bar1s | None = None
         self._latest_bar_features: SpikeBarFeatures | None = None
         self._first_bar1s_timestamp: int | None = None
+        self._last_bar1s_timestamp: int | None = None
+        self._continuous_1s_count = 0
         self._candidate_version = 0
         self._candidate_cache: dict[
             tuple[int, CandidateFeatureConfig], CandidateFeatureSnapshot | None
@@ -173,6 +184,14 @@ class SpikeSharedFeatureProvider:
         if isinstance(event, Bar1s):
             if not self._requires_1s:
                 return
+            if (
+                self._last_bar1s_timestamp is not None
+                and event.timestamp - self._last_bar1s_timestamp == MS_PER_SECOND
+            ):
+                self._continuous_1s_count += 1
+            else:
+                self._continuous_1s_count = 1
+            self._last_bar1s_timestamp = event.timestamp
             self.bars_1s.append(event)
             if self._first_bar1s_timestamp is None:
                 self._first_bar1s_timestamp = event.timestamp
@@ -305,10 +324,17 @@ class SpikeSharedFeatureProvider:
                 current.timestamp - previous_5s.timestamp == 5 * MS_PER_SECOND
                 and current.timestamp - previous_60s.timestamp == 60 * MS_PER_SECOND
             )
+            continuous_60s = False
+            rise_60s = None
+            if self._requires_rise_60s:
+                continuous_60s = self._continuous_1s_count >= 61
+                rise_60s = current.close / previous_60s.close - Decimal("1")
             self._latest_bar_features = SpikeBarFeatures(
                 timestamp=current.timestamp,
                 continuous=continuous,
                 rise_5s=current.close / previous_5s.close - Decimal("1"),
+                continuous_60s=continuous_60s,
+                rise_60s=rise_60s,
             )
         return self._latest_bar_features
 
@@ -330,6 +356,8 @@ class SpikeSharedFeatureProvider:
             timestamp=features.timestamp,
             continuous=features.continuous,
             rise_5s=features.rise_5s,
+            continuous_60s=features.continuous_60s,
+            rise_60s=features.rise_60s,
             volume_ready=True,
             volume_5s=volume_5s,
             median_volume_1s=median,
@@ -374,6 +402,8 @@ class SpikeSharedFeatureProvider:
             timestamp=features.timestamp,
             continuous=features.continuous,
             rise_5s=features.rise_5s,
+            continuous_60s=features.continuous_60s,
+            rise_60s=features.rise_60s,
             volume_ready=features.volume_ready,
             volume_5s=features.volume_5s,
             median_volume_1s=features.median_volume_1s,

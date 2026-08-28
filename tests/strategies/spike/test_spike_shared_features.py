@@ -11,6 +11,7 @@ from trading_platform.strategies.spike.shared_features import (
 from trading_platform.strategies.spike.definition import (
     SPIKE_MIN_LOW_1M_FEATURE,
     SPIKE_PRIOR_HIGH_1M_FEATURE,
+    SPIKE_RISE_60S_FEATURE,
     SPIKE_V2_SHARED_METRICS,
 )
 from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
@@ -86,6 +87,36 @@ def test_shared_bar_features_keep_exact_scalar_window_semantics():
     assert volume_features.median_volume_1s == Decimal("1")
     assert volume_features.volume_multiple_5s == Decimal("3.8")
     assert provider.volume_features(bars[-1]) is volume_features
+
+
+def test_shared_bar_features_expose_continuous_moving_60s_rise():
+    provider = SpikeSharedFeatureProvider(
+        shared_features={SPIKE_RISE_60S_FEATURE},
+        retained_1m_minutes=30 * 60,
+    )
+    bars = [_bar(index) for index in range(61)]
+    bars[-1] = _bar(60, close="140", volume="0")
+    for bar in bars:
+        provider.process_event(bar)
+
+    features = provider.bar_features(bars[-1])
+
+    assert features is not None
+    assert features.continuous_60s is True
+    assert features.rise_60s == Decimal("0.4")
+
+    gap_provider = SpikeSharedFeatureProvider(
+        shared_features={SPIKE_RISE_60S_FEATURE},
+        retained_1m_minutes=30 * 60,
+    )
+    gapped = [_bar(index) for index in range(60)] + [_bar(61, close="140")]
+    for bar in gapped:
+        gap_provider.process_event(bar)
+
+    gap_features = gap_provider.bar_features(gapped[-1])
+    assert gap_features is not None
+    assert gap_features.rise_60s == Decimal("0.4")
+    assert gap_features.continuous_60s is False
 
 
 def test_unrequested_1s_feature_has_no_1s_cache_or_calculation():

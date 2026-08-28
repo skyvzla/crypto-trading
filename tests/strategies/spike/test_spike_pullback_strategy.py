@@ -5,7 +5,18 @@ from trading_platform.shared.config import BacktestConfig
 from trading_platform.shared.events import Bar1s, Fill, Kline, OrderIntent, Position
 from trading_platform.strategies.spike.pullback import (
     PullbackV3Strategy,
+    PullbackV3BacktestStrategy,
     _PendingEntry,
+)
+from trading_platform.strategies.spike.definition import (
+    SPIKE_CANDIDATE_EXIT_FEATURE,
+    SPIKE_MIN_LOW_1M_FEATURE,
+    SPIKE_PRIOR_HIGH_1M_FEATURE,
+    SPIKE_RISE_60S_FEATURE,
+    SPIKE_V2_SHARED_METRICS,
+)
+from trading_platform.strategies.spike.shared_features import (
+    SpikeSharedFeatureProvider,
 )
 
 
@@ -64,6 +75,30 @@ def _bar(available_time: int) -> Bar1s:
         volume=Decimal("1"),
         trade_count=1,
         vwap=Decimal("100"),
+    )
+
+
+def _bar_at(
+    timestamp: int,
+    *,
+    close: str = "100",
+    high: str | None = None,
+    low: str | None = None,
+    open_price: str | None = None,
+    volume: str = "0",
+) -> Bar1s:
+    price = Decimal(close)
+    return Bar1s(
+        symbol=SYMBOL,
+        timestamp=timestamp,
+        available_time=timestamp + 1_000,
+        open=Decimal(open_price or close),
+        high=Decimal(high or close),
+        low=Decimal(low or close),
+        close=price,
+        volume=Decimal(volume),
+        trade_count=0,
+        vwap=price,
     )
 
 
@@ -262,3 +297,138 @@ def test_entry_exit_intents_and_audits_share_signal_campaign_id():
             "pullback_exit_filled",
         }
     } == {campaign_id}
+
+
+def test_moving_60s_rise_triggers_without_3s_volume_conditions():
+    strategy = PullbackV3Strategy(
+        SYMBOL,
+        Decimal("200"),
+        rise_low_lookback_hours=0,
+        min_rise_duration_hours=0,
+        prior_high_lookback_hours=0,
+        min_spike_rise=Decimal("0"),
+    )
+
+    for index in range(61):
+        close = "130" if index == 60 else "100"
+        strategy.on_bar1s(
+            _bar_at(index * 1_000, close=close, high=close, low=close)
+        )
+
+    assert strategy._pending is None
+
+    strategy.on_bar1s(_bar_at(61_000, close="140", high="140", low="140"))
+
+    assert strategy._pending is not None
+    assert strategy._pending.signal_ms == 61_000
+    assert strategy._pending.origin_price == Decimal("100")
+    audit = strategy.drain_audit_events()[-1]
+    assert audit.event_type == "signal_triggered"
+    assert Decimal(audit.details["rise_60s"]) == Decimal("0.4")
+
+
+def test_local_moving_60s_rise_rejects_a_gap_without_scanning_the_window():
+    strategy = PullbackV3Strategy(
+        SYMBOL,
+        Decimal("200"),
+        rise_low_lookback_hours=0,
+        min_rise_duration_hours=0,
+        prior_high_lookback_hours=0,
+        min_spike_rise=Decimal("0"),
+    )
+
+    for bar in [_bar_at(index * 1_000) for index in range(60)]:
+        strategy.on_bar1s(bar)
+    final_bar = _bar_at(61_000, close="140", high="140", low="140")
+    strategy.on_bar1s(final_bar)
+
+    assert strategy._continuous_1s_count == 1
+    assert strategy._pending is None
+
+
+def test_pending_signal_expires_after_90_seconds():
+    strategy = PullbackV3Strategy(
+        SYMBOL,
+        Decimal("200"),
+        rise_low_lookback_hours=0,
+        min_rise_duration_hours=0,
+        prior_high_lookback_hours=0,
+        wait_seconds=90,
+    )
+    strategy._pending = _PendingEntry(
+        signal_ms=0,
+        origin_price=Decimal("100"),
+        spike_high=Decimal("120"),
+    )
+
+    assert strategy._advance_pending(
+        _bar_at(90_001, close="120", high="120", low="120")
+    ) == []
+    assert strategy._pending is None
+    assert strategy.drain_audit_events()[-1].event_type == "signal_expired"
+
+
+def test_pending_entry_requires_candidate_strictly_above_prior_high():
+    def pending(prior_high: str) -> PullbackV3Strategy:
+        strategy = PullbackV3Strategy(
+            SYMBOL,
+            Decimal("200"),
+            rise_low_lookback_hours=0,
+            min_rise_duration_hours=0,
+            prior_high_lookback_hours=4,
+            min_spike_rise=Decimal("0.4"),
+            retrace_frac=Decimal("0.3"),
+        )
+        strategy._pending = _PendingEntry(
+            signal_ms=0,
+            origin_price=Decimal("100"),
+            spike_high=Decimal("150"),
+            prior_high=Decimal(prior_high),
+        )
+        return strategy
+
+    bar = _bar_at(
+        1_000,
+        close="140",
+        open_price="130",
+        high="150",
+        low="135",
+    )
+    equal = pending("135")
+    assert equal._advance_pending(bar) == []
+    assert equal._pending is not None
+
+    above = pending("134")
+    intents = above._advance_pending(bar)
+    assert len(intents) == 1
+    assert intents[0].price == Decimal("135")
+
+
+def test_fixed_take_profit_is_disabled_by_default_for_candidate_v1():
+    strategy, account = _start_campaign()
+    assert strategy.take_profit == Decimal("0")
+
+    exit_intents = strategy._manage_exits(
+        _bar_at(2_000, close="80", high="81", low="80")
+    )
+
+    assert exit_intents == []
+    assert account.position is not None
+
+
+def test_pullback_backtest_adapter_binds_shared_provider_to_leaf_strategies():
+    adapter = PullbackV3BacktestStrategy([SYMBOL], Decimal("200"))
+    provider = SpikeSharedFeatureProvider(
+        shared_features={
+            SPIKE_RISE_60S_FEATURE,
+            SPIKE_CANDIDATE_EXIT_FEATURE,
+            SPIKE_MIN_LOW_1M_FEATURE,
+            SPIKE_PRIOR_HIGH_1M_FEATURE,
+        },
+        shared_metrics=SPIKE_V2_SHARED_METRICS,
+        retained_1m_minutes=30 * 60,
+    )
+
+    provider.bind(adapter)
+
+    assert adapter.strategies[SYMBOL]._shared_feature_provider is provider

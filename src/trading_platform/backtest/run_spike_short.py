@@ -267,40 +267,34 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     # ---- Spike v3（pullback-v3）入场参数（默认 None=策略声明/类默认值）----
     parser.add_argument(
-        "--rise-3s-threshold",
+        "--rise-60s-threshold",
         type=float,
         default=None,
-        help="v3：3 秒暴涨涨幅门槛（小数），默认 0.03",
-    )
-    parser.add_argument(
-        "--vol-multiple",
-        type=float,
-        default=None,
-        help="v3：3 秒成交量相对 60s 中位数倍数门槛，默认 2.0",
+        help="v3：移动 60 秒暴涨涨幅门槛（小数），默认 0.40",
     )
     parser.add_argument(
         "--cooldown-seconds",
         type=int,
         default=None,
-        help="v3：3s 信号冷却秒数，默认 180",
+        help="v3：60s 信号冷却秒数，默认 180",
     )
     parser.add_argument(
         "--min-spike-rise",
         type=float,
         default=None,
-        help="v3：插针总涨幅门槛（spike_high/origin-1），默认 0.30",
+        help="v3：插针总涨幅门槛（spike_high/origin-1），默认 0.40",
     )
     parser.add_argument(
         "--retrace-frac",
         type=float,
         default=None,
-        help="v3：回吐插针涨幅比例后接空，默认 0.35",
+        help="v3：回吐插针涨幅比例后接空，默认 0.30",
     )
     parser.add_argument(
         "--buy-ratio-entry-min",
         type=float,
         default=None,
-        help="v3：接空前 10s 主动买占比轻过滤下限，默认 0.40",
+        help="v3：接空前 10s 主动买占比轻过滤下限，默认 0（关闭）",
     )
     parser.add_argument(
         "--no-stop-5m-high",
@@ -312,7 +306,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--take-profit",
         type=float,
         default=None,
-        help="v3：硬止盈比例（小数），默认 0.10",
+        help="v3：硬止盈比例（小数），默认 0（由 candidate-v1 动态退出管理）",
     )
     parser.add_argument(
         "--max-hold-seconds",
@@ -324,7 +318,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--wait-seconds",
         type=int,
         default=None,
-        help="v3：信号后等待回落的最大秒数，默认 3600",
+        help="v3：信号后等待回落的最大秒数，默认 90",
     )
     parser.add_argument(
         "--entry-tier-mode",
@@ -768,6 +762,7 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         "max_oi_change_pct": args.max_oi_change_pct,
         "max_ls_ratio": args.max_ls_ratio,
         "rise_5s_threshold_percent": args.rise_5s_threshold_percent,
+        "rise_60s_threshold": args.rise_60s_threshold,
         "accel_rise_5s_min": args.accel_rise_5s_min_percent,
         "accel_ratio": args.accel_ratio,
         "accel_prev_minutes": args.accel_prev_minutes,
@@ -836,6 +831,8 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
 
     if prior_high_lookback_hours < 0:
         raise ValueError("--prior-high-lookback-hours must not be negative")
+    if args.rise_60s_threshold is not None and args.rise_60s_threshold < 0:
+        raise ValueError("--rise-60s-threshold must not be negative")
     if rise_low_lookback_hours < 0 or min_rise_duration_hours < 0:
         raise ValueError("rise lookback and minimum duration must not be negative")
     if (rise_low_lookback_hours == 0) != (min_rise_duration_hours == 0):
@@ -1092,12 +1089,15 @@ def create_spike_engine(
             else args.total_notional
         )
         v3_params = {
-            "rise_3s_threshold": args.rise_3s_threshold,
-            "vol_multiple": args.vol_multiple,
+            "rise_60s_threshold": args.rise_60s_threshold,
             "cooldown_seconds": args.cooldown_seconds,
             "min_spike_rise": args.min_spike_rise,
             "retrace_frac": args.retrace_frac,
             "buy_ratio_entry_min": args.buy_ratio_entry_min,
+            "prior_high_lookback_hours": (
+                settings.prior_high_lookback_minutes // 60
+            ),
+            "prior_high_tolerance_percent": settings.prior_high_tolerance_percent,
             "rise_low_lookback_hours": (
                 settings.rise_low_lookback_minutes // 60
             ),

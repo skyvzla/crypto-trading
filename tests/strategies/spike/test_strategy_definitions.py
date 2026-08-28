@@ -47,15 +47,31 @@ def test_strategy_data_requirements_include_execution_timeframe():
 
 
 def test_shared_features_are_opt_in_per_strategy():
-    unshared = [
-        load_strategy_definition("trading_platform.strategies.spike.v1:V1"),
-        load_strategy_definition(
-            "trading_platform.strategies.spike.pullback:PullbackV3"
-        ),
-    ]
+    unshared = [load_strategy_definition("trading_platform.strategies.spike.v1:V1")]
     assert all(definition.data_requirements.shared_features == frozenset()
                for definition in unshared)
     assert all(definition.shared_feature_provider is None for definition in unshared)
+
+    pullback = load_strategy_definition(
+        "trading_platform.strategies.spike.pullback:PullbackV3"
+    )
+    assert pullback.shared_feature_provider is not None
+    assert pullback.defaults.prior_high_lookback_hours == 4
+    assert pullback.data_requirements.shared_features == frozenset({
+        FeatureSpec(name="rise_60s", timeframe="1s"),
+        FeatureSpec(name="candidate_exit", timeframe="1m"),
+        FeatureSpec(name="min_low_1m", timeframe="1m"),
+        FeatureSpec(name="prior_high_1m", timeframe="1m"),
+    })
+    assert {
+        metric.feature
+        for metric in pullback.data_requirements.shared_metrics
+    } == {
+        FeatureSpec(name="min_low_1m", timeframe="1m"),
+        FeatureSpec(name="prior_high_1m", timeframe="1m"),
+    }
+    assert "rise_60s_threshold" in pullback.supported_parameters
+    assert "rise_3s_threshold" not in pullback.supported_parameters
 
 
 def test_v2_family_declares_the_shared_spike_provider_contract():
@@ -88,9 +104,5 @@ def test_v2_family_declares_the_shared_spike_provider_contract():
             )
         ) == 48 * 60
 
-    for path in (
-        "trading_platform.strategies.spike.v1:V1",
-        "trading_platform.strategies.spike.pullback:PullbackV3",
-    ):
-        definition = load_strategy_definition(path)
-        assert definition.shared_feature_provider is None
+    definition = load_strategy_definition("trading_platform.strategies.spike.v1:V1")
+    assert definition.shared_feature_provider is None

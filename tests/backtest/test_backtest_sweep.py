@@ -1167,6 +1167,27 @@ def test_run_arguments_use_symbol_effective_start(tmp_path: Path):
     )
 
 
+def test_run_arguments_map_pullback_moving_rise_threshold(tmp_path: Path):
+    spec = sweep.RunSpec(
+        "run-pullback-rise",
+        "AKEUSDT",
+        {
+            "strategy": "trading_platform.strategies.spike.pullback:PullbackV3",
+            "total_notional": 1000,
+            "rise_60s_threshold": 0.4,
+        },
+    )
+    config = {
+        "start": "2025-08-01T00:00:00+00:00",
+        "end": "2026-08-01T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+    }
+
+    arguments = sweep._run_arguments(spec, config, tmp_path)
+
+    assert arguments[arguments.index("--rise-60s-threshold") + 1] == "0.4"
+
+
 def test_worker_memory_budget_rejects_less_than_two_gb():
     with pytest.raises(ValueError, match="at least 2GB"):
         _worker_memory_plan(4, "1GB", 70)

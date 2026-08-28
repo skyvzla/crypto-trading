@@ -260,6 +260,26 @@ def test_v1_defaults_remain_unchanged():
     assert settings.start_ms - settings.load_start_ms == 16 * 3_600_000
 
 
+def test_pullback_v3_resolves_moving_rise_and_prior_high_defaults():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.pullback:PullbackV3",
+    ])
+
+    settings = run_spike_short.resolve_settings(args)
+
+    assert settings.strategy_version == "pullback-v3"
+    assert settings.prior_high_lookback_minutes == 4 * 60
+    assert settings.rise_low_lookback_minutes == 24 * 60
+    assert settings.min_rise_duration_minutes == 6 * 60
+    assert args.rise_60s_threshold is None
+
+
+
 def test_v11_uses_existing_candidate_exit_policy_by_default():
     args = run_spike_short.parse_args([
         "--symbol", "AKEUSDT",
