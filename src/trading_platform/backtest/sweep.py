@@ -144,6 +144,7 @@ WORKER_NON_DUCKDB_RESERVE_BYTES = 1024**3
 MIN_WORKER_MEMORY_BYTES = 2 * 1024**3
 BACKTEST_WORKERS_ENV = "BACKTEST_WORKERS"
 _SIGNAL_AUDIT_EVENT_TYPES = frozenset({"signal_triggered", "signal_rejected"})
+_RESUME_EXECUTION_KEYS = ("chunk_hours", "fetch_batch_size", "duckdb_threads")
 
 
 @dataclass(frozen=True)
@@ -242,6 +243,15 @@ def _canonical_json(value: Any) -> Any:
     return json.loads(json.dumps(value, sort_keys=True, default=str))
 
 
+def _execution_identity(config: dict[str, Any]) -> dict[str, Any]:
+    execution = config.get("execution", {})
+    return {
+        key: execution[key]
+        for key in _RESUME_EXECUTION_KEYS
+        if key in execution
+    }
+
+
 def _run_identity(
     spec: RunSpec,
     config: dict[str, Any],
@@ -259,6 +269,7 @@ def _run_identity(
         ),
         "end": config.get("end"),
         "duckdb_path": config.get("duckdb_path"),
+        "execution": _canonical_json(_execution_identity(config)),
         "code_fingerprint": code_fingerprint,
         "archive_index_fingerprint": archive_index_fingerprint,
         "metrics_fingerprint": metrics_fingerprint,
@@ -977,6 +988,7 @@ def expand_specs(config: dict[str, Any], symbols: list[str]) -> list[RunSpec]:
             ),
             "end": config.get("end"),
             "duckdb_path": config.get("duckdb_path"),
+            "execution": _canonical_json(_execution_identity(config)),
             "code_fingerprint": code_fingerprint,
             "archive_index_fingerprint": archive_index_fingerprint,
             "metrics_fingerprint": metrics_fingerprint,

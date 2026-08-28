@@ -687,6 +687,32 @@ def test_expand_specs_run_id_tracks_market_slippage_bps(monkeypatch, tmp_path):
     assert zero.run_id != changed.run_id
 
 
+def test_expand_specs_run_id_tracks_streaming_execution_window(monkeypatch, tmp_path):
+    index_path = tmp_path / "archive_index.parquet"
+    index_path.write_bytes(b"archive")
+    monkeypatch.setattr(sweep, "_backtest_code_fingerprint", lambda: "code")
+    base = {
+        "start": "2026-07-01T00:00:00+00:00",
+        "end": "2026-08-01T00:00:00+00:00",
+        "duckdb_path": "history.duckdb",
+        "archive_index_path": str(index_path),
+        "fixed": {"total_notional": 1000},
+        "execution": {
+            "chunk_hours": 2160,
+            "fetch_batch_size": 10000,
+            "duckdb_threads": 1,
+        },
+    }
+
+    first = expand_specs(base, ["AKEUSDT"])[0]
+    changed = expand_specs({
+        **base,
+        "execution": {**base["execution"], "chunk_hours": 2880},
+    }, ["AKEUSDT"])[0]
+
+    assert first.run_id != changed.run_id
+
+
 def test_expand_specs_run_id_normalizes_negative_zero_slippage(
     monkeypatch, tmp_path
 ):

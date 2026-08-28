@@ -57,7 +57,7 @@ symbols = [
 
 [execution]
 memory_limit_enabled = false
-chunk_hours = 4320
+chunk_hours = 2880
 fetch_batch_size = 10000
 duckdb_threads = 1
 resume = true
