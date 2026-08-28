@@ -516,7 +516,7 @@ def _allowed_symbols(dsn: str, *, freeze_days: int, strategy_id: str) -> set[str
             with connection.cursor() as cursor:
                 cursor.execute(
                     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
-                    (timedelta(days=freeze_days), strategy_id),
+                    (timedelta(days=freeze_days), strategy_id, strategy_id),
                 )
                 return {str(row[0]).strip().upper() for row in cursor.fetchall()}
     except psycopg.OperationalError as error:

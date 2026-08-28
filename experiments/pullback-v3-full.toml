@@ -6,6 +6,7 @@ output = "reports/pullback-v3-full"
 
 [universe]
 mode = "explicit"
+strategy_id = "spike_short"
 require_database_allowed = false
 symbols = [
     "AINUSDT",

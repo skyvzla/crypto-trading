@@ -59,10 +59,15 @@ const visibleUniverse = computed(() => {
 })
 const strategyOptions = computed(() => strategies.value.map((value) => ({ label: value, value })))
 
-function enabled(item: ExchangeCategory): boolean { return admissions.value.get(item.category_key)?.enabled ?? true }
+function defaultEnabled(item: ExchangeCategory): boolean {
+  if (item.category_type === 'CATEGORY') return item.code.trim().toUpperCase() === 'COIN'
+  if (item.category_type !== 'SUBCATEGORY' || !item.parent_key) return false
+  return categoryByKey.value.get(item.parent_key)?.code.trim().toUpperCase() === 'COIN'
+}
+function enabled(item: ExchangeCategory): boolean { return admissions.value.get(item.category_key)?.enabled ?? defaultEnabled(item) }
 function policyLabel(item: ExchangeCategory): string {
   const admission = admissions.value.get(item.category_key)
-  if (!admission) return '默认允许'
+  if (!admission) return defaultEnabled(item) ? '默认允许' : '默认关闭'
   return admission.enabled ? '显式允许' : '显式关闭'
 }
 
@@ -193,7 +198,7 @@ function reasons(item: UniversePreviewItem): string { return item.exclusion_reas
 
 <template>
   <main class="operations-page strategy-risk-page">
-    <PageHeader eyebrow="RISK / CATEGORY ADMISSION" title="策略风控" description="首期只管理选定策略的 Category/Subcategory 可选黑名单；不控制策略进程，也不配置仓位、杠杆或参数。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
+    <PageHeader eyebrow="RISK / CATEGORY ADMISSION" title="策略风控" description="策略分类默认仅允许 COIN，其余分类关闭；可按策略显式放行或关闭 Category/Subcategory，不控制策略进程或交易参数。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
     <div class="strategy-selector"><label><span>策略 *</span><a-select v-model:value="strategyId" show-search placeholder="选择运行状态中已知策略" :options="strategyOptions" :filter-option="(input: string, option: { label?: string }) => String(option.label || '').toLowerCase().includes(input.toLowerCase())" @change="changeStrategy" /></label><div><ShieldCheck :size="15" /><span>策略来源：账本 runtime status</span></div></div>
     <a-alert v-if="!strategies.length && !loading" type="warning" show-icon message="没有可选择的策略" description="策略选择器只使用账本运行状态中的真实 strategy_id，不提供容易输错的自由文本输入。" />
 
@@ -202,16 +207,16 @@ function reasons(item: UniversePreviewItem): string { return item.exclusion_reas
         <MetricTile label="候选交易对" :value="String(preview.total_symbols)" :hint="`交易所生命周期 + freeze_days=${UNIVERSE_FREEZE_DAYS}`" />
         <MetricTile label="最终有效交易池" :value="String(preview.effective_symbols)" tone="positive" hint="与执行 worker 同源判定" />
         <MetricTile label="已排除交易对" :value="String(preview.excluded_symbols)" :tone="preview.excluded_symbols ? 'warning' : 'neutral'" hint="含上游全局与策略门禁" />
-        <MetricTile label="显式关闭分类" :value="String([...admissions.values()].filter((item) => !item.enabled).length)" hint="空配置保持默认允许" />
+        <MetricTile label="当前关闭分类" :value="String(categories.filter((item) => !enabled(item)).length)" hint="默认仅允许 COIN；显式配置优先" />
       </section>
-      <div class="risk-rule"><GitBranch :size="15" /><span>判定顺序：交易所状态与生命周期 → 交易对全局准入 → 策略匹配分类的显式关闭 → 最终有效交易池</span></div>
+      <div class="risk-rule"><GitBranch :size="15" /><span>判定顺序：交易所状态与生命周期 → 交易对全局准入 → COIN 默认与策略分类配置 → 最终有效交易池</span></div>
       <div class="risk-layout">
         <section class="policy-panel data-card">
-          <div class="data-card-heading"><div><h2>分类准入策略</h2><p>父 Category 关闭会覆盖子分类；任一匹配分类关闭即阻止新开仓</p></div></div>
+          <div class="data-card-heading"><div><h2>分类准入策略</h2><p>默认仅允许 COIN；父 Category 关闭会覆盖子分类，显式允许可覆盖默认关闭</p></div></div>
           <div class="panel-search"><a-input v-model:value="categorySearch" allow-clear placeholder="搜索分类" @change="syncUrl" @press-enter="syncUrl"><template #prefix><Search :size="13" /></template></a-input></div>
           <div class="policy-tree">
             <article v-for="parent in visibleTrees" :key="parent.category_key">
-              <div class="policy-row parent" :class="{ blocked: !enabled(parent) }"><button class="tree-toggle" @click="toggleTree(parent.category_key)">{{ expanded.has(parent.category_key) ? '−' : '+' }}</button><span class="policy-name"><strong>{{ parent.name }}</strong><small>{{ parent.symbol_count }} 交易对 · {{ policyLabel(parent) }}</small></span><a-tag :color="admissions.has(parent.category_key) ? (!enabled(parent) ? 'red' : 'blue') : 'default'">{{ policyLabel(parent) }}</a-tag><a-switch :checked="enabled(parent)" :checked-children="'允许'" :un-checked-children="'关闭'" @change="requestChange(parent, Boolean($event))" /></div>
+              <div class="policy-row parent" :class="{ blocked: !enabled(parent) }"><button class="tree-toggle" @click="toggleTree(parent.category_key)">{{ expanded.has(parent.category_key) ? '−' : '+' }}</button><span class="policy-name"><strong>{{ parent.name }}</strong><small>{{ parent.symbol_count }} 交易对 · {{ policyLabel(parent) }}</small></span><a-tag :color="!enabled(parent) ? 'red' : admissions.has(parent.category_key) ? 'blue' : 'default'">{{ policyLabel(parent) }}</a-tag><a-switch :checked="enabled(parent)" :checked-children="'允许'" :un-checked-children="'关闭'" @change="requestChange(parent, Boolean($event))" /></div>
               <div v-if="expanded.has(parent.category_key)">
                 <div v-for="child in parent.children" :key="child.category_key" class="policy-row child" :class="{ blocked: !enabled(parent) || !enabled(child) }"><span class="tree-branch">└</span><span class="policy-name"><strong>{{ child.name }}</strong><small>{{ child.symbol_count }} 交易对 · {{ !enabled(parent) ? '父分类覆盖关闭' : policyLabel(child) }}</small></span><a-tag :color="!enabled(parent) || !enabled(child) ? 'red' : admissions.has(child.category_key) ? 'blue' : 'default'">{{ !enabled(parent) ? '父级关闭' : policyLabel(child) }}</a-tag><a-switch :checked="enabled(child)" :disabled="!enabled(parent)" @change="requestChange(child, Boolean($event))" /></div>
               </div>

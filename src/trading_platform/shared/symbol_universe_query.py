@@ -3,8 +3,8 @@
 SYMBOL_UNIVERSE_MAX_SYNC_AGE_HOURS = 36
 
 # 这个 CTE 是实际交易池和 Web 预览共同的唯一规则源。调用方依次传入退市冻结窗口、
-# 可选 strategy_id；strategy_id 为 NULL 时 blocked_category_keys 自然为空，保持 D-031
-# 的“空配置默认允许”语义。
+# 可选 strategy_id；策略分类默认只允许 COIN，其他顶层 Category 默认关闭。策略的显式
+# 控制记录优先于该默认值；strategy_id 为 NULL 时不应用策略分类默认值。
 SYMBOL_UNIVERSE_EVALUATED_CTES_SQL = f"""
     universe_decisions AS (
         SELECT symbol.symbol,
@@ -30,16 +30,36 @@ SYMBOL_UNIVERSE_EVALUATED_CTES_SQL = f"""
             ) AS global_enabled,
             COALESCE((
                 SELECT ARRAY_AGG(
-                    category_control.category_key
-                    ORDER BY category_control.category_key
+                    COALESCE(category_control.category_key, category.category_key)
+                    ORDER BY category.category_key
                 )
                 FROM exchange_symbol_categories AS assignment
-                JOIN strategy_category_admission AS category_control
+                JOIN exchange_categories AS category
+                  ON category.category_key = assignment.category_key
+                 AND category.active = TRUE
+                LEFT JOIN strategy_category_admission AS category_control
                   ON category_control.category_key = assignment.category_key
+                 AND category_control.strategy_id = %s
+                LEFT JOIN exchange_categories AS parent_category
+                  ON parent_category.category_key = category.parent_key
+                 AND parent_category.active = TRUE
                 WHERE assignment.symbol = symbol.symbol
                   AND assignment.active = TRUE
-                  AND category_control.strategy_id = %s
-                  AND category_control.enabled = FALSE
+                  AND (
+                      category_control.enabled = FALSE
+                      OR (
+                          NULLIF(BTRIM(%s), '') IS NOT NULL
+                          AND
+                          category_control.category_key IS NULL
+                          AND NOT (
+                              (category.category_type = 'CATEGORY'
+                               AND UPPER(BTRIM(category.code)) = 'COIN')
+                              OR
+                              (category.category_type = 'SUBCATEGORY'
+                               AND UPPER(BTRIM(parent_category.code)) = 'COIN')
+                          )
+                      )
+                  )
             ), ARRAY[]::VARCHAR[]) AS blocked_category_keys
         FROM exchange_symbols AS symbol
     ),

@@ -242,12 +242,7 @@ class ReportDirectoryParser:
         config = raw.get("config", {})
         if not isinstance(config, dict):
             raise ReportValidationError("experiment.json config must contain an object")
-        universe = config.get("universe", {})
-        strategy_id = (
-            universe.get("strategy_id", "unknown")
-            if isinstance(universe, dict)
-            else "unknown"
-        )
+        strategy_id = _strategy_id_from_config(config)
         symbols = raw.get("symbols", [])
         if not isinstance(symbols, list):
             raise ReportValidationError("experiment.json symbols must contain an array")
@@ -430,3 +425,36 @@ def _optional_str(value: Any) -> str | None:
 
 def _optional_int(value: Any) -> int | None:
     return None if value is None else int(value)
+
+
+def _strategy_id_from_config(config: Mapping[str, Any]) -> str:
+    """Read the operational strategy id from current and legacy report layouts.
+
+    Sweep reports normally put it under ``universe.strategy_id``.  Older
+    pullback reports only persisted the implementation path in
+    ``fixed.strategy``; all Spike implementations share the live id
+    ``spike_short`` and must remain compatible with its Web schema.
+    """
+
+    universe = config.get("universe")
+    if isinstance(universe, Mapping):
+        value = universe.get("strategy_id")
+        if value is not None and str(value).strip().casefold() not in {
+            "",
+            "unknown",
+            "unk",
+        }:
+            return str(value).strip()
+
+    fixed = config.get("fixed")
+    implementation = (
+        fixed.get("strategy")
+        if isinstance(fixed, Mapping)
+        else config.get("strategy")
+    )
+    if implementation is not None and str(implementation).strip():
+        implementation_path = str(implementation).strip()
+        if implementation_path.startswith("trading_platform.strategies.spike."):
+            return "spike_short"
+        return implementation_path
+    return "unknown"

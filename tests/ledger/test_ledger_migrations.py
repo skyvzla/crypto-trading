@@ -136,7 +136,7 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
     old_migrations = tmp_path / "migrations"
     old_migrations.mkdir()
     for source in sorted(MIGRATIONS_DIR.glob("*.sql")):
-        if source.name.startswith("0012_"):
+        if int(source.stem.split("_", 1)[0]) > 11:
             continue
         shutil.copy(source, old_migrations / source.name)
     await apply_migrations(pool, schema=schema, directory=old_migrations)
@@ -183,7 +183,7 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
 
     result = await apply_migrations(pool, schema=schema)
 
-    assert result.applied_versions == (12,)
+    assert result.applied_versions == (12, 13)
     async with pool.connection() as conn:
         async with conn.transaction():
             await conn.execute(

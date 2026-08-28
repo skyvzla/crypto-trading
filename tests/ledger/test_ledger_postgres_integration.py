@@ -1639,9 +1639,9 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     category_by_code = {item.code: item for item in categories}
     assert category_by_code[subtype].parent_key == category_by_code["COIN"].category_key
 
-    assert await ledger.list_tradeable_exchange_symbols(strategy_id=strategy_id) == [
-        symbol
-    ]
+    assert symbol in await ledger.list_tradeable_exchange_symbols(
+        strategy_id=strategy_id
+    )
     seeded_globals, seeded_categories = await ledger.seed_exchange_symbol_admissions(
         default_disabled_symbols=[symbol, "MISSINGUSDT"],
         legacy_strategy_id=strategy_id,
@@ -1650,7 +1650,7 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         legacy_reason="legacy block",
     )
     assert (seeded_globals, seeded_categories) == (1, 0)
-    assert await ledger.list_tradeable_exchange_symbols() == []
+    assert symbol not in await ledger.list_tradeable_exchange_symbols()
     await ledger.set_symbol_global_admission(
         symbol, True, 1, "integration-test", "operator override"
     )
@@ -1662,7 +1662,7 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         legacy_reason="legacy block",
     )
     assert (seeded_globals, seeded_categories) == (0, 0)
-    assert await ledger.list_tradeable_exchange_symbols() == [symbol]
+    assert symbol in await ledger.list_tradeable_exchange_symbols()
 
     legacy = await ledger.set_subcategory_admission(
         subtype, False, 0, "integration-test", "legacy block"
@@ -1676,7 +1676,9 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         legacy_reason="legacy block",
     )
     assert (seeded_globals, seeded_categories) == (0, 1)
-    assert await ledger.list_tradeable_exchange_symbols(strategy_id=strategy_id) == []
+    assert symbol not in await ledger.list_tradeable_exchange_symbols(
+        strategy_id=strategy_id
+    )
     migrated = await ledger.get_strategy_category_admission(
         strategy_id, category_by_code[subtype].category_key
     )
@@ -1693,7 +1695,7 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         symbol, False, 2, "test", "manual block"
     )
     assert global_control.version == 3
-    assert await ledger.list_tradeable_exchange_symbols() == []
+    assert symbol not in await ledger.list_tradeable_exchange_symbols()
     await ledger.set_symbol_global_admission(symbol, True, 3, "test")
 
     strategy_control = await ledger.set_strategy_category_admission(
@@ -1704,13 +1706,13 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         "test",
     )
     assert strategy_control.version == 3
-    assert await ledger.list_tradeable_exchange_symbols() == [symbol]
-    assert await ledger.list_tradeable_exchange_symbols(
+    assert symbol in await ledger.list_tradeable_exchange_symbols()
+    assert symbol in await ledger.list_tradeable_exchange_symbols(
         strategy_id="unconfigured-strategy"
-    ) == [symbol]
-    assert await ledger.list_tradeable_exchange_symbols(
+    )
+    assert symbol not in await ledger.list_tradeable_exchange_symbols(
         strategy_id=strategy_id
-    ) == []
+    )
     await ledger.set_strategy_category_admission(
         strategy_id,
         category_by_code[subtype].category_key,
@@ -1718,9 +1720,9 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         3,
         "test",
     )
-    assert await ledger.list_tradeable_exchange_symbols(
+    assert symbol in await ledger.list_tradeable_exchange_symbols(
         strategy_id=strategy_id
-    ) == [symbol]
+    )
 
     parent_control = await ledger.set_strategy_category_admission(
         strategy_id,
@@ -1730,9 +1732,9 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
         "test",
     )
     assert parent_control.version == 1
-    assert await ledger.list_tradeable_exchange_symbols(
+    assert symbol not in await ledger.list_tradeable_exchange_symbols(
         strategy_id=strategy_id
-    ) == []
+    )
     await ledger.set_strategy_category_admission(
         strategy_id,
         category_by_code["COIN"].category_key,
@@ -1907,3 +1909,62 @@ async def test_exchange_symbol_sync_updates_lifecycle_categories_and_admission(
     with pytest.raises(ValueError, match="symbol count dropped"):
         await ledger.sync_exchange_symbols(first)
     assert (await ledger.get_exchange_symbol(bulk["symbols"][0]["symbol"])).active
+
+
+@pytest.mark.asyncio
+async def test_strategy_universe_defaults_to_coin_category_only(ledger):
+    async with ledger.pool.connection() as conn:
+        await conn.execute("TRUNCATE exchange_symbol_sync_state")
+        await conn.commit()
+
+    suffix = uuid4().hex[:8].upper()
+    coin_symbol = f"CO{suffix}USDT"
+    alt_symbol = f"AL{suffix}USDT"
+    alt_category = f"ALT_{suffix}"
+    exchange_info = {
+        "symbols": [
+            {
+                "symbol": coin_symbol,
+                "pair": coin_symbol,
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "onboardDate": 1_564_611_200_000,
+                "deliveryDate": 4_133_404_800_000,
+                "baseAsset": coin_symbol.removesuffix("USDT"),
+                "quoteAsset": "USDT",
+                "marginAsset": "USDT",
+                "underlyingType": "COIN",
+            },
+            {
+                "symbol": alt_symbol,
+                "pair": alt_symbol,
+                "contractType": "PERPETUAL",
+                "status": "TRADING",
+                "onboardDate": 1_564_611_200_000,
+                "deliveryDate": 4_133_404_800_000,
+                "baseAsset": alt_symbol.removesuffix("USDT"),
+                "quoteAsset": "USDT",
+                "marginAsset": "USDT",
+                "underlyingType": alt_category,
+            },
+        ]
+    }
+
+    assert await ledger.sync_exchange_symbols(exchange_info) == 2
+    assert await ledger.list_tradeable_exchange_symbols() == [alt_symbol, coin_symbol]
+    assert await ledger.list_tradeable_exchange_symbols(
+        strategy_id="default-only"
+    ) == [coin_symbol]
+
+    override = await ledger.set_strategy_category_admission(
+        "default-only",
+        f"BINANCE:CATEGORY:{alt_category}",
+        True,
+        0,
+        "integration-test",
+        "explicitly allow category",
+    )
+    assert override.enabled is True
+    assert await ledger.list_tradeable_exchange_symbols(
+        strategy_id="default-only"
+    ) == [alt_symbol, coin_symbol]

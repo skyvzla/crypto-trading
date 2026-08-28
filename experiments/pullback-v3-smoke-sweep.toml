@@ -6,6 +6,7 @@ output = "reports/pullback-v3-smoke-sweep"
 
 [universe]
 mode = "explicit"
+strategy_id = "spike_short"
 require_database_allowed = false
 symbols = [
     "SIRENUSDT",

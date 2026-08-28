@@ -48,11 +48,11 @@ Spike 不请求或写入这份元数据；每次安全扫描只读取 PostgreSQL
 
 1. 交易所 active、`PERPETUAL`、`TRADING`、已上架且未进入退市冻结窗口。
 2. `symbol_global_admission` 全局交易对开关；缺省为允许。
-3. `strategy_category_admission` 中该策略匹配分类的显式关闭规则。
+3. 策略分类默认仅允许 `COIN` 及其 Subcategory；`strategy_category_admission` 中该策略的显式配置优先。
 
-策略分类配置是可选过滤器。策略没有任何配置、分类没有配置或币种没有分类时均不受影响；
-只有匹配记录 `enabled=false` 才阻止该策略开仓。交易对同时关联父 Category 和所有
-Subcategory，因此关闭父分类会覆盖全部子分类；任意匹配分类关闭都优先阻止。
+没有分类的币种不因该默认规则被阻止。交易对同时关联父 Category 和所有 Subcategory，
+因此关闭父分类会覆盖全部子分类；显式允许可以覆盖对应分类的默认关闭，任意匹配分类关闭
+仍优先阻止该策略开仓。
 
 管理 API：
 

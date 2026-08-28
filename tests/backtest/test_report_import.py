@@ -14,14 +14,22 @@ from trading_platform.backtest.report_import import (
 )
 
 
-def _write_report(root: Path, *, strategy_id: str | None = "spike_short") -> Path:
+def _write_report(
+    root: Path,
+    *,
+    strategy_id: str | None = "spike_short",
+    fixed_strategy: str | None = None,
+) -> Path:
     root.mkdir()
     universe = {} if strategy_id is None else {"strategy_id": strategy_id}
+    fixed = {"notional": Decimal("1000")}
+    if fixed_strategy is not None:
+        fixed["strategy"] = fixed_strategy
     (root / "experiment.json").write_text(json.dumps({
         "config": {
             "name": "small-study",
             "universe": universe,
-            "fixed": {"notional": Decimal("1000")},
+            "fixed": fixed,
         },
         "symbols": ["AKEUSDT"],
         "runs": 1,
@@ -175,6 +183,17 @@ def test_strategy_id_falls_back_to_unknown(tmp_path: Path):
 
     assert parser.metadata.strategy_id == "unknown"
     assert next(parser.iter_trades()).strategy_id == "unknown"
+
+
+def test_strategy_id_uses_spike_implementation_path_for_legacy_reports(tmp_path: Path):
+    parser = ReportDirectoryParser(_write_report(
+        tmp_path / "study",
+        strategy_id=None,
+        fixed_strategy="trading_platform.strategies.spike.pullback:PullbackV3",
+    ))
+
+    assert parser.metadata.strategy_id == "spike_short"
+    assert next(parser.iter_trades()).strategy_id == "spike_short"
 
 
 def test_accepts_empty_trades_and_empty_optional_report(tmp_path: Path):

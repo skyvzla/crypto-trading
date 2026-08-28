@@ -1895,6 +1895,37 @@ class LedgerDB:
                 )
                 global_inserted += 1
 
+            # Keep newly synchronized Binance categories aligned with the
+            # migration default. Existing operator decisions are preserved.
+            await conn.execute(
+                """
+                WITH inserted AS (
+                    INSERT INTO strategy_category_admission (
+                        strategy_id, category_key, enabled, version,
+                        updated_by, reason
+                    )
+                    SELECT %s, category.category_key, FALSE, 1, %s,
+                        'default category admission: only COIN enabled'
+                    FROM exchange_categories AS category
+                    WHERE category.source = 'BINANCE'
+                      AND category.active = TRUE
+                      AND category.category_type = 'CATEGORY'
+                      AND UPPER(BTRIM(category.code)) <> 'COIN'
+                    ON CONFLICT (strategy_id, category_key) DO NOTHING
+                    RETURNING strategy_id, category_key, enabled, version,
+                        updated_by, reason
+                )
+                INSERT INTO strategy_category_admission_audit (
+                    strategy_id, category_key, previous_enabled, enabled,
+                    version, changed_by, reason
+                )
+                SELECT strategy_id, category_key, NULL, enabled, version,
+                    updated_by, reason
+                FROM inserted
+                """,
+                (normalized_strategy, updated_by),
+            )
+
             category_rows = await (
                 await conn.execute(
                     """
@@ -2140,7 +2171,7 @@ class LedgerDB:
         freeze_days: int = 15,
         strategy_id: Optional[str] = None,
     ) -> list[str]:
-        """Return the effective universe; absent strategy category rules allow."""
+        """Return the effective universe for the optional strategy scope."""
 
         if freeze_days < 0:
             raise ValueError("freeze_days must be non-negative")
@@ -2151,6 +2182,7 @@ class LedgerDB:
                     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
                     (
                         timedelta(days=freeze_days),
+                        normalized_strategy,
                         normalized_strategy,
                     ),
                 )
@@ -2174,6 +2206,7 @@ class LedgerDB:
             raise ValueError("strategy id is required")
         base_params: list[object] = [
             timedelta(days=freeze_days),
+            normalized_strategy,
             normalized_strategy,
         ]
         where = ""

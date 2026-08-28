@@ -48,6 +48,9 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+      # data/market is a separate host filesystem; bind it explicitly so
+      # Docker does not hide the archive disk behind the parent bind mount.
+      - ./data/market:/app/data/market
       - ./logs:/app/logs
     networks:
       - trading_net
@@ -96,6 +99,7 @@ services:
       - "8001:8001"
     volumes:
       - ./data:/app/data
+      - ./data/market:/app/data/market
       - ./logs:/app/logs
     networks:
       - trading_net
@@ -203,6 +207,7 @@ services:
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     volumes:
       - ./data:/app/data
+      - ./data/market:/app/data/market
       - ./logs:/app/logs
     networks:
       - trading_net
