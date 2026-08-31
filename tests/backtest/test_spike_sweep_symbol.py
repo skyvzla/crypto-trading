@@ -369,6 +369,65 @@ def test_v21_allows_configurable_rise_cap_window():
     assert settings.max_rise_window_percent == Decimal("10")
 
 
+def test_v21_resolves_hard_stop_research_parameters():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v2_1:V21",
+        "--hard-stop-loss-pct", "0.08",
+        "--hard-stop-confirm-ms", "5000",
+    ])
+
+    settings = run_spike_short.resolve_settings(args)
+
+    assert settings.hard_stop_loss_pct == Decimal("0.08")
+    assert settings.hard_stop_confirm_ms == 5_000
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--hard-stop-loss-pct", "-0.01"],
+        ["--hard-stop-loss-pct", "1.01"],
+        ["--hard-stop-confirm-ms", "-1"],
+        ["--hard-stop-confirm-ms", "5000"],
+    ],
+)
+def test_hard_stop_research_parameters_reject_invalid_values(arguments):
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v2_1:V21",
+        *arguments,
+    ])
+
+    with pytest.raises(ValueError, match="hard-stop"):
+        run_spike_short.resolve_settings(args)
+
+
+def test_zero_hard_stop_is_a_disabled_sweep_control_arm():
+    args = run_spike_short.parse_args([
+        "--symbol", "AKEUSDT",
+        "--start", "2026-07-01T00:00:00+00:00",
+        "--end", "2026-07-02T00:00:00+00:00",
+        "--duckdb-path", "history.duckdb",
+        "--metrics-root", "metrics",
+        "--total-notional", "1000",
+        "--strategy", "trading_platform.strategies.spike.v2_1:V21",
+        "--hard-stop-loss-pct", "0",
+    ])
+
+    assert run_spike_short.resolve_settings(args).hard_stop_loss_pct is None
+
+
 def test_rise_cap_window_rejects_conflicting_legacy_parameter():
     args = run_spike_short.parse_args([
         "--symbol", "AKEUSDT",

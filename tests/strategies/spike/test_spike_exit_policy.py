@@ -68,6 +68,28 @@ def test_stable_trend_breakout_exits_all(field, reason):
     assert decision.reason == reason
 
 
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [("hard_stop", "hard_stop"), ("gate_stop", "gate_stop")],
+)
+def test_immediate_stops_take_priority_and_latch_full_exit(field, reason):
+    policy = SpikeExitPolicyState()
+    decision = policy.evaluate(
+        _observation(
+            event_time=20_000,
+            stable_breakout_5m=True,
+            **{field: True},
+        )
+    )
+
+    assert decision.action == ExitAction.EXIT_ALL
+    assert decision.reason == reason
+    assert policy.exit_requested is True
+    assert policy.evaluate(_observation(event_time=21_000)).reason == (
+        "exit_already_requested"
+    )
+
+
 def test_invalid_observation_is_rejected():
     policy = SpikeExitPolicyState()
     with pytest.raises(ValueError, match="predates"):

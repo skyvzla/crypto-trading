@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from trading_platform.backtest.engine import BacktestEngine
 from trading_platform.shared.config import BacktestConfig
 from trading_platform.shared.events import Bar1s, Fill, Kline, OrderIntent, Position
@@ -17,6 +19,9 @@ from trading_platform.strategies.spike.definition import (
 )
 from trading_platform.strategies.spike.shared_features import (
     SpikeSharedFeatureProvider,
+)
+from trading_platform.strategies.spike.exit_features import (
+    CandidateFeatureSnapshot,
 )
 
 
@@ -346,6 +351,34 @@ def test_local_moving_60s_rise_rejects_a_gap_without_scanning_the_window():
     assert strategy._pending is None
 
 
+def test_custom_rise_window_with_shared_provider_still_rejects_a_gap():
+    strategy = PullbackV3Strategy(
+        SYMBOL,
+        Decimal("200"),
+        rise_window_seconds=300,
+        rise_60s_threshold=Decimal("0.30"),
+        rise_low_lookback_hours=0,
+        min_rise_duration_hours=0,
+        prior_high_lookback_hours=0,
+        min_spike_rise=Decimal("0"),
+    )
+    provider = SpikeSharedFeatureProvider(
+        shared_features={SPIKE_RISE_60S_FEATURE},
+        shared_metrics=frozenset(),
+        retained_1m_minutes=1,
+    )
+    strategy.bind_shared_feature_provider(provider)
+
+    for index in range(300):
+        strategy.on_bar1s(_bar_at(index * 1_000))
+    strategy.on_bar1s(
+        _bar_at(301_000, close="140", high="140", low="140")
+    )
+
+    assert strategy._continuous_1s_count == 1
+    assert strategy._pending is None
+
+
 def test_pending_signal_expires_after_90_seconds():
     strategy = PullbackV3Strategy(
         SYMBOL,
@@ -365,7 +398,54 @@ def test_pending_signal_expires_after_90_seconds():
         _bar_at(90_001, close="120", high="120", low="120")
     ) == []
     assert strategy._pending is None
-    assert strategy.drain_audit_events()[-1].event_type == "signal_expired"
+    audit = strategy.drain_audit_events()[-1]
+    assert audit.event_type == "signal_expired"
+    assert audit.details["timeout_stage"] == "retrace_not_reached"
+    assert audit.details["retrace_reached"] is False
+
+
+def test_pending_timeout_records_prior_high_funnel_stage():
+    strategy = PullbackV3Strategy(
+        SYMBOL,
+        Decimal("200"),
+        prior_high_lookback_hours=4,
+        wait_seconds=1,
+    )
+    strategy._pending = _PendingEntry(
+        signal_ms=0,
+        origin_price=Decimal("100"),
+        spike_high=Decimal("150"),
+        prior_high=Decimal("140"),
+    )
+
+    assert strategy._advance_pending(
+        _bar_at(1_000, close="135", high="150", low="135")
+    ) == []
+    assert strategy._advance_pending(
+        _bar_at(2_000, close="140", high="150", low="140")
+    ) == []
+
+    audit = strategy.drain_audit_events()[-1]
+    assert audit.event_type == "signal_expired"
+    assert audit.details["timeout_stage"] == "prior_high_not_cleared"
+    assert audit.details["retrace_reached"] is True
+
+
+def test_pending_origin_breach_is_audited():
+    strategy = PullbackV3Strategy(SYMBOL, Decimal("200"))
+    strategy._pending = _PendingEntry(
+        signal_ms=0,
+        origin_price=Decimal("100"),
+        spike_high=Decimal("150"),
+    )
+
+    assert strategy._advance_pending(
+        _bar_at(1_000, close="99", high="101", low="99")
+    ) == []
+
+    audit = strategy.drain_audit_events()[-1]
+    assert audit.event_type == "signal_invalidated"
+    assert audit.details["reason"] == "origin_breached"
 
 
 def test_pending_entry_requires_candidate_strictly_above_prior_high():
@@ -414,6 +494,193 @@ def test_fixed_take_profit_is_disabled_by_default_for_candidate_v1():
 
     assert exit_intents == []
     assert account.position is not None
+
+
+def _stable_breakout_snapshot(*, five_m=False, fifteen_m=True) -> CandidateFeatureSnapshot:
+    return CandidateFeatureSnapshot(
+        event_time=1_001,
+        decay_agreement=1,
+        stable_breakout_5m=five_m,
+        stable_breakout_15m=fifteen_m,
+        down_channel_5m=False,
+        down_channel_15m=False,
+    )
+
+
+def test_stable_breakout_age_gate_holds_position_inside_age_window():
+    """入场后 age 内即使站稳破位已点亮也不退出（修复假破位早退）。"""
+    strategy, account = _start_campaign()  # first_fill_time=1000
+    strategy.exit_stable_breakout_age_ms = 60_000
+    strategy._candidate_features = _stable_breakout_snapshot(fifteen_m=True)
+    strategy._campaign_origin_price = Decimal("80")
+
+    # elapsed = 2_000-1_000 = 1s < 60s → 稳定破位被 gate 掉
+    exit_intents = strategy._manage_exits(
+        _bar_at(2_000, close="80", high="81", low="80")
+    )
+
+    assert exit_intents == []
+    assert account.position is not None
+
+
+def test_stable_breakout_age_gate_releases_after_age_window():
+    """超过最短持有期后，稳定破位正常触发退出。"""
+    strategy, account = _start_campaign()  # first_fill_time=1000
+    strategy.exit_stable_breakout_age_ms = 60_000
+    strategy._candidate_features = _stable_breakout_snapshot(fifteen_m=True)
+    strategy._campaign_origin_price = Decimal("80")
+
+    # elapsed = 62_000-1_000 = 61s >= 60s → 稳定破位放行
+    exit_intents = strategy._manage_exits(
+        _bar_at(62_000, close="80", high="81", low="80")
+    )
+
+    assert len(exit_intents) == 1
+    assert exit_intents[0].trigger_reason == "candidate_trend_exit"
+    assert account.position is not None  # 订单已提交，待成交
+
+
+def test_stable_breakout_age_zero_keeps_original_behavior():
+    """age=0 (默认) 保持原行为：入场即触发稳定破位。"""
+    strategy, account = _start_campaign()  # first_fill_time=1000
+    strategy._candidate_features = _stable_breakout_snapshot(fifteen_m=True)
+    strategy._campaign_origin_price = Decimal("80")
+
+    exit_intents = strategy._manage_exits(
+        _bar_at(1_001, close="80", high="81", low="80")
+    )
+
+    assert len(exit_intents) == 1
+    assert exit_intents[0].trigger_reason == "candidate_trend_exit"
+
+
+def test_long_rise_window_catches_slower_rise_that_60s_misses():
+    """rise_window_seconds=300 时，300s 累计涨 30%（慢牛）能触发信号，60s 窗口看不到。"""
+    strategy = PullbackV3Strategy(
+        SYMBOL,
+        Decimal("200"),
+        rise_window_seconds=300,
+        rise_60s_threshold=Decimal("0.30"),
+        rise_low_lookback_hours=0,
+        min_rise_duration_hours=0,
+        prior_high_lookback_hours=0,
+        min_spike_rise=Decimal("0"),
+    )
+    # 前 240 根: 100 → 130（240s 累计涨 30%）
+    # 第 300 根: 130 → 133 时, 300s 窗口(bar[0]=100) 累计涨 33% ≥ 30%
+    for index in range(300):
+        close = "130" if index >= 240 else "100"
+        strategy.on_bar1s(
+            _bar_at(index * 1_000, close=close, high=close, low=close)
+        )
+    # 60s 窗口此刻 bar[0]≈127(240s处) → 涨幅 (133/127-1)≈4.7% <30%; 300s窗口 bar[0]=100 → 33% >=30%
+    strategy.on_bar1s(_bar_at(300_000, close="133", high="133", low="133"))
+
+    assert strategy._pending is not None
+    assert strategy._pending.origin_price == Decimal("100")
+    audit = strategy.drain_audit_events()[-1]
+    assert audit.event_type == "signal_triggered"
+    assert Decimal(audit.details["rise_60s"]) > Decimal("0.30")
+
+
+def test_default_window_60_keeps_original_behavior():
+    """默认 rise_window_seconds=60 保持原行为：缓牛(300s累计33%)但60s只涨~6% → 不触发。"""
+    strategy = PullbackV3Strategy(
+        SYMBOL,
+        Decimal("200"),
+        rise_60s_threshold=Decimal("0.30"),
+        rise_low_lookback_hours=0,
+        min_rise_duration_hours=0,
+        prior_high_lookback_hours=0,
+        min_spike_rise=Decimal("0"),
+    )
+    # 线性爬升: close = 100 + index*0.11, index0..300 → 100..133 (300s累计33%)
+    # 相邻60s窗口: 100+120*0.11=113.2 → 100+180*0.11=119.8, 涨幅5.8%<30% → 60s不触发任何时刻
+    for index in range(301):
+        close = f"{100 + index * 0.11:.2f}"
+        strategy.on_bar1s(
+            _bar_at(index * 1_000, close=close, high=close, low=close)
+        )
+
+    assert strategy._pending is None
+
+
+@pytest.mark.parametrize("rise_window_seconds", [59, 3601])
+def test_rise_window_rejects_values_outside_supported_range(
+    rise_window_seconds,
+):
+    with pytest.raises(
+        ValueError, match="rise_window_seconds must be between 60 and 3600"
+    ):
+        PullbackV3Strategy(
+            SYMBOL,
+            Decimal("200"),
+            rise_window_seconds=rise_window_seconds,
+        )
+
+
+def test_breakout_gate_stop_triggers_on_deep_adverse_within_age():
+    """age 门期间逆势浮亏达阈值即止损（防止 MON 被 gate 时猛烈反抽继续亏）。"""
+    strategy, account = _start_campaign()  # first_fill_time=1000, entry_price=100
+    strategy.exit_stable_breakout_age_ms = 60_000
+    strategy.stable_breakout_gate_stop_pct = Decimal("0.20")
+    strategy._candidate_features = _stable_breakout_snapshot(fifteen_m=True)
+    strategy._campaign_origin_price = Decimal("80")
+
+    # elapsed=1s < 60s(在 age 内), close=125 ⇒ 相对 entry100 逆势+25% ≥ 20% ⇒ gate_stop
+    exit_intents = strategy._manage_exits(
+        _bar_at(2_000, close="125", high="126", low="125")
+    )
+    assert len(exit_intents) == 1
+    assert exit_intents[0].trigger_reason == "candidate_gate_stop"
+    assert strategy._candidate_exit_state.exit_requested is True
+    assert strategy._manage_exits(
+        _bar_at(3_000, close="126", high="127", low="126")
+    ) == []
+
+
+def test_breakout_gate_stop_requires_a_stable_breakout_to_be_gated():
+    strategy, _ = _start_campaign()
+    strategy.exit_stable_breakout_age_ms = 60_000
+    strategy.stable_breakout_gate_stop_pct = Decimal("0.20")
+    strategy._candidate_features = _stable_breakout_snapshot(
+        five_m=False, fifteen_m=False
+    )
+    strategy._campaign_origin_price = Decimal("80")
+
+    assert strategy._manage_exits(
+        _bar_at(2_000, close="125", high="126", low="125")
+    ) == []
+    assert strategy._candidate_exit_state.exit_requested is False
+
+
+def test_breakout_gate_stop_not_trigger_within_budget():
+    """age 门期间逆势 8%(<20%) 不触发 gate_stop，继续被 gate 持有。"""
+    strategy, account = _start_campaign()
+    strategy.exit_stable_breakout_age_ms = 60_000
+    strategy.stable_breakout_gate_stop_pct = Decimal("0.20")
+    strategy._candidate_features = _stable_breakout_snapshot(fifteen_m=True)
+    strategy._campaign_origin_price = Decimal("80")
+
+    # elapsed=1s < 60s, close=108 ⇒ +8% < 20% ⇒ gate 期内不触发（也不被 stable 踢出）
+    exit_intents = strategy._manage_exits(
+        _bar_at(2_000, close="108", high="109", low="108")
+    )
+    assert exit_intents == []
+
+
+def test_breakout_gate_stop_disabled_by_default():
+    """gate_stop 默认 None(关闭)：age 门期间深逆势不额外止损（原方案C行为）。"""
+    strategy, account = _start_campaign()
+    strategy.exit_stable_breakout_age_ms = 60_000
+    strategy._candidate_features = _stable_breakout_snapshot(fifteen_m=True)
+    strategy._campaign_origin_price = Decimal("80")
+
+    exit_intents = strategy._manage_exits(
+        _bar_at(2_000, close="125", high="126", low="125")
+    )
+    # 无 gate_stop：仍在 age 门内，stable 被 gate，不退出
+    assert exit_intents == []
 
 
 def test_pullback_backtest_adapter_binds_shared_provider_to_leaf_strategies():

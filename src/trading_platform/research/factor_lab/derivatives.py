@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
+
+from trading_platform.market.archive.metrics import (
+    MetricsArchiveIndexError,
+    load_metrics_index,
+)
 
 
 METRICS_COLUMNS = (
@@ -18,6 +24,25 @@ METRICS_COLUMNS = (
     "count_long_short_ratio",
     "sum_taker_long_short_vol_ratio",
 )
+
+
+@lru_cache(maxsize=4)
+def _metrics_source(catalog_path: str) -> tuple[Path, pd.DataFrame]:
+    """Resolve and validate immutable metrics routing once per research process."""
+    import duckdb
+
+    catalog = duckdb.connect(catalog_path, read_only=True)
+    try:
+        metadata = dict(
+            catalog.execute(
+                "SELECT key, value FROM metrics_catalog_metadata"
+            ).fetchall()
+        )
+    finally:
+        catalog.close()
+    return Path(metadata["metrics_root"]), load_metrics_index(
+        Path(metadata["metrics_index"])
+    ).to_pandas()
 
 
 def load_metrics_frame(
@@ -39,26 +64,50 @@ def load_metrics_frame(
     if not path.is_file():
         raise FileNotFoundError(f"metrics DuckDB catalog not found: {path}")
 
+    metrics_root, index = _metrics_source(str(path.resolve()))
+    selected = index[
+        index["symbol"].isin(normalized)
+        & index["period"].eq("5m")
+        & index["first_snapshot_ms"].lt(end_ms)
+        & index["last_snapshot_ms"].ge(start_ms - 300_000)
+    ]
+    files = [
+        str(metrics_root / relative_path)
+        for relative_path in selected["relative_path"].drop_duplicates()
+    ]
+    if not files:
+        return pd.DataFrame(columns=METRICS_COLUMNS)
+    for row in selected.itertuples(index=False):
+        partition = metrics_root / row.relative_path
+        try:
+            stat = partition.stat()
+        except FileNotFoundError as error:
+            raise MetricsArchiveIndexError(
+                f"metrics index is stale: missing {row.relative_path}"
+            ) from error
+        if stat.st_size != row.file_size or stat.st_mtime_ns != row.file_mtime_ns:
+            raise MetricsArchiveIndexError(
+                f"metrics index is stale: changed {row.relative_path}"
+            )
+
     placeholders = ", ".join("?" for _ in normalized)
-    connection = duckdb.connect(str(path), read_only=True)
+    connection = duckdb.connect(":memory:")
     try:
-        table_exists = connection.execute(
-            "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_schema='main' AND table_name='metrics'"
-        ).fetchone()[0]
-        if not table_exists:
-            raise ValueError(f"{path} is missing main.metrics")
+        connection.execute("SET threads = 1")
+        connection.execute("SET memory_limit = '512MB'")
+        connection.execute("SET preserve_insertion_order = false")
         frame = connection.execute(
             "SELECT symbol, epoch_ms(snapshot_time)::BIGINT AS snapshot_time_ms, "
             "epoch_ms(available_time)::BIGINT AS available_time_ms, "
             "sum_open_interest, sum_open_interest_value, "
             "count_toptrader_long_short_ratio, sum_toptrader_long_short_ratio, "
             "count_long_short_ratio, sum_taker_long_short_vol_ratio "
-            "FROM main.metrics WHERE period='5m' "
+            "FROM read_parquet(?, union_by_name=true) WHERE period='5m' "
             f"AND symbol IN ({placeholders}) "
-            "AND epoch_ms(available_time) >= ? AND epoch_ms(available_time) < ? "
+            "AND available_time >= to_timestamp(? / 1000.0) "
+            "AND available_time < to_timestamp(? / 1000.0) "
             "ORDER BY symbol, available_time",
-            [*normalized, int(start_ms), int(end_ms)],
+            [files, *normalized, int(start_ms), int(end_ms)],
         ).fetch_df()
     finally:
         connection.close()

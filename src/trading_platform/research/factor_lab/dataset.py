@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from typing import Sequence
 
 import pandas as pd
+
+from trading_platform.market.archive.index import (
+    load_archive_index,
+    verify_archive_index_files,
+)
 
 from .event import SpikeEventConfig, detect_spike_events
 from .factors import add_market_factors, add_orderflow_factors
@@ -36,6 +42,25 @@ BAR1S_COLUMNS = (
 )
 
 
+@lru_cache(maxsize=4)
+def _archive_source(catalog_path: str) -> tuple[Path, pd.DataFrame]:
+    """Resolve and validate immutable archive routing once per research process."""
+    import duckdb
+
+    catalog = duckdb.connect(catalog_path, read_only=True)
+    try:
+        metadata = dict(
+            catalog.execute(
+                "SELECT key, value FROM archive_catalog_metadata"
+            ).fetchall()
+        )
+    finally:
+        catalog.close()
+    return Path(metadata["archive_root"]), load_archive_index(
+        Path(metadata["archive_index"])
+    )
+
+
 def load_bar1s_frame(
     catalog_path: str | Path,
     *,
@@ -55,6 +80,21 @@ def load_bar1s_frame(
     if not path.is_file():
         raise FileNotFoundError(f"DuckDB archive not found: {path}")
 
+    archive_root, index = _archive_source(str(path.resolve()))
+    selected = index[
+        index["symbol"].isin(normalized)
+        & index["timeframe"].eq("1s")
+        & index["first_open_ms"].lt(end_ms)
+        & index["last_close_ms"].ge(start_ms)
+    ]
+    files = [
+        str(archive_root / relative_path)
+        for relative_path in selected["relative_path"].drop_duplicates()
+    ]
+    if not files:
+        return pd.DataFrame(columns=BAR1S_COLUMNS)
+    verify_archive_index_files(selected, archive_root)
+
     placeholders = ", ".join("?" for _ in normalized)
     select = """
         symbol,
@@ -69,21 +109,19 @@ def load_bar1s_frame(
         max_taker_buy_agg_trade_quantity,
         max_taker_sell_agg_trade_quantity
     """
-    connection = duckdb.connect(str(path), read_only=True)
+    connection = duckdb.connect(":memory:")
     try:
-        table_exists = connection.execute(
-            "SELECT count(*) FROM information_schema.tables "
-            "WHERE table_schema='main' AND table_name='candles'"
-        ).fetchone()[0]
-        if not table_exists:
-            raise ValueError(f"{path} is missing main.candles")
+        connection.execute("SET threads = 1")
+        connection.execute("SET memory_limit = '512MB'")
+        connection.execute("SET preserve_insertion_order = false")
         frame = connection.execute(
-            f"SELECT {select} FROM main.candles "
+            f"SELECT {select} FROM read_parquet(?, union_by_name=true) "
             "WHERE timeframe='1s' "
             f"AND symbol IN ({placeholders}) "
-            "AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ? "
+            "AND open_time >= to_timestamp(? / 1000.0) "
+            "AND open_time < to_timestamp(? / 1000.0) "
             "ORDER BY symbol, open_time",
-            [*normalized, int(start_ms), int(end_ms)],
+            [files, *normalized, int(start_ms), int(end_ms)],
         ).fetch_df()
     finally:
         connection.close()

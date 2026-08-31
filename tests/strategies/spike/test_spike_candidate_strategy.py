@@ -70,6 +70,8 @@ def _strategy(
     profit_drawdown_ratio: Decimal | None = None,
     strong_bucket_strict_age_ms: int | None = None,
     weak_bucket_strict_age_ms: int | None = None,
+    hard_stop_loss_pct: Decimal | None = None,
+    hard_stop_confirm_ms: int = 0,
 ):
     account = PositionAccount(quantity)
     strategy = DynamicSpikeShortStrategy(
@@ -82,6 +84,8 @@ def _strategy(
         profit_drawdown_ratio=profit_drawdown_ratio,
         strong_bucket_strict_age_ms=strong_bucket_strict_age_ms,
         weak_bucket_strict_age_ms=weak_bucket_strict_age_ms,
+        hard_stop_loss_pct=hard_stop_loss_pct,
+        hard_stop_confirm_ms=hard_stop_confirm_ms,
     )
     strategy.restore_campaign_timing(
         "spike_short:AKEUSDT:1",
@@ -157,6 +161,70 @@ def test_candidate_exit_cancels_remaining_entries_before_requesting_order():
     assert entry.status == "CANCELLED"
     assert len(second) == 1
     assert second[0].trigger_reason == "candidate_momentum_exit"
+
+
+def test_hard_stop_cancels_entries_then_requests_one_persisted_exit():
+    strategy, account = _strategy(
+        agreement=None,
+        hard_stop_loss_pct=Decimal("0.08"),
+    )
+    entry = Mock(
+        order_id="entry-2",
+        client_order_id="entry-client-2",
+        status="NEW",
+    )
+    account.orders.append(entry)
+    strategy.active_signals = [Mock(placed_client_order_ids={"entry-client-2"})]
+
+    assert _evaluate(strategy, elapsed_ms=10_000, price="108") == []
+    assert entry.status == "CANCELLED"
+    intents = _evaluate(strategy, elapsed_ms=11_000, price="108")
+    duplicate = _evaluate(strategy, elapsed_ms=12_000, price="109")
+
+    assert len(intents) == 1
+    assert intents[0].trigger_reason == "candidate_hard_stop_exit"
+    assert intents[0].quantity == account.position.quantity
+    assert duplicate == []
+    assert strategy.campaign_exit_state() == (False, False, True)
+
+
+def test_hard_stop_confirmation_requires_continuous_breach_until_recovery():
+    strategy, _ = _strategy(
+        agreement=None,
+        hard_stop_loss_pct=Decimal("0.08"),
+        hard_stop_confirm_ms=5_000,
+    )
+
+    assert _evaluate(strategy, elapsed_ms=10_000, price="108") == []
+    assert strategy._hard_stop_armed is True
+    assert _evaluate(strategy, elapsed_ms=14_999, price="109") == []
+    assert _evaluate(strategy, elapsed_ms=15_000, price="100") == []
+    assert strategy._hard_stop_armed is False
+
+    assert _evaluate(strategy, elapsed_ms=20_000, price="108") == []
+    intents = _evaluate(strategy, elapsed_ms=25_000, price="108")
+
+    assert len(intents) == 1
+    assert intents[0].trigger_reason == "candidate_hard_stop_exit"
+
+
+@pytest.mark.parametrize(
+    ("loss_pct", "confirm_ms", "message"),
+    [
+        (Decimal("0"), 0, "hard_stop_loss_pct"),
+        (Decimal("1.01"), 0, "hard_stop_loss_pct"),
+        (Decimal("0.08"), -1, "hard_stop_confirm_ms"),
+    ],
+)
+def test_hard_stop_parameters_are_validated(loss_pct, confirm_ms, message):
+    with pytest.raises(ValueError, match=message):
+        DynamicSpikeShortStrategy(
+            "AKEUSDT",
+            total_notional=Decimal("20"),
+            exit_policy="candidate-v1",
+            hard_stop_loss_pct=loss_pct,
+            hard_stop_confirm_ms=confirm_ms,
+        )
 
 
 def test_recovered_candidate_cancels_wal_entry_without_active_signal():

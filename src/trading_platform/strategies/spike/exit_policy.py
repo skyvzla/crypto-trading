@@ -7,6 +7,19 @@ from decimal import Decimal
 from enum import Enum
 
 
+CANDIDATE_FULL_EXIT_REASONS = frozenset(
+    {
+        "candidate_time_risk_exit",
+        "candidate_momentum_exit",
+        "candidate_trend_exit",
+        "candidate_profit_drawdown_exit",
+        "candidate_hard_stop_exit",
+        "candidate_gate_stop",
+        "candidate_oi_stop_exit",
+    }
+)
+
+
 class ExitAction(str, Enum):
     HOLD = "hold"
     REDUCE_HALF = "reduce_half"
@@ -25,6 +38,8 @@ class ExitObservation:
     time_risk: bool = False
     momentum_risk: bool = False
     profit_drawdown: bool = False
+    hard_stop: bool = False
+    gate_stop: bool = False
     stable_breakout_5m: bool = False
     stable_breakout_15m: bool = False
 
@@ -52,6 +67,14 @@ class SpikeExitPolicyState:
             raise ValueError("exit prices must be positive")
         if self.exit_requested:
             return ExitDecision(ExitAction.HOLD, "exit_already_requested")
+
+        if observation.hard_stop:
+            self.exit_requested = True
+            return ExitDecision(ExitAction.EXIT_ALL, "hard_stop")
+
+        if observation.gate_stop:
+            self.exit_requested = True
+            return ExitDecision(ExitAction.EXIT_ALL, "gate_stop")
 
         if observation.stable_breakout_5m or observation.stable_breakout_15m:
             self.exit_requested = True

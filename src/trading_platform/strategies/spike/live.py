@@ -30,6 +30,9 @@ from trading_platform.strategies.spike.execution_queue import (
     ExecutionQueue,
     ExecutionWorker,
 )
+from trading_platform.strategies.spike.exit_policy import (
+    CANDIDATE_FULL_EXIT_REASONS,
+)
 from trading_platform.strategies.spike.capital import CapitalPolicy, CapitalPolicyConfig
 from trading_platform.strategies.spike.capital_store import CapitalSnapshot
 from trading_platform.strategies.spike.signal_arbiter import SignalArbiter
@@ -494,11 +497,7 @@ class SpikeExecutionCoordinator:
             record.payload.get("trigger_reason") for record in owned_records
         }
         reduced_at_origin = "candidate_origin_reduce" in filled_exit_reasons
-        full_exit_reasons = {
-            "candidate_time_risk_exit",
-            "candidate_momentum_exit",
-            "candidate_trend_exit",
-        }
+        full_exit_reasons = CANDIDATE_FULL_EXIT_REASONS
         filled_full_exit = bool(filled_exit_reasons & full_exit_reasons)
         exit_requested = any(
             record.payload.get("trigger_reason") in full_exit_reasons

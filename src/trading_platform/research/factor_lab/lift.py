@@ -9,9 +9,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+import re
 
 import numpy as np
 import pandas as pd
+
+
+_TARGET_HORIZON_RE = re.compile(r"_(\d+)(s|m|h)$")
+
+
+def target_horizon_ms(target: str) -> int:
+    """Return the forward label horizon encoded in a target column name."""
+    match = _TARGET_HORIZON_RE.search(target)
+    if match is None:
+        raise ValueError(
+            "target must end with a horizon such as 300s, 30m, or 1h"
+        )
+    value = int(match.group(1))
+    if value <= 0:
+        raise ValueError("target horizon must be positive")
+    unit_ms = {"s": 1_000, "m": 60_000, "h": 3_600_000}[match.group(2)]
+    return value * unit_ms
 
 
 @dataclass(frozen=True)
@@ -119,6 +137,144 @@ def apply_quantile_pair_rule(
     return apply_quantile_band(dataset, rule.left) & apply_quantile_band(
         dataset, rule.right
     )
+
+
+def evaluate_time_oos_bands(
+    dataset: pd.DataFrame,
+    factors: list[str] | tuple[str, ...],
+    *,
+    split_ms: int,
+    target: str,
+    quantiles: int = 3,
+    embargo_ms: int = 0,
+) -> pd.DataFrame:
+    """Fit edge quantile bands before ``split_ms`` and apply them unchanged after it."""
+    if "timestamp_ms" not in dataset.columns:
+        raise ValueError("dataset is missing timestamp_ms")
+    if target not in dataset.columns:
+        raise ValueError(f"unknown target: {target}")
+    missing = [factor for factor in factors if factor not in dataset.columns]
+    if missing:
+        raise ValueError(f"unknown factors: {', '.join(missing)}")
+    if quantiles < 2:
+        raise ValueError("quantiles must be at least 2")
+    if embargo_ms < 0:
+        raise ValueError("embargo_ms must not be negative")
+    effective_embargo_ms = max(embargo_ms, target_horizon_ms(target))
+    train = dataset[
+        dataset["timestamp_ms"].lt(split_ms - effective_embargo_ms)
+    ]
+    test = dataset[dataset["timestamp_ms"].ge(split_ms)]
+    if train.empty or test.empty:
+        raise ValueError("time OOS split requires non-empty train and test samples")
+
+    target_values = pd.to_numeric(test.get(target), errors="coerce").replace(
+        [np.inf, -np.inf], np.nan
+    )
+    target_valid = target_values.notna()
+    base_mean = float(target_values[target_valid].mean())
+    mfe_column = target if "mfe" in target else None
+    mae_candidate = target.replace("mfe", "mae") if mfe_column else None
+    mae_column = mae_candidate if mae_candidate in test.columns else None
+    base_mfe = base_mean if mfe_column else float("nan")
+    base_mae = (
+        float(pd.to_numeric(test[mae_column], errors="coerce").mean())
+        if mae_column
+        else float("nan")
+    )
+    rows: list[dict[str, object]] = []
+    for factor in factors:
+        for quantile in (1, quantiles):
+            try:
+                band = fit_quantile_band(
+                    train,
+                    factor,
+                    quantile=quantile,
+                    quantiles=quantiles,
+                )
+            except ValueError:
+                continue
+            train_mask = apply_quantile_band(train, band)
+            test_mask = apply_quantile_band(test, band)
+            selected_target = target_values[test_mask & target_valid]
+            selected_mean = (
+                float(selected_target.mean())
+                if len(selected_target)
+                else float("nan")
+            )
+            selected_mae = (
+                float(
+                    pd.to_numeric(test.loc[test_mask, mae_column], errors="coerce").mean()
+                )
+                if mae_column
+                else float("nan")
+            )
+            rows.append(
+                {
+                    "factor": factor,
+                    "band": f"Q{quantile}/{quantiles}",
+                    "lower": band.lower,
+                    "upper": band.upper,
+                    "train_samples": int(len(train)),
+                    "train_selected": int(train_mask.sum()),
+                    "test_samples": int(target_valid.sum()),
+                    "test_selected": int((test_mask & target_valid).sum()),
+                    "test_coverage": float((test_mask & target_valid).sum())
+                    / max(1, int(target_valid.sum())),
+                    "base_mean": base_mean,
+                    "selected_mean": selected_mean,
+                    "lift": _safe_lift(selected_mean, base_mean),
+                    "base_mfe": base_mfe,
+                    "selected_mfe": selected_mean if mfe_column else float("nan"),
+                    "base_mae": base_mae,
+                    "selected_mae": selected_mae,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def render_time_oos_report(
+    results: pd.DataFrame,
+    *,
+    split_ms: int,
+    target: str,
+    embargo_ms: int = 0,
+) -> str:
+    """Render the fixed-threshold time-forward validation table."""
+    split = pd.Timestamp(split_ms, unit="ms", tz="UTC").isoformat()
+    lines = [
+        "# Factor Time OOS Report",
+        "",
+        f"- Split: `{split}`",
+        f"- Target: `{target}`",
+        f"- Train embargo: {embargo_ms / 60_000:g} minutes",
+        "- Quantile thresholds are fitted on train only and applied unchanged to test.",
+        "",
+        "| Factor | Band | Train N | Train Selected | Test N | Test Selected | Coverage | Bounds | Base Mean | Selected Mean | Lift | Base MFE | Selected MFE | Base MAE | Selected MAE |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in results.itertuples(index=False):
+        lower = "-inf" if pd.isna(row.lower) else f"{row.lower:.6g}"
+        upper = "+inf" if pd.isna(row.upper) else f"{row.upper:.6g}"
+        values = [
+            row.base_mean,
+            row.selected_mean,
+            row.lift,
+            row.base_mfe,
+            row.selected_mfe,
+            row.base_mae,
+            row.selected_mae,
+        ]
+        formatted = ["-" if pd.isna(value) else f"{value:.4f}" for value in values]
+        lines.append(
+            f"| `{row.factor}` | {row.band} | {row.train_samples} | "
+            f"{row.train_selected} | {row.test_samples} | {row.test_selected} | "
+            f"{row.test_coverage:.1%} | ({lower}, {upper}] | "
+            + " | ".join(formatted)
+            + " |"
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _finite_pair(dataset: pd.DataFrame, factor: str, target: str) -> pd.DataFrame:

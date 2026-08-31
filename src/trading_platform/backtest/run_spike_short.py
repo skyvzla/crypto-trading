@@ -4,6 +4,7 @@ import argparse
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from itertools import chain
+import math
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -108,6 +109,10 @@ class SpikeBacktestSettings:
     profit_unlock_ratio: Decimal | None
     profit_drawdown_ratio: Decimal | None
     profit_drawdown_peak_ratio: Decimal | None
+    hard_stop_loss_pct: Decimal | None
+    hard_stop_confirm_ms: int
+    exit_stable_breakout_age_ms: int
+    stable_breakout_gate_stop_pct: Decimal | None
     max_oi_change_pct: float
     max_ls_ratio: float
     rise_5s_threshold: Decimal
@@ -271,6 +276,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="v3：移动 60 秒暴涨涨幅门槛（小数），默认 0.40",
+    )
+    parser.add_argument(
+        "--rise-window-seconds",
+        type=int,
+        default=None,
+        help="v3：涨幅计算累计窗口（秒），默认 60；增大则用更长窗口的累计涨幅作为入场信号，"
+             "覆盖更慢的多秒拉升而非仅单秒爆发",
     )
     parser.add_argument(
         "--cooldown-seconds",
@@ -473,6 +485,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="candidate-v1 单档动量一致要求（1-3）；None 保留默认 3/2/1 分档",
     )
     parser.add_argument(
+        "--exit-stable-breakout-age-ms",
+        type=int,
+        default=0,
+        help="通道站稳破位最短持有期（ms）：入场后 age 内不触发 stable_breakout 退出；"
+             "0 关闭（保持原行为）。修复插针假破位早退：入场时已点亮的站稳会在首根 K 线踢出。",
+    )
+    parser.add_argument(
+        "--stable-breakout-gate-stop-pct",
+        type=float,
+        default=None,
+        help="被站稳 age 门挡住的期间，逆势浮亏达到该比例立即止损（小数，如 0.20=20%）；"
+             "None 关闭。防 MON 这类被 gate 时猛烈反抽继续亏的单被 age 硬拖。",
+    )
+    parser.add_argument(
         "--time-risk-grace-ms",
         type=int,
         default=0,
@@ -525,6 +551,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         default=None,
         help="回撤保护浮盈前置（0-1）：峰值浮盈达到该比例后才启用回撤保护（粘滞，不与弱化时间耦合）；None 回退到 unlock 语义",
+    )
+    parser.add_argument(
+        "--hard-stop-loss-pct",
+        type=float,
+        default=None,
+        help="研究用 1s close 软件止损（0-1）：SHORT 入场后收盘价反向上涨达到该比例触发；0/None 关闭",
+    )
+    parser.add_argument(
+        "--hard-stop-confirm-ms",
+        type=int,
+        default=0,
+        help="软件止损确认期（ms）：穿透阈值后持续到确认期才平仓，回到盈亏平衡才解除武装；0=立即触发",
     )
     parser.add_argument(
         "--max-oi-change-pct",
@@ -802,6 +840,18 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         "profit_unlock_ratio": args.profit_unlock_ratio,
         "profit_drawdown_ratio": args.profit_drawdown_ratio,
         "profit_drawdown_peak_ratio": args.profit_drawdown_peak_ratio,
+        "hard_stop_loss_pct": args.hard_stop_loss_pct,
+        "hard_stop_confirm_ms": args.hard_stop_confirm_ms,
+        "exit_stable_breakout_age_ms": (
+            args.exit_stable_breakout_age_ms
+            if args.exit_stable_breakout_age_ms
+            else None
+        ),
+        "stable_breakout_gate_stop_pct": (
+            args.stable_breakout_gate_stop_pct
+            if args.stable_breakout_gate_stop_pct
+            else None
+        ),
     }
     unsupported = sorted(
         key
@@ -825,14 +875,51 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         )
 
     # 与实际引擎复用同一 Pydantic 校验，避免 CLI/settings 分叉。
-    market_slippage_bps = BacktestConfig(
-        market_slippage_bps=args.market_slippage_bps
-    ).market_slippage_bps
+    validated_backtest_config = BacktestConfig(
+        market_slippage_bps=args.market_slippage_bps,
+    )
+    market_slippage_bps = validated_backtest_config.market_slippage_bps
 
     if prior_high_lookback_hours < 0:
         raise ValueError("--prior-high-lookback-hours must not be negative")
     if args.rise_60s_threshold is not None and args.rise_60s_threshold < 0:
         raise ValueError("--rise-60s-threshold must not be negative")
+    if args.hard_stop_loss_pct is not None and not 0 <= args.hard_stop_loss_pct <= 1:
+        raise ValueError("--hard-stop-loss-pct must be between 0 and 1")
+    if args.hard_stop_confirm_ms < 0:
+        raise ValueError("--hard-stop-confirm-ms must not be negative")
+    if args.hard_stop_confirm_ms and not args.hard_stop_loss_pct:
+        raise ValueError("--hard-stop-confirm-ms requires --hard-stop-loss-pct")
+    if args.hard_stop_loss_pct and args.exit_policy != "candidate-v1":
+        raise ValueError("--hard-stop-loss-pct requires --exit-policy candidate-v1")
+    if args.exit_stable_breakout_age_ms < 0:
+        raise ValueError("--exit-stable-breakout-age-ms must not be negative")
+    gate_stop_pct = args.stable_breakout_gate_stop_pct
+    if gate_stop_pct is not None and (
+        not math.isfinite(gate_stop_pct) or not 0 <= gate_stop_pct <= 1
+    ):
+        raise ValueError(
+            "--stable-breakout-gate-stop-pct must be in (0, 1] or 0 to disable"
+        )
+    if gate_stop_pct:
+        if args.exit_stable_breakout_age_ms <= 0:
+            raise ValueError(
+                "--stable-breakout-gate-stop-pct requires "
+                "--exit-stable-breakout-age-ms > 0"
+            )
+        if args.exit_policy != "candidate-v1":
+            raise ValueError(
+                "--stable-breakout-gate-stop-pct requires --exit-policy candidate-v1"
+            )
+        if definition.name != "pullback-v3":
+            raise ValueError(
+                "--stable-breakout-gate-stop-pct requires pullback-v3"
+            )
+    if (
+        args.rise_window_seconds is not None
+        and not 60 <= args.rise_window_seconds <= 3600
+    ):
+        raise ValueError("--rise-window-seconds must be between 60 and 3600")
     if rise_low_lookback_hours < 0 or min_rise_duration_hours < 0:
         raise ValueError("rise lookback and minimum duration must not be negative")
     if (rise_low_lookback_hours == 0) != (min_rise_duration_hours == 0):
@@ -947,6 +1034,18 @@ def resolve_settings(args: argparse.Namespace) -> SpikeBacktestSettings:
         profit_drawdown_peak_ratio=(
             Decimal(str(args.profit_drawdown_peak_ratio))
             if args.profit_drawdown_peak_ratio
+            else None
+        ),
+        hard_stop_loss_pct=(
+            Decimal(str(args.hard_stop_loss_pct))
+            if args.hard_stop_loss_pct
+            else None
+        ),
+        hard_stop_confirm_ms=args.hard_stop_confirm_ms,
+        exit_stable_breakout_age_ms=args.exit_stable_breakout_age_ms,
+        stable_breakout_gate_stop_pct=(
+            Decimal(str(args.stable_breakout_gate_stop_pct))
+            if args.stable_breakout_gate_stop_pct
             else None
         ),
         max_oi_change_pct=args.max_oi_change_pct,
@@ -1090,6 +1189,7 @@ def create_spike_engine(
         )
         v3_params = {
             "rise_60s_threshold": args.rise_60s_threshold,
+            "rise_window_seconds": args.rise_window_seconds,
             "cooldown_seconds": args.cooldown_seconds,
             "min_spike_rise": args.min_spike_rise,
             "retrace_frac": args.retrace_frac,
@@ -1115,6 +1215,10 @@ def create_spike_engine(
             "profit_unlock_ratio": settings.profit_unlock_ratio,
             "profit_drawdown_ratio": settings.profit_drawdown_ratio,
             "profit_drawdown_peak_ratio": settings.profit_drawdown_peak_ratio,
+            "hard_stop_loss_pct": settings.hard_stop_loss_pct,
+            "hard_stop_confirm_ms": settings.hard_stop_confirm_ms,
+            "exit_stable_breakout_age_ms": settings.exit_stable_breakout_age_ms,
+            "stable_breakout_gate_stop_pct": settings.stable_breakout_gate_stop_pct,
             "early_profit_unlock_ratio": settings.early_profit_unlock_ratio,
             "stop_5m_high": not args.no_stop_5m_high,
             "take_profit": args.take_profit,
@@ -1188,6 +1292,10 @@ def create_spike_engine(
                     "profit_unlock_ratio": settings.profit_unlock_ratio,
                     "profit_drawdown_ratio": settings.profit_drawdown_ratio,
                     "profit_drawdown_peak_ratio": settings.profit_drawdown_peak_ratio,
+                    "hard_stop_loss_pct": settings.hard_stop_loss_pct,
+                    "hard_stop_confirm_ms": settings.hard_stop_confirm_ms,
+                    "exit_stable_breakout_age_ms": settings.exit_stable_breakout_age_ms,
+                    "stable_breakout_gate_stop_pct": settings.stable_breakout_gate_stop_pct,
                     "max_oi_change_pct": settings.max_oi_change_pct,
                     "max_ls_ratio": settings.max_ls_ratio,
                     "rise_5s_threshold": settings.rise_5s_threshold,

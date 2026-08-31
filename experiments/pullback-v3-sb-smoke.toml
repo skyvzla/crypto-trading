@@ -1,0 +1,59 @@
+name = "pullback-v3-sb-smoke"
+start = "2025-08-01T00:00:00+00:00"
+end = "2026-08-01T00:00:00+00:00"
+duckdb_path = "data/market/candles/candles.duckdb"
+output = "reports/pullback-v3-sb-smoke"
+
+[universe]
+mode = "explicit"
+require_database_allowed = false
+symbols = [
+    # 假破位早退的 4 笔 trend_exit
+    "VELVETUSDT",
+    "COAIUSDT",
+    "MONUSDT",
+    "API3USDT",
+    # 关键大单，验证无回归
+    "MOODENGUSDT",
+    "PROMPTUSDT",
+    "AKEUSDT",
+    "BANKUSDT",
+    "GMXUSDT",
+]
+
+[execution]
+memory_limit_enabled = false
+chunk_hours = 2880
+fetch_batch_size = 10000
+duckdb_threads = 1
+resume = true
+
+[fixed]
+strategy = "trading_platform.strategies.spike.pullback:PullbackV3"
+total_notional = 1000
+exit_policy = "candidate-v1"
+warmup_hours = 40
+rise_60s_threshold = 0.40
+cooldown_seconds = 180
+rise_low_lookback_hours = 24
+min_rise_duration_hours = 6
+prior_high_lookback_hours = 4
+prior_high_tolerance_percent = 0
+min_spike_rise = 0.40
+retrace_frac = 0.30
+take_profit = 0
+wait_seconds = 90
+
+# 深回撤保护保持与 dd-db 一致（基线 baseline）
+profit_drawdown_peak_ratio = 0.20
+profit_drawdown_ratio = 0.10
+
+[matrix]
+# 通道站稳破位最短持有期：0=基线(保持原行为)，30/60/90s 三档
+exit_stable_breakout_age_ms = [0, 30000, 60000, 90000]
+
+[analysis]
+collision_tolerance_seconds = 1
+pnl_split_usdt = 10
+breakout_windows_hours = [4, 6, 8, 12, 24]
+box_proximity_percentages = [1, 3, 5, 10]

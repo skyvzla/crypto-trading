@@ -1,0 +1,53 @@
+# v2.2 完整参数重跑：分档强桶 age 矩阵（database 489 币）
+# 基线 = v2.2 db-full-reject-only 原参数（reject+vwap+深回撤+strong25m/weak0m）
+# 矩阵 = strong_bucket_strict_age_ms ∈ {15m, 20m, 25m, 30m}，weak 固定 0
+# 验证完整 v2.2 下强桶 age 增大是否仍更优（92币研究曾证 25m 最优）
+name = "spike-v22-redb-age"
+start = "2025-08-01T00:00:00+00:00"
+end = "2026-08-01T00:00:00+00:00"
+duckdb_path = "data/market/candles/candles.duckdb"
+output = "reports/spike-v22-redb-age"
+metrics_root = "data/market/metrics"
+
+[universe]
+mode = "database"
+# database 模式：PostgreSQL 主库有效交易对集合 ∩ 1s 归档（489 币全量）
+
+[execution]
+memory_limit_enabled = false
+chunk_hours = 4320
+fetch_batch_size = 10000
+duckdb_threads = 1
+resume = true
+
+[fixed]
+strategy = "trading_platform.strategies.spike.v2_2:V22"
+total_notional = 1000
+exit_policy = "candidate-v1"
+warmup_hours = 168
+entry_tier_mode = "tier3-only"
+reject_below_current = true
+spike_vwap_deviation_max_pct = 0.0
+prior_high_lookback_hours = 6
+rise_low_lookback_hours = 168
+min_rise_duration_hours = 24
+profit_unlock_percent = 1.5
+max_oi_change_pct = 0
+max_ls_ratio = 1.5
+max_consecutive_up_minutes = 4
+group_rise_12h_threshold = 1.0
+loose_consecutive_up_minutes = 0
+strong_tier_atr_shift = 0.2
+weak_bucket_strict_age_ms = 0
+profit_drawdown_peak_ratio = 0.20
+profit_drawdown_ratio = 0.10
+
+# 分档强桶 age 矩阵：15m / 20m / 25m(基线) / 30m
+[matrix]
+strong_bucket_strict_age_ms = [900000, 1200000, 1500000, 1800000]
+
+[analysis]
+collision_tolerance_seconds = 1
+pnl_split_usdt = 10
+breakout_windows_hours = [4, 6, 8, 12, 24]
+box_proximity_percentages = [1, 3, 5, 10]

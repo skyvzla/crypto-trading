@@ -12,6 +12,7 @@ from trading_platform.strategies.spike.live import (
     CompositeEntryGate,
     SpikeExecutionCoordinator,
 )
+from trading_platform.strategies.spike.exit_policy import CANDIDATE_FULL_EXIT_REASONS
 from trading_platform.strategies.campaign_store import CampaignLease
 from trading_platform.strategies.spike.short import DynamicSpikeBacktestStrategy
 
@@ -267,7 +268,10 @@ async def test_candidate_restart_rejects_wal_reduction_without_actual_trade(tmp_
 
 
 @pytest.mark.asyncio
-async def test_candidate_restart_retries_terminal_full_exit_when_position_remains(tmp_path):
+@pytest.mark.parametrize("exit_reason", sorted(CANDIDATE_FULL_EXIT_REASONS))
+async def test_candidate_restart_retries_terminal_full_exit_when_position_remains(
+    tmp_path, exit_reason
+):
     coordinator, strategy, account, entry_id = _coordinator(
         tmp_path, trades=[], exit_policy="candidate-v1"
     )
@@ -276,7 +280,7 @@ async def test_candidate_restart_retries_terminal_full_exit_when_position_remain
         _wal_record(
             exit_id,
             recorded_at=1_300,
-            reason="candidate_momentum_exit",
+            reason=exit_reason,
         )
     )
     coordinator.trade_source.get_trades_by_client_order_ids.return_value = [

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Sequence
 
@@ -10,7 +11,12 @@ from .dataset import build_event_dataset, load_bar1s_frame
 from .derivatives import attach_derivative_factors, load_metrics_frame
 from .event import SpikeEventConfig
 from .labels import SpikeLabelConfig
-from .lift import render_lift_report
+from .lift import (
+    evaluate_time_oos_bands,
+    render_lift_report,
+    render_time_oos_report,
+    target_horizon_ms,
+)
 from .workflow import analyze_event_dataset
 
 
@@ -80,6 +86,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="append base-rate lift / terrain / rule-combination analysis to the report",
     )
+    parser.add_argument(
+        "--oos-split",
+        type=_timestamp_ms,
+        default=None,
+        help="time split: fit quantile thresholds before this instant and validate after it",
+    )
+    parser.add_argument("--oos-quantiles", type=int, default=3)
+    parser.add_argument("--oos-embargo-minutes", type=float, default=60.0)
+    parser.add_argument(
+        "--oos-factor",
+        action="append",
+        default=None,
+        help="factor to validate; repeatable, defaults to all available factors",
+    )
     parser.add_argument("--report-out", type=Path, default=None)
     parser.add_argument(
         "--dataset-out",
@@ -90,8 +110,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.start >= args.end:
         parser.error("--start must be earlier than --end")
-    if args.chunk_hours <= 0:
-        parser.error("--chunk-hours must be positive")
+    if not math.isfinite(args.chunk_hours) or not 0 < args.chunk_hours <= 24:
+        parser.error("--chunk-hours must be finite and within (0, 24]")
+    if args.oos_split is not None and not args.start < args.oos_split < args.end:
+        parser.error("--oos-split must be strictly inside the research interval")
+    if not 2 <= args.oos_quantiles <= 100:
+        parser.error("--oos-quantiles must be between 2 and 100")
+    if not math.isfinite(args.oos_embargo_minutes) or args.oos_embargo_minutes < 0:
+        parser.error("--oos-embargo-minutes must be finite and non-negative")
 
     label_config = SpikeLabelConfig()
     event_config = SpikeEventConfig(
@@ -137,8 +163,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         if event_parts
         else pd.DataFrame()
     )
+    effective_embargo_ms = 0
+    discovery_dataset = dataset
+    if args.oos_split is not None:
+        effective_embargo_ms = max(
+            int(args.oos_embargo_minutes * 60_000),
+            target_horizon_ms(args.target),
+        )
+        discovery_dataset = dataset[
+            dataset["timestamp_ms"].lt(args.oos_split - effective_embargo_ms)
+        ]
+        if discovery_dataset.empty:
+            parser.error("OOS split and purge leave no discovery samples")
     result = analyze_event_dataset(
-        dataset,
+        discovery_dataset,
         label_config=label_config,
         target=args.target,
         include_scale_sensitive=args.include_scale_sensitive,
@@ -152,6 +190,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             factor_names,
             target=args.target,
         )
+    if args.oos_split is not None:
+        factor_names = (
+            args.oos_factor
+            if args.oos_factor is not None
+            else [spec.name for spec in result.factor_specs]
+        )
+        oos = evaluate_time_oos_bands(
+            dataset,
+            factor_names,
+            split_ms=args.oos_split,
+            target=args.target,
+            quantiles=args.oos_quantiles,
+            embargo_ms=effective_embargo_ms,
+        )
+        report += "\n\n" + render_time_oos_report(
+            oos,
+            split_ms=args.oos_split,
+            target=args.target,
+            embargo_ms=effective_embargo_ms,
+        )
+        report += (
+            "\nDiscovery tables above use only the purged training period. "
+            "Both edge bands are exploratory multiple comparisons and require "
+            "confirmation on a later untouched holdout before deployment."
+        )
 
     if args.report_out is None:
         print(report)
@@ -159,7 +222,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.report_out.parent.mkdir(parents=True, exist_ok=True)
         args.report_out.write_text(report, encoding="utf-8")
     if args.dataset_out is not None:
-        _write_dataset(result.dataset, args.dataset_out)
+        _write_dataset(dataset, args.dataset_out)
     return 0
 
 

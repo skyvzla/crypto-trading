@@ -95,6 +95,8 @@ class _PendingEntry:
     spike_high: Decimal
     prior_high: Decimal | None = None
     prior_high_time: int | None = None
+    retrace_reached: bool = False
+    prior_high_blocked: bool = False
 
 
 class PullbackV3Strategy:
@@ -110,6 +112,7 @@ class PullbackV3Strategy:
         *,
         # 入场
         rise_60s_threshold: Decimal = Decimal("0.40"),
+        rise_window_seconds: int = 60,
         cooldown_seconds: int = 180,
         min_spike_rise: Decimal = Decimal("0.40"),
         retrace_frac: Decimal = Decimal("0.30"),
@@ -131,6 +134,8 @@ class PullbackV3Strategy:
         profit_drawdown_ratio: Decimal | None = None,
         profit_drawdown_peak_ratio: Decimal | None = None,
         early_profit_unlock_ratio: Decimal | None = None,
+        exit_stable_breakout_age_ms: int = 0,
+        stable_breakout_gate_stop_pct: Decimal | None = None,
         # 额外退出
         stop_5m_high: bool = True,
         take_profit: Decimal = Decimal("0"),
@@ -158,6 +163,29 @@ class PullbackV3Strategy:
             raise ValueError("cooldown_seconds must not be negative")
         if wait_seconds < 0:
             raise ValueError("wait_seconds must not be negative")
+        if exit_stable_breakout_age_ms is not None and exit_stable_breakout_age_ms < 0:
+            raise ValueError("exit_stable_breakout_age_ms must not be negative")
+        self.exit_stable_breakout_age_ms = int(exit_stable_breakout_age_ms or 0)
+        if (
+            rise_window_seconds is not None
+            and not 60 <= rise_window_seconds <= 3600
+        ):
+            raise ValueError("rise_window_seconds must be between 60 and 3600")
+        self.rise_window_seconds = int(rise_window_seconds or 60)
+        self.rise_window_bars = self.rise_window_seconds + 1
+        self.stable_breakout_gate_stop_pct = (
+            Decimal(str(stable_breakout_gate_stop_pct))
+            if stable_breakout_gate_stop_pct is not None
+            else None
+        )
+        # 0 哨兵=关闭（沿用 TOML 0 表示 None 的项目惯例）
+        if self.stable_breakout_gate_stop_pct == 0:
+            self.stable_breakout_gate_stop_pct = None
+        if (
+            self.stable_breakout_gate_stop_pct is not None
+            and not Decimal("0") < self.stable_breakout_gate_stop_pct <= Decimal("1")
+        ):
+            raise ValueError("stable_breakout_gate_stop_pct must be in (0, 1] or 0 to disable")
         self.symbol = symbol
         self.total_notional = Decimal(total_notional)
         self._account = account
@@ -403,7 +431,7 @@ class PullbackV3Strategy:
         if exit_intents:
             return exit_intents
 
-        if len(self.bars_1s) < BAR_BUFFER:
+        if len(self.bars_1s) < self.rise_window_bars:
             return []
 
         # 2. 待入场信号推进（大插针确认 + 回落接空）
@@ -428,7 +456,7 @@ class PullbackV3Strategy:
             self._continuous_1s_count = 1
         self._last_bar_timestamp = bar.timestamp
         self.bars_1s.append(bar)
-        while len(self.bars_1s) > BAR_BUFFER:
+        while len(self.bars_1s) > self.rise_window_bars:
             self.bars_1s.popleft()
 
     def _record_audit(
@@ -459,32 +487,31 @@ class PullbackV3Strategy:
             return
         if self._pending is not None:
             return
-        if len(bars) != BAR_BUFFER:
+        if len(bars) != self.rise_window_bars:
             return
-        b60 = bars[0]
+        window_base = bars[0]
         if (
-            self._shared_feature_provider is None
-            and self._continuous_1s_count < BAR_BUFFER
+            self._shared_feature_provider is None or self.rise_window_seconds != 60
+        ) and self._continuous_1s_count < self.rise_window_bars:
+            return
+        if window_base.close <= 0:
+            return
+        # 默认 60s 窗口走共享提供器固定 60s 特征（优化路径）；自定义窗口用本地计算。
+        if (
+            self._shared_feature_provider is not None
+            and self.rise_window_seconds == 60
         ):
-            return
-        if b60.close <= 0:
-            return
-        shared_features = (
-            self._shared_feature_provider.bar_features(bar)
-            if self._shared_feature_provider is not None
-            else None
-        )
-        if self._shared_feature_provider is not None:
+            shared_features = self._shared_feature_provider.bar_features(bar)
             if (
                 shared_features is None
                 or not shared_features.continuous_60s
                 or shared_features.rise_60s is None
             ):
                 return
-            rise_60s = shared_features.rise_60s
+            rise_window = shared_features.rise_60s
         else:
-            rise_60s = cur.close / b60.close - Decimal("1")
-        if rise_60s < self.rise_60s_threshold:
+            rise_window = cur.close / window_base.close - Decimal("1")
+        if rise_window < self.rise_60s_threshold:
             return
         if not self._rise_duration_ok(cur.timestamp):
             return
@@ -497,7 +524,7 @@ class PullbackV3Strategy:
         self.last_signal_time = cur.timestamp
         self._pending = _PendingEntry(
             signal_ms=cur.timestamp,
-            origin_price=b60.close,
+            origin_price=window_base.close,
             spike_high=cur.high,
             prior_high=(
                 prior_high_point[0] if prior_high_point is not None else None
@@ -511,8 +538,10 @@ class PullbackV3Strategy:
             "signal_triggered",
             _campaign_id(self.symbol, cur.timestamp),
             {
-                "rise_60s": str(rise_60s),
-                "origin_price": str(b60.close),
+                "rise_60s": str(rise_window),
+                "rise_window": str(rise_window),
+                "rise_window_seconds": self.rise_window_seconds,
+                "origin_price": str(window_base.close),
                 "prior_high": (
                     str(prior_high_point[0])
                     if prior_high_point is not None
@@ -613,15 +642,35 @@ class PullbackV3Strategy:
         p = self._pending
         elapsed_ms = bar.timestamp - p.signal_ms
         if elapsed_ms > self.wait_ms:
+            timeout_stage = (
+                "prior_high_not_cleared"
+                if p.prior_high_blocked
+                else "retrace_not_reached"
+            )
             self._record_audit(
                 bar.timestamp,
                 "signal_expired",
                 _campaign_id(self.symbol, p.signal_ms),
-                {"reason": "pullback_timeout", "wait_ms": self.wait_ms},
+                {
+                    "reason": "pullback_timeout",
+                    "wait_ms": self.wait_ms,
+                    "timeout_stage": timeout_stage,
+                    "retrace_reached": p.retrace_reached,
+                },
             )
             self._pending = None
             return []
         if bar.low < p.origin_price:
+            self._record_audit(
+                bar.timestamp,
+                "signal_invalidated",
+                _campaign_id(self.symbol, p.signal_ms),
+                {
+                    "reason": "origin_breached",
+                    "origin_price": str(p.origin_price),
+                    "bar_low": str(bar.low),
+                },
+            )
             self._pending = None
             return []
         if bar.high > p.spike_high:
@@ -633,6 +682,7 @@ class PullbackV3Strategy:
         )
         if candidate <= p.origin_price or bar.low > candidate:
             return []
+        p.retrace_reached = True
         if p.prior_high is not None:
             allowed_prior_high = p.prior_high * (
                 Decimal("1")
@@ -645,6 +695,7 @@ class PullbackV3Strategy:
                     and candidate == allowed_prior_high
                 )
             ):
+                p.prior_high_blocked = True
                 return []
         buy_ratio = self._buy_ratio_entry(bar)
         if buy_ratio is not None and buy_ratio < self.buy_ratio_entry_min:
@@ -735,6 +786,8 @@ class PullbackV3Strategy:
         elapsed_ms = bar.available_time - self.first_fill_time
         if elapsed_ms < 0:
             return []
+        if self._candidate_exit_state.exit_requested:
+            return []
 
         # 5m 插针高点止损（持仓>5min 重新触及插针高点，市价止损）
         if (
@@ -788,6 +841,7 @@ class PullbackV3Strategy:
             "candidate_momentum_exit": "t",
             "candidate_profit_drawdown_exit": "r",
             "candidate_trend_exit": "c",
+            "candidate_gate_stop": "t",
             "stop_5m_high": "c",
             "take_profit": "r",
             "timeout": "t",
@@ -899,6 +953,19 @@ class PullbackV3Strategy:
             profit_unlocked=self._candidate_profit_unlocked,
             entry_bucket=self._candidate_entry_bucket,
         )
+        # 最短持有期：入场后 age 内即使通道站稳破位也不退出。
+        # 防止插针回落后"早已点亮的站稳"在首根 K 线就踢出（假破位早退）。
+        gate_breakout = elapsed_ms < self.exit_stable_breakout_age_ms
+        # 只有实际存在被 age gate 挡住的 stable breakout 时才启用风险闸。
+        gate_stop = (
+            gate_breakout
+            and (features.stable_breakout_5m or features.stable_breakout_15m)
+            and self.stable_breakout_gate_stop_pct is not None
+            and self.entry_price is not None
+            and self.entry_price > 0
+            and (mark_price - self.entry_price) / self.entry_price
+            >= self.stable_breakout_gate_stop_pct
+        )
         observation = ExitObservation(
             event_time=event_time,
             first_fill_time=self.first_fill_time,
@@ -908,8 +975,13 @@ class PullbackV3Strategy:
             time_risk=time_risk,
             momentum_risk=momentum_risk,
             profit_drawdown=profit_drawdown,
-            stable_breakout_5m=features.stable_breakout_5m,
-            stable_breakout_15m=features.stable_breakout_15m,
+            gate_stop=gate_stop,
+            stable_breakout_5m=(
+                False if gate_breakout else features.stable_breakout_5m
+            ),
+            stable_breakout_15m=(
+                False if gate_breakout else features.stable_breakout_15m
+            ),
         )
         decision = self._candidate_exit_state.evaluate(observation)
         if decision.action == ExitAction.HOLD:
@@ -923,6 +995,7 @@ class PullbackV3Strategy:
                 "time_risk": "candidate_time_risk_exit",
                 "momentum_risk": "candidate_momentum_exit",
                 "profit_drawdown": "candidate_profit_drawdown_exit",
+                "gate_stop": "candidate_gate_stop",
             }.get(decision.reason, "candidate_trend_exit")
         )
         if not reduce_half:
@@ -1033,6 +1106,7 @@ class PullbackV3:
     supported_parameters = frozenset(
         {
             "rise_60s_threshold",
+            "rise_window_seconds",
             "cooldown_seconds",
             "min_spike_rise",
             "retrace_frac",
@@ -1053,6 +1127,8 @@ class PullbackV3:
             "profit_drawdown_ratio",
             "profit_drawdown_peak_ratio",
             "early_profit_unlock_ratio",
+            "exit_stable_breakout_age_ms",
+            "stable_breakout_gate_stop_pct",
             "stop_5m_high",
             "take_profit",
             "max_hold_seconds",

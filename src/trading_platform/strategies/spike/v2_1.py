@@ -529,17 +529,34 @@ class SpikeV21Strategy(DynamicSpikeShortStrategy):
             return []
         if event_ms < confirm[0]:
             return []
-        self._oi_stop_checked = True
         d_oi = (confirm[1] - base_oi[1]) / base_oi[1] * 100.0
         if d_oi <= self.oi_stop_oi_rise_pct:
+            self._oi_stop_checked = True
             return []
         entry = float(position.entry_price)
         if entry <= 0:
             return []
         loss_pct = (float(mark_price) - entry) / entry * 100.0
         if loss_pct < self.oi_stop_loss_pct:
+            self._oi_stop_checked = True
             return []
+        # OI stop follows the same entry-cancel gate as candidate exits. Keep the
+        # check open while cancellations are pending so a later bar can retry.
+        cancelled = sum(
+            self._cancel_signal_orders(signal) for signal in self.active_signals
+        )
+        blocked = self._block_exit_for_campaign_entries(event_ms)
+        if cancelled or blocked or bool(getattr(self._account, "has_pending_cancellations", False)):
+            self._record_audit(
+                event_time=event_ms,
+                event_type="candidate_oi_stop_waiting_entry_cancel",
+                campaign_id=campaign_id,
+                details={"cancelled_orders": cancelled},
+            )
+            return []
+        self._oi_stop_checked = True
         self._exit_requested = True
+        self._candidate_exit_state.exit_requested = True
         self._record_audit(
             event_time=event_ms,
             event_type="candidate_oi_stop_exit_requested",
@@ -704,6 +721,8 @@ class V21:
             "oi_stop_enabled",
             "oi_stop_oi_rise_pct",
             "oi_stop_loss_pct",
+            "hard_stop_loss_pct",
+            "hard_stop_confirm_ms",
         }
     )
     internal_parameters = frozenset({"metrics_series"})

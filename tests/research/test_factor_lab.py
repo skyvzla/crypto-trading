@@ -17,10 +17,12 @@ from trading_platform.research.factor_lab.labels import SpikeLabelConfig
 from trading_platform.research.factor_lab.lift import (
     apply_quantile_pair_rule,
     base_rate_stats,
+    evaluate_time_oos_bands,
     fit_quantile_pair_rule,
     mfe_mae_potential_score,
     quantile_lift,
     render_lift_report,
+    render_time_oos_report,
     rule_combination_lifts,
     scan_factor_lifts,
     terrain_table,
@@ -314,6 +316,46 @@ def test_quantile_lift_top_bucket_beats_base() -> None:
     assert {"lift_mean", "lift_valid_mean", "lift_median", "lift_valid_median"}.issubset(table.columns)
     assert table["lift_mean"].iloc[-1] > 1.0
     assert table["lift_mean"].iloc[0] < 1.0
+
+
+def test_time_oos_bands_keep_train_thresholds_under_distribution_shift() -> None:
+    dataset = pd.DataFrame(
+        {
+            "timestamp_ms": np.arange(24, dtype=np.int64) * 1_000,
+            "factor": [*np.arange(18, dtype=float), *np.arange(100, 106, dtype=float)],
+            "short_mfe_5s": [*np.linspace(0.01, 0.18, 18), *np.linspace(0.2, 0.7, 6)],
+            "short_mae_5s": [*np.linspace(0.2, 0.03, 18), *np.linspace(0.08, 0.03, 6)],
+        }
+    )
+
+    result = evaluate_time_oos_bands(
+        dataset,
+        ["factor"],
+        split_ms=18_000,
+        target="short_mfe_5s",
+        quantiles=3,
+    )
+
+    top = result[result["band"] == "Q3/3"].iloc[0]
+    assert top["train_samples"] == 13
+    assert top["test_samples"] == 6
+    # Every shifted test value remains above the threshold fitted on train.
+    # Re-running qcut on test would incorrectly select only two rows.
+    assert top["test_selected"] == 6
+    assert top["test_coverage"] == pytest.approx(1.0)
+    assert top["base_mfe"] == pytest.approx(top["selected_mfe"])
+    assert top["selected_mae"] == pytest.approx(
+        dataset.loc[18:, "short_mae_5s"].mean()
+    )
+
+    report = render_time_oos_report(
+        result,
+        split_ms=18_000,
+        target="short_mfe_5s",
+    )
+    assert "Factor Time OOS Report" in report
+    assert "Train N" in report
+    assert "Selected MAE" in report
 
 
 def test_quantile_lift_reports_global_and_valid_subset_bases() -> None:

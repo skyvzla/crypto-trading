@@ -270,6 +270,8 @@ class DynamicSpikeShortStrategy:
         profit_unlock_ratio: Decimal | None = None,
         profit_drawdown_ratio: Decimal | None = None,
         profit_drawdown_peak_ratio: Decimal | None = None,
+        hard_stop_loss_pct: Decimal | None = None,
+        hard_stop_confirm_ms: int = 0,
     ):
         """
         Args:
@@ -325,6 +327,18 @@ class DynamicSpikeShortStrategy:
             if not Decimal("0") < early_profit_unlock_ratio < Decimal("1"):
                 raise ValueError("early_profit_unlock_ratio must be between 0 and 1")
         self.early_profit_unlock_ratio = early_profit_unlock_ratio
+        if hard_stop_loss_pct is not None:
+            hard_stop_loss_pct = Decimal(str(hard_stop_loss_pct))
+            if not Decimal("0") < hard_stop_loss_pct <= Decimal("1"):
+                raise ValueError(
+                    "hard_stop_loss_pct must be between 0 (exclusive) and 1"
+                )
+        self.hard_stop_loss_pct = hard_stop_loss_pct
+        if hard_stop_confirm_ms < 0:
+            raise ValueError("hard_stop_confirm_ms must not be negative")
+        self.hard_stop_confirm_ms = int(hard_stop_confirm_ms)
+        self._hard_stop_armed = False
+        self._hard_stop_arm_ms: int | None = None
         self.rise_5s_threshold = (
             self.SPIKE_RISE_5S if rise_5s_threshold is None else Decimal(rise_5s_threshold)
         )
@@ -668,6 +682,8 @@ class DynamicSpikeShortStrategy:
         self._candidate_peak_1m_price = None
         self._candidate_profit_unlocked = False
         self._candidate_drawdown_armed = False
+        self._hard_stop_armed = False
+        self._hard_stop_arm_ms = None
         self._candidate_features = None
         self._pending_rotation = None
         self._rotation_exit_requested = False
@@ -695,6 +711,8 @@ class DynamicSpikeShortStrategy:
         self._pending_rotation = None
         self._rotation_exit_requested = False
         self._candidate_exit_waiting = False
+        self._hard_stop_armed = False
+        self._hard_stop_arm_ms = None
         if self.exit_policy == "candidate-v1" and origin_price is None:
             raise ValueError("candidate-v1 recovery requires origin_price")
         self._campaign_origin_price = origin_price
@@ -1046,13 +1064,53 @@ class DynamicSpikeShortStrategy:
             self.first_fill_time is None
             or self._campaign_origin_price is None
             or self._account is None
-            or self._candidate_features is None
         ):
             return []
         position = self._account.get_position(self.symbol)
         if position is None or position.side != "SHORT" or position.quantity <= 0:
             return []
+        hard_stop = False
+        hard_stop_loss_ratio: Decimal | None = None
+        if self.hard_stop_loss_pct is not None and position.entry_price > 0:
+            loss_ratio = (mark_price - position.entry_price) / position.entry_price
+            hard_stop_loss_ratio = loss_ratio
+            if loss_ratio >= self.hard_stop_loss_pct:
+                if self.hard_stop_confirm_ms == 0:
+                    self._hard_stop_armed = True
+                    self._hard_stop_arm_ms = event_time
+                    hard_stop = True
+                elif not self._hard_stop_armed:
+                    self._hard_stop_armed = True
+                    self._hard_stop_arm_ms = event_time
+                elif (
+                    self._hard_stop_arm_ms is not None
+                    and event_time - self._hard_stop_arm_ms
+                    >= self.hard_stop_confirm_ms
+                ):
+                    hard_stop = True
+            elif (
+                self.hard_stop_confirm_ms > 0
+                and loss_ratio <= 0
+                and self._hard_stop_armed
+            ):
+                # 恢复到回本（SHORT 方向 loss_ratio≤0 即价格回到 entry 以下）
+                # → 解除武装。不用"回到一半亏损"缓解，因为被套持仓短暂回落
+                # 不代表风险解除（BLESS 假性回落后又续跌 -49%），必须回到盈利区
+                # 才算真正的恢复。
+                self._hard_stop_armed = False
+                self._hard_stop_arm_ms = None
         features = self._candidate_features
+        if features is None:
+            if not hard_stop:
+                return []
+            features = CandidateFeatureSnapshot(
+                event_time=event_time,
+                decay_agreement=None,
+                stable_breakout_5m=False,
+                stable_breakout_15m=False,
+                down_channel_5m=None,
+                down_channel_15m=None,
+            )
         elapsed_ms = event_time - self.first_fill_time
         if elapsed_ms < 0:
             return []
@@ -1158,6 +1216,7 @@ class DynamicSpikeShortStrategy:
             time_risk=time_risk,
             momentum_risk=momentum_risk,
             profit_drawdown=profit_drawdown,
+            hard_stop=hard_stop,
             stable_breakout_5m=features.stable_breakout_5m,
             stable_breakout_15m=features.stable_breakout_15m,
         )
@@ -1218,6 +1277,8 @@ class DynamicSpikeShortStrategy:
                 "time_risk": "candidate_time_risk_exit",
                 "momentum_risk": "candidate_momentum_exit",
                 "profit_drawdown": "candidate_profit_drawdown_exit",
+                "hard_stop": "candidate_hard_stop_exit",
+                "gate_stop": "candidate_gate_stop",
             }.get(decision.reason, "candidate_trend_exit")
         )
         if not reduce_half:
@@ -1232,6 +1293,22 @@ class DynamicSpikeShortStrategy:
                 "quantity": str(quantity),
                 "mark_price": str(mark_price),
                 "net_pnl": str(net_pnl),
+                "hard_stop_loss_ratio": (
+                    str(hard_stop_loss_ratio)
+                    if decision.reason == "hard_stop"
+                    and hard_stop_loss_ratio is not None
+                    else None
+                ),
+                "hard_stop_loss_pct": (
+                    str(self.hard_stop_loss_pct)
+                    if decision.reason == "hard_stop"
+                    else None
+                ),
+                "hard_stop_confirm_ms": (
+                    self.hard_stop_confirm_ms
+                    if decision.reason == "hard_stop"
+                    else None
+                ),
             },
         )
         return [
