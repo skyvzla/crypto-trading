@@ -60,6 +60,9 @@ class SpikeV22PullbackStrategy(SpikeV21Strategy):
     def _manage_signals(self, bar: Bar1s) -> list[OrderIntent]:
         intents: list[OrderIntent] = []
         for signal in list(self.active_signals):
+            if bar.timestamp < signal.active_time:
+                continue
+
             client_order_id = self._client_order_id(signal, 3)
             if client_order_id in signal.placed_client_order_ids:
                 if bar.timestamp > signal.expire_time:

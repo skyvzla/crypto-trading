@@ -84,6 +84,37 @@ def test_retrace_touch_arms_then_enters_at_next_continuous_open():
     assert entry_intents[0].trigger_reason == "pullback_entry"
 
 
+def test_on_bar_lifecycle_does_not_treat_signal_bar_as_data_gap(monkeypatch):
+    strategy = _strategy()
+    strategy.BAR_BUFFER = 1
+    signal = _signal()
+    monkeypatch.setattr(
+        strategy,
+        "_detect_signal",
+        lambda bar: signal if bar.timestamp == signal.signal_time else None,
+    )
+
+    signal_bar_intents = strategy.on_bar1s(
+        _bar(1_000, open_="118", high="120", low="117")
+    )
+    touch_intents = strategy.on_bar1s(
+        _bar(2_000, open_="118", high="119", low="113")
+    )
+    entry_intents = strategy.on_bar1s(
+        _bar(3_000, open_="112", high="113", low="111")
+    )
+
+    assert signal_bar_intents == []
+    assert touch_intents == []
+    assert signal.pullback_ready_time == 2_000
+    assert len(entry_intents) == 1
+    assert entry_intents[0].trigger_reason == "pullback_entry"
+    assert all(
+        event.event_type != "pullback_data_gap"
+        for event in strategy.drain_audit_events()
+    )
+
+
 def test_current_bar_high_only_changes_next_bar_candidate():
     strategy = _strategy()
     signal = _signal()
