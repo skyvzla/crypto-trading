@@ -1,0 +1,47 @@
+name = "spike-v22-pullback-30-15-smoke"
+start = "2025-08-01T00:00:00+00:00"
+end = "2026-08-01T00:00:00+00:00"
+duckdb_path = "data/market/candles/candles.duckdb"
+output = "reports/spike-v22-pullback-30-15-smoke"
+metrics_root = "data/market/metrics"
+
+[universe]
+mode = "explicit"
+require_database_allowed = false
+symbols = ["AKEUSDT", "BANKUSDT", "BULLAUSDT", "XNYUSDT"]
+
+[execution]
+memory_limit_enabled = false
+chunk_hours = 4320
+fetch_batch_size = 10000
+duckdb_threads = 1
+resume = true
+
+[fixed]
+strategy = "trading_platform.strategies.spike.v2_2_pullback:V22Pullback"
+total_notional = 1000
+exit_policy = "candidate-v1"
+warmup_hours = 168
+entry_tier_mode = "tier3-only"
+reject_below_current = true
+prior_high_lookback_hours = 6
+rise_low_lookback_hours = 168
+min_rise_duration_hours = 24
+profit_unlock_percent = 1.5
+max_oi_change_pct = 0
+max_ls_ratio = 1.5
+max_consecutive_up_minutes = 0
+group_rise_12h_threshold = 1.0
+loose_consecutive_up_minutes = 0
+strong_tier_atr_shift = 0.2
+strong_bucket_strict_age_ms = 1800000
+weak_bucket_strict_age_ms = 900000
+profit_drawdown_peak_ratio = 0.20
+profit_drawdown_ratio = 0.10
+min_spike_rise = 0.15
+retrace_frac = 0.30
+wait_seconds = 90
+
+[analysis]
+collision_tolerance_seconds = 1
+pnl_split_usdt = 10

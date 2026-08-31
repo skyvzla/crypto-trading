@@ -181,6 +181,12 @@ class SpikeSignal:
     spike_range_pct: float | None = None
     # VWAP 偏离过滤审计字段：信号触发价相对前 100m 聚合 20 根 5m VWAP 的偏离
     spike_vwap_deviation_pct: float | None = None
+    # Hybrid 入场使用的局部冲高状态；与 16h campaign origin 严格分离。
+    impulse_base_price: Decimal | None = None
+    pullback_spike_high: Decimal | None = None
+    pullback_candidate: Decimal | None = None
+    pullback_ready_time: int | None = None
+    pullback_last_time: int | None = None
 
 
 class DynamicSpikeShortStrategy:
