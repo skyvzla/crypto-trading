@@ -6,7 +6,7 @@ function bars(closes: number[], highs?: number[], lows?: number[]) {
     open: close,
     high: highs?.[index] ?? close,
     low: lows?.[index] ?? close,
-    close
+    close,
   }))
 }
 

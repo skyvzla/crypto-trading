@@ -2,7 +2,7 @@ import type { Page, PageParams } from '@/api/types'
 
 export async function collectPageItems<T>(
   fetchPage: (params: Required<PageParams>) => Promise<Page<T>>,
-  pageSize = 1000
+  pageSize = 1000,
 ): Promise<Page<T>> {
   const items: T[] = []
   let total = 0

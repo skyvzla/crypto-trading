@@ -27,7 +27,7 @@ export function formatMoney(value: NumericLike, digits = 2): string {
   if (numeric === null) return EMPTY_VALUE
   return numeric.toLocaleString('zh-CN', {
     minimumFractionDigits: digits,
-    maximumFractionDigits: digits
+    maximumFractionDigits: digits,
   })
 }
 

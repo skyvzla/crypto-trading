@@ -18,13 +18,13 @@ export default defineConfig({
     // 不存在按组件引入的样式文件；reset.css 仍由 main.ts 显式引入。
     Components({
       dts: false,
-      resolvers: [AntDesignVueResolver({ importStyle: false })]
-    })
+      resolvers: [AntDesignVueResolver({ importStyle: false })],
+    }),
   ],
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url))
-    }
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+    },
   },
   server: {
     // 允许同一内网的其他设备访问复盘页面。
@@ -34,18 +34,18 @@ export default defineConfig({
       // 开发时把 /api/v1 直接转给本地 ledger 服务，避免依赖 CORS 配置。
       '/api': {
         target: 'http://localhost:8001',
-        changeOrigin: true
-      }
-    }
+        changeOrigin: true,
+      },
+    },
   },
   build: {
     outDir: 'dist',
-    emptyOutDir: true
+    emptyOutDir: true,
   },
   test: {
     globals: true,
     environment: 'jsdom',
     css: true,
-    setupFiles: ['./vitest.setup.ts']
-  }
+    setupFiles: ['./vitest.setup.ts'],
+  },
 })

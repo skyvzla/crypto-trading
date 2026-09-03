@@ -10,12 +10,15 @@ interface DailyPnlRow {
   fill_count: number
 }
 
-const props = withDefaults(defineProps<{
-  year: number
-  month: number
-  rows: DailyPnlRow[]
-  compact?: boolean
-}>(), { compact: false })
+const props = withDefaults(
+  defineProps<{
+    year: number
+    month: number
+    rows: DailyPnlRow[]
+    compact?: boolean
+  }>(),
+  { compact: false },
+)
 
 const emit = defineEmits<{ day: [date: string] }>()
 
@@ -31,7 +34,10 @@ const cells = computed(() => {
   const firstDay = dayjs(`${props.year}-${String(props.month).padStart(2, '0')}-01`)
   const leading = (firstDay.day() + 6) % 7
   const byDate = new Map(props.rows.map((row) => [row.date, row]))
-  const blanks: Array<{ date: string; day: number; row?: DailyPnlRow } | null> = Array.from({ length: leading }, () => null)
+  const blanks: Array<{ date: string; day: number; row?: DailyPnlRow } | null> = Array.from(
+    { length: leading },
+    () => null,
+  )
   const days = Array.from({ length: firstDay.daysInMonth() }, (_, index) => {
     const date = firstDay.add(index, 'day').format('YYYY-MM-DD')
     return { date, day: index + 1, row: byDate.get(date) }
@@ -40,14 +46,13 @@ const cells = computed(() => {
 })
 
 /** 亏盈色块深浅，按当月最大绝对值归一化。 */
-const maxAbsolutePnl = computed(() => Math.max(
-  1,
-  ...props.rows.filter((item) => item.net_pnl != null).map((item) => Math.abs(asNumber(item.net_pnl)))
-))
+const maxAbsolutePnl = computed(() =>
+  Math.max(1, ...props.rows.filter((item) => item.net_pnl != null).map((item) => Math.abs(asNumber(item.net_pnl)))),
+)
 
 function intensity(row?: DailyPnlRow): number {
   if (!row || row.net_pnl == null) return 0
-  return Math.max(.12, Math.min(.58, Math.abs(asNumber(row.net_pnl)) / maxAbsolutePnl.value * .58))
+  return Math.max(0.12, Math.min(0.58, (Math.abs(asNumber(row.net_pnl)) / maxAbsolutePnl.value) * 0.58))
 }
 </script>
 
@@ -66,8 +71,12 @@ function intensity(row?: DailyPnlRow): number {
         @click="emit('day', cell.date)"
       >
         <span class="calendar-day">{{ cell.day }}</span>
-        <strong v-if="cell.row">{{ cell.row.net_pnl == null ? '不可用' : formatMoney(cell.row.net_pnl, compact ? 0 : 2) }}</strong>
-        <small v-if="cell.row && !compact">{{ cell.row.campaign_count }} Campaign · {{ cell.row.fill_count }} fills</small>
+        <strong v-if="cell.row">{{
+          cell.row.net_pnl == null ? '不可用' : formatMoney(cell.row.net_pnl, compact ? 0 : 2)
+        }}</strong>
+        <small v-if="cell.row && !compact"
+          >{{ cell.row.campaign_count }} Campaign · {{ cell.row.fill_count }} fills</small
+        >
         <i v-else-if="!cell.row">—</i>
       </button>
     </template>

@@ -23,14 +23,28 @@ function notificationResponse(url: string) {
       policies: 1,
       events: 1,
       recent_events: 1,
-      deliveries: { pending: 0, sending: 0, retry: 0, sent: 2, dead: 0 }
+      deliveries: { pending: 0, sending: 0, retry: 0, sent: 2, dead: 0 },
     })
   }
   if (url.includes('/notifications/connectors')) {
-    return response({ items: [{ id: 'c-1', name: 'ops-bot', type: 'telegram', secret_ref: 'TG_TOKEN', config: {}, enabled: true, version: 1 }], total: 1, limit: 1000, offset: 0 })
+    return response({
+      items: [
+        { id: 'c-1', name: 'ops-bot', type: 'telegram', secret_ref: 'TG_TOKEN', config: {}, enabled: true, version: 1 },
+      ],
+      total: 1,
+      limit: 1000,
+      offset: 0,
+    })
   }
   if (url.includes('/notifications/endpoints')) {
-    return response({ items: [{ id: 'e-1', connector_id: 'c-1', name: 'ops-room', address: '-1001', config: {}, enabled: true, version: 1 }], total: 1, limit: 1000, offset: 0 })
+    return response({
+      items: [
+        { id: 'e-1', connector_id: 'c-1', name: 'ops-room', address: '-1001', config: {}, enabled: true, version: 1 },
+      ],
+      total: 1,
+      limit: 1000,
+      offset: 0,
+    })
   }
   if (url.includes('/notifications/groups')) return response({ items: [], total: 0, limit: 1000, offset: 0 })
   if (url.includes('/notifications/policies')) return response({ items: [], total: 0, limit: 1000, offset: 0 })
@@ -51,7 +65,10 @@ describe('notification API', () => {
     await notificationApi.createConnector({ name: 'ops', type: 'telegram', secret_ref: 'TG_TOKEN', enabled: true })
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/notifications/connectors',
-      expect.objectContaining({ method: 'POST', body: JSON.stringify({ name: 'ops', type: 'telegram', secret_ref: 'TG_TOKEN', enabled: true }) })
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ name: 'ops', type: 'telegram', secret_ref: 'TG_TOKEN', enabled: true }),
+      }),
     )
   })
 
@@ -108,7 +125,7 @@ describe('notification route and view', () => {
     const removeTargetRoute = router.addRoute({
       path: '/notification-test-target',
       name: 'notification-test-target',
-      component: { render: () => null }
+      component: { render: () => null },
     })
     await router.push('/notifications/connectors')
     const wrapper = mount(App, { attachTo: document.body })
@@ -131,7 +148,9 @@ describe('notification route and view', () => {
 describe('notification activity channels', () => {
   function deferred<T>() {
     let resolve!: (value: T) => void
-    const promise = new Promise<T>((settle) => { resolve = settle })
+    const promise = new Promise<T>((settle) => {
+      resolve = settle
+    })
     return { promise, resolve }
   }
 
@@ -140,7 +159,7 @@ describe('notification activity channels', () => {
       items: ids.map((id) => ({ id })) as unknown as NotificationEvent[],
       total: 50,
       limit: 8,
-      offset
+      offset,
     }
   }
 
@@ -148,9 +167,7 @@ describe('notification activity channels', () => {
     const activity = useNotificationActivity({ setError: () => undefined })
     const slow = deferred<Page<NotificationEvent>>()
     const fast = deferred<Page<NotificationEvent>>()
-    vi.spyOn(notificationApi, 'events')
-      .mockReturnValueOnce(slow.promise)
-      .mockReturnValueOnce(fast.promise)
+    vi.spyOn(notificationApi, 'events').mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise)
 
     const firstLoad = activity.loadEvents()
     const secondLoad = activity.loadEvents()
@@ -193,7 +210,8 @@ describe('notification activity channels', () => {
   it('改筛选后回到第一页，并在成功后清掉上一次的错误', async () => {
     const messages: string[] = []
     const activity = useNotificationActivity({ setError: (text) => messages.push(text) })
-    const events = vi.spyOn(notificationApi, 'events')
+    const events = vi
+      .spyOn(notificationApi, 'events')
       .mockRejectedValueOnce(new Error('后端不可用'))
       .mockResolvedValue(eventPage(['e-1']))
 

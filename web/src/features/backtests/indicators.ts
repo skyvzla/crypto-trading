@@ -27,7 +27,10 @@ export function ema(values: number[], period: number): number[] {
 }
 
 export function emaOfClose(bars: IndicatorBar[], period: number): number[] {
-  return ema(bars.map((bar) => bar.close), period)
+  return ema(
+    bars.map((bar) => bar.close),
+    period,
+  )
 }
 
 export interface MacdResult {
@@ -39,7 +42,7 @@ export interface MacdResult {
 /** MACD：DIF = EMA(fast) − EMA(slow)，DEA = EMA(DIF, signal)，柱 = DIF − DEA。 */
 export function macd(
   bars: IndicatorBar[],
-  { fast = 12, slow = 26, signal = 9 }: { fast?: number; slow?: number; signal?: number } = {}
+  { fast = 12, slow = 26, signal = 9 }: { fast?: number; slow?: number; signal?: number } = {},
 ): MacdResult {
   const closes = bars.map((bar) => bar.close)
   const fastLine = ema(closes, fast)

@@ -13,10 +13,13 @@ export function useBacktestPagination(defaultPageSize: number, namespace: string
     const query: LocationQuery = { ...route.query, [pageKey]: String(nextPage), [pageSizeKey]: String(nextSize) }
     void router.replace({ query })
   })
-  watch(() => [route.query[pageKey], route.query[pageSizeKey]], ([nextPage, nextSize]) => {
-    page.value = Math.max(1, Number(nextPage) || 1)
-    pageSize.value = Math.max(1, Number(nextSize) || defaultPageSize)
-  })
+  watch(
+    () => [route.query[pageKey], route.query[pageSizeKey]],
+    ([nextPage, nextSize]) => {
+      page.value = Math.max(1, Number(nextPage) || 1)
+      pageSize.value = Math.max(1, Number(nextSize) || defaultPageSize)
+    },
+  )
 
   const preservedQuery = computed(() => ({ ...route.query }))
   return { page, pageSize, preservedQuery }

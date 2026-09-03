@@ -16,7 +16,7 @@ function readFilters(query: LocationQuery): OperationFilters {
   return {
     account_id: String(query.account_id ?? ''),
     strategy_id: String(query.strategy_id ?? ''),
-    symbol: String(query.symbol ?? '')
+    symbol: String(query.symbol ?? ''),
   }
 }
 
@@ -80,10 +80,7 @@ export interface LedgerLoaderOptions {
  * 同时收口 KeepAlive 的重新激活语义——这些页面被 `<KeepAlive>` 缓存，
  * 只挂载一次，靠 onActivated 才能在返回时与地址栏重新对齐。
  */
-export function useLedgerLoader(
-  load: (context: LedgerLoaderContext) => Promise<void>,
-  options: LedgerLoaderOptions
-) {
+export function useLedgerLoader(load: (context: LedgerLoaderContext) => Promise<void>, options: LedgerLoaderOptions) {
   const loading = ref(false)
   const error = ref<string | null>(null)
   const refreshedAt = ref<string | null>(null)
@@ -187,10 +184,7 @@ export function useQuerySync() {
  *
  * 只做无状态比较，页面放哪些参数进 URL 由页面自己声明。
  */
-export function isQuerySynced(
-  current: LocationQuery,
-  parts: Record<string, string | number | undefined>
-): boolean {
+export function isQuerySynced(current: LocationQuery, parts: Record<string, string | number | undefined>): boolean {
   const expected = toQuery(parts)
   for (const key of new Set([...Object.keys(expected), ...Object.keys(current)])) {
     const raw = current[key]

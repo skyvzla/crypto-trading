@@ -23,7 +23,7 @@ describe('operationsApi', () => {
       account_id: 'testnet',
       strategy_id: 'spike-short',
       start_date: '2026-08-01',
-      end_date: '2026-08-31'
+      end_date: '2026-08-31',
     })
 
     const url = requestedUrl()
@@ -33,7 +33,7 @@ describe('operationsApi', () => {
       account_id: 'testnet',
       strategy_id: 'spike-short',
       start_date: '2026-08-01',
-      end_date: '2026-08-31'
+      end_date: '2026-08-31',
     })
   })
 
@@ -44,7 +44,7 @@ describe('operationsApi', () => {
       account_id: 'testnet',
       start_date: '2026-08-01',
       end_date: '2026-08-01',
-      timezone: 'UTC'
+      timezone: 'UTC',
     })
 
     expect(requestedUrl().searchParams.get('timezone')).toBe('UTC')
@@ -55,7 +55,7 @@ describe('operationsApi', () => {
 
     await operationsApi.dailyPnl({
       start_date: '2026-08-01',
-      end_date: '2026-08-01'
+      end_date: '2026-08-01',
     })
 
     expect(requestedUrl().searchParams.has('account_id')).toBe(false)
@@ -68,7 +68,8 @@ describe('operationsApi', () => {
 
     expect(requestedUrl().pathname).toBe('/api/v1/accounts')
     expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
-      limit: '100', offset: '0'
+      limit: '100',
+      offset: '0',
     })
   })
 
@@ -77,14 +78,14 @@ describe('operationsApi', () => {
 
     await operationsApi.capitalStatus({
       account_id: 'account/a',
-      strategy_id: 'spike_short'
+      strategy_id: 'spike_short',
     })
 
     const url = requestedUrl()
     expect(url.pathname).toBe('/api/v1/strategy-capital-status')
     expect(Object.fromEntries(url.searchParams)).toEqual({
       account_id: 'account/a',
-      strategy_id: 'spike_short'
+      strategy_id: 'spike_short',
     })
   })
 
@@ -95,7 +96,7 @@ describe('operationsApi', () => {
       account_id: 'testnet',
       symbol: 'BTCUSDT',
       start_date: '2026-08-01',
-      end_date: '2026-08-15'
+      end_date: '2026-08-15',
     })
 
     const url = requestedUrl()
@@ -104,7 +105,7 @@ describe('operationsApi', () => {
       account_id: 'testnet',
       symbol: 'BTCUSDT',
       start_date: '2026-08-01',
-      end_date: '2026-08-15'
+      end_date: '2026-08-15',
     })
   })
 
@@ -117,7 +118,7 @@ describe('operationsApi', () => {
       start_date: '2026-08-01',
       end_date: '2026-08-15',
       timezone: 'Asia/Shanghai',
-      group_by: 'subcategory'
+      group_by: 'subcategory',
     })
 
     const url = requestedUrl()
@@ -128,7 +129,7 @@ describe('operationsApi', () => {
       start_date: '2026-08-01',
       end_date: '2026-08-15',
       timezone: 'Asia/Shanghai',
-      group_by: 'subcategory'
+      group_by: 'subcategory',
     })
   })
 
@@ -142,7 +143,10 @@ describe('operationsApi', () => {
     vi.mocked(globalThis.fetch).mockClear()
     await operationsApi.orders({ account_id: 'a', active_only: true, limit: 25, offset: 25 })
     expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
-      account_id: 'a', active_only: 'true', limit: '25', offset: '25'
+      account_id: 'a',
+      active_only: 'true',
+      limit: '25',
+      offset: '25',
     })
 
     vi.mocked(globalThis.fetch).mockClear()
@@ -150,7 +154,13 @@ describe('operationsApi', () => {
     expect(requestedUrl().pathname).toBe('/api/v1/positions')
 
     vi.mocked(globalThis.fetch).mockClear()
-    await operationsApi.trades({ account_id: 'a', symbol: 'BTCUSDT', start_date: '2026-08-16', end_date: '2026-08-16', timezone: 'Asia/Shanghai' })
+    await operationsApi.trades({
+      account_id: 'a',
+      symbol: 'BTCUSDT',
+      start_date: '2026-08-16',
+      end_date: '2026-08-16',
+      timezone: 'Asia/Shanghai',
+    })
     expect(requestedUrl().pathname).toBe('/api/v1/trades')
     expect(requestedUrl().searchParams.get('start_date')).toBe('2026-08-16')
     expect(requestedUrl().searchParams.get('timezone')).toBe('Asia/Shanghai')
@@ -165,7 +175,7 @@ describe('operationsApi', () => {
       start_date: '2026-08-16',
       end_date: '2026-08-16',
       limit: 25,
-      offset: 25
+      offset: 25,
     })
     expect(requestedUrl().pathname).toBe('/api/v1/campaigns')
     expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
@@ -175,7 +185,7 @@ describe('operationsApi', () => {
       start_date: '2026-08-16',
       end_date: '2026-08-16',
       limit: '25',
-      offset: '25'
+      offset: '25',
     })
 
     vi.mocked(globalThis.fetch).mockClear()
@@ -188,16 +198,14 @@ describe('operationsApi', () => {
 
     await operationsApi.categorySymbols('binance:subcategory:Layer 1', {
       limit: 20,
-      offset: 40
+      offset: 40,
     })
 
     const [rawUrl] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(String(rawUrl)).toContain(
-      '/exchange-categories/binance%3Asubcategory%3ALayer%201/symbols'
-    )
+    expect(String(rawUrl)).toContain('/exchange-categories/binance%3Asubcategory%3ALayer%201/symbols')
     expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
       limit: '20',
-      offset: '40'
+      offset: '40',
     })
   })
 
@@ -222,7 +230,7 @@ describe('operationsApi', () => {
     expect(url.pathname).toBe('/api/v1/exchange-symbols')
     expect(Object.fromEntries(url.searchParams)).toEqual({
       unclassified: 'true',
-      limit: '1000'
+      limit: '1000',
     })
   })
 
@@ -233,18 +241,16 @@ describe('operationsApi', () => {
       freeze_days: 7,
       effective: false,
       limit: 100,
-      offset: 0
+      offset: 0,
     })
 
     const [rawUrl] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(String(rawUrl)).toContain(
-      '/strategy-category-admissions/spike%2Fshort/universe-preview'
-    )
+    expect(String(rawUrl)).toContain('/strategy-category-admissions/spike%2Fshort/universe-preview')
     expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
       freeze_days: '7',
       effective: 'false',
       limit: '100',
-      offset: '0'
+      offset: '0',
     })
   })
 
@@ -254,23 +260,19 @@ describe('operationsApi', () => {
       enabled: false,
       expected_version: 3,
       updated_by: 'web-operator',
-      reason: '暂停新开仓'
+      reason: '暂停新开仓',
     }
 
-    await operationsApi.updateStrategyAdmission(
-      'spike/short',
-      'binance:category:Layer 1',
-      update
-    )
+    await operationsApi.updateStrategyAdmission('spike/short', 'binance:category:Layer 1', update)
 
     const [url, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(String(url)).toContain(
-      '/strategy-category-admissions/spike%2Fshort/binance%3Acategory%3ALayer%201'
+    expect(String(url)).toContain('/strategy-category-admissions/spike%2Fshort/binance%3Acategory%3ALayer%201')
+    expect(init).toEqual(
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify(update),
+      }),
     )
-    expect(init).toEqual(expect.objectContaining({
-      method: 'PUT',
-      body: JSON.stringify(update)
-    }))
   })
 
   it('queries sync status from its dedicated endpoint', async () => {
@@ -283,14 +285,14 @@ describe('operationsApi', () => {
 
   it('propagates API failures instead of returning placeholder data', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse({ detail: 'database unavailable' }, { ok: false, status: 503 })
+      jsonResponse({ detail: 'database unavailable' }, { ok: false, status: 503 }),
     )
 
     await expect(operationsApi.health()).rejects.toEqual(
       expect.objectContaining({
         status: 503,
-        message: 'database unavailable'
-      })
+        message: 'database unavailable',
+      }),
     )
   })
 })

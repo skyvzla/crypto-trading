@@ -40,12 +40,16 @@ describe('api client', () => {
 
   it('backtest candles includes research id for archive resolution', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse({ symbol: 'AKEUSDT', interval: '5m', source: 'archive', candles: [] })
+      jsonResponse({ symbol: 'AKEUSDT', interval: '5m', source: 'archive', candles: [] }),
     )
 
     await backtestApi.candles({
-      research_id: 'research-7', symbol: 'AKEUSDT', interval: '5m',
-      start_ms: 1000, end_ms: 2000, source: 'archive'
+      research_id: 'research-7',
+      symbol: 'AKEUSDT',
+      interval: '5m',
+      start_ms: 1000,
+      end_ms: 2000,
+      source: 'archive',
     })
 
     expect(requestedUrl()).toContain('research_id=research-7')
@@ -54,11 +58,15 @@ describe('api client', () => {
 
   it('allows Binance market candles without a backtest research', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse({ symbol: 'BTCUSDT', interval: '5m', source: 'binance', candles: [] })
+      jsonResponse({ symbol: 'BTCUSDT', interval: '5m', source: 'binance', candles: [] }),
     )
 
     await backtestApi.candles({
-      symbol: 'BTCUSDT', interval: '5m', start_ms: 1000, end_ms: 2000, source: 'binance'
+      symbol: 'BTCUSDT',
+      interval: '5m',
+      start_ms: 1000,
+      end_ms: 2000,
+      source: 'binance',
     })
 
     expect(requestedUrl()).toContain('source=binance')
@@ -74,15 +82,13 @@ describe('api client', () => {
       expect.stringContaining('/api/v1/subcategory-admissions/a'),
       expect.objectContaining({
         method: 'PUT',
-        body: JSON.stringify(body)
-      })
+        body: JSON.stringify(body),
+      }),
     )
   })
 
   it('throws ApiError on non-ok response', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      jsonResponse({ detail: 'unavailable' }, { ok: false, status: 503 })
-    )
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ detail: 'unavailable' }, { ok: false, status: 503 }))
 
     await expect(api.get('/health')).rejects.toThrow(ApiError)
     await expect(api.get('/health')).rejects.toMatchObject({ status: 503, message: 'unavailable' })

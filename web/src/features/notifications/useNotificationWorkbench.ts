@@ -13,7 +13,7 @@ import type {
   NotificationOverview,
   NotificationPolicy,
   NotificationPolicyInput,
-  NotificationSeverity
+  NotificationSeverity,
 } from '@/api/types'
 import { useNotificationActivity } from './useNotificationActivity'
 import { useNotificationNavigation } from './useNotificationNavigation'
@@ -32,7 +32,7 @@ const EMPTY_OVERVIEW: NotificationOverview = {
   policies: 0,
   events: 0,
   unrouted_events: 0,
-  deliveries: { pending: 0, sending: 0, retry: 0, sent: 0, dead: 0 }
+  deliveries: { pending: 0, sending: 0, retry: 0, sent: 0, dead: 0 },
 }
 
 /**
@@ -57,8 +57,8 @@ function normalizeOverview(value: unknown): NotificationOverview {
       sending: count(deliveries.sending),
       retry: count(deliveries.retry),
       sent: count(deliveries.sent),
-      dead: count(deliveries.dead)
-    }
+      dead: count(deliveries.dead),
+    },
   }
 }
 
@@ -112,7 +112,9 @@ export function useNotificationWorkbench() {
   }
 
   const activity = useNotificationActivity({
-    setError: (text) => { loadError.value = text }
+    setError: (text) => {
+      loadError.value = text
+    },
   })
 
   const connectorById = computed(() => new Map(connectors.value.map((item) => [item.id, item])))
@@ -121,7 +123,7 @@ export function useNotificationWorkbench() {
   const enabledEndpointCount = computed(() => endpoints.value.filter((item) => item.enabled).length)
   const deadDeliveryCount = computed(() => overview.value.deliveries.dead ?? 0)
   const retryDeliveryCount = computed(
-    () => (overview.value.deliveries.retry ?? 0) + (overview.value.deliveries.pending ?? 0)
+    () => (overview.value.deliveries.retry ?? 0) + (overview.value.deliveries.pending ?? 0),
   )
 
   // ── 表单状态 ───────────────────────────────────────────────────────────
@@ -143,7 +145,7 @@ export function useNotificationWorkbench() {
     auth_type: 'hmac_sha256' as 'none' | 'bearer' | 'hmac_sha256',
     allow_http: false,
     enabled: true,
-    version: 1
+    version: 1,
   })
   const endpointForm = reactive({
     connector_id: '',
@@ -152,7 +154,7 @@ export function useNotificationWorkbench() {
     topic_id: '',
     headers_json: '{}',
     enabled: true,
-    version: 1
+    version: 1,
   })
   const groupForm = reactive({ name: '', description: '', endpoint_ids: [] as string[], enabled: true, version: 1 })
   const policyForm = reactive({
@@ -163,7 +165,7 @@ export function useNotificationWorkbench() {
     suppress: false,
     group_ids: [] as string[],
     enabled: true,
-    version: 1
+    version: 1,
   })
 
   const selectedConnector = computed(() => connectorById.value.get(endpointForm.connector_id) ?? null)
@@ -172,57 +174,85 @@ export function useNotificationWorkbench() {
   const connectorCollection = useVersionedCollection({
     items: connectors,
     label: '连接器',
-    update: (item, enabled) => notificationApi.updateConnector(item.id, {
-      name: item.name, type: item.type, secret_ref: item.secret_ref,
-      config: item.config, enabled, expected_version: item.version
-    }),
+    update: (item, enabled) =>
+      notificationApi.updateConnector(item.id, {
+        name: item.name,
+        type: item.type,
+        secret_ref: item.secret_ref,
+        config: item.config,
+        enabled,
+        expected_version: item.version,
+      }),
     remove: (item) => notificationApi.deleteConnector(item.id, item.version),
     removeHint: '连接器删除失败；请确认没有关联端点',
     // 端点隶属于连接器，连接器没了本地也要一起清掉。
-    onRemoved: (item) => { endpoints.value = endpoints.value.filter((row) => row.connector_id !== item.id) },
-    afterChange: refreshOverview
+    onRemoved: (item) => {
+      endpoints.value = endpoints.value.filter((row) => row.connector_id !== item.id)
+    },
+    afterChange: refreshOverview,
   })
 
   const endpointCollection = useVersionedCollection({
     items: endpoints,
     label: '端点',
-    update: (item, enabled) => notificationApi.updateEndpoint(item.id, {
-      connector_id: item.connector_id, name: item.name, address: item.address,
-      config: item.config, enabled, expected_version: item.version
-    }),
+    update: (item, enabled) =>
+      notificationApi.updateEndpoint(item.id, {
+        connector_id: item.connector_id,
+        name: item.name,
+        address: item.address,
+        config: item.config,
+        enabled,
+        expected_version: item.version,
+      }),
     remove: (item) => notificationApi.deleteEndpoint(item.id, item.version),
     removeHint: '端点删除失败；请先移出职责组',
     onRemoved: (item) => {
-      groups.value = groups.value.map((row) => ({ ...row, endpoint_ids: row.endpoint_ids.filter((id) => id !== item.id) }))
+      groups.value = groups.value.map((row) => ({
+        ...row,
+        endpoint_ids: row.endpoint_ids.filter((id) => id !== item.id),
+      }))
     },
-    afterChange: refreshOverview
+    afterChange: refreshOverview,
   })
 
   const groupCollection = useVersionedCollection({
     items: groups,
     label: '职责组',
-    update: (item, enabled) => notificationApi.updateGroup(item.id, {
-      name: item.name, description: item.description, endpoint_ids: item.endpoint_ids,
-      enabled, expected_version: item.version
-    }),
+    update: (item, enabled) =>
+      notificationApi.updateGroup(item.id, {
+        name: item.name,
+        description: item.description,
+        endpoint_ids: item.endpoint_ids,
+        enabled,
+        expected_version: item.version,
+      }),
     remove: (item) => notificationApi.deleteGroup(item.id, item.version),
     removeHint: '职责组删除失败；请先移出路由策略',
     onRemoved: (item) => {
-      policies.value = policies.value.map((row) => ({ ...row, group_ids: row.group_ids.filter((id) => id !== item.id) }))
+      policies.value = policies.value.map((row) => ({
+        ...row,
+        group_ids: row.group_ids.filter((id) => id !== item.id),
+      }))
     },
-    afterChange: refreshOverview
+    afterChange: refreshOverview,
   })
 
   const policyCollection = useVersionedCollection({
     items: policies,
     label: '路由策略',
-    update: (item, enabled) => notificationApi.updatePolicy(item.id, {
-      name: item.name, event_pattern: item.event_pattern, severity: item.severity,
-      priority: item.priority, suppress: item.suppress, group_ids: item.group_ids,
-      enabled, expected_version: item.version
-    }),
+    update: (item, enabled) =>
+      notificationApi.updatePolicy(item.id, {
+        name: item.name,
+        event_pattern: item.event_pattern,
+        severity: item.severity,
+        priority: item.priority,
+        suppress: item.suppress,
+        group_ids: item.group_ids,
+        enabled,
+        expected_version: item.version,
+      }),
     remove: (item) => notificationApi.deletePolicy(item.id, item.version),
-    afterChange: refreshOverview
+    afterChange: refreshOverview,
   })
 
   // ── 加载 ───────────────────────────────────────────────────────────────
@@ -238,9 +268,17 @@ export function useNotificationWorkbench() {
       collectPageItems((params) => notificationApi.groups(params)),
       collectPageItems((params) => notificationApi.policies(params)),
       notificationApi.events({ limit: activity.pageSize, offset: 0 }),
-      notificationApi.deliveries({ limit: activity.pageSize, offset: 0 })
+      notificationApi.deliveries({ limit: activity.pageSize, offset: 0 }),
     ])
-    const [overviewResult, connectorsResult, endpointsResult, groupsResult, policiesResult, eventsResult, deliveriesResult] = results
+    const [
+      overviewResult,
+      connectorsResult,
+      endpointsResult,
+      groupsResult,
+      policiesResult,
+      eventsResult,
+      deliveriesResult,
+    ] = results
     if (overviewResult.status === 'fulfilled') overview.value = normalizeOverview(overviewResult.value)
     if (connectorsResult.status === 'fulfilled') connectors.value = connectorsResult.value.items
     if (endpointsResult.status === 'fulfilled') endpoints.value = endpointsResult.value.items
@@ -284,7 +322,7 @@ export function useNotificationWorkbench() {
       auth_type: String(item?.config?.auth_type ?? 'hmac_sha256') as 'none' | 'bearer' | 'hmac_sha256',
       allow_http: Boolean(item?.config?.allow_http ?? false),
       enabled: item?.enabled ?? true,
-      version: item?.version ?? 1
+      version: item?.version ?? 1,
     })
     connectorModalOpen.value = true
   }
@@ -298,7 +336,7 @@ export function useNotificationWorkbench() {
       topic_id: String(item?.config?.message_thread_id ?? item?.config?.topic_id ?? ''),
       headers_json: JSON.stringify(item?.config?.headers ?? {}, null, 2),
       enabled: item?.enabled ?? true,
-      version: item?.version ?? 1
+      version: item?.version ?? 1,
     })
     endpointModalOpen.value = true
   }
@@ -310,7 +348,7 @@ export function useNotificationWorkbench() {
       description: item?.description ?? '',
       endpoint_ids: [...(item?.endpoint_ids ?? [])],
       enabled: item?.enabled ?? true,
-      version: item?.version ?? 1
+      version: item?.version ?? 1,
     })
     groupModalOpen.value = true
   }
@@ -325,7 +363,7 @@ export function useNotificationWorkbench() {
       suppress: item?.suppress ?? false,
       group_ids: [...(item?.group_ids ?? [])],
       enabled: item?.enabled ?? true,
-      version: item?.version ?? 1
+      version: item?.version ?? 1,
     })
     policyModalOpen.value = true
   }
@@ -368,13 +406,14 @@ export function useNotificationWorkbench() {
       type: connectorForm.type,
       secret_ref: connectorForm.secret_ref.trim(),
       enabled: connectorForm.enabled,
-      config: connectorForm.type === 'telegram'
-        ? { parse_mode: connectorForm.parse_mode || 'HTML' }
-        : {
-          timeout_seconds: Number(connectorForm.timeout_seconds) || DEFAULT_TIMEOUT_SECONDS,
-          auth_type: connectorForm.auth_type,
-          allow_http: connectorForm.allow_http
-        }
+      config:
+        connectorForm.type === 'telegram'
+          ? { parse_mode: connectorForm.parse_mode || 'HTML' }
+          : {
+              timeout_seconds: Number(connectorForm.timeout_seconds) || DEFAULT_TIMEOUT_SECONDS,
+              auth_type: connectorForm.auth_type,
+              allow_http: connectorForm.allow_http,
+            },
     }
     await submitResource({
       editingId: connectorEditingId.value,
@@ -383,8 +422,10 @@ export function useNotificationWorkbench() {
       create: notificationApi.createConnector,
       update: notificationApi.updateConnector,
       upsert: connectorCollection.upsert,
-      close: () => { connectorModalOpen.value = false },
-      label: '连接器'
+      close: () => {
+        connectorModalOpen.value = false
+      },
+      label: '连接器',
     })
   }
 
@@ -413,7 +454,7 @@ export function useNotificationWorkbench() {
       name: endpointForm.name.trim(),
       address: endpointForm.address.trim(),
       config,
-      enabled: endpointForm.enabled
+      enabled: endpointForm.enabled,
     }
     await submitResource({
       editingId: endpointEditingId.value,
@@ -422,8 +463,10 @@ export function useNotificationWorkbench() {
       create: notificationApi.createEndpoint,
       update: notificationApi.updateEndpoint,
       upsert: endpointCollection.upsert,
-      close: () => { endpointModalOpen.value = false },
-      label: '端点'
+      close: () => {
+        endpointModalOpen.value = false
+      },
+      label: '端点',
     })
   }
 
@@ -434,7 +477,7 @@ export function useNotificationWorkbench() {
       name: groupForm.name.trim(),
       description: groupForm.description.trim() || null,
       endpoint_ids: [...groupForm.endpoint_ids],
-      enabled: groupForm.enabled
+      enabled: groupForm.enabled,
     }
     await submitResource({
       editingId: groupEditingId.value,
@@ -443,8 +486,10 @@ export function useNotificationWorkbench() {
       create: notificationApi.createGroup,
       update: notificationApi.updateGroup,
       upsert: groupCollection.upsert,
-      close: () => { groupModalOpen.value = false },
-      label: '职责组'
+      close: () => {
+        groupModalOpen.value = false
+      },
+      label: '职责组',
     })
   }
 
@@ -458,7 +503,7 @@ export function useNotificationWorkbench() {
       priority: Number(policyForm.priority) || 0,
       suppress: policyForm.suppress,
       group_ids: [...policyForm.group_ids],
-      enabled: policyForm.enabled
+      enabled: policyForm.enabled,
     }
     await submitResource({
       editingId: policyEditingId.value,
@@ -467,8 +512,10 @@ export function useNotificationWorkbench() {
       create: notificationApi.createPolicy,
       update: notificationApi.updatePolicy,
       upsert: policyCollection.upsert,
-      close: () => { policyModalOpen.value = false },
-      label: '路由策略'
+      close: () => {
+        policyModalOpen.value = false
+      },
+      label: '路由策略',
     })
   }
 
@@ -506,7 +553,9 @@ export function useNotificationWorkbench() {
 
   // 页面被 KeepAlive 缓存，离开时必须收起弹窗，否则回来还挂在屏幕上。
   onDeactivated(closeDialogs)
-  onMounted(() => { void loadAll() })
+  onMounted(() => {
+    void loadAll()
+  })
 
   return {
     // 导航
@@ -575,6 +624,6 @@ export function useNotificationWorkbench() {
     deleteGroup: groupCollection.destroy,
     deletePolicy: policyCollection.destroy,
     testEndpoint,
-    retryDelivery
+    retryDelivery,
   }
 }

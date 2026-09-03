@@ -67,7 +67,7 @@ const SHARED_INDICATORS: IndicatorPalette = {
   macdHistogramDown: '#f0525266',
   kdjK: '#4da3ff',
   kdjD: '#f5c451',
-  kdjJ: '#d98bff'
+  kdjJ: '#d98bff',
 }
 
 const LIGHT_THEME: ChartTheme = {
@@ -91,7 +91,7 @@ const LIGHT_THEME: ChartTheme = {
   areaLine: '#16a34a',
   areaTop: 'rgba(22, 163, 74, .28)',
   areaBottom: 'rgba(22, 163, 74, .02)',
-  indicators: SHARED_INDICATORS
+  indicators: SHARED_INDICATORS,
 }
 
 const DARK_THEME: ChartTheme = {
@@ -107,7 +107,7 @@ const DARK_THEME: ChartTheme = {
   average: '#e2e8f0',
   invalid: '#f87171',
   up: '#34d399',
-  down: '#fb7185'
+  down: '#fb7185',
 }
 
 export function getChartTheme(dark: boolean): ChartTheme {

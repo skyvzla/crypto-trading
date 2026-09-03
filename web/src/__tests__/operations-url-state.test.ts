@@ -23,11 +23,25 @@ beforeEach(async () => {
 })
 
 function stubOverview() {
-  vi.spyOn(operationsApi, 'health').mockResolvedValue({ status: 'healthy', service: 'ledger', timestamp: '2026-08-16T00:00:00Z' })
+  vi.spyOn(operationsApi, 'health').mockResolvedValue({
+    status: 'healthy',
+    service: 'ledger',
+    timestamp: '2026-08-16T00:00:00Z',
+  })
   vi.spyOn(operationsApi, 'pnl').mockResolvedValue({
-    account_id: 'acct', strategy_id: null, symbol: null, total_trades: 0,
-    total_commission: '0', total_realized_pnl: '0', total_unrealized_pnl: '0',
-    net_pnl: '0', win_count: 0, loss_count: 0, win_rate: 0, avg_win: '0', avg_loss: '0'
+    account_id: 'acct',
+    strategy_id: null,
+    symbol: null,
+    total_trades: 0,
+    total_commission: '0',
+    total_realized_pnl: '0',
+    total_unrealized_pnl: '0',
+    net_pnl: '0',
+    win_count: 0,
+    loss_count: 0,
+    win_rate: 0,
+    avg_win: '0',
+    avg_loss: '0',
   })
   vi.spyOn(operationsApi, 'orders').mockResolvedValue({ items: [], total: 0, limit: 1, offset: 0 })
   vi.spyOn(operationsApi, 'trades').mockResolvedValue({ items: [], total: 0, limit: 6, offset: 0 })
@@ -48,7 +62,9 @@ function positionPageCalls(spy: { mock: { calls: unknown[][] } }) {
 describe('筛选写回地址栏', () => {
   it('已经在本页时地址栏被外部改动也会重新对齐并取数', async () => {
     stubOverview()
-    const positions = vi.spyOn(operationsApi, 'positions').mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 })
+    const positions = vi
+      .spyOn(operationsApi, 'positions')
+      .mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 })
 
     await router.push('/positions?account_id=first')
     const wrapper = mount(App)
@@ -71,7 +87,9 @@ describe('筛选写回地址栏', () => {
 
   it('切走之后被缓存的实例不再响应地址栏', async () => {
     const runtimeStatus = stubOverview()
-    const positions = vi.spyOn(operationsApi, 'positions').mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 })
+    const positions = vi
+      .spyOn(operationsApi, 'positions')
+      .mockResolvedValue({ items: [], total: 0, limit: 25, offset: 0 })
 
     await router.push('/positions?account_id=first')
     const wrapper = mount(App)

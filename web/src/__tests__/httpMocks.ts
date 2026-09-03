@@ -10,7 +10,7 @@ export function jsonResponse(body: unknown, init: { ok?: boolean; status?: numbe
     ok: init.ok ?? true,
     status: init.status ?? 200,
     json: () => Promise.resolve(body),
-    text: () => Promise.resolve(text)
+    text: () => Promise.resolve(text),
   } as Response
 }
 
@@ -20,7 +20,7 @@ export function emptyResponse(status = 204): Response {
     ok: status < 400,
     status,
     json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
-    text: () => Promise.resolve('')
+    text: () => Promise.resolve(''),
   } as Response
 }
 
@@ -30,6 +30,6 @@ export function textResponse(text: string, init: { ok?: boolean; status?: number
     ok: init.ok ?? true,
     status: init.status ?? 200,
     json: () => Promise.reject(new SyntaxError('Unexpected token')),
-    text: () => Promise.resolve(text)
+    text: () => Promise.resolve(text),
   } as Response
 }

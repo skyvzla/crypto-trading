@@ -7,7 +7,7 @@ const VIEW_ROUTE_NAMES: Record<NotificationViewKey, string> = {
   connectors: 'notifications-connectors',
   groups: 'notifications-groups',
   policies: 'notifications-policies',
-  activity: 'notifications-activity'
+  activity: 'notifications-activity',
 }
 
 /**
@@ -30,14 +30,14 @@ export function useNotificationNavigation() {
     set: (next) => {
       if (String(route.name ?? '') === VIEW_ROUTE_NAMES[next]) return
       void router.push({ name: VIEW_ROUTE_NAMES[next] })
-    }
+    },
   })
 
   const activityView = computed<NotificationActivityKey>({
     get: () => (route.query.tab === 'deliveries' ? 'deliveries' : 'events'),
     set: (next) => {
       void router.push({ name: VIEW_ROUTE_NAMES.activity, query: { ...route.query, tab: next } })
-    }
+    },
   })
 
   /** 从概览直接跳到事件或投递队列。 */

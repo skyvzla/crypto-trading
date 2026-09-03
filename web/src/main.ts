@@ -13,13 +13,9 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 30_000,
       retry: 1,
-      refetchOnWindowFocus: false
-    }
-  }
+      refetchOnWindowFocus: false,
+    },
+  },
 })
 
-createApp(App)
-  .use(createPinia())
-  .use(VueQueryPlugin, { queryClient })
-  .use(router)
-  .mount('#app')
+createApp(App).use(createPinia()).use(VueQueryPlugin, { queryClient }).use(router).mount('#app')

@@ -14,7 +14,7 @@ export type BadgeStatus = 'success' | 'processing' | 'warning' | 'error' | 'defa
 const SEVERITY_LABELS: Record<string, string> = {
   info: '信息',
   warning: '预警',
-  critical: '严重'
+  critical: '严重',
 }
 
 const STATUS_LABELS: Record<string, string> = {
@@ -26,7 +26,7 @@ const STATUS_LABELS: Record<string, string> = {
   routed: '已路由',
   suppressed: '已抑制',
   unrouted: '未匹配',
-  targeted: '定向测试'
+  targeted: '定向测试',
 }
 
 /** 事件级别与投递状态共用一套徽标色，保证同一语义在各处颜色一致。 */
@@ -42,7 +42,7 @@ const BADGE_STATUSES: Record<string, BadgeStatus> = {
   dead: 'error',
   critical: 'error',
   unrouted: 'error',
-  suppressed: 'default'
+  suppressed: 'default',
 }
 
 export interface SeverityOption {
@@ -54,7 +54,7 @@ export const SEVERITY_OPTIONS: SeverityOption[] = [
   { value: '', label: '全部级别' },
   { value: 'info', label: '信息' },
   { value: 'warning', label: '预警' },
-  { value: 'critical', label: '严重' }
+  { value: 'critical', label: '严重' },
 ]
 
 export function severityLabel(value: string): string {
@@ -93,7 +93,7 @@ export function connectorConfigSummary(connector: NotificationConnector): string
 
 export function endpointConfigSummary(
   endpoint: NotificationEndpoint,
-  connector: NotificationConnector | undefined
+  connector: NotificationConnector | undefined,
 ): string {
   if (connector?.type === 'telegram') {
     const topic = endpoint.config?.message_thread_id ?? endpoint.config?.topic_id
@@ -103,10 +103,6 @@ export function endpointConfigSummary(
 }
 
 /** 把 id 列表渲染成可读名称；缺失的 id 退化成短前缀而不是整段 UUID。 */
-export function nameList(
-  ids: string[],
-  lookup: Map<string, { name: string }>,
-  emptyText: string
-): string {
+export function nameList(ids: string[], lookup: Map<string, { name: string }>, emptyText: string): string {
   return ids.map((id) => lookup.get(id)?.name ?? `${id.slice(0, 8)}…`).join('、') || emptyText
 }

@@ -18,8 +18,8 @@ Object.defineProperty(window, 'matchMedia', {
     removeListener: () => undefined,
     addEventListener: () => undefined,
     removeEventListener: () => undefined,
-    dispatchEvent: () => false
-  })
+    dispatchEvent: () => false,
+  }),
 })
 
 /**
@@ -46,7 +46,7 @@ console.warn = (...args: unknown[]) => {
  * 关掉重试，并在每个用例前清空缓存，避免上一个用例的响应被下一个复用。
  */
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: false } }
+  defaultOptions: { queries: { retry: false } },
 })
 
 beforeEach(() => {

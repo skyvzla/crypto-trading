@@ -24,7 +24,7 @@ const viewOptions: Array<{ key: NotificationViewKey; label: string; icon: typeof
   { key: 'connectors', label: '连接器与端点', icon: Settings2 },
   { key: 'groups', label: '职责组', icon: UsersRound },
   { key: 'policies', label: '路由策略', icon: SlidersHorizontal },
-  { key: 'activity', label: '事件与投递', icon: Bell }
+  { key: 'activity', label: '事件与投递', icon: Bell },
 ]
 
 function changeView(key: string | number) {
@@ -52,13 +52,23 @@ function changeActivityView(key: NotificationViewKey | 'events' | 'deliveries') 
           <span class="notification-tab-label">
             <component :is="item.icon" :size="15" />
             <span>{{ item.label }}</span>
-            <a-badge v-if="item.key === 'activity' && workbench.deadDeliveryCount.value" :count="workbench.deadDeliveryCount.value" size="small" />
+            <a-badge
+              v-if="item.key === 'activity' && workbench.deadDeliveryCount.value"
+              :count="workbench.deadDeliveryCount.value"
+              size="small"
+            />
           </span>
         </template>
       </a-tab-pane>
     </a-tabs>
 
-    <a-alert v-if="workbench.loadError.value" class="notification-alert" :message="workbench.loadError.value" type="warning" show-icon>
+    <a-alert
+      v-if="workbench.loadError.value"
+      class="notification-alert"
+      :message="workbench.loadError.value"
+      type="warning"
+      show-icon
+    >
       <template #action><a-button type="link" size="small" @click="workbench.loadAll">重试</a-button></template>
     </a-alert>
     <div v-if="workbench.loading.value" class="query-state notification-loading">
@@ -165,12 +175,24 @@ function changeActivityView(key: NotificationViewKey | 'events' | 'deliveries') 
 
 <style scoped lang="scss">
 /* 只保留页面骨架样式；各面板的样式已随组件一起下沉到组件内部。 */
-.view-switcher :deep(.ant-tabs-nav) { margin: 0 0 15px; }
-.view-switcher :deep(.ant-tabs-content-holder) { display: none; }
-.notification-tab-label { display: inline-flex; align-items: center; gap: 7px; }
-.notification-alert { margin-bottom: 14px; }
+.view-switcher :deep(.ant-tabs-nav) {
+  margin: 0 0 15px;
+}
+.view-switcher :deep(.ant-tabs-content-holder) {
+  display: none;
+}
+.notification-tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.notification-alert {
+  margin-bottom: 14px;
+}
 
 @media (max-width: 600px) {
-  .view-switcher { margin-inline: -2px; }
+  .view-switcher {
+    margin-inline: -2px;
+  }
 }
 </style>

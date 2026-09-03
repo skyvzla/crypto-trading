@@ -51,7 +51,7 @@ function parseLedgerDate(date: string) {
 /** `YYYY-MM-DD HH:mm:ss`（账本时区）。`seconds: false` 时省略秒。 */
 export function formatLedgerDateTime(
   value: string | number | null | undefined,
-  options: { seconds?: boolean } = {}
+  options: { seconds?: boolean } = {},
 ): string | null {
   const ms = timestampMs(value)
   if (ms === null) return null
@@ -89,7 +89,7 @@ export function ledgerMonthRange(year: number, month: number): { startDate: stri
   const start = parseLedgerDate(`${year}-${String(month).padStart(2, '0')}-01`)
   return {
     startDate: start.format(DATE_FORMAT),
-    endDate: start.endOf('month').format(DATE_FORMAT)
+    endDate: start.endOf('month').format(DATE_FORMAT),
   }
 }
 

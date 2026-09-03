@@ -41,7 +41,7 @@ export function useNotificationActivity(deps: ActivityDeps) {
     target: Ref<Page<T>>,
     loading: Ref<boolean>,
     fetch: (paging: PageParams) => Promise<Page<T>>,
-    fallbackMessage: string
+    fallbackMessage: string,
   ) {
     let sequence = 0
     return async function load(offset = target.value.offset): Promise<void> {
@@ -67,13 +67,13 @@ export function useNotificationActivity(deps: ActivityDeps) {
     events,
     eventsLoading,
     (paging) => notificationApi.events({ ...paging, ...eventFilters }),
-    '通知事件加载失败'
+    '通知事件加载失败',
   )
   const loadDeliveries = createChannel(
     deliveries,
     deliveriesLoading,
     (paging) => notificationApi.deliveries({ ...paging, ...deliveryFilters }),
-    '通知投递加载失败'
+    '通知投递加载失败',
   )
 
   function changeEventPage(page: number) {
@@ -100,7 +100,7 @@ export function useNotificationActivity(deps: ActivityDeps) {
   function replaceDelivery(updated: NotificationDelivery) {
     deliveries.value = {
       ...deliveries.value,
-      items: deliveries.value.items.map((row) => (row.id === updated.id ? updated : row))
+      items: deliveries.value.items.map((row) => (row.id === updated.id ? updated : row)),
     }
   }
 
@@ -118,6 +118,6 @@ export function useNotificationActivity(deps: ActivityDeps) {
     changeDeliveryPage,
     prependTestResult,
     replaceDelivery,
-    pageSize: ACTIVITY_PAGE_SIZE
+    pageSize: ACTIVITY_PAGE_SIZE,
   }
 }

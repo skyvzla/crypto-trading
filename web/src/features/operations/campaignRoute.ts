@@ -15,7 +15,7 @@ export function campaignRoute(source: CampaignRouteSource): RouteLocationRaw | n
     query: {
       account_id: source.account_id,
       strategy_id: source.strategy_id,
-      symbol: source.symbol
-    }
+      symbol: source.symbol,
+    },
   }
 }

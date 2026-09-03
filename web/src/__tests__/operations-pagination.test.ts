@@ -7,7 +7,7 @@ describe('operations pagination', () => {
       items: offset === 0 ? ['A', 'B'] : ['C'],
       total: 3,
       limit,
-      offset
+      offset,
     }))
 
     const result = await collectPageItems(fetchPage, 2)
@@ -22,7 +22,7 @@ describe('operations pagination', () => {
       items: offset === 0 ? ['A'] : [],
       total: 2,
       limit,
-      offset
+      offset,
     }))
 
     await expect(collectPageItems(fetchPage, 1)).rejects.toThrow('分页读取在 1/2 条时未继续返回数据')

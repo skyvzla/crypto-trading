@@ -29,8 +29,8 @@ describe('router', () => {
         'backtest-symbols',
         'backtest-symbol-trades',
         'backtest-equity-replay',
-        'backtest-trade-replay'
-      ])
+        'backtest-trade-replay',
+      ]),
     )
   })
 
@@ -62,7 +62,11 @@ describe('router', () => {
     expect(router.resolve('/backtests/r-1/symbols/AKEUSDT/trades').name).toBe('backtest-symbol-trades')
     expect(router.resolve('/backtests/r-1/equity').name).toBe('backtest-equity-replay')
     expect(router.resolve('/backtests/r-1/trades/t-1').name).toBe('backtest-trade-replay')
-    const campaign = router.resolve({ name: 'campaign-trade-detail', params: { campaignId: 'campaign/1' }, query: { account_id: 'acct', strategy_id: 'spike', symbol: 'BTCUSDT' } })
+    const campaign = router.resolve({
+      name: 'campaign-trade-detail',
+      params: { campaignId: 'campaign/1' },
+      query: { account_id: 'acct', strategy_id: 'spike', symbol: 'BTCUSDT' },
+    })
     expect(campaign.name).toBe('campaign-trade-detail')
     expect(campaign.href).toContain('/trades/campaigns/campaign%2F1')
   })

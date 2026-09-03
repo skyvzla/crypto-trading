@@ -1,7 +1,17 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { ArrowDownToLine, ArrowUpToLine, Database, Globe2, Maximize2, Minimize2, RefreshCw, RotateCcw, SlidersHorizontal } from 'lucide-vue-next'
+import {
+  ArrowDownToLine,
+  ArrowUpToLine,
+  Database,
+  Globe2,
+  Maximize2,
+  Minimize2,
+  RefreshCw,
+  RotateCcw,
+  SlidersHorizontal,
+} from 'lucide-vue-next'
 import { backtestApi } from '@/api/backtests'
 import type { BacktestCandle, ChartOverlay } from '@/api/types'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
@@ -22,27 +32,33 @@ const intervalMs: Record<string, number> = {
   '6h': 21_600_000,
   '8h': 28_800_000,
   '12h': 43_200_000,
-  '1d': 86_400_000
+  '1d': 86_400_000,
 }
 
-const props = withDefaults(defineProps<{
-  trade: TradeChartData
-  mode?: 'backtest' | 'market'
-  researchId?: string
-  overlays?: ChartOverlay[]
-  fillDisplay?: TradeChartFillDisplay
-  fillTimeSemantics?: TradeChartFillTimeSemantics
-  exitLabel?: string
-  strategyLines?: boolean
-}>(), {
-  mode: 'backtest',
-  fillDisplay: 'entry',
-  fillTimeSemantics: 'backtest-confirmation',
-  exitLabel: '退出成交',
-  strategyLines: true
-})
+const props = withDefaults(
+  defineProps<{
+    trade: TradeChartData
+    mode?: 'backtest' | 'market'
+    researchId?: string
+    overlays?: ChartOverlay[]
+    fillDisplay?: TradeChartFillDisplay
+    fillTimeSemantics?: TradeChartFillTimeSemantics
+    exitLabel?: string
+    strategyLines?: boolean
+  }>(),
+  {
+    mode: 'backtest',
+    fillDisplay: 'entry',
+    fillTimeSemantics: 'backtest-confirmation',
+    exitLabel: '退出成交',
+    strategyLines: true,
+  },
+)
 
-const isDarkTheme = inject(IS_DARK_THEME, computed(() => false))
+const isDarkTheme = inject(
+  IS_DARK_THEME,
+  computed(() => false),
+)
 const palette = computed(() => getChartTheme(isDarkTheme.value))
 
 /**
@@ -55,7 +71,7 @@ const legendItems = computed(() => {
     return [
       { label: '买入', color: colors.filled, dashed: false, strong: true },
       { label: '卖出', color: colors.invalid, dashed: false, strong: false },
-      { label: '开仓均价', color: colors.average, dashed: false, strong: false }
+      { label: '开仓均价', color: colors.average, dashed: false, strong: false },
     ]
   }
   return [
@@ -64,7 +80,7 @@ const legendItems = computed(() => {
     { label: '实际成交', color: colors.filled, dashed: false, strong: true },
     { label: '开仓均价', color: colors.average, dashed: false, strong: false },
     { label: '失效价', color: colors.invalid, dashed: true, strong: false },
-    { label: '退出', color: colors.exitProfit, dashed: false, strong: false }
+    { label: '退出', color: colors.exitProfit, dashed: false, strong: false },
   ]
 })
 
@@ -78,17 +94,18 @@ const lineVisibility = ref({ signal: true, tiers: true, average: true, invalid: 
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
 
-const availableIntervals = computed(() => props.mode === 'market'
-  ? intervals.filter((item) => item !== '1s')
-  : intervals
+const availableIntervals = computed(() =>
+  props.mode === 'market' ? intervals.filter((item) => item !== '1s') : intervals,
 )
-const source = computed<'binance' | 'archive'>(() => props.mode === 'market' || interval.value !== '1s' ? 'binance' : 'archive')
-const sourceLabel = computed(() => source.value === 'archive' ? '本地归档' : 'Binance')
-const isReady = computed(() => Boolean(
-  props.trade.symbol
-  && timestampMs(props.trade.entry_time) !== null
-  && (props.mode === 'market' || props.researchId)
-))
+const source = computed<'binance' | 'archive'>(() =>
+  props.mode === 'market' || interval.value !== '1s' ? 'binance' : 'archive',
+)
+const sourceLabel = computed(() => (source.value === 'archive' ? '本地归档' : 'Binance'))
+const isReady = computed(() =>
+  Boolean(
+    props.trade.symbol && timestampMs(props.trade.entry_time) !== null && (props.mode === 'market' || props.researchId),
+  ),
+)
 const candleParams = computed(() => {
   if (!isReady.value) return null
   const entry = timestampMs(props.trade.entry_time)
@@ -103,15 +120,21 @@ const candleParams = computed(() => {
     interval: interval.value,
     start_ms: windowCenter - padding,
     end_ms: windowCenter + padding,
-    source: source.value
+    source: source.value,
   }
 })
 const candlesQuery = useQuery({
-  queryKey: computed(() => ['trade-replay-candles', props.mode, props.researchId, props.trade.symbol, candleParams.value]),
+  queryKey: computed(() => [
+    'trade-replay-candles',
+    props.mode,
+    props.researchId,
+    props.trade.symbol,
+    candleParams.value,
+  ]),
   queryFn: () => backtestApi.candles(candleParams.value!),
   enabled: computed(() => candleParams.value !== null),
   staleTime: 5 * 60_000,
-  placeholderData: (previous) => previous
+  placeholderData: (previous) => previous,
 })
 
 function selectInterval(value: string) {
@@ -131,9 +154,8 @@ async function focusTradeEvent(kind: 'entry' | 'exit') {
 }
 
 function requestMore(direction: 'before' | 'after') {
-  const boundary = direction === 'before'
-    ? loadedCandles.value[0]?.time
-    : loadedCandles.value[loadedCandles.value.length - 1]?.time
+  const boundary =
+    direction === 'before' ? loadedCandles.value[0]?.time : loadedCandles.value[loadedCandles.value.length - 1]?.time
   if (boundary === undefined) return
   windowCenterMs.value = boundary * 1_000
 }
@@ -155,31 +177,53 @@ function resetChartSize() {
 onMounted(() => document.addEventListener('fullscreenchange', syncFullscreenState))
 onBeforeUnmount(() => document.removeEventListener('fullscreenchange', syncFullscreenState))
 
-watch(availableIntervals, (items) => {
-  if (!items.includes(interval.value)) interval.value = items[0] || '5m'
-}, { immediate: true })
-watch(() => candlesQuery.data.value, (response) => {
-  if (!response || response.interval !== interval.value || response.source !== source.value) return
-  const byTime = new Map(loadedCandles.value.map((candle) => [candle.time, candle]))
-  response.candles.forEach((candle) => byTime.set(candle.time, candle))
-  loadedCandles.value = [...byTime.values()].sort((left, right) => left.time - right.time)
-}, { immediate: true })
-watch(() => [props.trade.symbol, props.trade.entry_time, props.trade.exit_time, interval.value, source.value], () => {
-  loadedCandles.value = []
-  windowCenterMs.value = null
-})
-watch(() => props.trade.entry_time, () => { focusTimeMs.value = null })
+watch(
+  availableIntervals,
+  (items) => {
+    if (!items.includes(interval.value)) interval.value = items[0] || '5m'
+  },
+  { immediate: true },
+)
+watch(
+  () => candlesQuery.data.value,
+  (response) => {
+    if (!response || response.interval !== interval.value || response.source !== source.value) return
+    const byTime = new Map(loadedCandles.value.map((candle) => [candle.time, candle]))
+    response.candles.forEach((candle) => byTime.set(candle.time, candle))
+    loadedCandles.value = [...byTime.values()].sort((left, right) => left.time - right.time)
+  },
+  { immediate: true },
+)
+watch(
+  () => [props.trade.symbol, props.trade.entry_time, props.trade.exit_time, interval.value, source.value],
+  () => {
+    loadedCandles.value = []
+    windowCenterMs.value = null
+  },
+)
+watch(
+  () => props.trade.entry_time,
+  () => {
+    focusTimeMs.value = null
+  },
+)
 </script>
 
 <template>
   <section ref="chartSection" class="chart-section">
     <div class="chart-toolbar">
-      <a-radio-group :value="interval" size="small" @change="(event: { target: { value: string } }) => selectInterval(event.target.value)">
+      <a-radio-group
+        :value="interval"
+        size="small"
+        @change="(event: { target: { value: string } }) => selectInterval(event.target.value)"
+      >
         <a-radio-button v-for="item in availableIntervals" :key="item" :value="item">{{ item }}</a-radio-button>
       </a-radio-group>
       <div class="source-tools">
         <a-tooltip :title="mode === 'market' ? 'Binance 公开 K 线；买卖点来自账本成交' : undefined">
-          <a-tag color="blue"><Database v-if="source === 'archive'" :size="14" /> <Globe2 v-else :size="14" /> {{ sourceLabel }}</a-tag>
+          <a-tag color="blue"
+            ><Database v-if="source === 'archive'" :size="14" /> <Globe2 v-else :size="14" /> {{ sourceLabel }}</a-tag
+          >
         </a-tooltip>
         <a-divider type="vertical" />
         <a-checkbox v-model:checked="indicators.volume">VOL</a-checkbox>
@@ -187,7 +231,10 @@ watch(() => props.trade.entry_time, () => { focusTimeMs.value = null })
         <a-checkbox v-model:checked="indicators.ema">EMA</a-checkbox>
         <a-checkbox v-model:checked="indicators.kdj">KDJ</a-checkbox>
         <a-dropdown :trigger="['click']">
-          <a-tooltip title="标线显示"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="标线显示"><template #icon><SlidersHorizontal :size="16" /></template></a-button></a-tooltip>
+          <a-tooltip title="标线显示"
+            ><a-button type="text" shape="circle" class="chart-icon-button" aria-label="标线显示"
+              ><template #icon><SlidersHorizontal :size="16" /></template></a-button
+          ></a-tooltip>
           <template #overlay>
             <a-card size="small" :bordered="false" @click.stop>
               <a-space direction="vertical" :size="8">
@@ -201,17 +248,76 @@ watch(() => props.trade.entry_time, () => { focusTimeMs.value = null })
           </template>
         </a-dropdown>
         <a-divider type="vertical" />
-        <a-tooltip title="跳转到第一笔成交"><a-button type="text" class="chart-tool-button" aria-label="跳转到第一笔成交" @click="focusTradeEvent('entry')"><template #icon><ArrowUpToLine :size="15" /></template>首笔成交</a-button></a-tooltip>
-        <a-tooltip :title="`跳转到${exitLabel}`"><a-button type="text" class="chart-tool-button" :aria-label="`跳转到${exitLabel}`" @click="focusTradeEvent('exit')"><template #icon><ArrowDownToLine :size="15" /></template>{{ exitLabel }}</a-button></a-tooltip>
+        <a-tooltip title="跳转到第一笔成交"
+          ><a-button
+            type="text"
+            class="chart-tool-button"
+            aria-label="跳转到第一笔成交"
+            @click="focusTradeEvent('entry')"
+            ><template #icon><ArrowUpToLine :size="15" /></template>首笔成交</a-button
+          ></a-tooltip
+        >
+        <a-tooltip :title="`跳转到${exitLabel}`"
+          ><a-button
+            type="text"
+            class="chart-tool-button"
+            :aria-label="`跳转到${exitLabel}`"
+            @click="focusTradeEvent('exit')"
+            ><template #icon><ArrowDownToLine :size="15" /></template>{{ exitLabel }}</a-button
+          ></a-tooltip
+        >
         <a-spin v-if="candlesQuery.isFetching.value" size="small" />
-        <a-tooltip title="刷新 K 线"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="刷新K线" @click="candlesQuery.refetch()"><template #icon><RefreshCw :size="16" /></template></a-button></a-tooltip>
-        <a-tooltip title="恢复默认尺寸"><a-button type="text" shape="circle" class="chart-icon-button" aria-label="恢复默认尺寸" @click="resetChartSize"><template #icon><RotateCcw :size="16" /></template></a-button></a-tooltip>
-        <a-tooltip :title="isFullscreen ? '退出全屏' : '全屏查看'"><a-button type="text" shape="circle" class="chart-icon-button" :aria-label="isFullscreen ? '退出全屏' : '全屏查看'" @click="toggleFullscreen"><template #icon><Minimize2 v-if="isFullscreen" :size="16" /><Maximize2 v-else :size="16" /></template></a-button></a-tooltip>
+        <a-tooltip title="刷新 K 线"
+          ><a-button
+            type="text"
+            shape="circle"
+            class="chart-icon-button"
+            aria-label="刷新K线"
+            @click="candlesQuery.refetch()"
+            ><template #icon><RefreshCw :size="16" /></template></a-button
+        ></a-tooltip>
+        <a-tooltip title="恢复默认尺寸"
+          ><a-button
+            type="text"
+            shape="circle"
+            class="chart-icon-button"
+            aria-label="恢复默认尺寸"
+            @click="resetChartSize"
+            ><template #icon><RotateCcw :size="16" /></template></a-button
+        ></a-tooltip>
+        <a-tooltip :title="isFullscreen ? '退出全屏' : '全屏查看'"
+          ><a-button
+            type="text"
+            shape="circle"
+            class="chart-icon-button"
+            :aria-label="isFullscreen ? '退出全屏' : '全屏查看'"
+            @click="toggleFullscreen"
+            ><template #icon
+              ><Minimize2 v-if="isFullscreen" :size="16" /><Maximize2 v-else :size="16" /></template></a-button
+        ></a-tooltip>
       </div>
     </div>
-    <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading"><a-spin /><span>加载 {{ sourceLabel }} K线</span></div>
-    <QueryPanel v-else :error="loadedCandles.length ? null : candlesQuery.error.value" :empty="loadedCandles.length === 0" @retry="candlesQuery.refetch()">
-      <TradeCandlestickChart ref="chartRef" :candles="loadedCandles" :trade="trade" :overlays="overlays" :indicators="indicators" :line-visibility="lineVisibility" :focus-time="focusTimeMs" :fill-display="fillDisplay" :fill-time-semantics="fillTimeSemantics" @request-more="requestMore" />
+    <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading">
+      <a-spin /><span>加载 {{ sourceLabel }} K线</span>
+    </div>
+    <QueryPanel
+      v-else
+      :error="loadedCandles.length ? null : candlesQuery.error.value"
+      :empty="loadedCandles.length === 0"
+      @retry="candlesQuery.refetch()"
+    >
+      <TradeCandlestickChart
+        ref="chartRef"
+        :candles="loadedCandles"
+        :trade="trade"
+        :overlays="overlays"
+        :indicators="indicators"
+        :line-visibility="lineVisibility"
+        :focus-time="focusTimeMs"
+        :fill-display="fillDisplay"
+        :fill-time-semantics="fillTimeSemantics"
+        @request-more="requestMore"
+      />
     </QueryPanel>
     <div class="chart-legend">
       <a-tag color="blue">{{ candlesQuery.data.value?.source === 'archive' ? '本地归档' : 'Binance' }}</a-tag>
@@ -221,7 +327,8 @@ watch(() => props.trade.entry_time, () => { focusTimeMs.value = null })
         class="legend-item"
         :class="{ 'is-dashed': item.dashed, 'is-strong': item.strong }"
         :style="{ color: item.color }"
-      ><i />{{ item.label }}</span>
+        ><i />{{ item.label }}</span
+      >
     </div>
   </section>
 </template>

@@ -12,18 +12,21 @@ import type { OperationFilters } from '@/features/operations/useOperationsView'
  */
 const ACCOUNTS_STALE_TIME_MS = 5 * 60_000
 
-const props = withDefaults(defineProps<{
-  modelValue: OperationFilters
-  accountRequired?: boolean
-  showStatus?: boolean
-  status?: string
-  statusOptions?: Array<{ label: string; value: string }>
-}>(), {
-  accountRequired: false,
-  showStatus: false,
-  status: '',
-  statusOptions: () => []
-})
+const props = withDefaults(
+  defineProps<{
+    modelValue: OperationFilters
+    accountRequired?: boolean
+    showStatus?: boolean
+    status?: string
+    statusOptions?: Array<{ label: string; value: string }>
+  }>(),
+  {
+    accountRequired: false,
+    showStatus: false,
+    status: '',
+    statusOptions: () => [],
+  },
+)
 
 const emit = defineEmits<{
   'update:modelValue': [value: OperationFilters]
@@ -34,7 +37,7 @@ const emit = defineEmits<{
 
 const filters = computed({
   get: () => props.modelValue,
-  set: (value) => emit('update:modelValue', value)
+  set: (value) => emit('update:modelValue', value),
 })
 
 const accountsQuery = useQuery({
@@ -43,13 +46,13 @@ const accountsQuery = useQuery({
     const page = await collectPageItems((params) => operationsApi.accounts(params))
     return page.items.map((item) => item.account_id)
   },
-  staleTime: ACCOUNTS_STALE_TIME_MS
+  staleTime: ACCOUNTS_STALE_TIME_MS,
 })
 const accountsLoading = computed(() => accountsQuery.isFetching.value)
 const accountsError = computed(() => Boolean(accountsQuery.error.value))
 const accountOptions = computed(() => [
   ...(props.accountRequired ? [] : [{ label: '全部账户', value: '' }]),
-  ...(accountsQuery.data.value ?? []).map((accountId) => ({ label: accountId, value: accountId }))
+  ...(accountsQuery.data.value ?? []).map((accountId) => ({ label: accountId, value: accountId })),
 ])
 
 function loadAccounts() {

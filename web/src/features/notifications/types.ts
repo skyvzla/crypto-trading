@@ -1,9 +1,4 @@
-import type {
-  NotificationConnector,
-  NotificationEndpoint,
-  NotificationGroup,
-  NotificationSeverity
-} from '@/api/types'
+import type { NotificationConnector, NotificationEndpoint, NotificationGroup, NotificationSeverity } from '@/api/types'
 
 export type NotificationViewKey = 'overview' | 'connectors' | 'groups' | 'policies' | 'activity'
 export type NotificationActivityKey = 'events' | 'deliveries'

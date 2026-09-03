@@ -62,10 +62,7 @@ function finite(value: number | null | undefined, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
-export function replayEquity(
-  trades: BacktestEquityTrade[],
-  settings: EquityReplaySettings
-): EquityReplayResult {
+export function replayEquity(trades: BacktestEquityTrade[], settings: EquityReplaySettings): EquityReplayResult {
   const ordered = [...trades].sort((left, right) => {
     const leftTime = timestamp(left.entry_time) ?? timestamp(left.signal_time) ?? 0
     const rightTime = timestamp(right.entry_time) ?? timestamp(right.signal_time) ?? 0
@@ -101,7 +98,7 @@ export function replayEquity(
       trade.gross_return,
       trade.entry_notional && trade.entry_notional > 0 && trade.gross_pnl !== null && trade.gross_pnl !== undefined
         ? trade.gross_pnl / trade.entry_notional
-        : finite(trade.net_return)
+        : finite(trade.net_return),
     )
     const base = {
       ...trade,
@@ -118,7 +115,7 @@ export function replayEquity(
       tradingCapitalAfter: tradingCapital,
       reserveCapitalAfter: reserveCapital,
       balanceAfter: balanceBefore,
-      drawdown: peak > 0 ? (balanceBefore - peak) / peak : 0
+      drawdown: peak > 0 ? (balanceBefore - peak) / peak : 0,
     }
 
     if (liquidated) {
@@ -165,7 +162,7 @@ export function replayEquity(
       tradingCapitalAfter: tradingCapital,
       reserveCapitalAfter: reserveCapital,
       balanceAfter: balance,
-      drawdown
+      drawdown,
     }
     rows.push(row)
     points.push({ time: exitTime, value: balance, row })
@@ -190,6 +187,6 @@ export function replayEquity(
     executedCount,
     skippedCount: rows.length - executedCount,
     liquidated,
-    liquidationTime
+    liquidationTime,
   }
 }

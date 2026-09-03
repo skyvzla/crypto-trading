@@ -8,7 +8,7 @@
 export const STORAGE_KEYS = {
   theme: 'trade-ledger-theme',
   chartHeight: 'backtest-replay-chart-height-v1',
-  indicatorPaneStretch: 'backtest-replay-indicator-pane-stretch-v1'
+  indicatorPaneStretch: 'backtest-replay-indicator-pane-stretch-v1',
 } as const
 
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS]
@@ -43,9 +43,7 @@ export function readStoredRecord(key: StorageKey): Record<string, number> {
   if (!raw) return {}
   try {
     const parsed: unknown = JSON.parse(raw)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, number>)
-      : {}
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, number>) : {}
   } catch {
     return {}
   }

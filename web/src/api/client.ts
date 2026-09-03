@@ -12,7 +12,7 @@ import type {
   NotificationDelivery,
   NotificationPublishResponse,
   Page,
-  PageParams
+  PageParams,
 } from '@/api/types'
 
 const BASE = '/api/v1'
@@ -20,7 +20,7 @@ const BASE = '/api/v1'
 export class ApiError extends Error {
   constructor(
     readonly status: number,
-    message: string
+    message: string,
   ) {
     super(message)
     this.name = 'ApiError'
@@ -64,14 +64,11 @@ function parseErrorDetail(body: string): string | null {
   }
 }
 
-async function request<T>(
-  path: string,
-  init?: RequestInit & { query?: Query }
-): Promise<T> {
+async function request<T>(path: string, init?: RequestInit & { query?: Query }): Promise<T> {
   const { query, ...rest } = init ?? {}
   const response = await fetch(`${BASE}${path}${search(query)}`, {
     headers: { 'Content-Type': 'application/json' },
-    ...rest
+    ...rest,
   })
   const body = await readBody(response)
   if (!response.ok) {
@@ -91,12 +88,10 @@ export const api = {
   post: <T>(path: string, body?: unknown) =>
     request<T>(path, {
       method: 'POST',
-      ...(body === undefined ? {} : { body: JSON.stringify(body) })
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }),
-  delete: <T>(path: string, query?: Query) =>
-    request<T>(path, { method: 'DELETE', query }),
-  put: <T>(path: string, body: unknown) =>
-    request<T>(path, { method: 'PUT', body: JSON.stringify(body) })
+  delete: <T>(path: string, query?: Query) => request<T>(path, { method: 'DELETE', query }),
+  put: <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
 }
 
 const NOTIFICATIONS = '/notifications'
@@ -127,26 +122,27 @@ export const notificationApi = {
     api.delete<void>(`${NOTIFICATIONS}/endpoints/${encodeURIComponent(id)}`, { expected_version: expectedVersion }),
   testEndpoint: (id: string, body?: { title?: string; body?: string; payload?: Record<string, unknown> }) =>
     api.post<NotificationPublishResponse>(`${NOTIFICATIONS}/endpoints/${encodeURIComponent(id)}/test`, body),
-  groups: (query: PageParams = {}) =>
-    api.get<Page<NotificationGroup>>(`${NOTIFICATIONS}/groups`, { ...query }),
-  createGroup: (body: NotificationGroupInput) =>
-    api.post<NotificationGroup>(`${NOTIFICATIONS}/groups`, body),
+  groups: (query: PageParams = {}) => api.get<Page<NotificationGroup>>(`${NOTIFICATIONS}/groups`, { ...query }),
+  createGroup: (body: NotificationGroupInput) => api.post<NotificationGroup>(`${NOTIFICATIONS}/groups`, body),
   updateGroup: (id: string, body: NotificationGroupInput & { expected_version: number }) =>
     api.put<NotificationGroup>(`${NOTIFICATIONS}/groups/${encodeURIComponent(id)}`, body),
   deleteGroup: (id: string, expectedVersion: number) =>
     api.delete<void>(`${NOTIFICATIONS}/groups/${encodeURIComponent(id)}`, { expected_version: expectedVersion }),
-  policies: (query: PageParams = {}) =>
-    api.get<Page<NotificationPolicy>>(`${NOTIFICATIONS}/policies`, { ...query }),
-  createPolicy: (body: NotificationPolicyInput) =>
-    api.post<NotificationPolicy>(`${NOTIFICATIONS}/policies`, body),
+  policies: (query: PageParams = {}) => api.get<Page<NotificationPolicy>>(`${NOTIFICATIONS}/policies`, { ...query }),
+  createPolicy: (body: NotificationPolicyInput) => api.post<NotificationPolicy>(`${NOTIFICATIONS}/policies`, body),
   updatePolicy: (id: string, body: NotificationPolicyInput & { expected_version: number }) =>
     api.put<NotificationPolicy>(`${NOTIFICATIONS}/policies/${encodeURIComponent(id)}`, body),
   deletePolicy: (id: string, expectedVersion: number) =>
     api.delete<void>(`${NOTIFICATIONS}/policies/${encodeURIComponent(id)}`, { expected_version: expectedVersion }),
-  events: (query?: { limit?: number; offset?: number; event_type?: string; severity?: string; routing_status?: string }) =>
-    api.get<Page<NotificationEvent>>(`${NOTIFICATIONS}/events`, query),
+  events: (query?: {
+    limit?: number
+    offset?: number
+    event_type?: string
+    severity?: string
+    routing_status?: string
+  }) => api.get<Page<NotificationEvent>>(`${NOTIFICATIONS}/events`, query),
   deliveries: (query?: { limit?: number; offset?: number; status?: string; event_id?: string; endpoint_id?: string }) =>
     api.get<Page<NotificationDelivery>>(`${NOTIFICATIONS}/deliveries`, query),
   retryDelivery: (id: string) =>
-    api.post<NotificationDelivery>(`${NOTIFICATIONS}/deliveries/${encodeURIComponent(id)}/retry`)
+    api.post<NotificationDelivery>(`${NOTIFICATIONS}/deliveries/${encodeURIComponent(id)}/retry`),
 }

@@ -13,7 +13,7 @@ import {
   useLedgerLoader,
   useOperationFilters,
   usePageParams,
-  useQuerySync
+  useQuerySync,
 } from '@/features/operations/useOperationsView'
 import { asNumber, formatDateTime, formatMoney, pnlClass, sideLabel } from '@/shared/format'
 
@@ -24,7 +24,13 @@ const route = useRoute()
 const router = useRouter()
 const syncQuery = useQuerySync()
 const { filters, query, restore: restoreFilters } = useOperationFilters()
-const { page, pageSize, offset, restore: restorePage, apply: applyPage } = usePageParams({ defaultSize: 25, maxSize: 100 })
+const {
+  page,
+  pageSize,
+  offset,
+  restore: restorePage,
+  apply: applyPage,
+} = usePageParams({ defaultSize: 25, maxSize: 100 })
 const activeTab = ref<Tab>(readTab())
 const historyStatus = ref(String(route.query.status ?? 'FILLED'))
 const positions = ref<LedgerPosition[]>([])
@@ -43,7 +49,7 @@ const statusOptions = [
   { label: '已成交 FILLED', value: 'FILLED' },
   { label: '已撤销 CANCELED', value: 'CANCELED' },
   { label: '已拒绝 REJECTED', value: 'REJECTED' },
-  { label: '已过期 EXPIRED', value: 'EXPIRED' }
+  { label: '已过期 EXPIRED', value: 'EXPIRED' },
 ]
 
 const tablePagination = computed<TablePaginationConfig>(() => ({
@@ -52,31 +58,117 @@ const tablePagination = computed<TablePaginationConfig>(() => ({
   total: total.value,
   showSizeChanger: true,
   pageSizeOptions: ['10', '25', '50', '100'],
-  showTotal: (value) => `共 ${value} 条`
+  showTotal: (value) => `共 ${value} 条`,
 }))
 
 const positionColumns: TableColumnsType<LedgerPosition> = [
-  { title: '交易对', dataIndex: 'symbol', key: 'symbol', fixed: 'left', width: 125, customRender: ({ record }) => h(Button, { type: 'link', class: 'table-link', onClick: () => openDetail({ kind: 'position', item: record }) }, () => record.symbol) },
-  { title: '方向', dataIndex: 'position_side', key: 'position_side', width: 110, customRender: ({ text }) => h(Tag, { color: String(text).toUpperCase() === 'LONG' ? 'green' : 'volcano' }, () => sideLabel(String(text))) },
+  {
+    title: '交易对',
+    dataIndex: 'symbol',
+    key: 'symbol',
+    fixed: 'left',
+    width: 125,
+    customRender: ({ record }) =>
+      h(
+        Button,
+        { type: 'link', class: 'table-link', onClick: () => openDetail({ kind: 'position', item: record }) },
+        () => record.symbol,
+      ),
+  },
+  {
+    title: '方向',
+    dataIndex: 'position_side',
+    key: 'position_side',
+    width: 110,
+    customRender: ({ text }) =>
+      h(Tag, { color: String(text).toUpperCase() === 'LONG' ? 'green' : 'volcano' }, () => sideLabel(String(text))),
+  },
   { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 130 },
-  { title: '入场均价', dataIndex: 'entry_price', key: 'entry_price', width: 135, customRender: ({ text }) => formatMoney(String(text), 6) },
-  { title: '标记价格', dataIndex: 'mark_price', key: 'mark_price', width: 135, customRender: ({ text }) => formatMoney(text == null ? null : String(text), 6) },
-  { title: '浮动 PnL', dataIndex: 'unrealized_pnl', key: 'unrealized_pnl', width: 130, customCell: (record) => ({ class: pnlClass(record.unrealized_pnl) }), customRender: ({ text }) => formatMoney(text == null ? null : String(text)) },
+  {
+    title: '入场均价',
+    dataIndex: 'entry_price',
+    key: 'entry_price',
+    width: 135,
+    customRender: ({ text }) => formatMoney(String(text), 6),
+  },
+  {
+    title: '标记价格',
+    dataIndex: 'mark_price',
+    key: 'mark_price',
+    width: 135,
+    customRender: ({ text }) => formatMoney(text == null ? null : String(text), 6),
+  },
+  {
+    title: '浮动 PnL',
+    dataIndex: 'unrealized_pnl',
+    key: 'unrealized_pnl',
+    width: 130,
+    customCell: (record) => ({ class: pnlClass(record.unrealized_pnl) }),
+    customRender: ({ text }) => formatMoney(text == null ? null : String(text)),
+  },
   { title: '策略', dataIndex: 'strategy_id', key: 'strategy_id', width: 150 },
   { title: '账户', dataIndex: 'account_id', key: 'account_id', width: 150 },
-  { title: '最后更新', dataIndex: 'updated_at', key: 'updated_at', width: 185, customRender: ({ text }) => formatDateTime(String(text)) }
+  {
+    title: '最后更新',
+    dataIndex: 'updated_at',
+    key: 'updated_at',
+    width: 185,
+    customRender: ({ text }) => formatDateTime(String(text)),
+  },
 ]
 
 const orderColumns: TableColumnsType<LedgerOrder> = [
-  { title: '订单 / 交易对', key: 'identity', fixed: 'left', width: 190, customRender: ({ record }) => h(Button, { type: 'link', class: 'table-link order-link', onClick: () => openDetail({ kind: 'order', item: record }) }, () => `${record.symbol} · ${record.order_id}`) },
-  { title: '状态', dataIndex: 'status', key: 'status', width: 150, customRender: ({ text }) => h(Tag, { color: ['NEW', 'PARTIALLY_FILLED'].includes(String(text)) ? 'gold' : text === 'FILLED' ? 'green' : undefined }, () => String(text)) },
+  {
+    title: '订单 / 交易对',
+    key: 'identity',
+    fixed: 'left',
+    width: 190,
+    customRender: ({ record }) =>
+      h(
+        Button,
+        { type: 'link', class: 'table-link order-link', onClick: () => openDetail({ kind: 'order', item: record }) },
+        () => `${record.symbol} · ${record.order_id}`,
+      ),
+  },
+  {
+    title: '状态',
+    dataIndex: 'status',
+    key: 'status',
+    width: 150,
+    customRender: ({ text }) =>
+      h(
+        Tag,
+        {
+          color: ['NEW', 'PARTIALLY_FILLED'].includes(String(text)) ? 'gold' : text === 'FILLED' ? 'green' : undefined,
+        },
+        () => String(text),
+      ),
+  },
   { title: '方向', dataIndex: 'side', key: 'side', width: 105, customRender: ({ text }) => sideLabel(String(text)) },
-  { title: '委托价', dataIndex: 'price', key: 'price', width: 125, customRender: ({ text }) => formatMoney(text == null ? null : String(text), 6) },
+  {
+    title: '委托价',
+    dataIndex: 'price',
+    key: 'price',
+    width: 125,
+    customRender: ({ text }) => formatMoney(text == null ? null : String(text), 6),
+  },
   { title: '原始数量', dataIndex: 'quantity', key: 'quantity', width: 125 },
   { title: '已成交', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 125 },
-  { title: '剩余', key: 'remaining', width: 125, customRender: ({ record }) => formatMoney(Math.max(0, asNumber(record.quantity) - asNumber(record.filled_quantity)), 6) },
+  {
+    title: '剩余',
+    key: 'remaining',
+    width: 125,
+    customRender: ({ record }) =>
+      formatMoney(Math.max(0, asNumber(record.quantity) - asNumber(record.filled_quantity)), 6),
+  },
   { title: '策略', dataIndex: 'strategy_id', key: 'strategy_id', width: 145 },
-  { title: '创建时间', dataIndex: 'created_at', key: 'created_at', width: 185, customRender: ({ text }) => formatDateTime(String(text)) }
+  {
+    title: '创建时间',
+    dataIndex: 'created_at',
+    key: 'created_at',
+    width: 185,
+    customRender: ({ text }) => formatDateTime(String(text)),
+  },
 ]
 
 function openDetail(value: Detail) {
@@ -96,11 +188,14 @@ async function fetchActiveTab() {
     return { kind: 'positions' as const, page: await operationsApi.positions({ ...query.value, ...paging }) }
   }
   if (activeTab.value === 'active') {
-    return { kind: 'orders' as const, page: await operationsApi.orders({ ...query.value, active_only: true, ...paging }) }
+    return {
+      kind: 'orders' as const,
+      page: await operationsApi.orders({ ...query.value, active_only: true, ...paging }),
+    }
   }
   return {
     kind: 'orders' as const,
-    page: await operationsApi.orders({ ...query.value, status: historyStatus.value || undefined, ...paging })
+    page: await operationsApi.orders({ ...query.value, status: historyStatus.value || undefined, ...paging }),
   }
 }
 
@@ -111,7 +206,7 @@ function routeQuery() {
     tab: activeTab.value,
     page: page.value,
     page_size: pageSize.value,
-    ...(activeTab.value === 'history' && historyStatus.value ? { status: historyStatus.value } : {})
+    ...(activeTab.value === 'history' && historyStatus.value ? { status: historyStatus.value } : {}),
   }
 }
 
@@ -123,16 +218,19 @@ function restoreFromRoute() {
   historyStatus.value = String(route.query.status ?? 'FILLED')
 }
 
-const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale }) => {
-  const result = await fetchActiveTab()
-  if (isStale()) return
-  if (result.kind === 'positions') positions.value = result.page.items
-  else orders.value = result.page.items
-  total.value = result.page.total
-}, {
-  fallbackMessage: '持仓与订单加载失败',
-  onActivate: restoreFromRoute
-})
+const { loading, error, refreshedAt, reload } = useLedgerLoader(
+  async ({ isStale }) => {
+    const result = await fetchActiveTab()
+    if (isStale()) return
+    if (result.kind === 'positions') positions.value = result.page.items
+    else orders.value = result.page.items
+    total.value = result.page.total
+  },
+  {
+    fallbackMessage: '持仓与订单加载失败',
+    onActivate: restoreFromRoute,
+  },
+)
 
 // 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
 // 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
@@ -140,11 +238,14 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(async ({ isStale
 // 自己写回的 query 与 routeQuery() 一致，所以这里不会把 applyFilters 变成两次
 // 请求；路由名变了说明已经切走，被缓存的实例不该再管地址栏。
 const ownRoute = route.name
-watch(() => route.query, () => {
-  if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
-  restoreFromRoute()
-  void reload()
-})
+watch(
+  () => route.query,
+  () => {
+    if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
+    restoreFromRoute()
+    void reload()
+  },
+)
 
 async function syncRoute() {
   await syncQuery(routeQuery())
@@ -169,7 +270,14 @@ async function onTableChange(pagination: TablePaginationConfig) {
 
 <template>
   <main class="operations-page positions-orders-page">
-    <PageHeader eyebrow="OPERATIONS / EXPOSURE" title="持仓与订单" description="查看当前风险敞口和交易所订单事实；首期仅查询，不在 Web 发起开仓或平仓。" :loading="loading" :refreshed-at="refreshedAt" @refresh="reload" />
+    <PageHeader
+      eyebrow="OPERATIONS / EXPOSURE"
+      title="持仓与订单"
+      description="查看当前风险敞口和交易所订单事实；首期仅查询，不在 Web 发起开仓或平仓。"
+      :loading="loading"
+      :refreshed-at="refreshedAt"
+      @refresh="reload"
+    />
     <FilterBar
       v-model="filters"
       :show-status="activeTab === 'history'"
@@ -184,46 +292,135 @@ async function onTableChange(pagination: TablePaginationConfig) {
       <a-tab-pane key="active" tab="活动订单" />
       <a-tab-pane key="history" tab="历史订单" />
     </a-tabs>
-    <div class="result-ledger"><span>{{ total }} 条记录</span><span v-if="activeTab === 'active'">口径：NEW + PARTIALLY_FILLED</span><span v-else-if="activeTab === 'history'">口径：后端订单状态筛选</span></div>
-    <DataState :loading="loading" :error="error" :empty="activeTab === 'positions' ? !positions.length : !orders.length" @retry="reload">
+    <div class="result-ledger">
+      <span>{{ total }} 条记录</span><span v-if="activeTab === 'active'">口径：NEW + PARTIALLY_FILLED</span
+      ><span v-else-if="activeTab === 'history'">口径：后端订单状态筛选</span>
+    </div>
+    <DataState
+      :loading="loading"
+      :error="error"
+      :empty="activeTab === 'positions' ? !positions.length : !orders.length"
+      @retry="reload"
+    >
       <div class="table-frame">
-        <a-table v-if="activeTab === 'positions'" :columns="positionColumns" :data-source="positions" row-key="id" :pagination="tablePagination" :scroll="{ x: 1180 }" size="middle" @change="onTableChange" />
-        <a-table v-else :columns="orderColumns" :data-source="orders" row-key="id" :pagination="tablePagination" :scroll="{ x: 1250 }" size="middle" @change="onTableChange" />
+        <a-table
+          v-if="activeTab === 'positions'"
+          :columns="positionColumns"
+          :data-source="positions"
+          row-key="id"
+          :pagination="tablePagination"
+          :scroll="{ x: 1180 }"
+          size="middle"
+          @change="onTableChange"
+        />
+        <a-table
+          v-else
+          :columns="orderColumns"
+          :data-source="orders"
+          row-key="id"
+          :pagination="tablePagination"
+          :scroll="{ x: 1250 }"
+          size="middle"
+          @change="onTableChange"
+        />
       </div>
     </DataState>
 
-    <a-drawer v-model:open="detailOpen" width="min(640px, 94vw)" :title="detail?.kind === 'position' ? '持仓详情' : '订单详情'">
+    <a-drawer
+      v-model:open="detailOpen"
+      width="min(640px, 94vw)"
+      :title="detail?.kind === 'position' ? '持仓详情' : '订单详情'"
+    >
       <template v-if="detail?.kind === 'position'">
         <a-descriptions :column="1" bordered size="small">
           <a-descriptions-item label="交易对">{{ detail.item.symbol }}</a-descriptions-item>
-          <a-descriptions-item label="账户 / 策略">{{ detail.item.account_id }} / {{ detail.item.strategy_id }}</a-descriptions-item>
-          <a-descriptions-item label="方向 / 数量">{{ sideLabel(detail.item.position_side) }} / {{ detail.item.quantity }}</a-descriptions-item>
-          <a-descriptions-item label="入场 / 标记价格">{{ formatMoney(detail.item.entry_price, 6) }} / {{ formatMoney(detail.item.mark_price, 6) }}</a-descriptions-item>
-          <a-descriptions-item label="浮动 PnL"><strong :class="pnlClass(detail.item.unrealized_pnl)">{{ formatMoney(detail.item.unrealized_pnl) }}</strong></a-descriptions-item>
-          <a-descriptions-item label="杠杆 / 保证金">{{ detail.item.leverage ?? '—' }} / {{ detail.item.margin_type ?? '—' }}</a-descriptions-item>
-          <a-descriptions-item label="强平价格">{{ formatMoney(detail.item.liquidation_price, 6) }}</a-descriptions-item>
+          <a-descriptions-item label="账户 / 策略"
+            >{{ detail.item.account_id }} / {{ detail.item.strategy_id }}</a-descriptions-item
+          >
+          <a-descriptions-item label="方向 / 数量"
+            >{{ sideLabel(detail.item.position_side) }} / {{ detail.item.quantity }}</a-descriptions-item
+          >
+          <a-descriptions-item label="入场 / 标记价格"
+            >{{ formatMoney(detail.item.entry_price, 6) }} /
+            {{ formatMoney(detail.item.mark_price, 6) }}</a-descriptions-item
+          >
+          <a-descriptions-item label="浮动 PnL"
+            ><strong :class="pnlClass(detail.item.unrealized_pnl)">{{
+              formatMoney(detail.item.unrealized_pnl)
+            }}</strong></a-descriptions-item
+          >
+          <a-descriptions-item label="杠杆 / 保证金"
+            >{{ detail.item.leverage ?? '—' }} / {{ detail.item.margin_type ?? '—' }}</a-descriptions-item
+          >
+          <a-descriptions-item label="强平价格">{{
+            formatMoney(detail.item.liquidation_price, 6)
+          }}</a-descriptions-item>
           <a-descriptions-item label="最后更新时间">{{ formatDateTime(detail.item.updated_at) }}</a-descriptions-item>
         </a-descriptions>
-        <a-alert class="drawer-note" type="info" show-icon message="当前持仓接口没有 Campaign 与开仓时间字段，因此不推测持仓时长和所属交易轮次。" />
+        <a-alert
+          class="drawer-note"
+          type="info"
+          show-icon
+          message="当前持仓接口没有 Campaign 与开仓时间字段，因此不推测持仓时长和所属交易轮次。"
+        />
       </template>
       <template v-else-if="detail?.kind === 'order'">
         <a-descriptions :column="1" bordered size="small">
-          <a-descriptions-item label="交易对 / 订单">{{ detail.item.symbol }} / {{ detail.item.order_id }}</a-descriptions-item>
-          <a-descriptions-item label="客户端订单 ID"><span class="mono">{{ detail.item.client_order_id }}</span></a-descriptions-item>
-          <a-descriptions-item label="账户 / 策略">{{ detail.item.account_id }} / {{ detail.item.strategy_id }}</a-descriptions-item>
+          <a-descriptions-item label="交易对 / 订单"
+            >{{ detail.item.symbol }} / {{ detail.item.order_id }}</a-descriptions-item
+          >
+          <a-descriptions-item label="客户端订单 ID"
+            ><span class="mono">{{ detail.item.client_order_id }}</span></a-descriptions-item
+          >
+          <a-descriptions-item label="账户 / 策略"
+            >{{ detail.item.account_id }} / {{ detail.item.strategy_id }}</a-descriptions-item
+          >
           <a-descriptions-item label="Campaign">{{ detail.item.campaign_id || '—' }}</a-descriptions-item>
-          <a-descriptions-item label="状态 / 类型">{{ detail.item.status }} / {{ detail.item.order_type }}</a-descriptions-item>
-          <a-descriptions-item label="方向 / 数量">{{ sideLabel(detail.item.side) }} / {{ detail.item.quantity }}</a-descriptions-item>
-          <a-descriptions-item label="委托 / 成交均价">{{ formatMoney(detail.item.price, 6) }} / {{ formatMoney(detail.item.avg_fill_price, 6) }}</a-descriptions-item>
-          <a-descriptions-item label="已成交 / 剩余">{{ detail.item.filled_quantity }} / {{ formatMoney(Math.max(0, asNumber(detail.item.quantity) - asNumber(detail.item.filled_quantity)), 6) }}</a-descriptions-item>
-          <a-descriptions-item label="创建 / 更新时间">{{ formatDateTime(detail.item.created_at) }} / {{ formatDateTime(detail.item.updated_at) }}</a-descriptions-item>
+          <a-descriptions-item label="状态 / 类型"
+            >{{ detail.item.status }} / {{ detail.item.order_type }}</a-descriptions-item
+          >
+          <a-descriptions-item label="方向 / 数量"
+            >{{ sideLabel(detail.item.side) }} / {{ detail.item.quantity }}</a-descriptions-item
+          >
+          <a-descriptions-item label="委托 / 成交均价"
+            >{{ formatMoney(detail.item.price, 6) }} /
+            {{ formatMoney(detail.item.avg_fill_price, 6) }}</a-descriptions-item
+          >
+          <a-descriptions-item label="已成交 / 剩余"
+            >{{ detail.item.filled_quantity }} /
+            {{
+              formatMoney(Math.max(0, asNumber(detail.item.quantity) - asNumber(detail.item.filled_quantity)), 6)
+            }}</a-descriptions-item
+          >
+          <a-descriptions-item label="创建 / 更新时间"
+            >{{ formatDateTime(detail.item.created_at) }} /
+            {{ formatDateTime(detail.item.updated_at) }}</a-descriptions-item
+          >
         </a-descriptions>
-        <a-button v-if="detail.item.campaign_id" class="drawer-link" type="primary" @click="openCampaign(detail.item)">查看该 Campaign 成交</a-button>
+        <a-button v-if="detail.item.campaign_id" class="drawer-link" type="primary" @click="openCampaign(detail.item)"
+          >查看该 Campaign 成交</a-button
+        >
       </template>
     </a-drawer>
   </main>
 </template>
 
 <style scoped lang="scss">
-.result-ledger { display:flex; justify-content:space-between; gap:12px; margin:-6px 0 9px; color:var(--muted); font:var(--type-meta) var(--font-family-mono); }.drawer-note,.drawer-link { margin-top:16px; }.order-link { max-width:180px; overflow:hidden; text-overflow:ellipsis; }
+.result-ledger {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -6px 0 9px;
+  color: var(--muted);
+  font: var(--type-meta) var(--font-family-mono);
+}
+.drawer-note,
+.drawer-link {
+  margin-top: 16px;
+}
+.order-link {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 </style>
