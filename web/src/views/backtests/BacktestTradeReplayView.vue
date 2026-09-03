@@ -4,11 +4,13 @@ import { useQuery } from '@tanstack/vue-query'
 import { useRoute } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
+import BacktestEventDetails from '@/features/backtests/BacktestEventDetails.vue'
 import JsonDetails from '@/features/backtests/JsonDetails.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
 import { formatDateTime, formatNumber, formatPercent, pnlClass } from '@/shared/format'
 import { timestampMs } from '@/shared/time'
+import { eventDisplayName } from '@/features/backtests/eventPresentation'
 
 const route = useRoute()
 const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
@@ -55,11 +57,6 @@ const tierDetails = computed(() => {
   })
 })
 const filledTierCount = computed(() => tierDetails.value.filter((item) => item.filled).length)
-function eventContent(event: { data?: Record<string, unknown>; description?: string | null; price?: number | null }): string {
-  if (event.description) return event.description
-  if (event.price != null) return `价格 ${formatNumber(event.price, 8)}`
-  return event.data && Object.keys(event.data).length ? JSON.stringify(event.data) : ''
-}
 const rootTo = computed(() => ({ path: '/backtests', query: route.query }))
 const symbolsTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/symbols`, query: route.query }))
 const equityTo = computed(() => ({ path: `/backtests/${encodeURIComponent(researchId.value)}/equity` }))
@@ -115,7 +112,7 @@ const crumbs = computed(() => openedFromEquity.value
           <section class="detail-section timeline-section">
             <h3>事件时间线</h3>
             <QueryPanel :pending="eventsQuery.isPending.value" :error="eventsQuery.error.value" :empty="eventsQuery.data.value?.items.length === 0" @retry="eventsQuery.refetch()">
-              <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id"><div class="event-heading"><strong>{{ event.title || event.type }}</strong><time>{{ formatDateTime(event.time) }}</time></div><div class="event-content">{{ eventContent(event) }}</div></a-timeline-item></a-timeline>
+              <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id"><div class="event-heading"><strong>{{ eventDisplayName(event) }}</strong><time>{{ formatDateTime(event.time) }}</time></div><BacktestEventDetails :event="event" :reference-data="allAttributes" /></a-timeline-item></a-timeline>
             </QueryPanel>
           </section>
         </div>

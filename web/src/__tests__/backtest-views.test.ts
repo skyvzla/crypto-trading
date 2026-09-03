@@ -201,7 +201,10 @@ describe('回测关键视图', () => {
       ]
     })
     vi.mocked(backtestApi.events).mockResolvedValue({
-      items: [{ id: 1, time: 1_750_000_000_000, type: 'entry_plan_created', title: 'entry_plan_created', description: null, price: null, data: { tier_prices: ['1.1', '1.2', '1.3'] } }]
+      items: [{
+        id: 1, time: 1_750_000_000_000, type: 'entry_plan_created', title: 'entry_plan_created', description: null, price: null,
+        data: { rise_5s: '0.06', rise_threshold_5s: '0.05', tier_prices: ['1.1', '1.2', '1.3'], invalid_price: '1.4' }
+      }]
     })
     vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
     vi.mocked(backtestApi.candles).mockResolvedValue({
@@ -213,9 +216,16 @@ describe('回测关键视图', () => {
       global: { stubs: { TradeCandlestickChart: true } }
     })
     await flushPromises()
-    expect(wrapper.find('.event-heading').text()).toContain('entry_plan_created')
+    expect(wrapper.find('.event-heading').text()).toContain('入场计划创建（entry_plan_created）')
     expect(wrapper.find('.event-heading time').text()).not.toBe('')
-    expect(wrapper.find('.event-content').text()).toContain('tier_prices')
+    expect(wrapper.findAll('.event-parameters tbody tr').length).toBe(3)
+    expect(wrapper.find('.event-parameters').text()).toContain('参数 / 指标')
+    expect(wrapper.find('.event-parameters').text()).toContain('参数值')
+    expect(wrapper.find('.event-parameters').text()).toContain('参考值')
+    expect(wrapper.find('.event-parameters-wrap').attributes('tabindex')).toBe('0')
+    expect(wrapper.find('.event-parameters').text()).toContain('5 秒涨幅门槛：5.00%')
+    expect(wrapper.find('.event-parameters tbody tr').classes()).toContain('is-major')
+    expect(wrapper.text()).not.toContain('{"rise_5s"')
     expect(wrapper.text()).toContain('已成交 1 / 3 档')
     expect(wrapper.text()).toContain('卖1')
     expect(wrapper.text()).toContain('限卖2')
