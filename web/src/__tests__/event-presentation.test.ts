@@ -28,10 +28,10 @@ describe('回测事件展示', () => {
 
     expect(rows.slice(0, 3).map((row) => row.key)).toEqual(['rise_5s', 'volume_multiple_5s', 'tier_prices'])
     expect(rows.find((row) => row.key === 'rise_5s')).toMatchObject({
-      value: '6.00%', reference: '5 秒涨幅门槛：5.00%'
+      value: '6.00%', threshold: '5.00%', reference: '5.00%'
     })
     expect(rows.find((row) => row.key === 'volume_multiple_5s')).toMatchObject({
-      value: '6.5', reference: '5 秒量比门槛：5'
+      value: '6.5', threshold: '5', reference: '5'
     })
     expect(rows.some((row) => row.key === 'rise_threshold_5s')).toBe(false)
     expect(rows.find((row) => row.key === 'tier_prices')?.value).toBe('1档 1.1；2档 1.2')
@@ -58,8 +58,8 @@ describe('回测事件展示', () => {
       { price: null, data: { d_oi_pct: 12.5, loss_pct: 4.2 } },
       { oi_stop_oi_rise_pct: 10, oi_stop_loss_pct: 3 }
     )
-    expect(rows.find((row) => row.key === 'd_oi_pct')?.reference).toBe('持仓量止损涨幅门槛：10%')
-    expect(rows.find((row) => row.key === 'loss_pct')?.reference).toBe('持仓量止损亏损门槛：3%')
+    expect(rows.find((row) => row.key === 'd_oi_pct')?.threshold).toBe('10%')
+    expect(rows.find((row) => row.key === 'loss_pct')?.threshold).toBe('3%')
   })
 
   it('将事件参数按类型划分成价格、涨幅量比、风控执行等分组', () => {

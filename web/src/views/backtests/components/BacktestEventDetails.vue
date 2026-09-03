@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { BacktestEvent } from '@/api/types'
 import { eventParameterRows } from './eventPresentation'
 
@@ -11,14 +11,70 @@ const props = withDefaults(defineProps<{
   pricePrecision: 2
 })
 
+const containerRef = ref<HTMLElement | null>(null)
+const initialWidth = typeof window !== 'undefined' ? (window.innerWidth || 1024) : 1024
+const containerWidth = ref(initialWidth)
+
+let resizeObserver: ResizeObserver | null = null
+
+onMounted(() => {
+  if (containerRef.value) {
+    containerWidth.value = containerRef.value.clientWidth || window.innerWidth || 1024
+    if (typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const width = entry.contentRect.width || (entry.target as HTMLElement).clientWidth
+          if (width > 0) {
+            containerWidth.value = width
+          }
+        }
+      })
+      resizeObserver.observe(containerRef.value)
+    }
+  }
+})
+
+onUnmounted(() => {
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+})
+
 const rows = computed(() => eventParameterRows(props.event, props.referenceData, props.pricePrecision))
 
+/**
+ * 根据容器实际可用宽度和参数总项数，智能计算最佳分列数量。
+ * 单表最小舒适宽度约为 340px，避免过窄导致换行严重；
+ * 同时保证每列至少约 3 项，避免参数项被过度打散。
+ */
+const targetCols = computed(() => {
+  const count = rows.value.length
+  if (count <= 3) return 1
+  // 每列至少保留 3 项
+  const maxColsByItems = Math.max(1, Math.floor(count / 3))
+  // 单列最小舒适宽 340px + 间距 10px
+  const width = containerWidth.value || 1024
+  const maxColsByWidth = Math.max(1, Math.floor((width + 10) / 350))
+  return Math.max(1, Math.min(maxColsByItems, maxColsByWidth))
+})
+
 const splitColumns = computed(() => {
-  if (rows.value.length <= 4) {
-    return [rows.value]
+  const cols = targetCols.value
+  const list = rows.value
+  if (cols <= 1 || list.length <= 3) {
+    return [list]
   }
-  const mid = Math.ceil(rows.value.length / 2)
-  return [rows.value.slice(0, mid), rows.value.slice(mid)]
+  const result: Array<typeof list> = []
+  const baseSize = Math.floor(list.length / cols)
+  const remainder = list.length % cols
+  let offset = 0
+  for (let i = 0; i < cols; i++) {
+    const size = baseSize + (i < remainder ? 1 : 0)
+    result.push(list.slice(offset, offset + size))
+    offset += size
+  }
+  return result
 })
 
 const description = computed(() => {
@@ -32,7 +88,12 @@ const description = computed(() => {
 
 <template>
   <p v-if="description" class="event-description">{{ description }}</p>
-  <div v-if="rows.length" class="event-tables-grid" :class="{ 'is-split': splitColumns.length > 1 }">
+  <div
+    v-if="rows.length"
+    ref="containerRef"
+    class="event-tables-grid"
+    :style="{ '--col-count': targetCols }"
+  >
     <div
       v-for="(colRows, idx) in splitColumns"
       :key="idx"
@@ -45,7 +106,7 @@ const description = computed(() => {
           <tr>
             <th scope="col">参数 / 指标</th>
             <th scope="col">参数值</th>
-            <th scope="col">参考值</th>
+            <th scope="col">门槛值</th>
           </tr>
         </thead>
         <tbody>
@@ -56,7 +117,7 @@ const description = computed(() => {
               <small>{{ row.key }}</small>
             </th>
             <td class="param-value">{{ row.value }}</td>
-            <td class="reference-value">{{ row.reference }}</td>
+            <td class="threshold-value">{{ row.threshold ?? row.reference }}</td>
           </tr>
         </tbody>
       </table>
@@ -73,7 +134,7 @@ const description = computed(() => {
 
 .event-tables-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(var(--col-count, 1), minmax(0, 1fr));
   gap: 10px;
   width: 100%;
   max-width: 100%;
@@ -82,9 +143,9 @@ const description = computed(() => {
   box-sizing: border-box;
 }
 
-@media (min-width: 1400px) {
-  .event-tables-grid.is-split {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+@media (max-width: 700px) {
+  .event-tables-grid {
+    grid-template-columns: 1fr !important;
   }
 }
 
@@ -159,6 +220,7 @@ const description = computed(() => {
   font-family: var(--font-family-mono);
 }
 
+.event-parameters .threshold-value,
 .event-parameters .reference-value {
   color: var(--muted);
 }

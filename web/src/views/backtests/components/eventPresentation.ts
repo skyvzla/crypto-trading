@@ -267,6 +267,7 @@ export interface EventParameterRow {
   key: string
   label: string
   value: string
+  threshold: string
   reference: string
   major: boolean
 }
@@ -367,6 +368,10 @@ export function eventParameterRows(
   const rows = Object.entries(data).map(([key, value], sourceIndex) => {
     const referenceKeys = (REFERENCE_FIELDS[key] || []).filter((candidate) => data[candidate] != null || referenceData[candidate] != null)
     referenceKeys.filter((referenceKey) => data[referenceKey] != null).forEach((referenceKey) => consumedReferences.add(referenceKey))
+    const thresholdValues = referenceKeys
+      .map((referenceKey) => formatEventValue(referenceKey, data[referenceKey] ?? referenceData[referenceKey], pricePrecision))
+      .filter((val) => val !== '-')
+    const thresholdText = thresholdValues.length ? thresholdValues.join('；') : '-'
     return {
       key,
       label: key === 'price' && event.type?.includes('exit_requested')
@@ -375,9 +380,8 @@ export function eventParameterRows(
           ? '入场价格'
           : eventParameterLabel(key),
       value: formatEventValue(key, value, pricePrecision),
-      reference: referenceKeys.length
-        ? referenceKeys.map((referenceKey) => `${eventParameterLabel(referenceKey)}：${formatEventValue(referenceKey, data[referenceKey] ?? referenceData[referenceKey], pricePrecision)}`).join('；')
-        : '-',
+      threshold: thresholdText,
+      reference: thresholdText,
       major: MAJOR_FIELDS.has(key),
       sourceIndex
     }
