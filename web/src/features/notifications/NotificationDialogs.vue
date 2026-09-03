@@ -76,12 +76,12 @@ const emit = defineEmits<{
 .modal-form :deep(.ant-select) { width: 100%; }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .form-meta,
-.policy-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding-top: 7px; border-top: 1px solid var(--line); color: var(--muted); font: var(--font-size-xs) var(--font-family-mono); }
+.policy-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 36px; padding-top: 7px; border-top: 1px solid var(--line); color: var(--muted); font: var(--type-meta) var(--font-family-mono); }
 .policy-toggle { margin-bottom: 12px; padding: 8px 0; border-top: 0; }
 .policy-toggle strong,
 .policy-toggle small { display: block; font-family: var(--font-family-sans); }
-.policy-toggle strong { color: var(--text); font-size: var(--font-size-sm); }
-.policy-toggle small { margin-top: 3px; color: var(--muted); font-size: var(--font-size-xs); }
+.policy-toggle strong { color: var(--text); font-size: var(--type-secondary); }
+.policy-toggle small { margin-top: 3px; color: var(--muted); font-size: var(--type-meta); }
 
 @media (max-width: 600px) {
   .form-grid { grid-template-columns: 1fr; gap: 0; }

@@ -157,6 +157,6 @@ function openCampaign(group: CampaignSummary) {
 </template>
 
 <style scoped lang="scss">
-.review-tools { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; color:var(--muted); font:var(--font-size-xs) var(--font-family-mono); }.scope-alert { margin-bottom:12px; }.campaign-symbol,.campaign-button { display:block; width:100%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.campaign-button { padding-inline:0; text-align:left; }.campaign-status { white-space:nowrap; }.net-unavailable,.value-unavailable { color:var(--color-warning); text-decoration:underline dotted; text-underline-offset:3px; }
+.review-tools { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:10px; color:var(--muted); font:var(--type-meta) var(--font-family-mono); }.scope-alert { margin-bottom:12px; }.campaign-symbol,.campaign-button { display:block; width:100%; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.campaign-button { padding-inline:0; text-align:left; }.campaign-status { white-space:nowrap; }.net-unavailable,.value-unavailable { color:var(--color-warning); text-decoration:underline dotted; text-underline-offset:3px; }
 @media(max-width:700px){.review-tools{align-items:flex-start;flex-direction:column}}
 </style>

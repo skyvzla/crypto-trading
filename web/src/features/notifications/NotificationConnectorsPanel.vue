@@ -54,7 +54,7 @@ const endpointsByConnector = computed(() => {
 <style scoped lang="scss">
 .view-panel { min-width: 0; }
 .data-card-heading > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.data-card-heading h3 { margin: 0; font-size: var(--font-size-md); letter-spacing: 0; }
+.data-card-heading h3 { margin: 0; font-size: var(--type-primary); letter-spacing: 0; }
 .panel-icon { color: var(--color-primary); }
 .connector-list { display: grid; gap: 12px; }
 .connector-block { overflow: hidden; }
@@ -65,10 +65,10 @@ const endpointsByConnector = computed(() => {
 .connector-mark.webhook { color: #0f766e; background: rgba(13, 148, 136, .1); }
 :root[data-theme='dark'] .connector-mark.webhook { color: #5eead4; }
 .connector-name { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
-.connector-name strong { overflow-wrap: anywhere; font-size: var(--font-size-md); }
-.connector-identity small { display: block; margin-top: 3px; color: var(--muted); font: var(--font-size-xs) var(--font-family-mono); overflow-wrap: anywhere; }
+.connector-name strong { overflow-wrap: anywhere; font-size: var(--type-primary); }
+.connector-identity small { display: block; margin-top: 3px; color: var(--muted); font: var(--type-meta) var(--font-family-mono); overflow-wrap: anywhere; }
 .connector-actions { display: flex; align-items: center; gap: 4px; }
-.endpoint-head { display: flex; align-items: center; justify-content: space-between; padding: 7px 14px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: var(--font-size-xs); text-transform: uppercase; letter-spacing: 0; }
+.endpoint-head { display: flex; align-items: center; justify-content: space-between; padding: 7px 14px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--muted); font-size: var(--type-meta); text-transform: uppercase; letter-spacing: 0; }
 .endpoint-head > div { display: flex; align-items: center; gap: 8px; }
 .endpoint-head :deep(.ant-btn) { text-transform: none; }
 .endpoint-list { padding: 0 14px; }
@@ -78,10 +78,10 @@ const endpointsByConnector = computed(() => {
 .endpoint-state.enabled { background: var(--color-success); }
 .endpoint-copy { min-width: 0; }
 .endpoint-copy strong, .endpoint-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.endpoint-copy strong { font-size: var(--font-size-sm); }
-.endpoint-copy small { margin-top: 2px; color: var(--muted); font: var(--font-size-xs) var(--font-family-mono); }
-.endpoint-version { color: var(--muted); font: var(--font-size-xs) var(--font-family-mono); }
-.empty-inline { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; color: var(--muted); font-size: var(--font-size-sm); }
+.endpoint-copy strong { font-size: var(--type-secondary); }
+.endpoint-copy small { margin-top: 2px; color: var(--muted); font: var(--type-meta) var(--font-family-mono); }
+.endpoint-version { color: var(--muted); font: var(--type-meta) var(--font-family-mono); }
+.empty-inline { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; color: var(--muted); font-size: var(--type-secondary); }
 
 @media (max-width: 600px) {
   .connector-header { align-items: flex-start; }

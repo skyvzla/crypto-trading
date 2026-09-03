@@ -176,7 +176,7 @@ onBeforeUnmount(() => {
 .app-sider {
   --sider-text-color: rgba(255, 255, 255, .65);
   --sider-border-color: rgba(255, 255, 255, .12);
-  --menu-group-font-size: 9px;
+  --menu-group-font-size: var(--type-meta);
 }
 .brand {
   display: flex;
@@ -199,11 +199,11 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--color-gold) 12%, transparent);
   color: color-mix(in srgb, var(--color-gold) 72%, white);
   font-weight: 700;
-  font-size: var(--font-size-sm);
+  font-size: var(--type-secondary);
 }
 .brand-name {
   color: var(--sider-text-color);
-  font-size: var(--font-size-md);
+  font-size: var(--type-primary);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -218,7 +218,7 @@ onBeforeUnmount(() => {
   padding: 16px 18px;
   border-top: 1px solid var(--sider-border-color);
   color: var(--sider-text-color);
-  font-size: var(--font-size-sm);
+  font-size: var(--type-secondary);
 }
 .app-header {
   padding: 0;
@@ -226,9 +226,9 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--line);
 }
 .header-actions { display: flex; height: 100%; align-items: center; justify-content: space-between; padding-inline: 20px; }
-.header-context { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--font-size-sm); }
+.header-context { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: var(--type-secondary); }
 .header-context span { color: var(--text); font-weight: 600; }
-.header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: var(--color-gold); font: var(--font-size-xs) var(--font-family-mono); font-style: normal; letter-spacing: 0; }
+.header-context i { padding-left: 8px; border-left: 1px solid var(--line); color: var(--color-gold); font: var(--type-meta) var(--font-family-mono); font-style: normal; letter-spacing: 0; }
 .theme-toggle { color: var(--text); }
 .workspace {
   flex: 1;

@@ -117,6 +117,6 @@ function openDay(date: string) {
 </template>
 
 <style scoped lang="scss">
-.calendar-toolbar { display:flex; align-items:center; gap:8px; margin:2px 0 12px; }.calendar-toolbar strong { min-width:120px; text-align:center; font:var(--font-size-md) var(--font-family-mono); }.calendar-toolbar > span { display:flex; align-items:center; gap:5px; margin-left:auto; color:var(--color-gold); font:var(--font-size-xs) var(--font-family-mono); }.calendar-metrics { margin-bottom:10px; }.status-strip { margin-bottom:10px; }.full-calendar { margin-top:2px; }.calendar-empty { padding:0 14px 14px; color:var(--muted); text-align:center; font-size:var(--font-size-xs); }
+.calendar-toolbar { display:flex; align-items:center; gap:8px; margin:2px 0 12px; }.calendar-toolbar strong { min-width:120px; text-align:center; font:var(--type-primary) var(--font-family-mono); }.calendar-toolbar > span { display:flex; align-items:center; gap:5px; margin-left:auto; color:var(--color-gold); font:var(--type-meta) var(--font-family-mono); }.calendar-metrics { margin-bottom:10px; }.status-strip { margin-bottom:10px; }.full-calendar { margin-top:2px; }.calendar-empty { padding:0 14px 14px; color:var(--muted); text-align:center; font-size:var(--type-meta); }
 @media(max-width:540px){.calendar-toolbar>span{width:100%;margin:4px 0 0}.calendar-toolbar{flex-wrap:wrap}}
 </style>

@@ -64,17 +64,17 @@ function changeActivityView(key: string | number) {
 <style scoped lang="scss">
 .view-panel { min-width: 0; }
 .data-card-heading > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.data-card-heading h3 { margin: 0; font-size: var(--font-size-md); letter-spacing: 0; }
+.data-card-heading h3 { margin: 0; font-size: var(--type-primary); letter-spacing: 0; }
 .panel-icon { color: var(--color-primary); }
 .activity-switcher :deep(.ant-tabs-nav) { margin: 0 0 10px; }
 .activity-switcher :deep(.ant-tabs-content-holder) { display: none; }
 .activity-tab-label { display: inline-flex; align-items: center; gap: 7px; }
 .activity-table { overflow: hidden; }
-.mono-value { color: var(--muted); font: var(--font-size-xs) var(--font-family-mono); }
+.mono-value { color: var(--muted); font: var(--type-meta) var(--font-family-mono); }
 .filter-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 11px 12px; border-bottom: 1px solid var(--line); }
 .filter-row :deep(.ant-input) { width: min(290px, 100%); }
 .filter-row :deep(.ant-select) { min-width: 125px; }
-.table-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 51px; padding: 8px 13px; border-top: 1px solid var(--line); color: var(--muted); font-size: var(--font-size-xs); }
+.table-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 51px; padding: 8px 13px; border-top: 1px solid var(--line); color: var(--muted); font-size: var(--type-meta); }
 .muted-dash { color: var(--muted); }
 
 @media (max-width: 600px) {

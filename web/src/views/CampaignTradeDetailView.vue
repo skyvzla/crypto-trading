@@ -179,9 +179,9 @@ watch(routeKey, () => { void reload() }, { immediate: true })
 <style scoped lang="scss">
 .campaign-identity { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-bottom:12px; }
 .campaign-identity > div,.campaign-detail-metrics article { padding:10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); }
-.campaign-identity span,.campaign-detail-metrics span { display:block; color:var(--muted); font:var(--font-size-xs) var(--font-family-mono); }
-.campaign-identity strong,.campaign-detail-metrics strong { display:block; margin-top:5px; overflow-wrap:anywhere; font:var(--font-size-sm) var(--font-family-mono); }
-.campaign-detail-metrics { margin-bottom:14px; }.detail-section { margin-top:18px; }.detail-section h3 { margin:0 0 9px; font-size:var(--font-size-md); }
-.section-alert,.campaign-chart-empty { margin-top:14px; }.campaign-events p { color:var(--muted); font-size:var(--font-size-xs); }.event-title { display:flex; justify-content:space-between; gap:10px; }.event-title time { color:var(--muted); font-size:var(--font-size-xs); }.campaign-events pre { max-height:180px; margin:6px 0 0; padding:8px; overflow:auto; border:1px solid var(--line); background:var(--surface-hover); color:var(--text); font:var(--font-size-xs) var(--font-family-mono); white-space:pre-wrap; }.timeline-empty { display:flex; gap:7px; align-items:center; color:var(--muted); font-size:var(--font-size-xs); }
+.campaign-identity span,.campaign-detail-metrics span { display:block; color:var(--muted); font:var(--type-meta) var(--font-family-mono); }
+.campaign-identity strong,.campaign-detail-metrics strong { display:block; margin-top:5px; overflow-wrap:anywhere; font:var(--type-secondary) var(--font-family-mono); }
+.campaign-detail-metrics { margin-bottom:14px; }.detail-section { margin-top:18px; }.detail-section h3 { margin:0 0 9px; font-size:var(--type-primary); }
+.section-alert,.campaign-chart-empty { margin-top:14px; }.campaign-events p { color:var(--muted); font-size:var(--type-meta); }.event-title { display:flex; justify-content:space-between; gap:10px; }.event-title time { color:var(--muted); font-size:var(--type-meta); }.campaign-events pre { max-height:180px; margin:6px 0 0; padding:8px; overflow:auto; border:1px solid var(--line); background:var(--surface-hover); color:var(--text); font:var(--type-meta) var(--font-family-mono); white-space:pre-wrap; }.timeline-empty { display:flex; gap:7px; align-items:center; color:var(--muted); font-size:var(--type-meta); }
 @media(max-width:700px){.campaign-identity{grid-template-columns:1fr}}
 </style>

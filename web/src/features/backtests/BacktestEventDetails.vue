@@ -31,16 +31,16 @@ const description = computed(() => {
 </template>
 
 <style scoped lang="scss">
-.event-description { margin:5px 0 0; color:var(--text); font-size:var(--font-size-sm); }
+.event-description { margin:5px 0 0; color:var(--text); font-size:var(--type-secondary); }
 .event-parameters-wrap { margin-top:7px; overflow-x:auto; border:1px solid var(--line); border-radius:5px; }
-.event-parameters { width:100%; min-width:470px; border-collapse:collapse; table-layout:fixed; font-size:var(--font-size-xs); }
+.event-parameters { width:100%; min-width:470px; border-collapse:collapse; table-layout:fixed; font-size:var(--type-meta); }
 .event-parameters th,.event-parameters td { padding:7px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; overflow-wrap:anywhere; }
 .event-parameters thead th { color:var(--muted); background:var(--surface-hover); font-weight:500; }
 .event-parameters thead th:first-child { width:35%; }.event-parameters thead th:nth-child(2) { width:30%; }
 .event-parameters tbody tr:last-child > * { border-bottom:0; }
 .event-parameters tbody th { color:var(--text); font-weight:500; }
-.major-mark { display:inline-block; margin-left:5px; color:var(--color-info); font-size:10px; font-weight:600; }
-.event-parameters tbody th small { display:block; margin-top:2px; color:var(--muted); font:var(--font-size-xs)/1.25 var(--font-family-mono); }
+.major-mark { display:inline-block; margin-left:5px; color:var(--color-info); font-size:var(--type-meta); font-weight:600; }
+.event-parameters tbody th small { display:block; margin-top:2px; color:var(--muted); font:var(--type-meta)/1.25 var(--font-family-mono); }
 .event-parameters td { color:var(--text); font-family:var(--font-family-mono); }
 .event-parameters .reference-value { color:var(--muted); }
 .event-parameters tr.is-major { background:color-mix(in srgb, var(--color-info) 7%, transparent); }

@@ -34,10 +34,10 @@ const emit = defineEmits<{
 <style scoped lang="scss">
 .view-panel { min-width: 0; }
 .data-card-heading > div { display: flex; align-items: center; gap: 7px; min-width: 0; }
-.data-card-heading h3 { margin: 0; font-size: var(--font-size-md); letter-spacing: 0; }
+.data-card-heading h3 { margin: 0; font-size: var(--type-primary); letter-spacing: 0; }
 .panel-icon { color: var(--color-primary); }
 .data-table-wrap { overflow: hidden; }
-.wrap-value { display: block; max-width: 420px; overflow-wrap: anywhere; color: var(--text); font-size: var(--font-size-sm); line-height: 1.45; }
+.wrap-value { display: block; max-width: 420px; overflow-wrap: anywhere; color: var(--text); font-size: var(--type-secondary); line-height: 1.45; }
 .table-empty { padding: 30px 0; }
-.mono-value { color: var(--muted); font: var(--font-size-xs) var(--font-family-mono); }
+.mono-value { color: var(--muted); font: var(--type-meta) var(--font-family-mono); }
 </style>

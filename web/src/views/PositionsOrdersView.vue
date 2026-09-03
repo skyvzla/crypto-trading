@@ -225,5 +225,5 @@ async function onTableChange(pagination: TablePaginationConfig) {
 </template>
 
 <style scoped lang="scss">
-.result-ledger { display:flex; justify-content:space-between; gap:12px; margin:-6px 0 9px; color:var(--muted); font:var(--font-size-xs) var(--font-family-mono); }.drawer-note,.drawer-link { margin-top:16px; }.order-link { max-width:180px; overflow:hidden; text-overflow:ellipsis; }
+.result-ledger { display:flex; justify-content:space-between; gap:12px; margin:-6px 0 9px; color:var(--muted); font:var(--type-meta) var(--font-family-mono); }.drawer-note,.drawer-link { margin-top:16px; }.order-link { max-width:180px; overflow:hidden; text-overflow:ellipsis; }
 </style>

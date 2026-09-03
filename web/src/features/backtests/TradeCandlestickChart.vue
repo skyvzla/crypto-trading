@@ -945,7 +945,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .chart-shell { position: relative; }
 .candlestick-host { position: relative; width: 100%; height: calc(100% - 8px); }
-.extrema-price-label { position: absolute; z-index: 5; font: var(--font-size-xs)/1.2 var(--font-family-mono); pointer-events: none; transform: translateX(-50%); white-space: nowrap; }
+.extrema-price-label { position: absolute; z-index: 5; font: var(--type-meta)/1.2 var(--font-family-mono); pointer-events: none; transform: translateX(-50%); white-space: nowrap; }
 .chart-hover-label {
   position: absolute;
   z-index: 2;
@@ -956,7 +956,7 @@ onBeforeUnmount(() => {
   border-radius: 4px;
   background: var(--chart-overlay);
   color: var(--text);
-  font: var(--font-size-xs)/1.45 var(--font-family-mono);
+  font: var(--type-meta)/1.45 var(--font-family-mono);
   pointer-events: none;
 }
 .hover-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 19px; white-space: nowrap; }
@@ -973,7 +973,7 @@ onBeforeUnmount(() => {
   border-radius: 3px;
   border: 1px solid var(--line);
   background: var(--chart-overlay);
-  font: var(--font-size-xs)/1.3 var(--font-family-mono);
+  font: var(--type-meta)/1.3 var(--font-family-mono);
   pointer-events: none;
 }
 .chart-height-resizer {
