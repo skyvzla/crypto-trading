@@ -149,7 +149,7 @@ a {
 .legend-item.is-strong i { border-top-width: 3px; }
 .detail-section { margin-top: 14px; }
 .detail-section h3 { margin: 0 0 9px; font-size: var(--type-primary); letter-spacing: 0; }
-.timeline-section { padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+.timeline-section { padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); min-width: 0; overflow-x: hidden; }
 .timeline-section .query-state, .timeline-section .query-empty { min-height: 120px; }
 .timeline-section .ant-timeline { margin: 0; }
 .timeline-section .ant-timeline-item { min-width: 0; padding-bottom: 24px; }
@@ -221,6 +221,8 @@ a {
   .equity-summary-strip { grid-template-columns: 1fr; }
   .equity-chart-wrap { min-height: 320px; height: 48vh; }
   .equity-section-heading { align-items: flex-start; flex-direction: column; }
+  .timeline-section { padding: 12px 10px; }
+  .timeline-section .ant-timeline-item-content { margin-inline-start: 22px; }
 }
 
 /* Shared operations console vocabulary. Values remain legible in both themes. */

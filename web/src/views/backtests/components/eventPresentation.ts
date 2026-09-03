@@ -289,10 +289,34 @@ export function eventParameterLabel(key: string): string {
   return translated === '字段' ? key : translated
 }
 
-function formatArray(key: string, values: unknown[]): string {
+export function resolvePricePrecision(
+  _symbol?: string,
+  samplePrices: Array<number | string | null | undefined> = []
+): number {
+  let maxDecimals = 0
+  let hasValid = false
+  for (const price of samplePrices) {
+    if (price == null || price === '') continue
+    const num = Number(price)
+    if (!Number.isFinite(num) || num === 0) continue
+    hasValid = true
+    const str = String(price).trim()
+    const dot = str.indexOf('.')
+    if (dot !== -1) {
+      const decimals = str.slice(dot + 1).replace(/0+$/, '').length
+      if (decimals > maxDecimals) maxDecimals = decimals
+    }
+  }
+  if (hasValid) {
+    return Math.min(8, Math.max(2, maxDecimals))
+  }
+  return 2
+}
+
+function formatArray(key: string, values: unknown[], pricePrecision?: number): string {
   if (!values.length) return '-'
   return values.map((value, index) => {
-    const formatted = formatEventValue(key, value)
+    const formatted = formatEventValue(key, value, pricePrecision)
     return key === 'tier_prices' || key === 'tier_weights' ? `${index + 1}档 ${formatted}` : formatted
   }).join('；')
 }
@@ -303,15 +327,15 @@ function formatCodeValue(value: unknown): string {
   return translated === '字段' ? code : `${translated}（${code}）`
 }
 
-export function formatEventValue(key: string, value: unknown): string {
+export function formatEventValue(key: string, value: unknown, pricePrecision?: number): string {
   if (value == null || value === '') return '-'
   if (Array.isArray(value)) return CODE_VALUE_FIELDS.has(key)
     ? value.map(formatCodeValue).join('；') || '-'
-    : formatArray(key, value)
+    : formatArray(key, value, pricePrecision)
   if (typeof value === 'boolean') return value ? '是' : '否'
   if (typeof value === 'object') {
     return Object.entries(value as Record<string, unknown>)
-      .map(([childKey, childValue]) => `${eventParameterLabel(childKey)}：${formatEventValue(childKey, childValue)}`)
+      .map(([childKey, childValue]) => `${eventParameterLabel(childKey)}：${formatEventValue(childKey, childValue, pricePrecision)}`)
       .join('；') || '-'
   }
   if (CODE_VALUE_FIELDS.has(key)) return formatCodeValue(value)
@@ -319,14 +343,23 @@ export function formatEventValue(key: string, value: unknown): string {
   if (DURATION_MS_FIELDS.test(key) && Number.isFinite(Number(value))) return formatDurationMs(Number(value))
   if (isRatioField(key) && Number.isFinite(Number(value))) return formatPercent(Number(value), 2)
   if (RAW_PERCENT_FIELDS.test(key) && Number.isFinite(Number(value))) return `${formatNumber(Number(value), 4)}%`
-  if ((PRICE_FIELDS.test(key) || key === 'candidate' || key === 'observed_close') && Number.isFinite(Number(value))) return formatNumber(Number(value), 8)
+  if ((PRICE_FIELDS.test(key) || key === 'candidate' || key === 'observed_close') && Number.isFinite(Number(value))) {
+    if (pricePrecision != null) {
+      return formatNumber(Number(value), pricePrecision)
+    }
+    const s = String(value).trim()
+    const dot = s.indexOf('.')
+    const naturalDigits = dot === -1 ? 2 : Math.min(8, Math.max(2, s.slice(dot + 1).replace(/0+$/, '').length))
+    return formatNumber(Number(value), naturalDigits)
+  }
   if (MULTIPLE_FIELDS.test(key) && Number.isFinite(Number(value))) return formatNumber(Number(value), 2)
   return String(value)
 }
 
 export function eventParameterRows(
   event: Pick<BacktestEvent, 'data' | 'price'> & Partial<Pick<BacktestEvent, 'type'>>,
-  referenceData: Record<string, unknown> = {}
+  referenceData: Record<string, unknown> = {},
+  pricePrecision?: number
 ): EventParameterRow[] {
   const data: Record<string, unknown> = { ...(event.data || {}) }
   if (event.price != null && data.price == null && data.trigger_price == null && data.fill_price == null) data.price = event.price
@@ -341,9 +374,9 @@ export function eventParameterRows(
         : key === 'price' && event.type?.includes('entry')
           ? '入场价格'
           : eventParameterLabel(key),
-      value: formatEventValue(key, value),
+      value: formatEventValue(key, value, pricePrecision),
       reference: referenceKeys.length
-        ? referenceKeys.map((referenceKey) => `${eventParameterLabel(referenceKey)}：${formatEventValue(referenceKey, data[referenceKey] ?? referenceData[referenceKey])}`).join('；')
+        ? referenceKeys.map((referenceKey) => `${eventParameterLabel(referenceKey)}：${formatEventValue(referenceKey, data[referenceKey] ?? referenceData[referenceKey], pricePrecision)}`).join('；')
         : '-',
       major: MAJOR_FIELDS.has(key),
       sourceIndex
@@ -356,9 +389,10 @@ export function eventParameterRows(
 
 export function eventParameterGroups(
   event: Pick<BacktestEvent, 'data' | 'price'> & Partial<Pick<BacktestEvent, 'type'>>,
-  referenceData: Record<string, unknown> = {}
+  referenceData: Record<string, unknown> = {},
+  pricePrecision?: number
 ): EventParameterGroup[] {
-  const rows = eventParameterRows(event, referenceData)
+  const rows = eventParameterRows(event, referenceData, pricePrecision)
   const groupedMap = new Map<EventParameterGroupKey, EventParameterRow[]>()
 
   for (const row of rows) {

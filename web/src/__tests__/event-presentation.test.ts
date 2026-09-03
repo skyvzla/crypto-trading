@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { eventDisplayName, eventParameterGroups, eventParameterRows, formatEventValue } from '@/views/backtests/components/eventPresentation'
+import {
+  eventDisplayName,
+  eventParameterGroups,
+  eventParameterRows,
+  formatEventValue,
+  resolvePricePrecision
+} from '@/views/backtests/components/eventPresentation'
 
 describe('回测事件展示', () => {
   it('使用中文（英文）事件名并为未知事件保留原始类型', () => {
@@ -73,5 +79,13 @@ describe('回测事件展示', () => {
     expect(groups.find((g) => g.id === 'price')?.title).toBe('价格与标线')
     expect(groups.find((g) => g.id === 'rise_volume')?.title).toBe('涨幅与量比')
     expect(groups.find((g) => g.id === 'risk_execution')?.title).toBe('风控与执行')
+  })
+
+  it('根据交易对价格样本自适应推导精度并格式化价格', () => {
+    expect(resolvePricePrecision('BTCUSDT', [65000.5, 64200.1])).toBe(2)
+    expect(resolvePricePrecision('ETHUSDT', [2450.25, 2460.5])).toBe(2)
+    expect(resolvePricePrecision('DOGEUSDT', [0.12345, 0.1234])).toBe(5)
+    expect(formatEventValue('trigger_price', 65000.5, 2)).toBe('65,000.5')
+    expect(formatEventValue('trigger_price', 0.123456, 5)).toBe('0.12346')
   })
 })
