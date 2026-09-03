@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { eventDisplayName, eventParameterRows, formatEventValue } from '@/features/backtests/eventPresentation'
+import { eventDisplayName, eventParameterGroups, eventParameterRows, formatEventValue } from '@/views/backtests/components/eventPresentation'
 
 describe('回测事件展示', () => {
   it('使用中文（英文）事件名并为未知事件保留原始类型', () => {
@@ -54,5 +54,24 @@ describe('回测事件展示', () => {
     )
     expect(rows.find((row) => row.key === 'd_oi_pct')?.reference).toBe('持仓量止损涨幅门槛：10%')
     expect(rows.find((row) => row.key === 'loss_pct')?.reference).toBe('持仓量止损亏损门槛：3%')
+  })
+
+  it('将事件参数按类型划分成价格、涨幅量比、风控执行等分组', () => {
+    const groups = eventParameterGroups({
+      price: null,
+      data: {
+        trigger_price: 100,
+        rise_5s: 0.05,
+        volume_multiple_5s: 4.2,
+        oi_change_pct: 1.5,
+        scored_score: 88,
+        action: 'hold'
+      }
+    })
+
+    expect(groups.map((g) => g.id)).toEqual(['price', 'rise_volume', 'oi', 'risk_execution', 'decision'])
+    expect(groups.find((g) => g.id === 'price')?.title).toBe('价格与标线')
+    expect(groups.find((g) => g.id === 'rise_volume')?.title).toBe('涨幅与量比')
+    expect(groups.find((g) => g.id === 'risk_execution')?.title).toBe('风控与执行')
   })
 })

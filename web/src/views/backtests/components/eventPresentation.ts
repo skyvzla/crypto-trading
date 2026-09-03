@@ -1,6 +1,6 @@
 import type { BacktestEvent } from '@/api/types'
 import { formatDateTime, formatDurationMs, formatNumber, formatPercent } from '@/shared/format'
-import { reportLabel } from './reportLabels'
+import { reportLabel } from '@/features/backtests/reportLabels'
 
 const EVENT_LABELS: Record<string, string> = {
   signal_triggered: '信号触发',
@@ -29,12 +29,20 @@ const EVENT_LABELS: Record<string, string> = {
   pullback_exit_requested: '回调策略退出请求',
   pullback_exit_filled: '回调策略退出成交',
   pullback_rejected_low_buy_ratio: '回调入场拒绝',
-  pullback_order_expired: '回调入场单过期', pullback_timeout: '回调等待超时', pullback_data_gap: '回调行情缺口',
-  pullback_next_open_invalid: '回调次根开盘失效', pullback_position_already_open: '回调仓位已存在',
-  pullback_state_missing: '回调状态缺失', pullback_v22_invalid_price: '回调触及失效价', pullback_impulse_base_breached: '回调跌破脉冲起点',
-  legacy_ambiguous_exit_requested: '旧版歧义退出请求', legacy_stop_exit_requested: '旧版止损退出请求',
-  legacy_target_exit_requested: '旧版止盈退出请求', legacy_timeout_exit_requested: '旧版超时退出请求',
-  research_hold_exit_requested: '研究持有退出请求', research_stop_exit_requested: '研究止损退出请求'
+  pullback_order_expired: '回调入场单过期',
+  pullback_timeout: '回调等待超时',
+  pullback_data_gap: '回调行情缺口',
+  pullback_next_open_invalid: '回调次根开盘失效',
+  pullback_position_already_open: '回调仓位已存在',
+  pullback_state_missing: '回调状态缺失',
+  pullback_v22_invalid_price: '回调触及失效价',
+  pullback_impulse_base_breached: '回调跌破脉冲起点',
+  legacy_ambiguous_exit_requested: '旧版歧义退出请求',
+  legacy_stop_exit_requested: '旧版止损退出请求',
+  legacy_target_exit_requested: '旧版止盈退出请求',
+  legacy_timeout_exit_requested: '旧版超时退出请求',
+  research_hold_exit_requested: '研究持有退出请求',
+  research_stop_exit_requested: '研究止损退出请求'
 }
 
 const FIELD_LABELS: Record<string, string> = {
@@ -134,12 +142,139 @@ function isRatioField(key: string): boolean {
     || key === 'hard_stop_loss_pct'
 }
 
+export type EventParameterGroupKey = 'price' | 'rise_volume' | 'oi' | 'risk_execution' | 'decision' | 'other'
+
+const FIELD_GROUP_MAP: Record<string, EventParameterGroupKey> = {
+  // 决策与状态
+  action: 'decision',
+  decision: 'decision',
+  reason: 'decision',
+  rejection_stage: 'decision',
+  rejection_reasons: 'decision',
+  cancelled_orders: 'decision',
+  exit_required: 'decision',
+
+  // 价格与标线
+  trigger_price: 'price',
+  price: 'price',
+  fill_price: 'price',
+  mark_price: 'price',
+  spike_high: 'price',
+  spike_high_time: 'price',
+  origin_price: 'price',
+  origin_floor: 'price',
+  rise_low: 'price',
+  invalid_price: 'price',
+  pullback_threshold: 'price',
+  pullback_atr: 'price',
+  pullback_low: 'price',
+  pullback_time: 'price',
+  candidate: 'price',
+  entry_price: 'price',
+  impulse_base_price: 'price',
+  bar_low: 'price',
+  observed_close: 'price',
+  target_price: 'price',
+  tier_prices: 'price',
+
+  // 涨幅与量比
+  rise_5s: 'rise_volume',
+  rise_10s: 'rise_volume',
+  rise_15s: 'rise_volume',
+  rise_60s: 'rise_volume',
+  rise_from_12h_low: 'rise_volume',
+  volume_5s: 'rise_volume',
+  median_volume_1s: 'rise_volume',
+  volume_multiple_5s: 'rise_volume',
+  max_rise_5s: 'rise_volume',
+  max_rise_window: 'rise_volume',
+  max_volume_multiple_5s: 'rise_volume',
+  volume_multiple_5m: 'rise_volume',
+  min_volume_multiple_5m: 'rise_volume',
+  upper_wick_ratio_5m: 'rise_volume',
+  upper_wick_ratio_15m: 'rise_volume',
+  td_sell_setup_5m: 'rise_volume',
+  td_sell_setup_15m: 'rise_volume',
+  spike_avg_deviation_pct: 'rise_volume',
+  spike_vwap_deviation_pct: 'rise_volume',
+  decay_agreement: 'rise_volume',
+
+  // 持仓量与多空
+  oi: 'oi',
+  previous_oi: 'oi',
+  oi_change_pct: 'oi',
+  max_oi_change_pct: 'oi',
+  ls_ratio: 'oi',
+  max_ls_ratio: 'oi',
+  d_oi_pct: 'oi',
+  base_ms: 'oi',
+  confirm_ms: 'oi',
+
+  // 风控与执行
+  scored_score: 'risk_execution',
+  scored_threshold: 'risk_execution',
+  loss_pct: 'risk_execution',
+  oi_stop_loss_pct: 'risk_execution',
+  oi_stop_oi_rise_pct: 'risk_execution',
+  hard_stop_loss_ratio: 'risk_execution',
+  hard_stop_loss_pct: 'risk_execution',
+  hard_stop_confirm_ms: 'risk_execution',
+  buy_ratio_entry: 'risk_execution',
+  buy_ratio_entry_min: 'risk_execution',
+  retrace_frac: 'risk_execution',
+  gross_pnl: 'risk_execution',
+  net_pnl: 'risk_execution',
+  gross_return: 'risk_execution',
+  pnl_pct: 'risk_execution',
+  entry_commission: 'risk_execution',
+  quantity: 'risk_execution',
+  order_id: 'risk_execution',
+  fill_id: 'risk_execution',
+  tier_weights: 'risk_execution',
+  active_time: 'risk_execution',
+  expire_time: 'risk_execution',
+  first_fill_time: 'risk_execution',
+  origin_signal_time: 'risk_execution',
+  entry_pattern: 'risk_execution',
+  entry_tier_mode: 'risk_execution',
+  exit_policy: 'risk_execution',
+  pullback_before_fill: 'risk_execution',
+  timeout_stage: 'risk_execution',
+  wait_ms: 'risk_execution',
+  strategy_version: 'risk_execution',
+  metrics_available_time: 'risk_execution'
+}
+
+const GROUP_TITLES: Record<EventParameterGroupKey, string> = {
+  price: '价格与标线',
+  rise_volume: '涨幅与量比',
+  oi: '持仓量与多空',
+  risk_execution: '风控与执行',
+  decision: '决策与状态',
+  other: '其他参数'
+}
+
+const GROUP_ORDER: EventParameterGroupKey[] = ['price', 'rise_volume', 'oi', 'risk_execution', 'decision', 'other']
+
+export function classifyParameterGroup(key: string): EventParameterGroupKey {
+  if (FIELD_GROUP_MAP[key]) return FIELD_GROUP_MAP[key]
+  if (PRICE_FIELDS.test(key)) return 'price'
+  if (isRatioField(key) || MULTIPLE_FIELDS.test(key)) return 'rise_volume'
+  return 'other'
+}
+
 export interface EventParameterRow {
   key: string
   label: string
   value: string
   reference: string
   major: boolean
+}
+
+export interface EventParameterGroup {
+  id: EventParameterGroupKey
+  title: string
+  rows: EventParameterRow[]
 }
 
 export function eventDisplayName(event: Pick<BacktestEvent, 'type' | 'title'>): string {
@@ -217,4 +352,32 @@ export function eventParameterRows(
   return rows
     .sort((left, right) => Number(right.major) - Number(left.major) || left.sourceIndex - right.sourceIndex)
     .map(({ sourceIndex: _sourceIndex, ...row }) => row)
+}
+
+export function eventParameterGroups(
+  event: Pick<BacktestEvent, 'data' | 'price'> & Partial<Pick<BacktestEvent, 'type'>>,
+  referenceData: Record<string, unknown> = {}
+): EventParameterGroup[] {
+  const rows = eventParameterRows(event, referenceData)
+  const groupedMap = new Map<EventParameterGroupKey, EventParameterRow[]>()
+
+  for (const row of rows) {
+    const groupKey = classifyParameterGroup(row.key)
+    const list = groupedMap.get(groupKey) || []
+    list.push(row)
+    groupedMap.set(groupKey, list)
+  }
+
+  const result: EventParameterGroup[] = []
+  for (const groupKey of GROUP_ORDER) {
+    const groupRows = groupedMap.get(groupKey)
+    if (groupRows && groupRows.length > 0) {
+      result.push({
+        id: groupKey,
+        title: GROUP_TITLES[groupKey],
+        rows: groupRows
+      })
+    }
+  }
+  return result
 }

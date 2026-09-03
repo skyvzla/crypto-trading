@@ -4,13 +4,13 @@ import { useQuery } from '@tanstack/vue-query'
 import { useRoute } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
-import BacktestEventDetails from '@/features/backtests/BacktestEventDetails.vue'
+import BacktestEventDetails from './components/BacktestEventDetails.vue'
 import JsonDetails from '@/features/backtests/JsonDetails.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
 import { formatDateTime, formatNumber, formatPercent, pnlClass } from '@/shared/format'
 import { timestampMs } from '@/shared/time'
-import { eventDisplayName } from '@/features/backtests/eventPresentation'
+import { eventDisplayName } from './components/eventPresentation'
 
 const route = useRoute()
 const researchId = computed(() => typeof route.params.researchId === 'string' ? route.params.researchId : '')
