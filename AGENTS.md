@@ -4,6 +4,7 @@
 - 尽可能使用多agent并行处理任务。大部分情况下使用5.6luna-max作为subagent开发，使用5.6sol-medium review代码；如果2次 luna 没有完成任务，那就使用 5.6sol-medium 接管完成
 - 有任何不确认的地方，请询问。不要猜测用户意图
 - 测试优先使用 Docker Compose 的隔离测试服务，不依赖宿主机环境；全量测试使用 13 个 pytest workers（`-n 13`），完成全量测试、代码审查和 `git diff --check`。
+- 容器优先：处理任何应用服务前，先检查 `docker compose config --services`、`docker compose ps` 和实际容器状态，以 Compose 中的服务关系、命令、环境和健康检查为准；存在对应容器时，不使用宿主机进程或开发服务器代替运行、验证或交付。代码修改后必须重新构建受影响服务的镜像、重启对应容器，并检查 Compose 状态和健康接口。当前 Web 静态产物构建在 `trading_platform-ledger` 镜像中并由 `ledger` 服务提供，因此 Web 修改后必须 build 并重启 `ledger` 容器，不启动宿主机 Vite 作为交付方式。
 - 发布流程：提交代码后执行安全部署；部署前备份并保留排空/门禁，线上策略部署后检查 Compose 状态、健康检查、实时数据连续性门禁和部署状态。本地归档任务单独检查归档心跳。
 - PostgreSQL 是业务持久化数据库，不保留 SQLite/双数据库兼容分支；优先使用成熟库或 ORM，避免重复手写基础设施。
 - Redis 只用于实时行情、短期数据和任务队列；DuckDB 是 K 线历史归档，单写入归档器，其他进程只读。
