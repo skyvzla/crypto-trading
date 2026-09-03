@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  classifyParameterGroup,
   eventDisplayName,
+  eventParameterLabel,
   eventParameterGroups,
   eventParameterRows,
   formatEventValue,
@@ -100,11 +102,74 @@ describe('回测事件展示', () => {
     expect(formatEventValue('net_pnl', '86.17378087397086763774540848')).toBe('86.174')
     expect(formatEventValue('gross_pnl', '-1.23456')).toBe('-1.235')
     expect(formatEventValue('quantity', '123456.123456789')).toBe('123,456.123457')
-    expect(formatEventValue('volume_5s', '12345.6789')).toBe('12.35k')
-    expect(formatEventValue('median_volume_1s', 2_500_000)).toBe('2.5m')
-    expect(formatEventValue('volume_5s', 999_999)).toBe('1m')
-    expect(formatEventValue('volume_5s', 999_999_999)).toBe('1b')
+    expect(formatEventValue('volume_5s', '12345.6789')).toBe('12.35K')
+    expect(formatEventValue('median_volume_1s', 2_500_000)).toBe('2.5M')
+    expect(formatEventValue('volume_5s', 999_999)).toBe('1M')
+    expect(formatEventValue('volume_5s', 999_999_999)).toBe('1B')
     expect(formatEventValue('volume_multiple_5s', 12.3456)).toBe('12.35')
     expect(formatEventValue('scored_score', '88.123456789')).toBe('88.123457')
+  })
+
+  it('完整翻译尖峰、箱体和连阳审计字段，并按语义归组主要指标', () => {
+    const rows = eventParameterRows({
+      type: 'signal_rejected',
+      price: null,
+      data: {
+        rejection_stage: 'box_breakthrough_entry_filter',
+        rejection_reasons: ['box_duration_min_minutes'],
+        box_upper_3d: '0.155',
+        box_upper_7d: '0.16',
+        box_lower_3d: '0.145',
+        box_lower_7d: '0.14',
+        box_breakthrough: '0.1575',
+        box_break_lower: '0.1425',
+        box_break_first_time: 1_750_000_000_000,
+        box_break_minutes: 120,
+        box_break_hours: 2,
+        box_duration_min_minutes: 240,
+        spike_range_pct: 46,
+        spike_range_max_pct: 35,
+        consecutive_up_minutes: 6,
+        max_consecutive_up_minutes: 4,
+      },
+    })
+
+    expect(eventParameterLabel('spike_range_pct')).toBe('尖峰价格极差')
+    expect(eventParameterLabel('box_breakthrough')).toBe('箱体突破线')
+    expect(eventParameterLabel('box_break_minutes')).toBe('箱体突破持续分钟数')
+    expect(eventParameterLabel('prior_high_guard_all_tiers_above')).toBe('全部入场档位须高于前期高点')
+    expect(formatEventValue('box_breakthrough', '0.1575', 4)).toBe('0.1575')
+    expect(formatEventValue('rejection_stage', 'box_breakthrough_entry_filter')).toBe(
+      '箱体突破入场过滤（box_breakthrough_entry_filter）',
+    )
+    expect(formatEventValue('rejection_reasons', ['box_duration_min_minutes'])).toBe(
+      '箱体突破持续时间不足（box_duration_min_minutes）',
+    )
+
+    expect(rows.find((row) => row.key === 'spike_range_pct')).toMatchObject({
+      label: '尖峰价格极差',
+      value: '46%',
+      threshold: '35%',
+      major: true,
+    })
+    expect(rows.find((row) => row.key === 'box_break_minutes')).toMatchObject({
+      label: '箱体突破持续分钟数',
+      threshold: '240',
+      major: true,
+    })
+    expect(rows.find((row) => row.key === 'consecutive_up_minutes')).toMatchObject({
+      label: '连续上涨分钟数',
+      threshold: '4',
+      major: true,
+    })
+    expect(rows.some((row) => row.key === 'spike_range_max_pct')).toBe(false)
+    expect(rows.some((row) => row.key === 'box_duration_min_minutes')).toBe(false)
+    expect(rows.some((row) => row.key === 'max_consecutive_up_minutes')).toBe(false)
+
+    expect(classifyParameterGroup('box_breakthrough')).toBe('price')
+    expect(classifyParameterGroup('box_break_minutes')).toBe('risk_execution')
+    expect(classifyParameterGroup('consecutive_up_minutes')).toBe('rise_volume')
+    const groups = eventParameterGroups({ price: null, data: { box_breakthrough: '0.1575' } })
+    expect(groups[0]).toMatchObject({ id: 'price', title: '价格与标线' })
   })
 })

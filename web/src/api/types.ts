@@ -802,3 +802,67 @@ export interface BacktestCandlesResponse {
   source: 'binance' | 'archive'
   candles: BacktestCandle[]
 }
+
+export interface ChartIndicatorLineSetting {
+  period: number
+  color: string
+}
+
+export interface ChartIndicatorSettings {
+  main: {
+    ema: {
+      enabled: boolean
+      lines: ChartIndicatorLineSetting[]
+    }
+    ma: {
+      enabled: boolean
+      lines: ChartIndicatorLineSetting[]
+    }
+    boll: {
+      enabled: boolean
+      period: number
+      deviation: number
+      colors: {
+        upper: string
+        middle: string
+        lower: string
+      }
+    }
+  }
+  sub: {
+    volume: {
+      enabled: boolean
+      ma_lines: ChartIndicatorLineSetting[]
+    }
+    macd: {
+      enabled: boolean
+      fast_period: number
+      slow_period: number
+      signal_period: number
+      colors: {
+        dif: string
+        dea: string
+        histogram_up: string
+        histogram_down: string
+      }
+    }
+    kdj: {
+      enabled: boolean
+      period: number
+      colors: {
+        k: string
+        d: string
+        j: string
+      }
+    }
+    rsi: {
+      enabled: boolean
+      lines: ChartIndicatorLineSetting[]
+    }
+    atr: {
+      enabled: boolean
+      period: number
+      color: string
+    }
+  }
+}

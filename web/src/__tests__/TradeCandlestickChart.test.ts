@@ -2,6 +2,10 @@ import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createChart } from 'lightweight-charts'
 import TradeCandlestickChart from '@/features/backtests/TradeCandlestickChart.vue'
+import {
+  cloneChartIndicatorSettings,
+  DEFAULT_CHART_INDICATOR_SETTINGS,
+} from '@/features/backtests/chartIndicatorSettings'
 
 const remove = vi.fn()
 const setData = vi.fn()
@@ -18,7 +22,7 @@ const subscribeVisibleLogicalRangeChange = vi.fn()
 let visibleLogicalRange = { from: 0, to: 100 }
 const seriesApis: Array<Record<string, unknown>> = []
 const seriesOptions: Array<Record<string, unknown>> = []
-const paneMocks = Array.from({ length: 4 }, (_, index) => ({
+const paneMocks = Array.from({ length: 8 }, (_, index) => ({
   getHeight: vi.fn(() => (index === 0 ? 300 : 100)),
   getStretchFactor: vi.fn(() => (index === 0 ? 3 : 1)),
   setStretchFactor: paneSetStretchFactor,
@@ -507,6 +511,57 @@ describe('TradeCandlestickChart', () => {
     expect(wrapper.findAll('.indicator-hover-label')).toHaveLength(4)
   })
 
+  it('按主副图组织全部指标，左上角持续显示最新值并在右轴保留参考标注', async () => {
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    Object.values(settings.main).forEach((indicator) => {
+      indicator.enabled = true
+    })
+    Object.values(settings.sub).forEach((indicator) => {
+      indicator.enabled = true
+    })
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 40 }, (_, index) => ({
+      time: start + index * 60,
+      open: 10 + index * 0.1,
+      high: 10.5 + index * 0.1,
+      low: 9.5 + index * 0.1,
+      close: 10.2 + index * 0.1,
+      volume: 1_000 + index * 20,
+    }))
+
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        trade: {
+          id: 't-all-indicators',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: (start + 20 * 60) * 1000,
+          entry_price: 12,
+          net_pnl: 1,
+        },
+        indicatorSettings: settings,
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const paneLabels = wrapper.findAll('.indicator-hover-label')
+    expect(paneLabels).toHaveLength(6)
+    expect(paneLabels[0].findAll('.indicator-value-line')).toHaveLength(4)
+    expect(paneLabels[0].text()).toContain('EMA9')
+    expect(paneLabels[0].text()).toContain('MA5')
+    expect(paneLabels[0].text()).toContain('上轨')
+    expect(paneLabels[1].text()).toContain('MAVOL5')
+    expect(paneLabels[4].text()).toContain('RSI6')
+    expect(paneLabels[5].text()).toContain('ATR14')
+    expect(seriesOptions.filter((options) => options.lastValueVisible === false).length).toBe(seriesOptions.length)
+
+    const guideTitles = createPriceLine.mock.calls.map(([line]) => (line as { title?: string }).title)
+    expect(guideTitles).toContain('0轴')
+    expect(guideTitles).toContain('均量5')
+    expect(guideTitles).toContain('50')
+  })
+
   it('低价币价格轴、价格线和EMA保留行情实际精度', async () => {
     mount(TradeCandlestickChart, {
       props: {
@@ -604,6 +659,96 @@ describe('TradeCandlestickChart', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(setVisibleRange).toHaveBeenCalledWith({ from: 1_754_000_030, to: 1_754_000_060 })
+  })
+
+  it('服务端替换指标配置及嵌套周期变化都会重建图表', async () => {
+    const start = 1_754_000_000
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    Object.values(settings.main).forEach((indicator) => {
+      indicator.enabled = false
+    })
+    Object.values(settings.sub).forEach((indicator) => {
+      indicator.enabled = false
+    })
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles: Array.from({ length: 40 }, (_, index) => ({
+          time: start + index,
+          open: 1,
+          high: 1.2,
+          low: 0.9,
+          close: 1.1,
+          volume: 10,
+        })),
+        trade: {
+          id: 't-settings-replace',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: (start + 20) * 1000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+        indicatorSettings: settings,
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const initialCharts = vi.mocked(createChart).mock.calls.length
+
+    const enabledSettings = cloneChartIndicatorSettings(settings)
+    enabledSettings.main.ma.enabled = true
+    await wrapper.setProps({ indicatorSettings: enabledSettings })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(vi.mocked(createChart).mock.calls.length).toBe(initialCharts + 1)
+    expect(seriesOptions.at(-1)?.title).toBe('MA20')
+
+    const changedSettings = cloneChartIndicatorSettings(enabledSettings)
+    changedSettings.main.ma.lines[0].period = 7
+    await wrapper.setProps({ indicatorSettings: changedSettings })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(vi.mocked(createChart).mock.calls.length).toBe(initialCharts + 2)
+    expect(seriesOptions.some((options) => options.title === 'MA7')).toBe(true)
+  })
+
+  it('悬停在指标 warm-up 区间时不显示未来的最新指标值，并限制标签在 pane 内', async () => {
+    const start = 1_754_000_000
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    settings.main.ema.enabled = true
+    settings.sub.volume.enabled = true
+    const candles = Array.from({ length: 20 }, (_, index) => ({
+      time: start + index,
+      open: 1,
+      high: 1.2,
+      low: 0.9,
+      close: 1.1 + index * 0.01,
+      volume: 10,
+    }))
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        trade: {
+          id: 't-indicator-warmup',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: (start + 10) * 1000,
+          entry_price: 1.2,
+          net_pnl: 1,
+        },
+        indicatorSettings: settings,
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(
+      wrapper
+        .findAll('.indicator-hover-label')
+        .every((label) => (label.attributes('style') || '').includes('max-height')),
+    ).toBe(true)
+
+    const candle = { open: 1, high: 1.2, low: 0.9, close: 1.1 }
+    const seriesData = new Map<unknown, unknown>([[seriesApis[0], candle]])
+    subscribeCrosshairMove.mock.calls.at(-1)?.[0]({ point: { x: 100, y: 100 }, time: start, seriesData })
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.indicator-hover-label').text()).not.toContain('EMA9')
   })
 
   it('恢复并保存整体图高与指标窗格，并可重置为默认尺寸', async () => {

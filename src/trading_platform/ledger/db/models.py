@@ -482,6 +482,41 @@ class LedgerDB:
             await conn.execute("SELECT 1")
         return True
 
+    async def get_chart_settings(
+        self,
+    ) -> tuple[dict[str, Any] | None, datetime | None]:
+        """Read the installation-wide chart settings document, if present."""
+
+        async with self.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT settings, updated_at FROM chart_settings "
+                    "WHERE setting_key = 'global'"
+                )
+            ).fetchone()
+        if row is None:
+            return None, None
+        return dict(row[0]), row[1]
+
+    async def upsert_chart_settings(
+        self, settings: dict[str, Any]
+    ) -> tuple[dict[str, Any], datetime]:
+        """Replace the installation-wide chart settings document atomically."""
+
+        async with self.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "INSERT INTO chart_settings (setting_key, settings) "
+                    "VALUES ('global', %s) "
+                    "ON CONFLICT (setting_key) DO UPDATE SET "
+                    "settings = EXCLUDED.settings, updated_at = NOW() "
+                    "RETURNING settings, updated_at",
+                    (Jsonb(settings),),
+                )
+            ).fetchone()
+        assert row is not None
+        return dict(row[0]), row[1]
+
     @staticmethod
     def _strategy_audit_record(
         account_id: str, event: StrategyAuditEvent

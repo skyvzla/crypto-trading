@@ -183,7 +183,7 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
 
     result = await apply_migrations(pool, schema=schema)
 
-    assert result.applied_versions == (12, 13)
+    assert result.applied_versions == (12, 13, 14)
     async with pool.connection() as conn:
         async with conn.transaction():
             await conn.execute(
@@ -201,7 +201,14 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
                     """
                 )
             ).fetchall()
+            chart_settings = await (
+                await conn.execute(
+                    "SELECT setting_key, jsonb_typeof(settings) "
+                    "FROM chart_settings ORDER BY setting_key"
+                )
+            ).fetchall()
     assert facts == [(False, False), (False, True), (True, True)]
+    assert chart_settings == [("global", "object")]
 
 
 @pytest.mark.asyncio

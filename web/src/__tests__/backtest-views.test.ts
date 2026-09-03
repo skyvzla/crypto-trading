@@ -8,6 +8,11 @@ import BacktestTradeListView from '@/views/backtests/BacktestTradeListView.vue'
 import BacktestTradeReplayView from '@/views/backtests/BacktestTradeReplayView.vue'
 import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
 import { backtestApi } from '@/api/backtests'
+import { chartSettingsApi } from '@/api/chartSettings'
+import {
+  cloneChartIndicatorSettings,
+  DEFAULT_CHART_INDICATOR_SETTINGS,
+} from '@/features/backtests/chartIndicatorSettings'
 import { router } from '@/router'
 
 vi.mock('@/api/backtests', () => ({
@@ -25,12 +30,22 @@ vi.mock('@/api/backtests', () => ({
   },
 }))
 
+vi.mock('@/api/chartSettings', () => ({
+  chartSettingsApi: {
+    get: vi.fn(),
+    update: vi.fn(),
+  },
+}))
+
 /** vue-query 已在 vitest.setup.ts 全局安装，这里只需把路由推到目标地址。 */
 async function atRoute(path = '/') {
   await router.push(path)
 }
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(chartSettingsApi.get).mockResolvedValue(cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS))
+})
 
 describe('回测关键视图', () => {
   it('图表续页以已加载K线边界为中心扩展窗口', async () => {
@@ -73,6 +88,47 @@ describe('回测关键视图', () => {
         end_ms: 1_750_449_700_000,
       }),
     )
+  })
+
+  it('从服务端读取全局指标配置并传给行情图', async () => {
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    settings.main.ma.enabled = true
+    settings.main.ma.lines[0].period = 7
+    vi.mocked(chartSettingsApi.get).mockResolvedValue(settings)
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT',
+      interval: '5m',
+      source: 'binance',
+      candles: [{ time: 1_750_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }],
+    })
+
+    const wrapper = mount(TradeReplayChartPanel, {
+      props: {
+        researchId: 'r-1',
+        trade: {
+          id: 't-settings',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+      },
+      global: {
+        stubs: {
+          TradeCandlestickChart: {
+            name: 'TradeCandlestickChart',
+            props: ['indicatorSettings'],
+            template: '<div class="indicator-settings-probe">{{ indicatorSettings.main.ma.lines[0].period }}</div>',
+          },
+          ChartIndicatorSettingsModal: true,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(chartSettingsApi.get).toHaveBeenCalledOnce()
+    expect(wrapper.get('.indicator-settings-probe').text()).toBe('7')
   })
 
   it('研究记录只展示概要并提供两个线性入口', async () => {

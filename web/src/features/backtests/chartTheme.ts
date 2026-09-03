@@ -29,6 +29,8 @@ export interface ChartTheme {
   axisText: string
   grid: string
   border: string
+  paneSeparator: string
+  paneSeparatorHover: string
   /** 阳线 / 阴线 */
   up: string
   down: string
@@ -76,6 +78,8 @@ const LIGHT_THEME: ChartTheme = {
   axisText: '#64748b',
   grid: '#e2e8f0',
   border: '#cbd5e1',
+  paneSeparator: '#94a3b8',
+  paneSeparatorHover: '#475569',
   up: '#059669',
   down: '#e11d48',
   signal: '#b45309',
@@ -101,6 +105,8 @@ const DARK_THEME: ChartTheme = {
   axisText: '#94a8c1',
   grid: '#263243',
   border: '#41536b',
+  paneSeparator: '#64748b',
+  paneSeparatorHover: '#94a3b8',
   signal: '#fbbf24',
   filled: '#fb923c',
   pending: '#60a5fa',

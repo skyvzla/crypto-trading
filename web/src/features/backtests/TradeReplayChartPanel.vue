@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useQuery } from '@tanstack/vue-query'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
+import { message } from 'ant-design-vue'
 import {
   ArrowDownToLine,
   ArrowUpToLine,
@@ -10,12 +11,21 @@ import {
   Minimize2,
   RefreshCw,
   RotateCcw,
+  Settings2,
   SlidersHorizontal,
 } from 'lucide-vue-next'
 import { backtestApi } from '@/api/backtests'
-import type { BacktestCandle, ChartOverlay } from '@/api/types'
+import { chartSettingsApi } from '@/api/chartSettings'
+import type { BacktestCandle, ChartIndicatorSettings, ChartOverlay } from '@/api/types'
+import ChartIndicatorSettingsModal from '@/features/backtests/ChartIndicatorSettingsModal.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import TradeCandlestickChart from '@/features/backtests/TradeCandlestickChart.vue'
+import {
+  CHART_INDICATORS,
+  cloneChartIndicatorSettings,
+  DEFAULT_CHART_INDICATOR_SETTINGS,
+  indicatorEnabled,
+} from '@/features/backtests/chartIndicatorSettings'
 import { getChartTheme } from '@/features/backtests/chartTheme'
 import { timestampMs } from '@/shared/time'
 import { IS_DARK_THEME } from '@/shared/theme'
@@ -59,6 +69,7 @@ const isDarkTheme = inject(
   IS_DARK_THEME,
   computed(() => false),
 )
+const queryClient = useQueryClient()
 const palette = computed(() => getChartTheme(isDarkTheme.value))
 
 /**
@@ -89,7 +100,9 @@ const windowCenterMs = ref<number | null>(null)
 const chartRef = ref<InstanceType<typeof TradeCandlestickChart> | null>(null)
 const chartSection = ref<HTMLElement | null>(null)
 const isFullscreen = ref(false)
-const indicators = ref({ volume: true, macd: false, ema: false, kdj: false })
+const indicatorSettingsOpen = ref(false)
+const indicatorSettingsSaving = ref(false)
+const indicatorSettings = ref<ChartIndicatorSettings>(cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS))
 const lineVisibility = ref({ signal: true, tiers: true, average: true, invalid: true, extensions: true })
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
@@ -136,6 +149,17 @@ const candlesQuery = useQuery({
   staleTime: 5 * 60_000,
   placeholderData: (previous) => previous,
 })
+const indicatorSettingsQuery = useQuery({
+  queryKey: ['chart-indicator-settings'],
+  queryFn: chartSettingsApi.get,
+  staleTime: Number.POSITIVE_INFINITY,
+  retry: 1,
+})
+const activeIndicatorNames = computed(() =>
+  CHART_INDICATORS.filter((definition) => indicatorEnabled(indicatorSettings.value, definition)).map(
+    (definition) => definition.name,
+  ),
+)
 
 function selectInterval(value: string) {
   interval.value = value
@@ -174,6 +198,40 @@ function resetChartSize() {
   chartRef.value?.resetSize()
 }
 
+function openIndicatorSettings() {
+  indicatorSettingsOpen.value = true
+  if (indicatorSettingsQuery.isError.value) message.warning('指标设置读取失败，当前使用默认配置')
+}
+
+async function saveIndicatorSettings(settings: ChartIndicatorSettings) {
+  const lineGroups = [
+    settings.main.ema.lines,
+    settings.main.ma.lines,
+    settings.sub.volume.ma_lines,
+    settings.sub.rsi.lines,
+  ]
+  if (lineGroups.some((lines) => new Set(lines.map((line) => line.period)).size !== lines.length)) {
+    message.error('同一指标不能配置重复周期')
+    return
+  }
+  if (settings.sub.macd.fast_period >= settings.sub.macd.slow_period) {
+    message.error('MACD 快线周期必须小于慢线周期')
+    return
+  }
+  indicatorSettingsSaving.value = true
+  try {
+    const saved = await chartSettingsApi.update(settings)
+    indicatorSettings.value = cloneChartIndicatorSettings(saved)
+    queryClient.setQueryData(['chart-indicator-settings'], saved)
+    indicatorSettingsOpen.value = false
+    message.success('图表指标设置已保存')
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : '图表指标设置保存失败')
+  } finally {
+    indicatorSettingsSaving.value = false
+  }
+}
+
 onMounted(() => document.addEventListener('fullscreenchange', syncFullscreenState))
 onBeforeUnmount(() => document.removeEventListener('fullscreenchange', syncFullscreenState))
 
@@ -191,6 +249,13 @@ watch(
     const byTime = new Map(loadedCandles.value.map((candle) => [candle.time, candle]))
     response.candles.forEach((candle) => byTime.set(candle.time, candle))
     loadedCandles.value = [...byTime.values()].sort((left, right) => left.time - right.time)
+  },
+  { immediate: true },
+)
+watch(
+  () => indicatorSettingsQuery.data.value,
+  (settings) => {
+    if (settings) indicatorSettings.value = cloneChartIndicatorSettings(settings)
   },
   { immediate: true },
 )
@@ -226,10 +291,14 @@ watch(
           >
         </a-tooltip>
         <a-divider type="vertical" />
-        <a-checkbox v-model:checked="indicators.volume">VOL</a-checkbox>
-        <a-checkbox v-model:checked="indicators.macd">MACD</a-checkbox>
-        <a-checkbox v-model:checked="indicators.ema">EMA</a-checkbox>
-        <a-checkbox v-model:checked="indicators.kdj">KDJ</a-checkbox>
+        <a-tooltip :title="`配置技术指标：${activeIndicatorNames.join('、') || '未启用'}`">
+          <a-button type="text" class="chart-tool-button" aria-label="配置技术指标" @click="openIndicatorSettings">
+            <template #icon>
+              <Settings2 :size="16" />
+            </template>
+            指标
+          </a-button>
+        </a-tooltip>
         <a-dropdown :trigger="['click']">
           <a-tooltip title="标线显示"
             ><a-button type="text" shape="circle" class="chart-icon-button" aria-label="标线显示"
@@ -311,7 +380,7 @@ watch(
         :candles="loadedCandles"
         :trade="trade"
         :overlays="overlays"
-        :indicators="indicators"
+        :indicator-settings="indicatorSettings"
         :line-visibility="lineVisibility"
         :focus-time="focusTimeMs"
         :fill-display="fillDisplay"
@@ -330,5 +399,11 @@ watch(
         ><i />{{ item.label }}</span
       >
     </div>
+    <ChartIndicatorSettingsModal
+      v-model:open="indicatorSettingsOpen"
+      :settings="indicatorSettings"
+      :saving="indicatorSettingsSaving"
+      @save="saveIndicatorSettings"
+    />
   </section>
 </template>

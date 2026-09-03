@@ -104,8 +104,46 @@ const FIELD_LABELS: Record<string, string> = {
   max_rise_5s: '5 秒最大涨幅',
   max_rise_window: '窗口最大涨幅',
   max_volume_multiple_5s: '5 秒最大量比',
+  max_rise_window_seconds: '最大涨幅窗口秒数',
   spike_avg_deviation_pct: '尖峰均价偏离',
+  spike_avg_deviation_max_pct: '尖峰均价偏离上限',
+  spike_range_pct: '尖峰价格极差',
+  spike_range_max_pct: '尖峰价格极差上限',
   spike_vwap_deviation_pct: '尖峰 VWAP 偏离',
+  spike_vwap_deviation_max_pct: '尖峰 VWAP 偏离上限',
+  box_upper_3d: '3 天箱体上沿',
+  box_upper_7d: '7 天箱体上沿',
+  box_lower_3d: '3 天箱体下沿',
+  box_lower_7d: '7 天箱体下沿',
+  box_breakthrough: '箱体突破线',
+  box_break_lower: '箱体突破下沿',
+  box_break_first_time: '箱体突破起始时间',
+  box_break_minutes: '箱体突破持续分钟数',
+  box_break_hours: '箱体突破持续小时数',
+  box_duration_min_minutes: '箱体突破最短持续分钟数',
+  consecutive_up_minutes: '连续上涨分钟数',
+  max_consecutive_up_minutes: '连续上涨分钟数上限',
+  current_close: '当前收盘价',
+  low_12h: '12 小时低点',
+  atr: '平均真实波幅',
+  prior_high: '前期高点',
+  prior_high_time: '前期高点时间',
+  prior_high_4h: '4 小时前期高点',
+  prior_high_4h_time: '4 小时前期高点时间',
+  prior_high_lookback_minutes: '前期高点回看分钟数',
+  prior_high_guard_all_tiers_above: '全部入场档位须高于前期高点',
+  allowed_prior_high: '允许的前期高点',
+  rise_low_time: '上涨窗口低点时间',
+  rise_low_age_minutes: '上涨窗口低点距今分钟数',
+  rise_low_lookback_minutes: '上涨低点回看分钟数',
+  min_rise_duration_minutes: '最短上涨持续分钟数',
+  signal_cooldown_seconds: '信号冷却秒数',
+  order_ttl_seconds: '订单有效秒数',
+  early_profit_unlock_ratio: '提前止盈解锁比例',
+  entry_tier: '入场档位',
+  lowest_tier: '最低入场档位',
+  old_campaign_id: '原交易批次 ID',
+  rejected: '是否拒绝',
   oi: '持仓量',
   previous_oi: '前值持仓量',
   oi_change_pct: '持仓量变化',
@@ -154,6 +192,13 @@ const MAJOR_FIELDS = new Set([
   'rise_from_12h_low',
   'scored_score',
   'spike_high',
+  'box_breakthrough',
+  'box_break_lower',
+  'box_break_minutes',
+  'spike_avg_deviation_pct',
+  'spike_range_pct',
+  'spike_vwap_deviation_pct',
+  'consecutive_up_minutes',
   'origin_price',
   'pullback_threshold',
   'invalid_price',
@@ -201,6 +246,14 @@ const TIME_FIELDS = /(?:^|_)(?:time|at)$/
 const DURATION_MS_FIELDS = /_ms$/
 const RAW_PERCENT_FIELDS = /_pct$/
 const PRICE_FIELDS = /(?:^|_)(?:price|prices|high|low|floor|atr)(?:_|$)/
+const BOX_PRICE_FIELDS = new Set([
+  'box_upper_3d',
+  'box_upper_7d',
+  'box_lower_3d',
+  'box_lower_7d',
+  'box_breakthrough',
+  'box_break_lower',
+])
 const MULTIPLE_FIELDS = /multiple/
 const PNL_FIELDS = /(?:^|_)(?:pnl|commission|fee)(?:_|$)/
 const QUANTITY_FIELDS = /(?:^|_)(?:quantity|qty)(?:_|$)/
@@ -220,6 +273,15 @@ const CODE_VALUE_FIELDS = new Set([
 const CODE_VALUE_LABELS: Record<string, string> = {
   post_base_entry_filters: '基础条件通过后的入场过滤',
   base_trigger_filters: '基础信号触发过滤',
+  box_breakthrough_entry_filter: '箱体突破入场过滤',
+  premature_spike_entry_filter: '尖峰过早触发入场过滤',
+  vwap_deviation_entry_filter: 'VWAP 偏离入场过滤',
+  scored_entry_filter: '评分入场过滤',
+  price_sanity_entry_filter: '价格合理性入场过滤',
+  consecutive_up_entry_filter: '连续上涨入场过滤',
+  combined_entry_filters: '组合入场过滤',
+  metrics_entry_filters: '持仓量与多空入场过滤',
+  top_maturity_entry_filter: '顶部成熟度入场过滤',
   hard_stop: '硬止损',
   time_risk: '时间风险',
   momentum_risk: '动量风险',
@@ -234,12 +296,25 @@ const CODE_VALUE_LABELS: Record<string, string> = {
   short_term_high_pullback_rebreak: '短期高点回调再突破',
   direct_entry_without_pullback: '未回调直接入场',
   single_entry: '单档入场',
+  'tier3-only': '仅第三档入场',
+  tier3_only: '仅第三档入场',
+  'candidate-v1': '候选退出策略 V1',
   box_data_insufficient: '箱体数据不足',
+  box_duration_min_minutes: '箱体突破持续时间不足',
   max_consecutive_up_minutes: '连续上涨时间超限',
+  max_oi_change_pct: '持仓量变化超限',
+  max_ls_ratio: '多空账户比超限',
+  min_td_sell_setup_5m: '5 分钟 TD 卖出序列不足',
+  min_volume_multiple_5m: '5 分钟量比不足',
+  max_rise_5s: '5 秒涨幅超限',
+  max_rise_window: '窗口涨幅超限',
+  max_volume_multiple_5s: '5 秒量比超限',
   spike_avg_deviation_max_pct: '尖峰均价偏离超限',
+  spike_range_max_pct: '尖峰价格极差超限',
   spike_vwap_deviation_max_pct: '尖峰 VWAP 偏离超限',
   origin_floor: '低于起涨价格下限',
   prior_high: '未超过前期高点',
+  reject_below_current: '入场价未高于当前价格',
   entry_scoring_threshold: '准入评分不足',
 }
 
@@ -318,7 +393,35 @@ const FIELD_GROUP_MAP: Record<string, EventParameterGroupKey> = {
   td_sell_setup_15m: 'rise_volume',
   spike_avg_deviation_pct: 'rise_volume',
   spike_vwap_deviation_pct: 'rise_volume',
+  spike_range_pct: 'rise_volume',
   decay_agreement: 'rise_volume',
+
+  // 箱体/突破诊断
+  box_upper_3d: 'price',
+  box_upper_7d: 'price',
+  box_lower_3d: 'price',
+  box_lower_7d: 'price',
+  box_breakthrough: 'price',
+  box_break_lower: 'price',
+  box_break_first_time: 'price',
+  box_break_minutes: 'risk_execution',
+  box_break_hours: 'risk_execution',
+  box_duration_min_minutes: 'risk_execution',
+
+  // 连阳过滤
+  consecutive_up_minutes: 'rise_volume',
+  max_consecutive_up_minutes: 'rise_volume',
+  current_close: 'price',
+  prior_high: 'price',
+  prior_high_time: 'price',
+  prior_high_4h: 'price',
+  prior_high_4h_time: 'price',
+  allowed_prior_high: 'price',
+  prior_high_guard_all_tiers_above: 'price',
+  rise_low_time: 'price',
+  rise_low_age_minutes: 'rise_volume',
+  rise_low_lookback_minutes: 'rise_volume',
+  min_rise_duration_minutes: 'rise_volume',
 
   // 持仓量与多空
   oi: 'oi',
@@ -364,6 +467,13 @@ const FIELD_GROUP_MAP: Record<string, EventParameterGroupKey> = {
   wait_ms: 'risk_execution',
   strategy_version: 'risk_execution',
   metrics_available_time: 'risk_execution',
+  signal_cooldown_seconds: 'risk_execution',
+  order_ttl_seconds: 'risk_execution',
+  early_profit_unlock_ratio: 'risk_execution',
+  entry_tier: 'risk_execution',
+  lowest_tier: 'risk_execution',
+  old_campaign_id: 'risk_execution',
+  rejected: 'decision',
 }
 
 const GROUP_TITLES: Record<EventParameterGroupKey, string> = {
@@ -480,7 +590,10 @@ export function formatEventValue(key: string, value: unknown, pricePrecision?: n
   if (DURATION_MS_FIELDS.test(key) && Number.isFinite(Number(value))) return formatDurationMs(Number(value))
   if (isRatioField(key) && Number.isFinite(Number(value))) return formatPercent(Number(value), 2)
   if (RAW_PERCENT_FIELDS.test(key) && Number.isFinite(Number(value))) return `${formatNumber(Number(value), 4)}%`
-  if ((PRICE_FIELDS.test(key) || key === 'candidate' || key === 'observed_close') && Number.isFinite(Number(value))) {
+  if (
+    (PRICE_FIELDS.test(key) || BOX_PRICE_FIELDS.has(key) || key === 'candidate' || key === 'observed_close') &&
+    Number.isFinite(Number(value))
+  ) {
     if (pricePrecision != null) {
       return formatNumber(Number(value), pricePrecision)
     }

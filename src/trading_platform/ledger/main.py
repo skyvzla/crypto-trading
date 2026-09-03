@@ -17,6 +17,7 @@ from trading_platform.ledger.db.migrations import apply_migrations, verify_curre
 from trading_platform.ledger.api.routes import router
 from trading_platform.ledger.api.backtests import router as backtest_router
 from trading_platform.ledger.api.notifications import router as notification_router
+from trading_platform.ledger.api.chart_settings import router as chart_settings_router
 from trading_platform.shared.config import load_config
 
 
@@ -103,6 +104,7 @@ app.add_middleware(
 app.include_router(router)
 app.include_router(backtest_router)
 app.include_router(notification_router)
+app.include_router(chart_settings_router)
 
 # Vite 产物目录，相对进程工作目录解析（容器内为 /app）。
 # 未构建时跳过挂载，保证 API 与 dev server 模式下服务仍可启动。

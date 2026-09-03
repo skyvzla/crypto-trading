@@ -19,12 +19,13 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import type { BacktestCandle, ChartOverlay } from '@/api/types'
+import type { BacktestCandle, ChartIndicatorSettings, ChartOverlay } from '@/api/types'
 import { formatLedgerDateTime, timestampMs } from '@/shared/time'
 import { IS_DARK_THEME } from '@/shared/theme'
 import { STORAGE_KEYS, readStored, readStoredRecord, removeStored, writeStored } from '@/shared/storage'
 import { getChartTheme, type ChartTheme } from './chartTheme'
-import { emaOfClose, kdj, macd } from './indicators'
+import { cloneChartIndicatorSettings, DEFAULT_CHART_INDICATOR_SETTINGS } from './chartIndicatorSettings'
+import { atr, bollinger, emaOfClose, kdj, maOfClose, macd, rsiOfClose, volumeMa } from './indicators'
 import type { TradeChartData, TradeChartFillDisplay, TradeChartFillTimeSemantics } from './tradeChart'
 
 interface PriceLineVisibility {
@@ -48,6 +49,7 @@ const props = defineProps<{
     ema?: boolean
     kdj?: boolean
   }
+  indicatorSettings?: ChartIndicatorSettings
   lineVisibility?: PriceLineVisibility
 }>()
 const emit = defineEmits<{ 'request-more': [direction: 'before' | 'after'] }>()
@@ -67,17 +69,40 @@ const FOCUS_HALF_WINDOW_BARS = 30
 
 const host = ref<HTMLElement | null>(null)
 const hoverLabel = ref<{ left: number; top: number; lines: Array<{ label: string; value: string }> } | null>(null)
-const indicatorLabels = ref<
-  Array<{ key: string; top: number; values: Array<{ label: string; value: string; color: string }> }>
->([])
+interface PaneValue {
+  label: string
+  value: string
+  color: string
+}
+
+interface PaneValueLine {
+  key: string
+  values: PaneValue[]
+}
+
+interface IndicatorLabel {
+  key: string
+  paneIndex: number
+  top: number
+  height: number | null
+  lines: PaneValueLine[]
+}
+
+const indicatorLabels = ref<IndicatorLabel[]>([])
 const extremaLabels = ref<Array<{ left: number; top: number; text: string; color: string }>>([])
 
 type ChartCandle = Omit<BacktestCandle, 'time'> & { time: UTCTimestamp }
 type IndicatorApi = ISeriesApi<'Line'> | ISeriesApi<'Histogram'>
 interface IndicatorGroup {
-  key: 'ema' | 'volume' | 'macd' | 'kdj'
+  key: string
   paneIndex: number
-  values: Array<{ label: string; color: string; series: IndicatorApi; format?: 'volume' | 'oscillator' }>
+  values: Array<{
+    label: string
+    color: string
+    series: IndicatorApi
+    format?: 'volume' | 'percent'
+    latestValue?: number
+  }>
 }
 type PriceLineSpec = {
   price: number
@@ -104,6 +129,7 @@ let indicatorGroups: IndicatorGroup[] = []
 let priceLineHandles: IPriceLine[] = []
 let extremaPoints: Array<{ time: UTCTimestamp; price: number; position: 'above' | 'below'; text: string }> = []
 let extremaPricePrecision = 2
+let indicatorPricePrecision = 2
 let suppressEdgeRequestsUntil = 0
 let handleVisibleRangeChange: ((range: { from: number; to: number } | null, force?: boolean) => void) | null = null
 
@@ -339,8 +365,11 @@ function restorePaneHeights() {
   if (!chart) return
   const stretch = readStoredRecord(STORAGE_KEYS.indicatorPaneStretch)
   const panes = chart.panes()
+  const restoredPanes = new Set<number>()
   indicatorGroups.forEach(({ key, paneIndex }) => {
-    const factor = stretch[key]
+    if (restoredPanes.has(paneIndex)) return
+    restoredPanes.add(paneIndex)
+    const factor = stretch[paneIndex === 0 ? 'main' : key] ?? (paneIndex === 0 ? stretch[key] : undefined)
     if (Number.isFinite(factor) && factor > 0 && panes[paneIndex]) panes[paneIndex].setStretchFactor(factor)
   })
 }
@@ -349,8 +378,11 @@ function persistPaneHeights() {
   if (!chart) return
   const panes = chart.panes()
   const stretch = readStoredRecord(STORAGE_KEYS.indicatorPaneStretch)
+  const persistedPanes = new Set<number>()
   indicatorGroups.forEach(({ key, paneIndex }) => {
-    if (panes[paneIndex]) stretch[key] = panes[paneIndex].getStretchFactor()
+    if (persistedPanes.has(paneIndex)) return
+    persistedPanes.add(paneIndex)
+    if (panes[paneIndex]) stretch[paneIndex === 0 ? 'main' : key] = panes[paneIndex].getStretchFactor()
   })
   writeStored(STORAGE_KEYS.indicatorPaneStretch, JSON.stringify(stretch))
   refreshIndicatorPositions()
@@ -365,9 +397,41 @@ function refreshIndicatorPositions() {
   const hostTop = host.value.getBoundingClientRect().top
   const panes = chart.panes()
   indicatorLabels.value = indicatorLabels.value.map((label) => {
-    const group = indicatorGroups.find((item) => item.key === label.key)
-    const paneTop = group ? panes[group.paneIndex]?.getHTMLElement()?.getBoundingClientRect().top : null
-    return { ...label, top: paneTop == null ? label.top : paneTop - hostTop + 7 }
+    const pane = panes[label.paneIndex]
+    const paneElement = pane?.getHTMLElement()
+    const paneRect = paneElement?.getBoundingClientRect()
+    const paneHeight = pane?.getHeight() ?? paneRect?.height
+    return {
+      ...label,
+      top: paneRect == null ? label.top : paneRect.top - hostTop + 7,
+      height: paneHeight == null ? label.height : Math.max(0, paneHeight - 10),
+    }
+  })
+}
+
+function effectiveIndicatorSettings(): ChartIndicatorSettings {
+  if (props.indicatorSettings) return props.indicatorSettings
+  const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+  settings.main.ema.enabled = props.indicators?.ema === true
+  settings.main.ma.enabled = false
+  settings.main.boll.enabled = false
+  settings.sub.volume.enabled = props.indicators?.volume === true
+  settings.sub.macd.enabled = props.indicators?.macd === true
+  settings.sub.kdj.enabled = props.indicators?.kdj === true
+  settings.sub.rsi.enabled = false
+  settings.sub.atr.enabled = false
+  return settings
+}
+
+const hiddenLatestValue = {
+  lastValueVisible: false,
+  priceLineVisible: false,
+}
+
+function updateGroupLatestValues(group: IndicatorGroup, values: Array<number | null>) {
+  group.values.forEach((item, index) => {
+    const value = values[index]
+    item.latestValue = typeof value === 'number' && Number.isFinite(value) ? value : undefined
   })
 }
 
@@ -378,40 +442,130 @@ function refreshIndicatorPositions() {
  * 返回下一个可用窗格号；主图指标（EMA）留在窗格 0。
  */
 function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: Record<string, unknown>) {
-  const colors = palette.value.indicators
-  const settings = props.indicators || {}
+  const theme = palette.value
+  const colors = theme.indicators
+  const settings = effectiveIndicatorSettings()
+  const percentFormat = { type: 'price' as const, precision: 2, minMove: 0.01 }
   let paneIndex = 1
 
-  if (settings.ema) {
-    const ema9 = instance.addSeries(LineSeries, { color: colors.ema9, lineWidth: 1, title: 'EMA9', priceFormat })
-    const ema21 = instance.addSeries(LineSeries, { color: colors.ema21, lineWidth: 1, title: 'EMA21', priceFormat })
+  if (settings.main.ema.enabled) {
+    const group: IndicatorGroup = { key: 'ema', paneIndex: 0, values: [] }
+    settings.main.ema.lines.forEach((line) => {
+      const series = instance.addSeries(LineSeries, {
+        ...hiddenLatestValue,
+        color: line.color,
+        lineWidth: 1,
+        title: `EMA${line.period}`,
+        priceFormat,
+      })
+      group.values.push({ label: `EMA${line.period}`, color: line.color, series })
+    })
     const update = (next: ChartCandle[]) => {
-      ema9.setData(lineData(next, emaOfClose(next, 9)))
-      ema21.setData(lineData(next, emaOfClose(next, 21)))
+      const values = settings.main.ema.lines.map((line, index) => {
+        const seriesValues = emaOfClose(next, line.period)
+        group.values[index].series.setData(lineData(next, seriesValues))
+        return seriesValues.at(-1) ?? null
+      })
+      updateGroupLatestValues(group, values)
     }
     update(data)
     dataUpdaters.push(update)
-    indicatorGroups.push({
-      key: 'ema',
-      paneIndex: 0,
-      values: [
-        { label: 'EMA9', color: colors.ema9, series: ema9 },
-        { label: 'EMA21', color: colors.ema21, series: ema21 },
-      ],
-    })
+    indicatorGroups.push(group)
   }
 
-  if (settings.volume) {
+  if (settings.main.ma.enabled) {
+    const group: IndicatorGroup = { key: 'ma', paneIndex: 0, values: [] }
+    settings.main.ma.lines.forEach((line) => {
+      const series = instance.addSeries(LineSeries, {
+        ...hiddenLatestValue,
+        color: line.color,
+        lineWidth: 1,
+        title: `MA${line.period}`,
+        priceFormat,
+      })
+      group.values.push({ label: `MA${line.period}`, color: line.color, series })
+    })
+    const update = (next: ChartCandle[]) => {
+      const values = settings.main.ma.lines.map((line, index) => {
+        const seriesValues = maOfClose(next, line.period)
+        group.values[index].series.setData(lineData(next, seriesValues))
+        return seriesValues.at(-1) ?? null
+      })
+      updateGroupLatestValues(group, values)
+    }
+    update(data)
+    dataUpdaters.push(update)
+    indicatorGroups.push(group)
+  }
+
+  if (settings.main.boll.enabled) {
+    const definitions = [
+      { key: 'upper' as const, label: '上轨', color: settings.main.boll.colors.upper },
+      { key: 'middle' as const, label: '中轨', color: settings.main.boll.colors.middle },
+      { key: 'lower' as const, label: '下轨', color: settings.main.boll.colors.lower },
+    ]
+    const group: IndicatorGroup = { key: 'boll', paneIndex: 0, values: [] }
+    definitions.forEach((definition) => {
+      const series = instance.addSeries(LineSeries, {
+        ...hiddenLatestValue,
+        color: definition.color,
+        lineWidth: 1,
+        title: `BOLL ${definition.label}`,
+        priceFormat,
+      })
+      group.values.push({ label: definition.label, color: definition.color, series })
+    })
+    const update = (next: ChartCandle[]) => {
+      const result = bollinger(next, {
+        period: settings.main.boll.period,
+        multiplier: settings.main.boll.deviation,
+      })
+      const values = definitions.map((definition, index) => {
+        const seriesValues = result[definition.key]
+        group.values[index].series.setData(lineData(next, seriesValues))
+        return seriesValues.at(-1) ?? null
+      })
+      updateGroupLatestValues(group, values)
+    }
+    update(data)
+    dataUpdaters.push(update)
+    indicatorGroups.push(group)
+  }
+
+  if (settings.sub.volume.enabled) {
     const volume = instance.addSeries(
       HistogramSeries,
       {
+        ...hiddenLatestValue,
         priceFormat: { type: 'volume' },
         priceScaleId: 'volume',
         color: colors.volume,
       },
       paneIndex,
     )
-    const update = (next: ChartCandle[]) =>
+    const group: IndicatorGroup = {
+      key: 'volume',
+      paneIndex,
+      values: [{ label: 'VOL', color: colors.volumeLabel, series: volume, format: 'volume' }],
+    }
+    const volumeAverageGuides: Array<IPriceLine | null> = []
+    settings.sub.volume.ma_lines.forEach((line) => {
+      const series = instance.addSeries(
+        LineSeries,
+        {
+          ...hiddenLatestValue,
+          color: line.color,
+          lineWidth: 1,
+          title: `MAVOL${line.period}`,
+          priceFormat: { type: 'volume' },
+          priceScaleId: 'volume',
+        },
+        paneIndex,
+      )
+      group.values.push({ label: `MAVOL${line.period}`, color: line.color, series, format: 'volume' })
+      volumeAverageGuides.push(null)
+    })
+    const update = (next: ChartCandle[]) => {
       volume.setData(
         next.map((bar) => ({
           time: bar.time,
@@ -419,76 +573,223 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
           color: bar.close >= bar.open ? colors.volumeUp : colors.volumeDown,
         })),
       )
+      const latestValues: Array<number | null> = [next.at(-1)?.volume ?? null]
+      settings.sub.volume.ma_lines.forEach((line, index) => {
+        const seriesValues = volumeMa(next, line.period)
+        const series = group.values[index + 1].series
+        series.setData(lineData(next, seriesValues))
+        const latest = seriesValues.at(-1) ?? null
+        latestValues.push(latest)
+        if (typeof latest !== 'number') return
+        if (!volumeAverageGuides[index]) {
+          volumeAverageGuides[index] = series.createPriceLine({
+            price: latest,
+            title: `均量${line.period}`,
+            color: line.color,
+            lineVisible: false,
+            axisLabelVisible: true,
+          })
+        } else {
+          volumeAverageGuides[index]?.applyOptions({ price: latest })
+        }
+      })
+      updateGroupLatestValues(group, latestValues)
+    }
     update(data)
     dataUpdaters.push(update)
     instance.priceScale('volume', paneIndex).applyOptions({ scaleMargins: { top: 0.1, bottom: 0.05 } })
-    indicatorGroups.push({
-      key: 'volume',
-      paneIndex,
-      values: [{ label: 'VOL', color: colors.volumeLabel, series: volume, format: 'volume' }],
-    })
+    indicatorGroups.push(group)
     paneIndex += 1
   }
 
-  if (settings.macd) {
+  if (settings.sub.macd.enabled) {
+    const macdSettings = settings.sub.macd
     const dif = instance.addSeries(
       LineSeries,
-      { color: colors.macdDif, lineWidth: 1, title: 'DIF', priceFormat },
+      {
+        ...hiddenLatestValue,
+        color: macdSettings.colors.dif,
+        lineWidth: 1,
+        title: 'DIF',
+        priceFormat,
+      },
       paneIndex,
     )
     const dea = instance.addSeries(
       LineSeries,
-      { color: colors.macdDea, lineWidth: 1, title: 'DEA', priceFormat },
+      {
+        ...hiddenLatestValue,
+        color: macdSettings.colors.dea,
+        lineWidth: 1,
+        title: 'DEA',
+        priceFormat,
+      },
       paneIndex,
     )
-    const histogram = instance.addSeries(HistogramSeries, { color: colors.macdHistogram, priceFormat }, paneIndex)
+    const histogram = instance.addSeries(
+      HistogramSeries,
+      { ...hiddenLatestValue, color: colors.macdHistogram, priceFormat },
+      paneIndex,
+    )
+    const group: IndicatorGroup = {
+      key: 'macd',
+      paneIndex,
+      values: [
+        { label: 'DIF', color: macdSettings.colors.dif, series: dif },
+        { label: 'DEA', color: macdSettings.colors.dea, series: dea },
+        { label: 'MACD', color: macdSettings.colors.histogram_up, series: histogram },
+      ],
+    }
     const update = (next: ChartCandle[]) => {
-      const result = macd(next)
+      const result = macd(next, {
+        fast: macdSettings.fast_period,
+        slow: macdSettings.slow_period,
+        signal: macdSettings.signal_period,
+      })
       dif.setData(lineData(next, result.dif))
       dea.setData(lineData(next, result.dea))
       histogram.setData(
         next.map((bar, index) => ({
           time: bar.time,
           value: result.histogram[index],
-          color: result.histogram[index] >= 0 ? colors.macdHistogramUp : colors.macdHistogramDown,
+          color: result.histogram[index] >= 0 ? macdSettings.colors.histogram_up : macdSettings.colors.histogram_down,
         })),
       )
+      updateGroupLatestValues(group, [
+        result.dif.at(-1) ?? null,
+        result.dea.at(-1) ?? null,
+        result.histogram.at(-1) ?? null,
+      ])
     }
     update(data)
     dataUpdaters.push(update)
-    indicatorGroups.push({
-      key: 'macd',
-      paneIndex,
-      values: [
-        { label: 'DIF', color: colors.macdDif, series: dif, format: 'oscillator' },
-        { label: 'DEA', color: colors.macdDea, series: dea, format: 'oscillator' },
-        { label: 'MACD', color: colors.volumeLabel, series: histogram, format: 'oscillator' },
-      ],
+    histogram.createPriceLine({
+      price: 0,
+      title: '0轴',
+      color: theme.paneSeparator,
+      lineStyle: LineStyle.Dotted,
+      lineVisible: true,
+      axisLabelVisible: true,
     })
+    indicatorGroups.push(group)
     paneIndex += 1
   }
 
-  if (settings.kdj) {
-    const kSeries = instance.addSeries(LineSeries, { color: colors.kdjK, lineWidth: 1, title: 'K' }, paneIndex)
-    const dSeries = instance.addSeries(LineSeries, { color: colors.kdjD, lineWidth: 1, title: 'D' }, paneIndex)
-    const jSeries = instance.addSeries(LineSeries, { color: colors.kdjJ, lineWidth: 1, title: 'J' }, paneIndex)
-    const update = (next: ChartCandle[]) => {
-      const result = kdj(next)
-      kSeries.setData(lineData(next, result.k))
-      dSeries.setData(lineData(next, result.d))
-      jSeries.setData(lineData(next, result.j))
-    }
-    update(data)
-    dataUpdaters.push(update)
-    indicatorGroups.push({
+  if (settings.sub.kdj.enabled) {
+    const kdjSettings = settings.sub.kdj
+    const kSeries = instance.addSeries(
+      LineSeries,
+      { ...hiddenLatestValue, color: kdjSettings.colors.k, lineWidth: 1, title: 'K', priceFormat: percentFormat },
+      paneIndex,
+    )
+    const dSeries = instance.addSeries(
+      LineSeries,
+      { ...hiddenLatestValue, color: kdjSettings.colors.d, lineWidth: 1, title: 'D', priceFormat: percentFormat },
+      paneIndex,
+    )
+    const jSeries = instance.addSeries(
+      LineSeries,
+      { ...hiddenLatestValue, color: kdjSettings.colors.j, lineWidth: 1, title: 'J', priceFormat: percentFormat },
+      paneIndex,
+    )
+    const group: IndicatorGroup = {
       key: 'kdj',
       paneIndex,
       values: [
-        { label: 'K', color: colors.kdjK, series: kSeries, format: 'oscillator' },
-        { label: 'D', color: colors.kdjD, series: dSeries, format: 'oscillator' },
-        { label: 'J', color: colors.kdjJ, series: jSeries, format: 'oscillator' },
+        { label: 'K', color: kdjSettings.colors.k, series: kSeries, format: 'percent' },
+        { label: 'D', color: kdjSettings.colors.d, series: dSeries, format: 'percent' },
+        { label: 'J', color: kdjSettings.colors.j, series: jSeries, format: 'percent' },
       ],
+    }
+    const update = (next: ChartCandle[]) => {
+      const result = kdj(next, { period: kdjSettings.period })
+      kSeries.setData(lineData(next, result.k))
+      dSeries.setData(lineData(next, result.d))
+      jSeries.setData(lineData(next, result.j))
+      updateGroupLatestValues(group, [result.k.at(-1) ?? null, result.d.at(-1) ?? null, result.j.at(-1) ?? null])
+    }
+    update(data)
+    dataUpdaters.push(update)
+    ;[20, 50, 80].forEach((level) =>
+      kSeries.createPriceLine({
+        price: level,
+        title: String(level),
+        color: theme.paneSeparator,
+        lineStyle: LineStyle.Dotted,
+        lineVisible: level === 50,
+        axisLabelVisible: true,
+      }),
+    )
+    indicatorGroups.push(group)
+    paneIndex += 1
+  }
+
+  if (settings.sub.rsi.enabled) {
+    const group: IndicatorGroup = { key: 'rsi', paneIndex, values: [] }
+    settings.sub.rsi.lines.forEach((line) => {
+      const series = instance.addSeries(
+        LineSeries,
+        {
+          ...hiddenLatestValue,
+          color: line.color,
+          lineWidth: 1,
+          title: `RSI${line.period}`,
+          priceFormat: percentFormat,
+        },
+        paneIndex,
+      )
+      group.values.push({ label: `RSI${line.period}`, color: line.color, series, format: 'percent' })
     })
+    const update = (next: ChartCandle[]) => {
+      const values = settings.sub.rsi.lines.map((line, index) => {
+        const seriesValues = rsiOfClose(next, line.period)
+        group.values[index].series.setData(lineData(next, seriesValues))
+        return seriesValues.at(-1) ?? null
+      })
+      updateGroupLatestValues(group, values)
+    }
+    update(data)
+    dataUpdaters.push(update)
+    ;[30, 50, 70].forEach((level) =>
+      group.values[0]?.series.createPriceLine({
+        price: level,
+        title: String(level),
+        color: theme.paneSeparator,
+        lineStyle: LineStyle.Dotted,
+        lineVisible: level === 50,
+        axisLabelVisible: true,
+      }),
+    )
+    indicatorGroups.push(group)
+    paneIndex += 1
+  }
+
+  if (settings.sub.atr.enabled) {
+    const atrSettings = settings.sub.atr
+    const series = instance.addSeries(
+      LineSeries,
+      {
+        ...hiddenLatestValue,
+        color: atrSettings.color,
+        lineWidth: 1,
+        title: `ATR${atrSettings.period}`,
+        priceFormat,
+      },
+      paneIndex,
+    )
+    const group: IndicatorGroup = {
+      key: 'atr',
+      paneIndex,
+      values: [{ label: `ATR${atrSettings.period}`, color: atrSettings.color, series }],
+    }
+    const update = (next: ChartCandle[]) => {
+      const values = atr(next, atrSettings.period)
+      series.setData(lineData(next, values))
+      updateGroupLatestValues(group, [values.at(-1) ?? null])
+    }
+    update(data)
+    dataUpdaters.push(update)
+    indicatorGroups.push(group)
   }
 }
 
@@ -579,6 +880,7 @@ function destroy() {
   candleSeries = null
   extremaPoints = []
   extremaPricePrecision = 2
+  indicatorPricePrecision = 2
   handleVisibleRangeChange = null
   chart?.remove()
   chart = null
@@ -613,6 +915,73 @@ function fillBarTime(value: string | number | null | undefined): UTCTimestamp | 
 
 type EventPrice = { label: string; price: number; priority: number }
 
+function compactIndicatorValue(value: number): string {
+  return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(value)
+}
+
+function formatIndicatorValue(value: number, format?: 'volume' | 'percent'): string {
+  if (format === 'volume') return compactIndicatorValue(value)
+  if (format === 'percent') return Number(value).toFixed(2)
+  return Number(value).toFixed(indicatorPricePrecision)
+}
+
+function updatePaneLabels(
+  seriesData?: MouseEventParams<Time>['seriesData'],
+  candle?: { open?: number; high?: number; low?: number; close?: number },
+) {
+  const paneLines = new Map<number, PaneValueLine[]>()
+  const selectedCandle = candle ?? renderedCandles.at(-1)
+  if (selectedCandle) {
+    const priceValues = [
+      { label: '开', value: selectedCandle.open },
+      { label: '高', value: selectedCandle.high },
+      { label: '低', value: selectedCandle.low },
+      { label: '收', value: selectedCandle.close },
+    ].flatMap((item) =>
+      typeof item.value === 'number'
+        ? [
+            {
+              label: item.label,
+              value: Number(item.value).toFixed(indicatorPricePrecision),
+              color: palette.value.text,
+            },
+          ]
+        : [],
+    )
+    paneLines.set(0, [{ key: 'kline', values: priceValues }])
+  }
+
+  indicatorGroups.forEach((group) => {
+    const values = group.values.flatMap((item) => {
+      const point = seriesData?.get(item.series as ISeriesApi<SeriesType, Time>) as { value?: number } | undefined
+      const value =
+        seriesData === undefined ? item.latestValue : typeof point?.value === 'number' ? point.value : undefined
+      return typeof value === 'number'
+        ? [{ label: item.label, value: formatIndicatorValue(value, item.format), color: item.color }]
+        : []
+    })
+    if (!values.length) return
+    const lines = paneLines.get(group.paneIndex) ?? []
+    lines.push({ key: group.key, values })
+    paneLines.set(group.paneIndex, lines)
+  })
+
+  const hostTop = host.value?.getBoundingClientRect().top ?? 0
+  const panes = chart?.panes() ?? []
+  indicatorLabels.value = [...paneLines.entries()].map(([paneIndex, lines]) => {
+    const paneElement = panes[paneIndex]?.getHTMLElement()
+    const paneRect = paneElement?.getBoundingClientRect()
+    const paneHeight = panes[paneIndex]?.getHeight() ?? paneRect?.height
+    return {
+      key: `pane-${paneIndex}`,
+      paneIndex,
+      top: paneRect == null ? 7 : paneRect.top - hostTop + 7,
+      height: paneHeight == null ? null : Math.max(0, paneHeight - 10),
+      lines,
+    }
+  })
+}
+
 /**
  * 十字光标浮层。
  *
@@ -627,18 +996,11 @@ function createCrosshairHandler(context: {
 }) {
   const { series, eventPrices, pricePrecision, candleSpacing } = context
   const formatPrice = (value: number | undefined) => (value == null ? '-' : Number(value).toFixed(pricePrecision))
-  const compact = (value: number) =>
-    new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(value)
-  const formatIndicatorValue = (value: number, format?: 'volume' | 'oscillator') => {
-    if (format === 'volume') return compact(value)
-    if (format === 'oscillator') return Number(value).toFixed(4)
-    return formatPrice(value)
-  }
 
   return (param: MouseEventParams<Time>) => {
     if (!param.point || param.time === undefined) {
       hoverLabel.value = null
-      indicatorLabels.value = []
+      updatePaneLabels()
       return
     }
     const candle = param.seriesData.get(series) as
@@ -660,7 +1022,7 @@ function createCrosshairHandler(context: {
       { label: '涨跌', value: formatPrice(change) },
       { label: '涨跌幅', value: `${changePercent.toFixed(2)}%` },
       { label: '振幅', value: `${amplitude.toFixed(2)}%` },
-      { label: '成交量', value: sourceCandle == null ? '-' : compact(sourceCandle.volume) },
+      { label: '成交量', value: sourceCandle == null ? '-' : compactIndicatorValue(sourceCandle.volume) },
       ...events.map((event) => ({ label: event.label, value: formatPrice(event.price) })),
     ]
     hoverLabel.value = {
@@ -668,19 +1030,7 @@ function createCrosshairHandler(context: {
       top: Math.min(Math.max(8, param.point.y + 12), Math.max(8, element.clientHeight - lines.length * 23 - 16)),
       lines,
     }
-    const hostTop = element.getBoundingClientRect().top
-    const panes = chart?.panes() || []
-    indicatorLabels.value = indicatorGroups.flatMap((group) => {
-      const values = group.values.flatMap((item) => {
-        const point = param.seriesData.get(item.series as ISeriesApi<SeriesType, Time>) as
-          { value?: number } | undefined
-        return typeof point?.value === 'number'
-          ? [{ label: item.label, value: formatIndicatorValue(point.value, item.format), color: item.color }]
-          : []
-      })
-      const paneTop = panes[group.paneIndex]?.getHTMLElement()?.getBoundingClientRect().top
-      return values.length ? [{ key: group.key, top: paneTop == null ? 7 : paneTop - hostTop + 7, values }] : []
-    })
+    updatePaneLabels(param.seriesData, candle)
   }
 }
 
@@ -701,7 +1051,11 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
       background: { type: ColorType.Solid, color: colors.background },
       textColor: colors.text,
       attributionLogo: true,
-      panes: { enableResize: true, separatorColor: colors.grid, separatorHoverColor: colors.border },
+      panes: {
+        enableResize: true,
+        separatorColor: colors.paneSeparator,
+        separatorHoverColor: colors.paneSeparatorHover,
+      },
     },
     grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
     rightPriceScale: { borderColor: colors.border },
@@ -718,6 +1072,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   })
 
   const series = chart.addSeries(CandlestickSeries, {
+    ...hiddenLatestValue,
     upColor: colors.up,
     downColor: colors.down,
     borderVisible: false,
@@ -730,10 +1085,12 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   renderedBarTimes = data.map((bar) => Number(bar.time))
   renderedCandleByTime = new Map(data.map((bar) => [Number(bar.time), bar]))
   extremaPricePrecision = pricePrecision
+  indicatorPricePrecision = pricePrecision
   series.setData(data)
   dataUpdaters.push((nextData) => series.setData(nextData))
 
   setupIndicators(chart, data, priceFormat)
+  updatePaneLabels()
 
   const overlayMarkers: SeriesMarker<UTCTimestamp>[] = []
   for (const overlay of props.overlays || []) {
@@ -909,6 +1266,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   // 这里必须停下，不能再往一个已经脱离文档的 host 上挂 observer。
   if (disposed || !host.value) return
   restorePaneHeights()
+  refreshIndicatorPositions()
   updateExtremaPoints()
   refreshExtremaLabels()
   requestAnimationFrame(() => {
@@ -1009,6 +1367,7 @@ async function updateChartData() {
   renderedBarTimes = nextData.map((bar) => Number(bar.time))
   renderedCandleByTime = new Map(nextData.map((bar) => [Number(bar.time), bar]))
   dataUpdaters.forEach((update) => update(nextData))
+  updatePaneLabels()
   updateExtremaPoints()
   refreshExtremaLabels()
   if (requestedEdgeFilled) requestedEdge = null
@@ -1031,9 +1390,9 @@ watch(
   { immediate: true, deep: true },
 )
 
-// 指标增删要重排窗格，只能重建；但保留视窗，避免勾一个指标就丢失缩放位置。
+// 指标增删或参数变更要重排窗格，只能重建；但保留视窗，避免勾一个指标就丢失缩放位置。
 watch(
-  () => props.indicators,
+  () => [props.indicators, props.indicatorSettings],
   () => void requestRender(true),
   { deep: true },
 )
@@ -1081,11 +1440,16 @@ onBeforeUnmount(() => {
         v-for="label in indicatorLabels"
         :key="label.key"
         class="indicator-hover-label"
-        :style="{ top: `${label.top}px` }"
+        :style="{
+          top: `${label.top}px`,
+          maxHeight: label.height == null ? undefined : `${label.height}px`,
+        }"
       >
-        <span v-for="item in label.values" :key="item.label" :style="{ color: item.color }"
-          >{{ item.label }} {{ item.value }}</span
-        >
+        <div v-for="line in label.lines" :key="line.key" class="indicator-value-line">
+          <span v-for="item in line.values" :key="item.label" :style="{ color: item.color }">
+            {{ item.label }} {{ item.value }}
+          </span>
+        </div>
       </div>
     </div>
     <div
@@ -1149,15 +1513,30 @@ onBeforeUnmount(() => {
   position: absolute;
   z-index: 2;
   left: 9px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
+  display: grid;
+  gap: 2px;
+  box-sizing: border-box;
+  max-width: calc(100% - 86px);
   padding: 3px 6px;
   border-radius: 3px;
   border: 1px solid var(--line);
   background: var(--chart-overlay);
   font: var(--type-meta)/1.3 var(--font-family-mono);
+  overflow: hidden;
   pointer-events: none;
+}
+.indicator-value-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+.indicator-value-line > span {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .chart-height-resizer {
   position: absolute;
