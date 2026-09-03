@@ -431,7 +431,7 @@ export function resolvePricePrecision(
 }
 
 function formatCompactMetric(value: number): string {
-  const units = ['', 'k', 'm', 'b', 't']
+  const units = ['', 'K', 'M', 'B', 'T']
   let scaled = value
   let unitIndex = 0
   while (Math.abs(scaled) >= 999.5 && unitIndex < units.length - 1) {
