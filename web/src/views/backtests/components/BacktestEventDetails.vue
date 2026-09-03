@@ -90,18 +90,10 @@ const description = computed(() => {
 </script>
 
 <template>
-  <p
-    v-if="description"
-    class="event-description"
-  >
+  <p v-if="description" class="event-description">
     {{ description }}
   </p>
-  <div
-    v-if="rows.length"
-    ref="containerRef"
-    class="event-tables-grid"
-    :style="{ '--col-count': targetCols }"
-  >
+  <div v-if="rows.length" ref="containerRef" class="event-tables-grid" :style="{ '--col-count': targetCols }">
     <div
       v-for="(colRows, idx) in splitColumns"
       :key="idx"
@@ -118,19 +110,10 @@ const description = computed(() => {
           </tr>
         </thead>
         <tbody>
-          <tr
-            v-for="row in colRows"
-            :key="row.key"
-            :class="{ 'is-major': row.major }"
-          >
+          <tr v-for="row in colRows" :key="row.key" :class="{ 'is-major': row.major }">
             <th scope="row">
               <span>{{ row.label }}</span>
-              <b
-                v-if="row.major"
-                class="major-mark"
-              >
-                主要
-              </b>
+              <b v-if="row.major" class="major-mark">主要</b>
               <small>{{ row.key }}</small>
             </th>
             <td class="param-value">{{ row.value }}</td>

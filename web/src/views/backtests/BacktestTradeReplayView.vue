@@ -124,11 +124,7 @@ const crumbs = computed(() =>
     :back-to="backTo"
     :crumbs="crumbs"
   >
-    <QueryPanel
-      :pending="tradeQuery.isPending.value"
-      :error="tradeQuery.error.value"
-      @retry="tradeQuery.refetch()"
-    >
+    <QueryPanel :pending="tradeQuery.isPending.value" :error="tradeQuery.error.value" @retry="tradeQuery.refetch()">
       <template v-if="tradeQuery.data.value">
         <div class="trade-summary-strip">
           <div>
@@ -186,11 +182,7 @@ const crumbs = computed(() =>
 
         <section class="detail-section trade-details-section">
           <h3>成交明细</h3>
-          <a-descriptions
-            :column="{ xs: 1, sm: 2, md: 2, lg: 4, xl: 4, xxl: 6 }"
-            layout="vertical"
-            bordered
-          >
+          <a-descriptions :column="{ xs: 1, sm: 2, md: 2, lg: 4, xl: 4, xxl: 6 }" layout="vertical" bordered>
             <a-descriptions-item label="信号时间">
               {{ formatDateTime(tradeQuery.data.value.signal_time) }}
             </a-descriptions-item>
@@ -206,16 +198,10 @@ const crumbs = computed(() =>
               :label="tier.filled ? `${entrySideLabel}${tier.index}` : `限${entrySideLabel}${tier.index}`"
             >
               <span class="tier-price">{{ formatNumber(tier.price, symbolPricePrecision) }}</span>
-              <a-tag
-                :color="tier.filled ? 'success' : 'default'"
-                class="tier-status"
-              >
+              <a-tag :color="tier.filled ? 'success' : 'default'" class="tier-status">
                 {{ tier.filled ? '已成交' : '未成交' }}
               </a-tag>
-              <span
-                v-if="tier.filled"
-                class="tier-times"
-              >
+              <span v-if="tier.filled" class="tier-times">
                 <span>触发 K线 {{ formatDateTime(tier.triggerTime) }}</span>
                 <span>确认 {{ formatDateTime(tier.confirmationTime) }}</span>
               </span>
@@ -230,20 +216,14 @@ const crumbs = computed(() =>
             :empty="eventsQuery.data.value?.items.length === 0"
             @retry="eventsQuery.refetch()"
           >
-            <a-timeline
-              class="timeline-events"
-              aria-label="事件时间线"
-            >
+            <a-timeline class="timeline-events" aria-label="事件时间线">
               <a-timeline-item
                 v-for="(event, index) in eventsQuery.data.value?.items"
                 :key="event.id"
                 :data-sequence="index + 1"
               >
                 <template #dot>
-                  <span
-                    class="event-sequence"
-                    :aria-label="`第 ${index + 1} 个事件`"
-                  >
+                  <span class="event-sequence" :aria-label="`第 ${index + 1} 个事件`">
                     {{ index + 1 }}
                   </span>
                 </template>
@@ -262,11 +242,7 @@ const crumbs = computed(() =>
         </section>
         <section class="detail-section">
           <h3>策略扩展参数</h3>
-          <a-tag
-            v-if="schemaQuery.data.value === null"
-            color="orange"
-            class="schema-fallback"
-          >
+          <a-tag v-if="schemaQuery.data.value === null" color="orange" class="schema-fallback">
             策略 Schema 不存在，显示原始 JSON
           </a-tag>
           <JsonDetails
