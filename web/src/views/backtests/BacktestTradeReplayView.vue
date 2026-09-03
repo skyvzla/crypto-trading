@@ -111,7 +111,7 @@ const crumbs = computed(() => openedFromEquity.value
         <section class="detail-section timeline-section">
           <h3>事件时间线</h3>
           <QueryPanel :pending="eventsQuery.isPending.value" :error="eventsQuery.error.value" :empty="eventsQuery.data.value?.items.length === 0" @retry="eventsQuery.refetch()">
-            <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id"><div class="event-heading"><strong>{{ eventDisplayName(event) }}</strong><time>{{ formatDateTime(event.time) }}</time></div><BacktestEventDetails :event="event" :reference-data="allAttributes" /></a-timeline-item></a-timeline>
+            <a-timeline class="timeline-events" aria-label="事件时间线"><a-timeline-item v-for="(event, index) in eventsQuery.data.value?.items" :key="event.id" :data-sequence="index + 1"><template #dot><span class="event-sequence" :aria-label="`第 ${index + 1} 个事件`">{{ index + 1 }}</span></template><div class="event-heading"><strong>{{ eventDisplayName(event) }}</strong><time>{{ formatDateTime(event.time) }}</time></div><BacktestEventDetails :event="event" :reference-data="allAttributes" /></a-timeline-item></a-timeline>
           </QueryPanel>
         </section>
         <section class="detail-section"><h3>策略扩展参数</h3><a-tag v-if="schemaQuery.data.value === null" color="orange" class="schema-fallback">策略 Schema 不存在，显示原始 JSON</a-tag><JsonDetails :value="allAttributes" :groups="schemaQuery.data.value?.detail_groups || schemaQuery.data.value?.groups" :fields="schemaQuery.data.value?.parameter_fields || schemaQuery.data.value?.fields" /></section>
