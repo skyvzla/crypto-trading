@@ -3,16 +3,19 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import type { BacktestEvent } from '@/api/types'
 import { eventParameterRows } from './eventPresentation'
 
-const props = withDefaults(defineProps<{
-  event: BacktestEvent
-  referenceData?: Record<string, unknown>
-  pricePrecision?: number
-}>(), {
-  pricePrecision: 2
-})
+const props = withDefaults(
+  defineProps<{
+    event: BacktestEvent
+    referenceData?: Record<string, unknown>
+    pricePrecision?: number
+  }>(),
+  {
+    pricePrecision: 2,
+  },
+)
 
 const containerRef = ref<HTMLElement | null>(null)
-const initialWidth = typeof window !== 'undefined' ? (window.innerWidth || 1024) : 1024
+const initialWidth = typeof window !== 'undefined' ? window.innerWidth || 1024 : 1024
 const containerWidth = ref(initialWidth)
 
 let resizeObserver: ResizeObserver | null = null
@@ -45,7 +48,7 @@ const rows = computed(() => eventParameterRows(props.event, props.referenceData,
 
 /**
  * 根据容器实际可用宽度和参数总项数，智能计算最佳分列数量。
- * 单表最小舒适宽度约为 340px，避免过窄导致换行严重；
+ * 单表最小舒适宽度约为 420px，避免过窄导致换行严重；
  * 同时保证每列至少约 3 项，避免参数项被过度打散。
  */
 const targetCols = computed(() => {
@@ -53,9 +56,9 @@ const targetCols = computed(() => {
   if (count <= 3) return 1
   // 每列至少保留 3 项
   const maxColsByItems = Math.max(1, Math.floor(count / 3))
-  // 单列最小舒适宽 340px + 间距 10px
+  // 单列最小舒适宽 420px + 间距 10px
   const width = containerWidth.value || 1024
-  const maxColsByWidth = Math.max(1, Math.floor((width + 10) / 350))
+  const maxColsByWidth = Math.max(1, Math.floor((width + 10) / 420))
   return Math.max(1, Math.min(maxColsByItems, maxColsByWidth))
 })
 
@@ -87,7 +90,12 @@ const description = computed(() => {
 </script>
 
 <template>
-  <p v-if="description" class="event-description">{{ description }}</p>
+  <p
+    v-if="description"
+    class="event-description"
+  >
+    {{ description }}
+  </p>
   <div
     v-if="rows.length"
     ref="containerRef"
@@ -110,14 +118,25 @@ const description = computed(() => {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in colRows" :key="row.key" :class="{ 'is-major': row.major }">
+          <tr
+            v-for="row in colRows"
+            :key="row.key"
+            :class="{ 'is-major': row.major }"
+          >
             <th scope="row">
               <span>{{ row.label }}</span>
-              <b v-if="row.major" class="major-mark">主要</b>
+              <b
+                v-if="row.major"
+                class="major-mark"
+              >
+                主要
+              </b>
               <small>{{ row.key }}</small>
             </th>
             <td class="param-value">{{ row.value }}</td>
-            <td class="threshold-value">{{ row.threshold ?? row.reference }}</td>
+            <td class="threshold-value">
+              {{ row.threshold ?? row.reference }}
+            </td>
           </tr>
         </tbody>
       </table>
@@ -187,9 +206,15 @@ const description = computed(() => {
   font-weight: 500;
 }
 
-.event-parameters thead th:nth-child(1) { width: 38%; }
-.event-parameters thead th:nth-child(2) { width: 30%; }
-.event-parameters thead th:nth-child(3) { width: 32%; }
+.event-parameters thead th:nth-child(1) {
+  width: 50%;
+}
+.event-parameters thead th:nth-child(2) {
+  width: 30%;
+}
+.event-parameters thead th:nth-child(3) {
+  width: 20%;
+}
 
 .event-parameters tbody tr:last-child > * {
   border-bottom: 0;
@@ -237,17 +262,23 @@ const description = computed(() => {
   .event-parameters th,
   .event-parameters td {
     padding: 5px 4px;
-    font-size: 11px;
+    font-size: var(--type-meta);
   }
-  .event-parameters thead th:nth-child(1) { width: 37%; }
-  .event-parameters thead th:nth-child(2) { width: 31%; }
-  .event-parameters thead th:nth-child(3) { width: 32%; }
+  .event-parameters thead th:nth-child(1) {
+    width: 37%;
+  }
+  .event-parameters thead th:nth-child(2) {
+    width: 31%;
+  }
+  .event-parameters thead th:nth-child(3) {
+    width: 32%;
+  }
   .major-mark {
     margin-left: 2px;
-    font-size: 10px;
+    font-size: var(--type-meta);
   }
   .event-parameters tbody th small {
-    font-size: 10px;
+    font-size: var(--type-meta);
   }
 }
 </style>

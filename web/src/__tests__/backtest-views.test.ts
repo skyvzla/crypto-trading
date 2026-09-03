@@ -21,8 +21,8 @@ vi.mock('@/api/backtests', () => ({
     trade: vi.fn(),
     events: vi.fn(),
     strategySchema: vi.fn(),
-    candles: vi.fn()
-  }
+    candles: vi.fn(),
+  },
 }))
 
 /** vue-query 已在 vitest.setup.ts 全局安装，这里只需把路由推到目标地址。 */
@@ -35,39 +35,64 @@ beforeEach(() => vi.clearAllMocks())
 describe('回测关键视图', () => {
   it('图表续页以已加载K线边界为中心扩展窗口', async () => {
     vi.mocked(backtestApi.candles).mockResolvedValue({
-      symbol: 'AKEUSDT', interval: '5m', source: 'binance',
+      symbol: 'AKEUSDT',
+      interval: '5m',
+      source: 'binance',
       candles: [
         { time: 1_749_775_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 },
-        { time: 1_750_224_700, open: 1.1, high: 1.3, low: 1, close: 1.2, volume: 12 }
-      ]
+        { time: 1_750_224_700, open: 1.1, high: 1.3, low: 1, close: 1.2, volume: 12 },
+      ],
     })
     const wrapper = mount(TradeReplayChartPanel, {
       props: {
         researchId: 'r-1',
-        trade: { id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000, entry_price: 1.1, net_pnl: 1 }
+        trade: {
+          id: 't-1',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
       },
       global: {
         stubs: {
           TradeCandlestickChart: {
             emits: ['request-more'],
-            template: '<button aria-label="request-after" @click="$emit(\'request-more\', \'after\')" />'
-          }
-        }
-      }
+            template: '<button aria-label="request-after" @click="$emit(\'request-more\', \'after\')" />',
+          },
+        },
+      },
     })
     await flushPromises()
     await wrapper.get('button[aria-label="request-after"]').trigger('click')
     await flushPromises()
-    expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
-      start_ms: 1_749_999_700_000,
-      end_ms: 1_750_449_700_000
-    }))
+    expect(backtestApi.candles).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        start_ms: 1_749_999_700_000,
+        end_ms: 1_750_449_700_000,
+      }),
+    )
   })
 
   it('研究记录只展示概要并提供两个线性入口', async () => {
     vi.mocked(backtestApi.researches).mockResolvedValue({
-      items: [{ id: 'r-1', name: '7月全币种参数研究', strategy_id: 'spike-short', status: 'completed', trade_count: 1007, symbol_count: 494, win_rate: 0.67, net_pnl: 3304.57, created_at: '2026-08-10T08:00:00Z' }],
-      total: 1, limit: 25, offset: 0
+      items: [
+        {
+          id: 'r-1',
+          name: '7月全币种参数研究',
+          strategy_id: 'spike-short',
+          status: 'completed',
+          trade_count: 1007,
+          symbol_count: 494,
+          win_rate: 0.67,
+          net_pnl: 3304.57,
+          created_at: '2026-08-10T08:00:00Z',
+        },
+      ],
+      total: 1,
+      limit: 25,
+      offset: 0,
     })
     await atRoute()
     const wrapper = mount(BacktestResearchListView)
@@ -82,8 +107,14 @@ describe('回测关键视图', () => {
   it('报表详情按后端 columns 动态生成表头和数据', async () => {
     vi.mocked(backtestApi.report).mockResolvedValue({
       descriptor: { type: 'pnl_bucket', title: '盈亏金额分组' },
-      columns: [{ key: 'bucket', title: '盈亏区间' }, { key: 'trade_count', title: '交易数', type: 'number' }],
-      rows: [{ bucket: '盈利大于10U', trade_count: 18 }], total: 1, limit: 50, offset: 0
+      columns: [
+        { key: 'bucket', title: '盈亏区间' },
+        { key: 'trade_count', title: '交易数', type: 'number' },
+      ],
+      rows: [{ bucket: '盈利大于10U', trade_count: 18 }],
+      total: 1,
+      limit: 50,
+      offset: 0,
     })
     await atRoute('/backtests/r-1/reports/pnl_bucket')
     const wrapper = mount(BacktestReportDetailView)
@@ -97,7 +128,10 @@ describe('回测关键视图', () => {
 
   it('交易对列表从 URL 恢复筛选和服务端排序', async () => {
     vi.mocked(backtestApi.symbols).mockResolvedValue({
-      items: [{ symbol: 'AKEUSDT', trade_count: 2, win_rate: 0.5, net_pnl: -10 }], total: 1, limit: 25, offset: 0
+      items: [{ symbol: 'AKEUSDT', trade_count: 2, win_rate: 0.5, net_pnl: -10 }],
+      total: 1,
+      limit: 25,
+      offset: 0,
     })
     await atRoute('/backtests/r-1/symbols?symbol_filter=AKE&sort_by=win_rate&sort_order=asc')
     const wrapper = mount(BacktestSymbolListView)
@@ -112,7 +146,7 @@ describe('回测关键视图', () => {
       items: filter === 'NO_MATCH' ? [] : [{ symbol: 'AKEUSDT', trade_count: 2, win_rate: 0.5, net_pnl: -10 }],
       total: filter === 'NO_MATCH' ? 0 : 1,
       limit,
-      offset
+      offset,
     }))
     await atRoute('/backtests/r-1/symbols?symbol_filter=NO_MATCH')
     const wrapper = mount(BacktestSymbolListView)
@@ -131,30 +165,68 @@ describe('回测关键视图', () => {
 
   it('交易明细从 URL 恢复筛选并提供主要字段排序', async () => {
     vi.mocked(backtestApi.trades).mockResolvedValue({
-      items: [{ id: 't-1', symbol: 'AKEUSDT', entry_time: 1_750_000_000_000, entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10, net_return: -0.1, winner: false }],
-      total: 1, limit: 25, offset: 0
+      items: [
+        {
+          id: 't-1',
+          symbol: 'AKEUSDT',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          exit_time: 1_750_001_800_000,
+          exit_price: 1.2,
+          net_pnl: -10,
+          net_return: -0.1,
+          winner: false,
+        },
+      ],
+      total: 1,
+      limit: 25,
+      offset: 0,
     })
-    await atRoute('/backtests/r-1/symbols/AKEUSDT/trades?result=loss&min_pnl=-100&trade_sort_by=net_pnl&trade_sort_order=asc')
+    await atRoute(
+      '/backtests/r-1/symbols/AKEUSDT/trades?result=loss&min_pnl=-100&trade_sort_by=net_pnl&trade_sort_order=asc',
+    )
     const wrapper = mount(BacktestTradeListView)
     await flushPromises()
-    expect(backtestApi.trades).toHaveBeenCalledWith('r-1', 'AKEUSDT', 25, 0, expect.objectContaining({
-      winner: false, min_pnl: -100, sort_by: 'net_pnl', sort_order: 'asc'
-    }))
+    expect(backtestApi.trades).toHaveBeenCalledWith(
+      'r-1',
+      'AKEUSDT',
+      25,
+      0,
+      expect.objectContaining({
+        winner: false,
+        min_pnl: -100,
+        sort_by: 'net_pnl',
+        sort_order: 'asc',
+      }),
+    )
     expect(wrapper.find('input[placeholder="最低盈亏 U"]').exists()).toBe(true)
     expect(wrapper.findAll('.ant-table-column-sorters').length).toBeGreaterThanOrEqual(10)
   })
 
   it('收益曲线默认以500U资金池、500U储备和50%盈利复投回放', async () => {
     vi.mocked(backtestApi.replayParameterSets).mockResolvedValue({
-      items: [{ parameters: {}, trade_count: 1, net_pnl: 50 }]
+      items: [{ parameters: {}, trade_count: 1, net_pnl: 50 }],
     })
     vi.mocked(backtestApi.replayTrades).mockResolvedValue({
       parameters: {},
-      items: [{ id: 't-1', symbol: 'AKEUSDT', entry_time: 1_750_000_000_000, exit_time: 1_750_001_800_000, entry_price: 1, exit_price: 0.9, net_pnl: 50, gross_pnl: 50, entry_notional: 500, gross_return: 0.1 }]
+      items: [
+        {
+          id: 't-1',
+          symbol: 'AKEUSDT',
+          entry_time: 1_750_000_000_000,
+          exit_time: 1_750_001_800_000,
+          entry_price: 1,
+          exit_price: 0.9,
+          net_pnl: 50,
+          gross_pnl: 50,
+          entry_notional: 500,
+          gross_return: 0.1,
+        },
+      ],
     })
     await atRoute('/backtests/r-1/equity')
     const wrapper = mount(BacktestEquityReplayView, {
-      global: { stubs: { EquityCurveChart: true } }
+      global: { stubs: { EquityCurveChart: true } },
     })
     await flushPromises()
 
@@ -172,15 +244,26 @@ describe('回测关键视图', () => {
 
   it('从收益曲线打开单笔复盘时，返回按钮回到收益曲线', async () => {
     vi.mocked(backtestApi.trade).mockResolvedValue({
-      id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000,
-      entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10
+      id: 't-1',
+      symbol: 'AKEUSDT',
+      strategy_id: 'spike-short',
+      entry_time: 1_750_000_000_000,
+      entry_price: 1.1,
+      exit_time: 1_750_001_800_000,
+      exit_price: 1.2,
+      net_pnl: -10,
     })
     vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
     vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
-    vi.mocked(backtestApi.candles).mockResolvedValue({ symbol: 'AKEUSDT', interval: '5m', source: 'binance', candles: [] })
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT',
+      interval: '5m',
+      source: 'binance',
+      candles: [],
+    })
     await atRoute('/backtests/r-1/trades/t-1?from=equity')
     const wrapper = mount(BacktestTradeReplayView, {
-      global: { stubs: { TradeCandlestickChart: true } }
+      global: { stubs: { TradeCandlestickChart: true } },
     })
     await flushPromises()
 
@@ -191,32 +274,55 @@ describe('回测关键视图', () => {
 
   it('单笔复盘按1500根窗口加载，并在退出定位时重新以退出时间取数', async () => {
     vi.mocked(backtestApi.trade).mockResolvedValue({
-      id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000,
-      entry_price: 1.1, exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10,
-      trade_id: 'backtest-trade:AKEUSDT:1', campaign_id: 'spike_short:AKEUSDT:1750000000000',
-      side: 'SHORT', tier_prices: [1.1, 1.2, 1.3],
+      id: 't-1',
+      symbol: 'AKEUSDT',
+      strategy_id: 'spike-short',
+      entry_time: 1_750_000_000_000,
+      entry_price: 1.1,
+      exit_time: 1_750_001_800_000,
+      exit_price: 1.2,
+      net_pnl: -10.12345,
+      trade_id: 'backtest-trade:AKEUSDT:1',
+      campaign_id: 'spike_short:AKEUSDT:1750000000000',
+      side: 'SHORT',
+      tier_prices: [1.1, 1.2, 1.3],
       fills: [
         { id: 'f-1', time: 1_750_000_000_000, price: 1.1, side: 'SELL' },
-        { id: 'f-exit', time: 1_750_001_800_000, price: 1.2, side: 'BUY' }
-      ]
+        { id: 'f-exit', time: 1_750_001_800_000, price: 1.2, side: 'BUY' },
+      ],
     })
     vi.mocked(backtestApi.events).mockResolvedValue({
-      items: [{
-        id: 1, time: 1_750_000_000_000, type: 'entry_plan_created', title: 'entry_plan_created', description: null, price: null,
-        data: { rise_5s: '0.06', rise_threshold_5s: '0.05', tier_prices: ['1.1', '1.2', '1.3'], invalid_price: '1.4' }
-      }]
+      items: [
+        {
+          id: 1,
+          time: 1_750_000_000_000,
+          type: 'entry_plan_created',
+          title: 'entry_plan_created',
+          description: null,
+          price: null,
+          data: {
+            rise_5s: '0.06',
+            rise_threshold_5s: '0.05',
+            tier_prices: ['1.1', '1.2', '1.3'],
+            invalid_price: '1.4',
+          },
+        },
+      ],
     })
     vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
     vi.mocked(backtestApi.candles).mockResolvedValue({
-      symbol: 'AKEUSDT', interval: '5m', source: 'binance',
-      candles: [{ time: 1_750_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }]
+      symbol: 'AKEUSDT',
+      interval: '5m',
+      source: 'binance',
+      candles: [{ time: 1_750_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }],
     })
     await atRoute('/backtests/r-1/trades/t-1?symbol_filter=AKE&result=loss')
     const wrapper = mount(BacktestTradeReplayView, {
-      global: { stubs: { TradeCandlestickChart: true } }
+      global: { stubs: { TradeCandlestickChart: true } },
     })
     await flushPromises()
     expect(wrapper.find('.event-heading').text()).toContain('入场计划创建（entry_plan_created）')
+    expect(wrapper.find('.trade-summary-strip').text()).toContain('-10.123 U')
     expect(wrapper.find('.event-heading time').text()).not.toBe('')
     expect(wrapper.find('.event-tables-grid').exists()).toBe(true)
     expect(wrapper.find('.event-group-card').exists()).toBe(false)
@@ -241,17 +347,21 @@ describe('回测关键视图', () => {
     expect(wrapper.find('.line-visibility-menu').exists()).toBe(false)
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
-    expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
-      start_ms: 1_749_775_000_000,
-      end_ms: 1_750_225_000_000,
-      source: 'binance'
-    }))
+    expect(backtestApi.candles).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        start_ms: 1_749_775_000_000,
+        end_ms: 1_750_225_000_000,
+        source: 'binance',
+      }),
+    )
     await wrapper.get('button[aria-label="跳转到退出成交"]').trigger('click')
     await flushPromises()
-    expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
-      start_ms: 1_749_776_800_000,
-      end_ms: 1_750_226_800_000
-    }))
+    expect(backtestApi.candles).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        start_ms: 1_749_776_800_000,
+        end_ms: 1_750_226_800_000,
+      }),
+    )
     await wrapper.get('input[value="1s"]').trigger('change')
     await flushPromises()
     expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({ source: 'archive', interval: '1s' }))
@@ -265,18 +375,33 @@ describe('回测关键视图', () => {
 
   it('单笔复盘将成交明细、事件时间线和扩展参数纵向排列，并使成交字段按屏幕响应式分列', async () => {
     vi.mocked(backtestApi.trade).mockResolvedValue({
-      id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000,
-      entry_price: 1.1, signal_time: 1_750_000_000_000, signal_price: 1.1, invalid_price: 1.4,
-      exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10, tier_prices: [1.1]
+      id: 't-1',
+      symbol: 'AKEUSDT',
+      strategy_id: 'spike-short',
+      entry_time: 1_750_000_000_000,
+      entry_price: 1.1,
+      signal_time: 1_750_000_000_000,
+      signal_price: 1.1,
+      invalid_price: 1.4,
+      exit_time: 1_750_001_800_000,
+      exit_price: 1.2,
+      net_pnl: -10,
+      tier_prices: [1.1],
     })
     vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
     vi.mocked(backtestApi.strategySchema).mockResolvedValue({
-      strategy_id: 'spike-short', fields: [{ key: 'rise_5s', label: '5 秒涨幅' }]
+      strategy_id: 'spike-short',
+      fields: [{ key: 'rise_5s', label: '5 秒涨幅' }],
     })
-    vi.mocked(backtestApi.candles).mockResolvedValue({ symbol: 'AKEUSDT', interval: '5m', source: 'binance', candles: [] })
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT',
+      interval: '5m',
+      source: 'binance',
+      candles: [],
+    })
     await atRoute('/backtests/r-1/trades/t-1')
     const wrapper = mount(BacktestTradeReplayView, {
-      global: { stubs: { TradeCandlestickChart: true } }
+      global: { stubs: { TradeCandlestickChart: true } },
     })
     await flushPromises()
 
