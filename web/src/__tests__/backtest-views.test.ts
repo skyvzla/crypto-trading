@@ -6,6 +6,7 @@ import BacktestEquityReplayView from '@/views/backtests/BacktestEquityReplayView
 import BacktestSymbolListView from '@/views/backtests/BacktestSymbolListView.vue'
 import BacktestTradeListView from '@/views/backtests/BacktestTradeListView.vue'
 import BacktestTradeReplayView from '@/views/backtests/BacktestTradeReplayView.vue'
+import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
 import { backtestApi } from '@/api/backtests'
 import { router } from '@/router'
 
@@ -32,6 +33,37 @@ async function atRoute(path = '/') {
 beforeEach(() => vi.clearAllMocks())
 
 describe('回测关键视图', () => {
+  it('图表续页以已加载K线边界为中心扩展窗口', async () => {
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT', interval: '5m', source: 'binance',
+      candles: [
+        { time: 1_749_775_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 },
+        { time: 1_750_224_700, open: 1.1, high: 1.3, low: 1, close: 1.2, volume: 12 }
+      ]
+    })
+    const wrapper = mount(TradeReplayChartPanel, {
+      props: {
+        researchId: 'r-1',
+        trade: { id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000, entry_price: 1.1, net_pnl: 1 }
+      },
+      global: {
+        stubs: {
+          TradeCandlestickChart: {
+            emits: ['request-more'],
+            template: '<button aria-label="request-after" @click="$emit(\'request-more\', \'after\')" />'
+          }
+        }
+      }
+    })
+    await flushPromises()
+    await wrapper.get('button[aria-label="request-after"]').trigger('click')
+    await flushPromises()
+    expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({
+      start_ms: 1_749_999_700_000,
+      end_ms: 1_750_449_700_000
+    }))
+  })
+
   it('研究记录只展示概要并提供两个线性入口', async () => {
     vi.mocked(backtestApi.researches).mockResolvedValue({
       items: [{ id: 'r-1', name: '7月全币种参数研究', strategy_id: 'spike-short', status: 'completed', trade_count: 1007, symbol_count: 494, win_rate: 0.67, net_pnl: 3304.57, created_at: '2026-08-10T08:00:00Z' }],

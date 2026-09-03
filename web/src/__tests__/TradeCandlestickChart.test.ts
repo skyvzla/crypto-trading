@@ -15,6 +15,7 @@ const disconnect = vi.fn()
 const paneSetStretchFactor = vi.fn()
 const subscribeCrosshairMove = vi.fn()
 const subscribeVisibleLogicalRangeChange = vi.fn()
+let visibleLogicalRange = { from: 0, to: 100 }
 const seriesApis: Array<Record<string, unknown>> = []
 const seriesOptions: Array<Record<string, unknown>> = []
 const paneMocks = Array.from({ length: 4 }, (_, index) => ({
@@ -48,7 +49,7 @@ vi.mock('lightweight-charts', () => ({
       seriesOptions.push(options)
       return api
     },
-    timeScale: () => ({ fitContent: vi.fn(), getVisibleRange: vi.fn(() => ({ from: 1_754_000_030, to: 1_754_000_060 })), getVisibleLogicalRange: vi.fn(() => ({ from: 0, to: 100 })), setVisibleRange, setVisibleLogicalRange, timeToCoordinate: vi.fn(() => 100), subscribeVisibleLogicalRangeChange: (handler: unknown) => subscribeVisibleLogicalRangeChange(handler), unsubscribeVisibleLogicalRangeChange: vi.fn() }),
+    timeScale: () => ({ fitContent: vi.fn(), getVisibleRange: vi.fn(() => ({ from: 1_754_000_030, to: 1_754_000_060 })), getVisibleLogicalRange: vi.fn(() => visibleLogicalRange), setVisibleRange, setVisibleLogicalRange, timeToCoordinate: vi.fn(() => 100), subscribeVisibleLogicalRangeChange: (handler: unknown) => subscribeVisibleLogicalRangeChange(handler), unsubscribeVisibleLogicalRangeChange: vi.fn() }),
     priceScale: () => ({ applyOptions: vi.fn() }),
     panes: () => paneMocks,
     subscribeCrosshairMove: (handler: unknown) => subscribeCrosshairMove(handler),
@@ -62,6 +63,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   seriesApis.length = 0
   seriesOptions.length = 0
+  visibleLogicalRange = { from: 0, to: 100 }
   localStorage.clear()
   vi.stubGlobal('ResizeObserver', class {
     observe = observe
@@ -126,7 +128,7 @@ describe('TradeCandlestickChart', () => {
     expect(createSeriesMarkers).toHaveBeenCalled()
   })
 
-  it('接近当前视窗边缘时预取，并在同方向数据接入后允许继续加载', async () => {
+  it('接近当前视窗边缘时预取，并在同方向数据接入后自动继续加载', async () => {
     const start = 1_754_000_000
     const candles = Array.from({ length: 300 }, (_, index) => ({ time: start + index, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }))
     const wrapper = mount(TradeCandlestickChart, {
@@ -140,10 +142,33 @@ describe('TradeCandlestickChart', () => {
     const rangeHandler = subscribeVisibleLogicalRangeChange.mock.calls.at(-1)?.[0] as (range: { from: number; to: number }) => void
     rangeHandler({ from: 42, to: 102 })
     expect(wrapper.emitted('request-more')).toEqual([['before']])
-    await wrapper.setProps({ candles: [...candles, { time: start + 300, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }] })
+    await wrapper.setProps({ candles: [{ time: start - 1, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }, ...candles] })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    rangeHandler({ from: 42, to: 102 })
     expect(wrapper.emitted('request-more')).toEqual([['before'], ['before']])
+  })
+
+  it('缩小到两侧都进入预取区时加载更近的右侧后续K线', async () => {
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 300 }, (_, index) => ({ time: start + index, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }))
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        trade: { id: 't-wide', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: (start + 150) * 1000, entry_price: 1.1, exit_time: (start + 302) * 1000, net_pnl: 1 }
+      }
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await new Promise((resolve) => setTimeout(resolve, 550))
+    const rangeHandler = subscribeVisibleLogicalRangeChange.mock.calls.at(-1)?.[0] as (range: { from: number; to: number }) => void
+    visibleLogicalRange = { from: 100, to: 650 }
+    rangeHandler(visibleLogicalRange)
+    expect(wrapper.emitted('request-more')).toEqual([['after']])
+    await wrapper.setProps({ candles: [
+      ...candles,
+      { time: start + 300, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 },
+      { time: start + 301, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }
+    ] })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(wrapper.emitted('request-more')).toEqual([['after'], ['after']])
   })
 
   it('将回测成交确认时刻定位到实际触价的前一根1秒K线', async () => {

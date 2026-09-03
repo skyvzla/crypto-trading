@@ -69,7 +69,7 @@ const legendItems = computed(() => {
 })
 
 const interval = ref('5m')
-const windowShiftBars = ref(0)
+const windowCenterMs = ref<number | null>(null)
 const chartRef = ref<InstanceType<typeof TradeCandlestickChart> | null>(null)
 const chartSection = ref<HTMLElement | null>(null)
 const isFullscreen = ref(false)
@@ -96,7 +96,7 @@ const candleParams = computed(() => {
   const focus = focusTimeMs.value ?? entry
   const halfWindowBars = 750
   const padding = intervalMs[interval.value] * halfWindowBars
-  const windowCenter = Math.max(padding, focus + windowShiftBars.value * intervalMs[interval.value])
+  const windowCenter = Math.max(padding, windowCenterMs.value ?? focus)
   return {
     ...(props.mode === 'backtest' ? { research_id: props.researchId } : {}),
     symbol: props.trade.symbol,
@@ -116,7 +116,7 @@ const candlesQuery = useQuery({
 
 function selectInterval(value: string) {
   interval.value = value
-  windowShiftBars.value = 0
+  windowCenterMs.value = null
 }
 
 async function focusTradeEvent(kind: 'entry' | 'exit') {
@@ -124,15 +124,18 @@ async function focusTradeEvent(kind: 'entry' | 'exit') {
   const target = timestampMs(kind === 'entry' ? (firstFillTime ?? props.trade.entry_time) : props.trade.exit_time)
   if (target === null) return
   focusTimeMs.value = target
-  windowShiftBars.value = 0
+  windowCenterMs.value = null
   await nextTick()
   if (kind === 'entry') chartRef.value?.focusEntry?.()
   else chartRef.value?.focusExit?.()
 }
 
 function requestMore(direction: 'before' | 'after') {
-  const shiftBars = 750
-  windowShiftBars.value += direction === 'before' ? -shiftBars : shiftBars
+  const boundary = direction === 'before'
+    ? loadedCandles.value[0]?.time
+    : loadedCandles.value[loadedCandles.value.length - 1]?.time
+  if (boundary === undefined) return
+  windowCenterMs.value = boundary * 1_000
 }
 
 async function toggleFullscreen() {
@@ -163,7 +166,7 @@ watch(() => candlesQuery.data.value, (response) => {
 }, { immediate: true })
 watch(() => [props.trade.symbol, props.trade.entry_time, props.trade.exit_time, interval.value, source.value], () => {
   loadedCandles.value = []
-  windowShiftBars.value = 0
+  windowCenterMs.value = null
 })
 watch(() => props.trade.entry_time, () => { focusTimeMs.value = null })
 </script>

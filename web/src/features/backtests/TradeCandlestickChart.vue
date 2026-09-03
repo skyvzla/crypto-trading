@@ -93,6 +93,7 @@ let priceLineHandles: IPriceLine[] = []
 let extremaPoints: Array<{ time: UTCTimestamp; price: number; position: 'above' | 'below'; text: string }> = []
 let extremaPricePrecision = 2
 let suppressEdgeRequestsUntil = 0
+let handleVisibleRangeChange: ((range: { from: number; to: number } | null, force?: boolean) => void) | null = null
 
 // 渲染串行化。renderChart 内部有 await，多个 watcher 在同一 tick 触发时会交错：
 // 前一次刚 destroy 还没 createChart，后一次就进来了，最后同一个 host 上挂了两张图，
@@ -523,6 +524,7 @@ function destroy() {
   candleSeries = null
   extremaPoints = []
   extremaPricePrecision = 2
+  handleVisibleRangeChange = null
   chart?.remove()
   chart = null
 }
@@ -759,15 +761,19 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   chart.subscribeCrosshairMove(handleCrosshair)
   unsubscribeCrosshair = () => chart?.unsubscribeCrosshairMove(handleCrosshair)
 
-  const requestMore = (range: { from: number; to: number } | null) => {
+  const requestMore = (range: { from: number; to: number } | null, force = false) => {
     updateExtremaPoints()
     refreshExtremaLabels()
-    if (!range || Date.now() < suppressEdgeRequestsUntil) return
+    if (!range || (!force && Date.now() < suppressEdgeRequestsUntil)) return
     const visibleBars = Math.max(1, range.to - range.from)
     const prefetchBars = Math.max(20, Math.ceil(visibleBars * 3))
     const nearStart = range.from <= prefetchBars
     const nearEnd = range.to >= renderedBarTimes.length - 1 - prefetchBars
-    const edge = nearStart ? 'before' : nearEnd ? 'after' : null
+    // 缩得足够小时两侧会同时进入预取区。此时按离数据边界的距离选择，
+    // 否则固定优先 before 会让右侧后续 K 线永远得不到加载机会。
+    const edge = nearStart && nearEnd
+      ? (range.from < renderedBarTimes.length - 1 - range.to ? 'before' : 'after')
+      : nearStart ? 'before' : nearEnd ? 'after' : null
     if (edge && edge !== requestedEdge) {
       requestedEdge = edge
       emit('request-more', edge)
@@ -775,6 +781,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
       requestedEdge = null
     }
   }
+  handleVisibleRangeChange = requestMore
   suppressEdgeRequestsUntil = Date.now() + EDGE_REQUEST_SUPPRESS_MS
   if (preservedRange) timeScale.setVisibleRange(preservedRange)
   else timeScale.setVisibleLogicalRange({
@@ -860,6 +867,13 @@ async function updateChartData() {
   }
   const nextData = normalizeCandles(props.candles)
   const visibleRange = chart.timeScale().getVisibleRange()
+  const previousFirst = Number(renderedCandles[0]?.time)
+  const previousLast = Number(renderedCandles[renderedCandles.length - 1]?.time)
+  const nextFirst = Number(nextData[0]?.time)
+  const nextLast = Number(nextData[nextData.length - 1]?.time)
+  const requestedEdgeFilled = requestedEdge === 'before'
+    ? nextFirst < previousFirst
+    : requestedEdge === 'after' && nextLast > previousLast
   const focusArrived = !containsTime(renderedCandles, props.focusTime) && containsTime(nextData, props.focusTime)
   const eventTimes = [
     props.trade.signal_time,
@@ -870,6 +884,9 @@ async function updateChartData() {
   const markerArrived = eventTimes.some((time) => !containsTime(renderedCandles, time) && containsTime(nextData, time))
   if (focusArrived || markerArrived) {
     await renderChart(focusArrived ? null : visibleRange)
+    if (requestedEdgeFilled && chart) {
+      handleVisibleRangeChange?.(chart.timeScale().getVisibleLogicalRange(), true)
+    }
     return
   }
   renderedCandles = nextData
@@ -878,8 +895,11 @@ async function updateChartData() {
   dataUpdaters.forEach((update) => update(nextData))
   updateExtremaPoints()
   refreshExtremaLabels()
+  if (requestedEdgeFilled) requestedEdge = null
   if (visibleRange) chart.timeScale().setVisibleRange(visibleRange)
-  requestedEdge = null
+  if (requestedEdgeFilled) {
+    handleVisibleRangeChange?.(chart.timeScale().getVisibleLogicalRange())
+  }
 }
 
 watch(() => props.candles, () => void requestDataUpdate(), { deep: true })
