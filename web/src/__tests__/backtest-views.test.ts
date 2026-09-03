@@ -260,4 +260,31 @@ describe('回测关键视图', () => {
     expect(backtestApi.trade).not.toHaveBeenCalledWith('r-1', '')
     expect(backtestApi.events).not.toHaveBeenCalledWith('r-1', '')
   })
+
+  it('单笔复盘将成交明细、事件时间线和扩展参数纵向排列，并使成交字段按屏幕响应式分列', async () => {
+    vi.mocked(backtestApi.trade).mockResolvedValue({
+      id: 't-1', symbol: 'AKEUSDT', strategy_id: 'spike-short', entry_time: 1_750_000_000_000,
+      entry_price: 1.1, signal_time: 1_750_000_000_000, signal_price: 1.1, invalid_price: 1.4,
+      exit_time: 1_750_001_800_000, exit_price: 1.2, net_pnl: -10, tier_prices: [1.1]
+    })
+    vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
+    vi.mocked(backtestApi.strategySchema).mockResolvedValue({
+      strategy_id: 'spike-short', fields: [{ key: 'rise_5s', label: '5 秒涨幅' }]
+    })
+    vi.mocked(backtestApi.candles).mockResolvedValue({ symbol: 'AKEUSDT', interval: '5m', source: 'binance', candles: [] })
+    await atRoute('/backtests/r-1/trades/t-1')
+    const wrapper = mount(BacktestTradeReplayView, {
+      global: { stubs: { TradeCandlestickChart: true } }
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.replay-details').exists()).toBe(false)
+    expect(wrapper.find('.trade-details-section h3').text()).toBe('成交明细')
+    expect(wrapper.find('.timeline-section h3').text()).toBe('事件时间线')
+    expect(wrapper.find('.timeline-section + .detail-section h3').text()).toBe('策略扩展参数')
+
+    const descriptions = wrapper.find('.trade-details-section').findComponent({ name: 'ADescriptions' })
+    expect(descriptions.exists()).toBe(true)
+    expect(descriptions.props('column')).toEqual({ xs: 1, sm: 2, md: 2, lg: 4, xl: 4, xxl: 6 })
+  })
 })

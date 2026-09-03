@@ -92,30 +92,28 @@ const crumbs = computed(() => openedFromEquity.value
 
         <TradeReplayChartPanel :trade="tradeQuery.data.value" :research-id="researchId" :overlays="schemaQuery.data.value?.chart_overlays" />
 
-        <div class="replay-details">
-          <section class="detail-section">
-            <h3>成交明细</h3>
-            <a-descriptions :column="3" layout="vertical" bordered>
-              <a-descriptions-item label="信号时间">{{ formatDateTime(tradeQuery.data.value.signal_time) }}</a-descriptions-item>
-              <a-descriptions-item label="信号价格">{{ formatNumber(tradeQuery.data.value.signal_price, 8) }}</a-descriptions-item>
-              <a-descriptions-item label="失效价格">{{ formatNumber(tradeQuery.data.value.invalid_price, 8) }}</a-descriptions-item>
-              <a-descriptions-item v-for="tier in tierDetails" :key="tier.index" :label="tier.filled ? `${entrySideLabel}${tier.index}` : `限${entrySideLabel}${tier.index}`">
-                <span class="tier-price">{{ formatNumber(tier.price, 8) }}</span>
-                <a-tag :color="tier.filled ? 'success' : 'default'" class="tier-status">{{ tier.filled ? '已成交' : '未成交' }}</a-tag>
-                <span v-if="tier.filled" class="tier-times">
-                  <span>触发 K线 {{ formatDateTime(tier.triggerTime) }}</span>
-                  <span>确认 {{ formatDateTime(tier.confirmationTime) }}</span>
-                </span>
-              </a-descriptions-item>
-            </a-descriptions>
-          </section>
-          <section class="detail-section timeline-section">
-            <h3>事件时间线</h3>
-            <QueryPanel :pending="eventsQuery.isPending.value" :error="eventsQuery.error.value" :empty="eventsQuery.data.value?.items.length === 0" @retry="eventsQuery.refetch()">
-              <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id"><div class="event-heading"><strong>{{ eventDisplayName(event) }}</strong><time>{{ formatDateTime(event.time) }}</time></div><BacktestEventDetails :event="event" :reference-data="allAttributes" /></a-timeline-item></a-timeline>
-            </QueryPanel>
-          </section>
-        </div>
+        <section class="detail-section trade-details-section">
+          <h3>成交明细</h3>
+          <a-descriptions :column="{ xs: 1, sm: 2, md: 2, lg: 4, xl: 4, xxl: 6 }" layout="vertical" bordered>
+            <a-descriptions-item label="信号时间">{{ formatDateTime(tradeQuery.data.value.signal_time) }}</a-descriptions-item>
+            <a-descriptions-item label="信号价格">{{ formatNumber(tradeQuery.data.value.signal_price, 8) }}</a-descriptions-item>
+            <a-descriptions-item label="失效价格">{{ formatNumber(tradeQuery.data.value.invalid_price, 8) }}</a-descriptions-item>
+            <a-descriptions-item v-for="tier in tierDetails" :key="tier.index" :label="tier.filled ? `${entrySideLabel}${tier.index}` : `限${entrySideLabel}${tier.index}`">
+              <span class="tier-price">{{ formatNumber(tier.price, 8) }}</span>
+              <a-tag :color="tier.filled ? 'success' : 'default'" class="tier-status">{{ tier.filled ? '已成交' : '未成交' }}</a-tag>
+              <span v-if="tier.filled" class="tier-times">
+                <span>触发 K线 {{ formatDateTime(tier.triggerTime) }}</span>
+                <span>确认 {{ formatDateTime(tier.confirmationTime) }}</span>
+              </span>
+            </a-descriptions-item>
+          </a-descriptions>
+        </section>
+        <section class="detail-section timeline-section">
+          <h3>事件时间线</h3>
+          <QueryPanel :pending="eventsQuery.isPending.value" :error="eventsQuery.error.value" :empty="eventsQuery.data.value?.items.length === 0" @retry="eventsQuery.refetch()">
+            <a-timeline><a-timeline-item v-for="event in eventsQuery.data.value?.items" :key="event.id"><div class="event-heading"><strong>{{ eventDisplayName(event) }}</strong><time>{{ formatDateTime(event.time) }}</time></div><BacktestEventDetails :event="event" :reference-data="allAttributes" /></a-timeline-item></a-timeline>
+          </QueryPanel>
+        </section>
         <section class="detail-section"><h3>策略扩展参数</h3><a-tag v-if="schemaQuery.data.value === null" color="orange" class="schema-fallback">策略 Schema 不存在，显示原始 JSON</a-tag><JsonDetails :value="allAttributes" :groups="schemaQuery.data.value?.detail_groups || schemaQuery.data.value?.groups" :fields="schemaQuery.data.value?.parameter_fields || schemaQuery.data.value?.fields" /></section>
       </template>
     </QueryPanel>
