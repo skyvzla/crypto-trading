@@ -74,7 +74,6 @@ interface PaneValue {
   label: string
   value: string
   color: string
-  showLabel?: boolean
 }
 
 interface PaneValueLine {
@@ -444,8 +443,7 @@ function updateGroupLatestValues(group: IndicatorGroup, values: Array<number | n
  * 返回下一个可用窗格号；主图指标（EMA）留在窗格 0。
  */
 function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: Record<string, unknown>) {
-  const theme = palette.value
-  const colors = theme.indicators
+  const colors = palette.value.indicators
   const settings = effectiveIndicatorSettings()
   const percentFormat = { type: 'price' as const, precision: 2, minMove: 0.01 }
   let paneIndex = 1
@@ -459,7 +457,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         lineWidth: 1,
         priceFormat,
       })
-      group.values.push({ label: `EMA${line.period}`, color: line.color, series })
+      group.values.push({ label: `EMA(${line.period})`, color: line.color, series })
     })
     const update = (next: ChartCandle[]) => {
       const values = settings.main.ema.lines.map((line, index) => {
@@ -483,7 +481,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         lineWidth: 1,
         priceFormat,
       })
-      group.values.push({ label: `MA${line.period}`, color: line.color, series })
+      group.values.push({ label: `MA(${line.period})`, color: line.color, series })
     })
     const update = (next: ChartCandle[]) => {
       const values = settings.main.ma.lines.map((line, index) => {
@@ -500,9 +498,9 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
 
   if (settings.main.boll.enabled) {
     const definitions = [
-      { key: 'upper' as const, label: '上轨', color: settings.main.boll.colors.upper },
-      { key: 'middle' as const, label: '中轨', color: settings.main.boll.colors.middle },
-      { key: 'lower' as const, label: '下轨', color: settings.main.boll.colors.lower },
+      { key: 'upper' as const, label: 'BOLL UP', color: settings.main.boll.colors.upper },
+      { key: 'middle' as const, label: 'MID', color: settings.main.boll.colors.middle },
+      { key: 'lower' as const, label: 'DOWN', color: settings.main.boll.colors.lower },
     ]
     const group: IndicatorGroup = { key: 'boll', paneIndex: 0, values: [] }
     definitions.forEach((definition) => {
@@ -547,7 +545,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
       paneIndex,
       values: [{ label: 'VOL', color: colors.volumeLabel, series: volume, format: 'volume' }],
     }
-    const volumeAverageGuides: Array<IPriceLine | null> = []
     settings.sub.volume.ma_lines.forEach((line) => {
       const series = instance.addSeries(
         LineSeries,
@@ -560,8 +557,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         },
         paneIndex,
       )
-      group.values.push({ label: `MAVOL${line.period}`, color: line.color, series, format: 'volume' })
-      volumeAverageGuides.push(null)
+      group.values.push({ label: `MA(${line.period})`, color: line.color, series, format: 'volume' })
     })
     const update = (next: ChartCandle[]) => {
       volume.setData(
@@ -578,18 +574,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         series.setData(lineData(next, seriesValues))
         const latest = seriesValues.at(-1) ?? null
         latestValues.push(latest)
-        if (typeof latest !== 'number') return
-        if (!volumeAverageGuides[index]) {
-          volumeAverageGuides[index] = series.createPriceLine({
-            price: latest,
-            title: `均量${line.period}`,
-            color: line.color,
-            lineVisible: false,
-            axisLabelVisible: true,
-          })
-        } else {
-          volumeAverageGuides[index]?.applyOptions({ price: latest })
-        }
       })
       updateGroupLatestValues(group, latestValues)
     }
@@ -631,9 +615,9 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
       key: 'macd',
       paneIndex,
       values: [
-        { label: 'DIF', color: macdSettings.colors.dif, series: dif },
+        { label: 'MACD DIF', color: macdSettings.colors.dif, series: dif },
         { label: 'DEA', color: macdSettings.colors.dea, series: dea },
-        { label: 'MACD', color: macdSettings.colors.histogram_up, series: histogram },
+        { label: 'HIST', color: macdSettings.colors.histogram_up, series: histogram },
       ],
     }
     const update = (next: ChartCandle[]) => {
@@ -659,14 +643,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
     }
     update(data)
     dataUpdaters.push(update)
-    histogram.createPriceLine({
-      price: 0,
-      title: '0轴',
-      color: theme.paneSeparator,
-      lineStyle: LineStyle.Dotted,
-      lineVisible: true,
-      axisLabelVisible: true,
-    })
     indicatorGroups.push(group)
     paneIndex += 1
   }
@@ -692,7 +668,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
       key: 'kdj',
       paneIndex,
       values: [
-        { label: 'K', color: kdjSettings.colors.k, series: kSeries, format: 'percent' },
+        { label: 'KDJ K', color: kdjSettings.colors.k, series: kSeries, format: 'percent' },
         { label: 'D', color: kdjSettings.colors.d, series: dSeries, format: 'percent' },
         { label: 'J', color: kdjSettings.colors.j, series: jSeries, format: 'percent' },
       ],
@@ -706,16 +682,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
     }
     update(data)
     dataUpdaters.push(update)
-    ;[20, 50, 80].forEach((level) =>
-      kSeries.createPriceLine({
-        price: level,
-        title: String(level),
-        color: theme.paneSeparator,
-        lineStyle: LineStyle.Dotted,
-        lineVisible: level === 50,
-        axisLabelVisible: true,
-      }),
-    )
     indicatorGroups.push(group)
     paneIndex += 1
   }
@@ -733,7 +699,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         },
         paneIndex,
       )
-      group.values.push({ label: `RSI${line.period}`, color: line.color, series, format: 'percent' })
+      group.values.push({ label: `RSI(${line.period})`, color: line.color, series, format: 'percent' })
     })
     const update = (next: ChartCandle[]) => {
       const values = settings.sub.rsi.lines.map((line, index) => {
@@ -745,16 +711,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
     }
     update(data)
     dataUpdaters.push(update)
-    ;[30, 50, 70].forEach((level) =>
-      group.values[0]?.series.createPriceLine({
-        price: level,
-        title: String(level),
-        color: theme.paneSeparator,
-        lineStyle: LineStyle.Dotted,
-        lineVisible: level === 50,
-        axisLabelVisible: true,
-      }),
-    )
     indicatorGroups.push(group)
     paneIndex += 1
   }
@@ -774,7 +730,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
     const group: IndicatorGroup = {
       key: 'atr',
       paneIndex,
-      values: [{ label: `ATR${atrSettings.period}`, color: atrSettings.color, series }],
+      values: [{ label: `ATR(${atrSettings.period})`, color: atrSettings.color, series }],
     }
     const update = (next: ChartCandle[]) => {
       const values = atr(next, atrSettings.period)
@@ -942,11 +898,6 @@ function visibleCandleIndex(visibleRange?: { from: number; to: number } | null):
   return index
 }
 
-function visibleCandleAt(index: number): ChartCandle | undefined {
-  const data = candleSeries?.dataByIndex(index, MismatchDirection.None) as ChartCandle | null | undefined
-  return data && typeof data.open === 'number' ? data : renderedCandles[index]
-}
-
 function indicatorValueAt(item: IndicatorGroup['values'][number], index: number): number | undefined {
   const data = item.series.dataByIndex(index, MismatchDirection.None) as { value?: number } | null
   return typeof data?.value === 'number' && Number.isFinite(data.value) ? data.value : undefined
@@ -959,27 +910,6 @@ function updatePaneLabels(
 ) {
   const paneLines = new Map<number, PaneValueLine[]>()
   const selectedIndex = candle == null ? visibleCandleIndex(visibleRange) : null
-  const selectedCandle = candle ?? (selectedIndex == null ? undefined : visibleCandleAt(selectedIndex))
-  if (selectedCandle) {
-    const priceValues = [
-      { label: '开', value: selectedCandle.open },
-      { label: '高', value: selectedCandle.high },
-      { label: '低', value: selectedCandle.low },
-      { label: '收', value: selectedCandle.close },
-    ].flatMap((item) =>
-      typeof item.value === 'number'
-        ? [
-            {
-              label: item.label,
-              value: Number(item.value).toFixed(indicatorPricePrecision),
-              color: palette.value.text,
-              showLabel: true,
-            },
-          ]
-        : [],
-    )
-    paneLines.set(0, [{ key: 'kline', values: priceValues }])
-  }
 
   indicatorGroups.forEach((group) => {
     const values = group.values.flatMap((item) => {
@@ -993,7 +923,7 @@ function updatePaneLabels(
             ? point.value
             : undefined
       return typeof value === 'number'
-        ? [{ label: item.label, value: formatIndicatorValue(value, item.format), color: item.color, showLabel: false }]
+        ? [{ label: item.label, value: formatIndicatorValue(value, item.format), color: item.color }]
         : []
     })
     if (!values.length) return
@@ -1485,7 +1415,7 @@ onBeforeUnmount(() => {
       >
         <div v-for="line in label.lines" :key="line.key" class="indicator-value-line">
           <span v-for="item in line.values" :key="item.label" :style="{ color: item.color }">
-            <template v-if="item.showLabel">{{ item.label }} </template>{{ item.value }}
+            {{ item.label }} {{ item.value }}
           </span>
         </div>
       </div>

@@ -614,6 +614,17 @@ export function formatEventValue(key: string, value: unknown, pricePrecision?: n
   return String(value)
 }
 
+function hasActualValue(value: unknown): boolean {
+  if (value == null) return false
+  if (typeof value === 'string') return value.trim() !== ''
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value !== 'object') return true
+
+  const prototype = Object.getPrototypeOf(value)
+  const isPlainObject = prototype === Object.prototype || prototype === null
+  return !isPlainObject || Object.keys(value).length > 0
+}
+
 export function eventParameterRows(
   event: Pick<BacktestEvent, 'data' | 'price'> & Partial<Pick<BacktestEvent, 'type'>>,
   referenceData: Record<string, unknown> = {},
@@ -624,17 +635,19 @@ export function eventParameterRows(
     data.price = event.price
   const consumedReferences = new Set<string>()
   const rows = Object.entries(data)
+    .filter(([, value]) => hasActualValue(value))
     .map(([key, value], sourceIndex) => {
       const referenceKeys = (REFERENCE_FIELDS[key] || []).filter(
-        (candidate) => data[candidate] != null || referenceData[candidate] != null,
+        (candidate) => hasActualValue(data[candidate]) || hasActualValue(referenceData[candidate]),
       )
       referenceKeys
-        .filter((referenceKey) => data[referenceKey] != null)
+        .filter((referenceKey) => hasActualValue(data[referenceKey]))
         .forEach((referenceKey) => consumedReferences.add(referenceKey))
       const thresholdValues = referenceKeys
-        .map((referenceKey) =>
-          formatEventValue(referenceKey, data[referenceKey] ?? referenceData[referenceKey], pricePrecision),
-        )
+        .map((referenceKey) => {
+          const referenceValue = hasActualValue(data[referenceKey]) ? data[referenceKey] : referenceData[referenceKey]
+          return formatEventValue(referenceKey, referenceValue, pricePrecision)
+        })
         .filter((val) => val !== '-')
       const thresholdText = thresholdValues.length ? thresholdValues.join('；') : '-'
       return {

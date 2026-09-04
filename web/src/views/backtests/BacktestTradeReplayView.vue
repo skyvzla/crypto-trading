@@ -210,35 +210,37 @@ const crumbs = computed(() =>
         </section>
         <section class="detail-section timeline-section">
           <h3>事件时间线</h3>
-          <QueryPanel
-            :pending="eventsQuery.isPending.value"
-            :error="eventsQuery.error.value"
-            :empty="eventsQuery.data.value?.items.length === 0"
-            @retry="eventsQuery.refetch()"
-          >
-            <a-timeline class="timeline-events" aria-label="事件时间线">
-              <a-timeline-item
-                v-for="(event, index) in eventsQuery.data.value?.items"
-                :key="event.id"
-                :data-sequence="index + 1"
-              >
-                <template #dot>
-                  <span class="event-sequence" :aria-label="`第 ${index + 1} 个事件`">
-                    {{ index + 1 }}
-                  </span>
-                </template>
-                <div class="event-heading">
-                  <strong>{{ eventDisplayName(event) }}</strong>
-                  <time>{{ formatDateTime(event.time) }}</time>
-                </div>
-                <BacktestEventDetails
-                  :event="event"
-                  :reference-data="allAttributes"
-                  :price-precision="symbolPricePrecision"
-                />
-              </a-timeline-item>
-            </a-timeline>
-          </QueryPanel>
+          <div class="timeline-panel">
+            <QueryPanel
+              :pending="eventsQuery.isPending.value"
+              :error="eventsQuery.error.value"
+              :empty="eventsQuery.data.value?.items.length === 0"
+              @retry="eventsQuery.refetch()"
+            >
+              <a-timeline class="timeline-events" aria-label="事件时间线">
+                <a-timeline-item
+                  v-for="(event, index) in eventsQuery.data.value?.items"
+                  :key="event.id"
+                  :data-sequence="index + 1"
+                >
+                  <template #dot>
+                    <span class="event-sequence" :aria-label="`第 ${index + 1} 个事件`">
+                      {{ index + 1 }}
+                    </span>
+                  </template>
+                  <div class="event-heading">
+                    <strong>{{ eventDisplayName(event) }}</strong>
+                    <time>{{ formatDateTime(event.time) }}</time>
+                  </div>
+                  <BacktestEventDetails
+                    :event="event"
+                    :reference-data="allAttributes"
+                    :price-precision="symbolPricePrecision"
+                  />
+                </a-timeline-item>
+              </a-timeline>
+            </QueryPanel>
+          </div>
         </section>
         <section class="detail-section">
           <h3>策略扩展参数</h3>

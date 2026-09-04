@@ -70,6 +70,59 @@ describe('回测事件展示', () => {
     expect(rows.find((row) => row.key === 'loss_pct')?.threshold).toBe('3%')
   })
 
+  it('事件门槛为空占位时回退到该笔交易的有效参考值', () => {
+    const rows = eventParameterRows(
+      {
+        price: null,
+        data: {
+          rise_5s: 0.06,
+          rise_threshold_5s: '   ',
+          volume_multiple_5s: 6,
+          volume_threshold_5s: [],
+        },
+      },
+      {
+        rise_threshold_5s: 0.05,
+        volume_threshold_5s: 5,
+      },
+    )
+
+    expect(rows.find((row) => row.key === 'rise_5s')?.threshold).toBe('5.00%')
+    expect(rows.find((row) => row.key === 'volume_multiple_5s')?.threshold).toBe('5')
+    expect(rows.some((row) => row.key === 'rise_threshold_5s')).toBe(false)
+    expect(rows.some((row) => row.key === 'volume_threshold_5s')).toBe(false)
+  })
+
+  it('移除没有实际测算值的字段，并保留零值和 false', () => {
+    const rows = eventParameterRows(
+      {
+        price: null,
+        data: {
+          rise_5s: 0,
+          exit_required: false,
+          trigger_price: null,
+          // @ts-expect-error Runtime API data can violate the declared JSON value contract.
+          reason: undefined,
+          decision: '   ',
+          tier_prices: [],
+          metrics: {},
+        },
+      },
+      {
+        rise_threshold_5s: 0.05,
+        volume_threshold_5s: 5,
+      },
+    )
+
+    expect(rows.map((row) => row.key)).toEqual(['rise_5s', 'exit_required'])
+    expect(rows.find((row) => row.key === 'rise_5s')).toMatchObject({
+      value: '0.00%',
+      threshold: '5.00%',
+    })
+    expect(rows.find((row) => row.key === 'exit_required')?.value).toBe('否')
+    expect(rows.some((row) => row.key === 'volume_threshold_5s')).toBe(false)
+  })
+
   it('将事件参数按类型划分成价格、涨幅量比、风控执行等分组', () => {
     const groups = eventParameterGroups({
       price: null,

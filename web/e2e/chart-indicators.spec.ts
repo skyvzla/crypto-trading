@@ -329,8 +329,8 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await expect(page.locator('.ant-modal:visible')).toHaveCount(0)
 
   await assertChartIsVisibleAndSettled(page, 3)
-  await expect(page.locator('.indicator-hover-label').first()).not.toContainText('MA7')
-  await expect(page.locator('.indicator-hover-label').last()).not.toContainText('RSI14')
+  await expect(page.locator('.indicator-hover-label').first()).toContainText('MA(7)')
+  await expect(page.locator('.indicator-hover-label').last()).toContainText('RSI(14)')
   await expect(page.locator('.indicator-hover-label').last()).toContainText(/-?\d/)
 
   const overflow = await page.evaluate(() => ({

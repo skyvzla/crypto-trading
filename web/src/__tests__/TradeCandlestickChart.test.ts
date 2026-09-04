@@ -527,7 +527,7 @@ describe('TradeCandlestickChart', () => {
     expect(wrapper.findAll('.indicator-hover-label')).toHaveLength(4)
   })
 
-  it('按主副图组织全部指标，左上角持续显示最新值并在右轴保留参考标注', async () => {
+  it('按主副图组织全部指标，并在左上角显示带名称的当前值', async () => {
     const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     Object.values(settings.main).forEach((indicator) => {
       indicator.enabled = true
@@ -563,28 +563,34 @@ describe('TradeCandlestickChart', () => {
 
     const paneLabels = wrapper.findAll('.indicator-hover-label')
     expect(paneLabels).toHaveLength(6)
-    expect(paneLabels[0].findAll('.indicator-value-line')).toHaveLength(4)
+    expect(paneLabels[0].findAll('.indicator-value-line')).toHaveLength(3)
     const indicatorNames = [
-      'EMA9',
-      'MA5',
-      '上轨',
-      '中轨',
-      '下轨',
+      'EMA(9)',
+      'MA(5)',
+      'BOLL UP',
+      'MID',
+      'DOWN',
       'VOL',
-      'MAVOL5',
-      'DIF',
+      'MA(5)',
+      'MA(20)',
+      'MACD DIF',
       'DEA',
-      'MACD',
-      'RSI6',
-      'ATR14',
+      'HIST',
+      'KDJ K',
+      'RSI(6)',
+      'ATR(14)',
     ]
-    indicatorNames.forEach((name) => expect(paneLabels.map((label) => label.text()).join(' ')).not.toContain(name))
-    const indicatorLines = paneLabels.flatMap((label, paneIndex) =>
-      label.findAll('.indicator-value-line').slice(paneIndex === 0 ? 1 : 0),
-    )
-    indicatorLines.forEach((line) => {
-      line.findAll('span').forEach((value) => expect(value.text().trim()).toMatch(/^-?\d/))
-    })
+    const paneText = paneLabels.map((label) => label.text()).join(' ')
+    indicatorNames.forEach((name) => expect(paneText).toContain(name))
+    expect(paneLabels[0].text()).not.toMatch(/开|高|低|收/)
+    expect(paneLabels[0].text()).toMatch(/EMA\(9\) -?\d/)
+    expect(paneLabels[0].text()).toMatch(/MA\(5\) -?\d/)
+    expect(paneLabels[0].text()).toMatch(/BOLL UP -?\d.+MID -?\d.+DOWN -?\d/)
+    expect(paneLabels[1].text()).toMatch(/VOL \d.+MA\(5\) \d.+MA\(20\) \d/)
+    expect(paneLabels[2].text()).toMatch(/MACD DIF -?\d.+DEA -?\d.+HIST -?\d/)
+    expect(paneLabels[3].text()).toMatch(/KDJ K -?\d.+D -?\d.+J -?\d/)
+    expect(paneLabels[4].text()).toMatch(/RSI\(6\) -?\d/)
+    expect(paneLabels[5].text()).toMatch(/ATR\(14\) -?\d/)
     expect(paneLabels[0].text()).toMatch(/\d/)
     expect(getComputedStyle(paneLabels[0].element).zIndex).toBe('6')
     expect(seriesOptions.filter((options) => options.lastValueVisible === false).length).toBe(seriesOptions.length)
@@ -592,9 +598,9 @@ describe('TradeCandlestickChart', () => {
     expect(seriesOptions.every((options) => options.title === undefined)).toBe(true)
 
     const guideTitles = createPriceLine.mock.calls.map(([line]) => (line as { title?: string }).title)
-    expect(guideTitles).toContain('0轴')
-    expect(guideTitles).toContain('均量5')
-    expect(guideTitles).toContain('50')
+    expect(guideTitles).not.toContain('0轴')
+    expect(guideTitles).not.toContain('均量5')
+    expect(guideTitles).not.toContain('50')
   })
 
   it('无十字光标时按可见范围最右侧K线刷新OHLC和指标值', async () => {
@@ -636,8 +642,8 @@ describe('TradeCandlestickChart', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     let lines = wrapper.findAll('.indicator-value-line')
-    expect(lines[0].text()).toContain('开60.00')
-    expect(lines[1].text()).toBe('55.00')
+    expect(lines).toHaveLength(1)
+    expect(lines[0].text()).toBe('MA(2) 55.00')
 
     const rangeHandler = subscribeVisibleLogicalRangeChange.mock.calls.at(-1)?.[0] as (range: {
       from: number
@@ -648,16 +654,14 @@ describe('TradeCandlestickChart', () => {
     await wrapper.vm.$nextTick()
 
     lines = wrapper.findAll('.indicator-value-line')
-    expect(lines[0].text()).toContain('开40.00')
-    expect(lines[1].text()).toBe('35.00')
-    expect(wrapper.text()).not.toContain('MA2')
+    expect(lines).toHaveLength(1)
+    expect(lines[0].text()).toBe('MA(2) 35.00')
 
     visibleLogicalRange = { from: 0, to: 0.8 }
     rangeHandler(visibleLogicalRange)
     await wrapper.vm.$nextTick()
     lines = wrapper.findAll('.indicator-value-line')
-    expect(lines).toHaveLength(1)
-    expect(lines[0].text()).toContain('开10.00')
+    expect(lines).toHaveLength(0)
     expect(wrapper.text()).not.toContain('15.00')
 
     visibleLogicalRange = { from: 0.5, to: 0.8 }
@@ -852,7 +856,7 @@ describe('TradeCandlestickChart', () => {
     subscribeCrosshairMove.mock.calls.at(-1)?.[0]({ point: { x: 100, y: 100 }, time: start, seriesData })
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('.indicator-hover-label').text()).not.toContain('EMA9')
+    expect(wrapper.findAll('.indicator-hover-label')).toHaveLength(0)
   })
 
   it('恢复并保存整体图高与指标窗格，并可重置为默认尺寸', async () => {

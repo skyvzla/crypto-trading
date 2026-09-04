@@ -444,7 +444,18 @@ describe('回测关键视图', () => {
       net_pnl: -10,
       tier_prices: [1.1],
     })
-    vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
+    vi.mocked(backtestApi.events).mockResolvedValue({
+      items: [
+        {
+          id: 1,
+          type: 'signal_triggered',
+          title: 'signal_triggered',
+          time: 1_750_000_000_000,
+          price: 1.1,
+          data: {},
+        },
+      ],
+    })
     vi.mocked(backtestApi.strategySchema).mockResolvedValue({
       strategy_id: 'spike-short',
       fields: [{ key: 'rise_5s', label: '5 秒涨幅' }],
@@ -463,7 +474,10 @@ describe('回测关键视图', () => {
 
     expect(wrapper.find('.replay-details').exists()).toBe(false)
     expect(wrapper.find('.trade-details-section h3').text()).toBe('成交明细')
-    expect(wrapper.find('.timeline-section h3').text()).toBe('事件时间线')
+    expect(wrapper.find('.timeline-section > h3').text()).toBe('事件时间线')
+    expect(wrapper.find('.timeline-panel').exists()).toBe(true)
+    expect(wrapper.find('.timeline-panel h3').exists()).toBe(false)
+    expect(wrapper.find('.timeline-panel .timeline-events').exists()).toBe(true)
     expect(wrapper.find('.timeline-section + .detail-section h3').text()).toBe('策略扩展参数')
 
     const descriptions = wrapper.find('.trade-details-section').findComponent({ name: 'ADescriptions' })
