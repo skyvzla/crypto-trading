@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { Plus, Trash2 } from 'lucide-vue-next'
 import type { ChartIndicatorLineSetting, ChartIndicatorSettings } from '@/api/types'
+import { CHART_INTERVALS } from '@/shared/chartIntervals'
 import {
   CHART_INDICATORS,
   cloneChartIndicatorSettings,
@@ -75,7 +76,7 @@ function save() {
 <template>
   <a-modal
     :open="open"
-    title="图表指标设置"
+    title="图表设置"
     width="900px"
     :confirm-loading="saving"
     ok-text="保存设置"
@@ -83,6 +84,18 @@ function save() {
     @update:open="emit('update:open', $event)"
     @ok="save"
   >
+    <div class="default-interval-setting">
+      <label for="default-chart-interval">默认周期</label>
+      <a-select
+        id="default-chart-interval"
+        v-model:value="draft.default_interval"
+        class="default-interval-select"
+        aria-label="默认周期"
+        size="small"
+      >
+        <a-select-option v-for="item in CHART_INTERVALS" :key="item" :value="item">{{ item }}</a-select-option>
+      </a-select>
+    </div>
     <div class="indicator-settings-layout">
       <nav class="indicator-list" aria-label="技术指标列表">
         <h3>主图指标</h3>
@@ -345,6 +358,19 @@ function save() {
 </template>
 
 <style scoped lang="scss">
+.default-interval-setting {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: var(--text);
+  font-size: var(--type-secondary);
+}
+
+.default-interval-select {
+  width: 136px;
+}
+
 .indicator-settings-layout {
   display: grid;
   grid-template-columns: minmax(210px, 0.7fr) minmax(0, 1.6fr);

@@ -27,12 +27,12 @@ import {
   indicatorEnabled,
 } from '@/features/backtests/chartIndicatorSettings'
 import { getChartTheme } from '@/features/backtests/chartTheme'
+import { CHART_INTERVALS, DEFAULT_CHART_INTERVAL, isChartInterval, type ChartInterval } from '@/shared/chartIntervals'
 import { timestampMs } from '@/shared/time'
 import { IS_DARK_THEME } from '@/shared/theme'
 import type { TradeChartData, TradeChartFillDisplay, TradeChartFillTimeSemantics } from './tradeChart'
 
-const intervals = ['1s', '1m', '5m', '15m', '1h', '4h', '6h', '8h', '12h', '1d']
-const intervalMs: Record<string, number> = {
+const intervalMs: Record<ChartInterval, number> = {
   '1s': 1_000,
   '1m': 60_000,
   '5m': 300_000,
@@ -95,7 +95,8 @@ const legendItems = computed(() => {
   ]
 })
 
-const interval = ref('5m')
+const interval = ref<ChartInterval>(DEFAULT_CHART_INTERVAL)
+const intervalSelectedByUser = ref(false)
 const windowCenterMs = ref<number | null>(null)
 const chartRef = ref<InstanceType<typeof TradeCandlestickChart> | null>(null)
 const chartSection = ref<HTMLElement | null>(null)
@@ -107,8 +108,8 @@ const lineVisibility = ref({ signal: true, tiers: true, average: true, invalid: 
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
 
-const availableIntervals = computed(() =>
-  props.mode === 'market' ? intervals.filter((item) => item !== '1s') : intervals,
+const availableIntervals = computed<ChartInterval[]>(() =>
+  props.mode === 'market' ? CHART_INTERVALS.filter((item) => item !== '1s') : [...CHART_INTERVALS],
 )
 const source = computed<'binance' | 'archive'>(() =>
   props.mode === 'market' || interval.value !== '1s' ? 'binance' : 'archive',
@@ -119,8 +120,27 @@ const isReady = computed(() =>
     props.trade.symbol && timestampMs(props.trade.entry_time) !== null && (props.mode === 'market' || props.researchId),
   ),
 )
+function resolveDefaultInterval(preferred: string | undefined): ChartInterval {
+  if (preferred && availableIntervals.value.includes(preferred as ChartInterval)) {
+    return preferred as ChartInterval
+  }
+  return availableIntervals.value[0] ?? DEFAULT_CHART_INTERVAL
+}
+
+const indicatorSettingsQuery = useQuery({
+  queryKey: ['chart-indicator-settings'],
+  queryFn: chartSettingsApi.get,
+  staleTime: Number.POSITIVE_INFINITY,
+  retry: 1,
+})
+const settingsResolved = computed(
+  () =>
+    indicatorSettingsQuery.isSuccess.value ||
+    (indicatorSettingsQuery.isError.value && !indicatorSettingsQuery.isFetching.value),
+)
+const chartLoadingLabel = computed(() => (settingsResolved.value ? `加载 ${sourceLabel.value} K线` : '加载图表设置'))
 const candleParams = computed(() => {
-  if (!isReady.value) return null
+  if (!isReady.value || !settingsResolved.value) return null
   const entry = timestampMs(props.trade.entry_time)
   if (entry === null) return null
   const focus = focusTimeMs.value ?? entry
@@ -149,12 +169,6 @@ const candlesQuery = useQuery({
   staleTime: 5 * 60_000,
   placeholderData: (previous) => previous,
 })
-const indicatorSettingsQuery = useQuery({
-  queryKey: ['chart-indicator-settings'],
-  queryFn: chartSettingsApi.get,
-  staleTime: Number.POSITIVE_INFINITY,
-  retry: 1,
-})
 const activeIndicatorNames = computed(() =>
   CHART_INDICATORS.filter((definition) => indicatorEnabled(indicatorSettings.value, definition)).map(
     (definition) => definition.name,
@@ -162,8 +176,19 @@ const activeIndicatorNames = computed(() =>
 )
 
 function selectInterval(value: string) {
+  if (!isChartInterval(value) || !availableIntervals.value.includes(value)) return
+  intervalSelectedByUser.value = true
   interval.value = value
   windowCenterMs.value = null
+}
+
+function applyDefaultInterval(preferred: string | undefined) {
+  if (intervalSelectedByUser.value) return
+  const nextInterval = resolveDefaultInterval(preferred)
+  if (interval.value !== nextInterval) {
+    interval.value = nextInterval
+    windowCenterMs.value = null
+  }
 }
 
 async function focusTradeEvent(kind: 'entry' | 'exit') {
@@ -199,6 +224,7 @@ function resetChartSize() {
 }
 
 function openIndicatorSettings() {
+  if (!settingsResolved.value) return
   indicatorSettingsOpen.value = true
   if (indicatorSettingsQuery.isError.value) message.warning('指标设置读取失败，当前使用默认配置')
 }
@@ -220,9 +246,11 @@ async function saveIndicatorSettings(settings: ChartIndicatorSettings) {
   }
   indicatorSettingsSaving.value = true
   try {
+    await queryClient.cancelQueries({ queryKey: ['chart-indicator-settings'] })
     const saved = await chartSettingsApi.update(settings)
     indicatorSettings.value = cloneChartIndicatorSettings(saved)
     queryClient.setQueryData(['chart-indicator-settings'], saved)
+    applyDefaultInterval(saved.default_interval)
     indicatorSettingsOpen.value = false
     message.success('图表指标设置已保存')
   } catch (error) {
@@ -238,7 +266,7 @@ onBeforeUnmount(() => document.removeEventListener('fullscreenchange', syncFulls
 watch(
   availableIntervals,
   (items) => {
-    if (!items.includes(interval.value)) interval.value = items[0] || '5m'
+    if (!items.includes(interval.value)) interval.value = items[0] ?? DEFAULT_CHART_INTERVAL
   },
   { immediate: true },
 )
@@ -256,6 +284,14 @@ watch(
   () => indicatorSettingsQuery.data.value,
   (settings) => {
     if (settings) indicatorSettings.value = cloneChartIndicatorSettings(settings)
+  },
+  { immediate: true },
+)
+watch(
+  [() => settingsResolved.value, () => indicatorSettingsQuery.data.value],
+  ([resolved, settings]) => {
+    if (!resolved) return
+    applyDefaultInterval(settings?.default_interval ?? DEFAULT_CHART_INDICATOR_SETTINGS.default_interval)
   },
   { immediate: true },
 )
@@ -292,7 +328,13 @@ watch(
         </a-tooltip>
         <a-divider type="vertical" />
         <a-tooltip :title="`配置技术指标：${activeIndicatorNames.join('、') || '未启用'}`">
-          <a-button type="text" class="chart-tool-button" aria-label="配置技术指标" @click="openIndicatorSettings">
+          <a-button
+            type="text"
+            class="chart-tool-button"
+            aria-label="配置技术指标"
+            :disabled="!settingsResolved"
+            @click="openIndicatorSettings"
+          >
             <template #icon>
               <Settings2 :size="16" />
             </template>
@@ -366,8 +408,12 @@ watch(
         ></a-tooltip>
       </div>
     </div>
-    <div v-if="candlesQuery.isFetching.value && loadedCandles.length === 0" class="chart-loading">
-      <a-spin /><span>加载 {{ sourceLabel }} K线</span>
+    <div
+      v-if="(!settingsResolved || candlesQuery.isFetching.value) && loadedCandles.length === 0"
+      class="chart-loading"
+    >
+      <a-spin />
+      <span>{{ chartLoadingLabel }}</span>
     </div>
     <QueryPanel
       v-else

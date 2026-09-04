@@ -1,4 +1,5 @@
 import type { ChartIndicatorSettings } from '@/api/types'
+import { DEFAULT_CHART_INTERVAL } from '@/shared/chartIntervals'
 
 export type ChartIndicatorKey = 'ema' | 'ma' | 'boll' | 'volume' | 'macd' | 'kdj' | 'rsi' | 'atr'
 export type ChartIndicatorGroup = 'main' | 'sub'
@@ -22,6 +23,7 @@ export const CHART_INDICATORS: ChartIndicatorDefinition[] = [
 ]
 
 export const DEFAULT_CHART_INDICATOR_SETTINGS: ChartIndicatorSettings = {
+  default_interval: DEFAULT_CHART_INTERVAL,
   main: {
     ema: {
       enabled: false,

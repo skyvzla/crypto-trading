@@ -280,6 +280,8 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await expect(modal).toBeVisible()
   await expect(page.getByText('主图指标', { exact: true })).toBeVisible()
   await expect(page.getByText('副图指标', { exact: true })).toBeVisible()
+  await modal.getByLabel('默认周期').click()
+  await page.getByRole('option', { name: '15m' }).click()
 
   const maItem = page.locator('.indicator-list-item').filter({ hasText: '简单移动平均线' })
   await maItem.click()
@@ -305,6 +307,7 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await modal.getByRole('button', { name: '保存设置' }).click()
   const saved = await putSeen
   expect(saved).toMatchObject({
+    default_interval: '15m',
     main: {
       ma: {
         enabled: true,

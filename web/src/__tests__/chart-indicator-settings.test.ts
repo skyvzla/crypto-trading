@@ -25,9 +25,11 @@ describe('图表指标配置', () => {
 
   it('编辑副本不会污染服务端配置对象', () => {
     const copy = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    copy.default_interval = '15m'
     copy.main.ma.lines[0].period = 30
     copy.sub.volume.ma_lines.push({ period: 60, color: '#123456' })
 
+    expect(DEFAULT_CHART_INDICATOR_SETTINGS.default_interval).toBe('1s')
     expect(DEFAULT_CHART_INDICATOR_SETTINGS.main.ma.lines[0].period).toBe(5)
     expect(DEFAULT_CHART_INDICATOR_SETTINGS.sub.volume.ma_lines).toHaveLength(2)
   })

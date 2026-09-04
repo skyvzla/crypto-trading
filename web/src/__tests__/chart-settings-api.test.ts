@@ -22,8 +22,21 @@ describe('图表设置 API', () => {
     expect(settings).not.toHaveProperty('updated_at')
   })
 
+  it('读取旧版响应时补充 1s 默认周期', async () => {
+    const response = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS) as Partial<
+      typeof DEFAULT_CHART_INDICATOR_SETTINGS
+    >
+    delete response.default_interval
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(response))
+
+    const settings = await chartSettingsApi.get()
+
+    expect(settings.default_interval).toBe('1s')
+  })
+
   it('整体更新全局指标设置', async () => {
     const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    settings.default_interval = '15m'
     settings.main.ma.enabled = true
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ ...settings, updated_at: '2026-09-03T12:00:00Z' }))
 

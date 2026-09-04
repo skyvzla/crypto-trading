@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import (
@@ -25,6 +25,18 @@ from trading_platform.ledger.db.models import LedgerDB
 
 _COLOR_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$")
 Color = Annotated[str, StringConstraints(pattern=_COLOR_PATTERN.pattern)]
+ChartInterval = Literal[
+    "1s",
+    "1m",
+    "5m",
+    "15m",
+    "1h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+]
 
 
 class _ChartModel(BaseModel):
@@ -142,6 +154,7 @@ class SubChartSettings(_ChartModel):
 class ChartSettings(_ChartModel):
     """The complete replacement document accepted by the PUT endpoint."""
 
+    default_interval: ChartInterval = "1s"
     main: MainChartSettings
     sub: SubChartSettings
 
@@ -153,6 +166,7 @@ class ChartSettingsResponse(ChartSettings):
 
 
 DEFAULT_CHART_SETTINGS: dict[str, Any] = {
+    "default_interval": "1s",
     "main": {
         "ema": {
             "enabled": False,

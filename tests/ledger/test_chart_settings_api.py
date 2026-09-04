@@ -72,6 +72,7 @@ async def test_get_returns_migration_defaults(chart_settings_client):
 
     assert response.status_code == 200
     payload = response.json()
+    assert payload["default_interval"] == "1s"
     assert payload["main"]["ema"] == DEFAULT_CHART_SETTINGS["main"]["ema"]
     assert payload["main"]["ma"]["lines"] == [
         {"period": 5, "color": "#f59e0b"},
@@ -86,9 +87,29 @@ async def test_get_returns_migration_defaults(chart_settings_client):
 
 
 @pytest.mark.asyncio
+async def test_get_adds_default_interval_to_legacy_document(chart_settings_client):
+    client, pool, schema = chart_settings_client
+
+    async with pool.connection() as conn:
+        await conn.execute(
+            sql.SQL(
+                "UPDATE {}.chart_settings "
+                "SET settings = settings - 'default_interval' "
+                "WHERE setting_key = 'global'"
+            ).format(sql.Identifier(schema))
+        )
+
+    response = await client.get("/api/v1/chart-settings")
+
+    assert response.status_code == 200
+    assert response.json()["default_interval"] == "1s"
+
+
+@pytest.mark.asyncio
 async def test_put_replaces_document_and_get_reads_it(chart_settings_client):
     client, pool, schema = chart_settings_client
     settings = default_chart_settings().model_dump(mode="json")
+    settings["default_interval"] = "15m"
     settings["main"]["ma"] = {
         "enabled": True,
         "lines": [
@@ -105,11 +126,13 @@ async def test_put_replaces_document_and_get_reads_it(chart_settings_client):
     assert response.status_code == 200
     assert response.json()["main"]["ma"] == settings["main"]["ma"]
     assert response.json()["sub"]["rsi"] == settings["sub"]["rsi"]
+    assert response.json()["default_interval"] == "15m"
 
     loaded = await client.get("/api/v1/chart-settings")
     assert loaded.status_code == 200
     assert loaded.json()["main"]["ma"] == settings["main"]["ma"]
     assert loaded.json()["sub"]["rsi"] == settings["sub"]["rsi"]
+    assert loaded.json()["default_interval"] == "15m"
 
     async with pool.connection() as conn:
         row = await (
@@ -149,6 +172,19 @@ async def test_put_rejects_invalid_period_color_and_unknown_fields(chart_setting
     integer_deviation["main"]["boll"]["deviation"] = 2
     response = await client.put("/api/v1/chart-settings", json=integer_deviation)
     assert response.status_code == 200
+
+    valid_interval = default_chart_settings().model_dump(mode="json")
+    valid_interval["default_interval"] = "15m"
+    response = await client.put("/api/v1/chart-settings", json=valid_interval)
+    assert response.status_code == 200
+    assert response.json()["default_interval"] == "15m"
+
+    invalid_interval = default_chart_settings().model_dump(mode="json")
+    invalid_interval["default_interval"] = "30s"
+    response = await client.put(
+        "/api/v1/chart-settings", json=invalid_interval
+    )
+    assert response.status_code == 422
 
     invalid_period_order = settings.copy()
     invalid_period_order["sub"] = {**settings["sub"]}

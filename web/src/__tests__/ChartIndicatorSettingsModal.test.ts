@@ -19,13 +19,25 @@ describe('ChartIndicatorSettingsModal', () => {
             template:
               '<div><h2>{{ title }}</h2><slot /><button class="save-probe" @click="$emit(\'ok\')">保存</button></div>',
           },
+          ASelect: {
+            props: ['value'],
+            emits: ['update:value'],
+            template: '<select :value="value" @change="$emit(\'update:value\', $event.target.value)"><slot /></select>',
+          },
+          ASelectOption: {
+            props: ['value'],
+            template: '<option :value="value"><slot /></option>',
+          },
         },
       },
     })
 
     expect(wrapper.text()).toContain('主图指标')
     expect(wrapper.text()).toContain('副图指标')
+    expect(wrapper.get('h2').text()).toBe('图表设置')
     expect(wrapper.findAll('.indicator-list-item')).toHaveLength(8)
+
+    await wrapper.get('select[aria-label="默认周期"]').setValue('15m')
 
     const maItem = wrapper.findAll('.indicator-list-item').find((item) => item.text().includes('简单移动平均线'))!
     await maItem.trigger('click')
@@ -38,6 +50,7 @@ describe('ChartIndicatorSettingsModal', () => {
 
     const saved = wrapper.emitted('save')?.[0]?.[0] as typeof settings
     expect(saved.main.ma.enabled).toBe(true)
+    expect(saved.default_interval).toBe('15m')
     expect(saved.main.ma.lines.map((line) => line.period)).toEqual([5, 10, 20])
     expect(saved).not.toBe(settings)
   })

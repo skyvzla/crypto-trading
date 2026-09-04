@@ -49,6 +49,9 @@ beforeEach(() => {
 
 describe('回测关键视图', () => {
   it('图表续页以已加载K线边界为中心扩展窗口', async () => {
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    settings.default_interval = '5m'
+    vi.mocked(chartSettingsApi.get).mockResolvedValue(settings)
     vi.mocked(backtestApi.candles).mockResolvedValue({
       symbol: 'AKEUSDT',
       interval: '5m',
@@ -90,6 +93,254 @@ describe('回测关键视图', () => {
     )
   })
 
+  it('等待设置读取完成后按保存的默认周期首次请求K线', async () => {
+    let resolveSettings!: (settings: typeof DEFAULT_CHART_INDICATOR_SETTINGS) => void
+    vi.mocked(chartSettingsApi.get).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSettings = resolve
+        }),
+    )
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT',
+      interval: '1s',
+      source: 'archive',
+      candles: [],
+    })
+
+    const wrapper = mount(TradeReplayChartPanel, {
+      props: {
+        researchId: 'r-1',
+        trade: {
+          id: 't-default-interval',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.chart-loading').exists()).toBe(true)
+    expect(wrapper.find('.chart-loading').text()).toContain('加载图表设置')
+    expect(wrapper.find('.query-empty').exists()).toBe(false)
+    expect(wrapper.get('button[aria-label="配置技术指标"]').attributes('disabled')).toBeDefined()
+    expect(backtestApi.candles).not.toHaveBeenCalled()
+
+    resolveSettings(cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS))
+    await flushPromises()
+
+    expect(backtestApi.candles).toHaveBeenCalledOnce()
+    expect(backtestApi.candles).toHaveBeenCalledWith(expect.objectContaining({ interval: '1s', source: 'archive' }))
+  })
+
+  it('行情模式不支持1s时回退到1m', async () => {
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT',
+      interval: '1m',
+      source: 'binance',
+      candles: [],
+    })
+
+    mount(TradeReplayChartPanel, {
+      props: {
+        mode: 'market',
+        trade: {
+          id: 't-market-default',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+      },
+    })
+    await flushPromises()
+
+    expect(backtestApi.candles).toHaveBeenCalledWith(expect.objectContaining({ interval: '1m', source: 'binance' }))
+  })
+
+  it('设置读取失败时使用本地1s默认周期', async () => {
+    vi.mocked(chartSettingsApi.get).mockRejectedValue(new Error('settings unavailable'))
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT',
+      interval: '1s',
+      source: 'archive',
+      candles: [],
+    })
+
+    mount(TradeReplayChartPanel, {
+      props: {
+        researchId: 'r-1',
+        trade: {
+          id: 't-settings-fallback',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+      },
+    })
+    await flushPromises()
+
+    await vi.waitFor(
+      () => {
+        expect(backtestApi.candles).toHaveBeenCalledWith(expect.objectContaining({ interval: '1s', source: 'archive' }))
+      },
+      { timeout: 2_000 },
+    )
+  })
+
+  it('设置响应不会覆盖等待期间手动选择的周期', async () => {
+    let resolveSettings!: (settings: typeof DEFAULT_CHART_INDICATOR_SETTINGS) => void
+    vi.mocked(chartSettingsApi.get).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSettings = resolve
+        }),
+    )
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT',
+      interval: '15m',
+      source: 'binance',
+      candles: [],
+    })
+
+    const wrapper = mount(TradeReplayChartPanel, {
+      props: {
+        researchId: 'r-1',
+        trade: {
+          id: 't-user-interval',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('input[value="15m"]').trigger('change')
+
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    settings.default_interval = '5m'
+    resolveSettings(settings)
+    await flushPromises()
+
+    expect(backtestApi.candles).toHaveBeenCalledOnce()
+    expect(backtestApi.candles).toHaveBeenCalledWith(expect.objectContaining({ interval: '15m' }))
+  })
+
+  it('保存设置完成后不会覆盖保存期间手动选择的周期', async () => {
+    let resolveUpdate!: (settings: typeof DEFAULT_CHART_INDICATOR_SETTINGS) => void
+    vi.mocked(chartSettingsApi.update).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpdate = resolve
+        }),
+    )
+    vi.mocked(backtestApi.candles).mockImplementation(async (params) => ({
+      symbol: params.symbol,
+      interval: params.interval,
+      source: params.source,
+      candles: [],
+    }))
+    const settingsToSave = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    settingsToSave.default_interval = '5m'
+
+    const wrapper = mount(TradeReplayChartPanel, {
+      props: {
+        researchId: 'r-1',
+        trade: {
+          id: 't-save-user-interval',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+      },
+      global: {
+        stubs: {
+          ChartIndicatorSettingsModal: {
+            emits: ['save'],
+            setup(_: unknown, { emit }: { emit: (event: 'save', settings: typeof settingsToSave) => void }) {
+              return { save: () => emit('save', settingsToSave) }
+            },
+            template: '<button class="save-settings-probe" @click="save">保存设置</button>',
+          },
+        },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.save-settings-probe').trigger('click')
+    await wrapper.get('input[value="15m"]').trigger('change')
+    await flushPromises()
+
+    resolveUpdate(settingsToSave)
+    await flushPromises()
+
+    expect(backtestApi.candles).toHaveBeenLastCalledWith(expect.objectContaining({ interval: '15m' }))
+  })
+
+  it('保存设置时取消在途读取，迟到响应不会覆盖新默认周期', async () => {
+    let resolveSettings!: (settings: typeof DEFAULT_CHART_INDICATOR_SETTINGS) => void
+    vi.mocked(chartSettingsApi.get).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSettings = resolve
+        }),
+    )
+    const savedSettings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    savedSettings.default_interval = '15m'
+    vi.mocked(chartSettingsApi.update).mockResolvedValue(savedSettings)
+    vi.mocked(backtestApi.candles).mockImplementation(async (params) => ({
+      symbol: params.symbol,
+      interval: params.interval,
+      source: params.source,
+      candles: [],
+    }))
+
+    const wrapper = mount(TradeReplayChartPanel, {
+      props: {
+        researchId: 'r-1',
+        trade: {
+          id: 't-settings-race',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_750_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+      },
+      global: {
+        stubs: {
+          ChartIndicatorSettingsModal: {
+            emits: ['save'],
+            setup(_: unknown, { emit }: { emit: (event: 'save', settings: typeof savedSettings) => void }) {
+              return { save: () => emit('save', savedSettings) }
+            },
+            template: '<button class="save-settings-probe" @click="save">保存设置</button>',
+          },
+        },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.save-settings-probe').trigger('click')
+    await flushPromises()
+
+    const staleSettings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    staleSettings.default_interval = '5m'
+    resolveSettings(staleSettings)
+    await flushPromises()
+
+    expect(backtestApi.candles).toHaveBeenCalledOnce()
+    expect(backtestApi.candles).toHaveBeenCalledWith(expect.objectContaining({ interval: '15m' }))
+  })
+
   it('从服务端读取全局指标配置并传给行情图', async () => {
     const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     settings.main.ma.enabled = true
@@ -97,8 +348,8 @@ describe('回测关键视图', () => {
     vi.mocked(chartSettingsApi.get).mockResolvedValue(settings)
     vi.mocked(backtestApi.candles).mockResolvedValue({
       symbol: 'AKEUSDT',
-      interval: '5m',
-      source: 'binance',
+      interval: '1s',
+      source: 'archive',
       candles: [{ time: 1_750_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }],
     })
 
@@ -368,8 +619,8 @@ describe('回测关键视图', () => {
     vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
     vi.mocked(backtestApi.candles).mockResolvedValue({
       symbol: 'AKEUSDT',
-      interval: '5m',
-      source: 'binance',
+      interval: '1s',
+      source: 'archive',
       candles: [{ time: 1_750_000_000, open: 1, high: 1.2, low: 0.9, close: 1.1, volume: 10 }],
     })
     await atRoute('/backtests/r-1/trades/t-1?symbol_filter=AKE&result=loss')
@@ -405,17 +656,17 @@ describe('回测关键视图', () => {
     expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        start_ms: 1_749_775_000_000,
-        end_ms: 1_750_225_000_000,
-        source: 'binance',
+        start_ms: 1_749_999_250_000,
+        end_ms: 1_750_000_750_000,
+        source: 'archive',
       }),
     )
     await wrapper.get('button[aria-label="跳转到退出成交"]').trigger('click')
     await flushPromises()
     expect(backtestApi.candles).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        start_ms: 1_749_776_800_000,
-        end_ms: 1_750_226_800_000,
+        start_ms: 1_750_001_050_000,
+        end_ms: 1_750_002_550_000,
       }),
     )
     await wrapper.get('input[value="1s"]').trigger('change')
