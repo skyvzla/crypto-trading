@@ -36,9 +36,6 @@ SPIKE_SHORT_SCHEMA: dict[str, Any] = {
             "label": "执行与风险",
             "fields": [
                 {"key": "invalid_price", "label": "失效价格", "format": "price"},
-                {"key": "tier1_price", "label": "第一档", "format": "price"},
-                {"key": "tier2_price", "label": "第二档", "format": "price"},
-                {"key": "tier3_price", "label": "第三档", "format": "price"},
                 {"key": "collision_status", "label": "交易竞争", "format": "text"},
             ],
         },
@@ -57,9 +54,6 @@ SPIKE_SHORT_SCHEMA: dict[str, Any] = {
     "chart_overlays": [
         {"key": "spike_high", "label": "尖峰高点", "kind": "price_line", "color": "#f59e0b", "line_style": "dashed"},
         {"key": "prior_high", "label": "过滤前高", "kind": "price_line", "color": "#eab308", "line_style": "dotted"},
-        {"key": "tier1_price", "label": "第一档", "kind": "price_line", "color": "#38bdf8"},
-        {"key": "tier2_price", "label": "第二档", "kind": "price_line", "color": "#22d3ee"},
-        {"key": "tier3_price", "label": "第三档", "kind": "price_line", "color": "#2dd4bf"},
         {"key": "invalid_price", "label": "失效价", "kind": "price_line", "color": "#fb7185", "line_style": "dashed"},
     ],
 }

@@ -120,12 +120,12 @@ const columns: TableColumnsType<BacktestTradeSummary> = [
     customRender: ({ record: row }) => formatNumber(row.exit_price, 8),
   },
   {
-    title: '档位',
-    key: 'filled_tier_count',
-    dataIndex: 'filled_tier_count',
-    width: 76,
+    title: '入场成交笔数',
+    key: 'entry_fill_count',
+    dataIndex: 'entry_fill_count',
+    width: 125,
     sorter: true,
-    customRender: ({ record: row }) => (row.filled_tier_count ? `${row.filled_tier_count}档` : '-'),
+    customRender: ({ record: row }) => row.entry_fill_count ?? '-',
   },
   {
     title: '持仓',

@@ -27,11 +27,10 @@ import { STORAGE_KEYS, readStored, readStoredRecord, removeStored, writeStored }
 import { getChartTheme, type ChartTheme } from './chartTheme'
 import { cloneChartIndicatorSettings, DEFAULT_CHART_INDICATOR_SETTINGS } from './chartIndicatorSettings'
 import { atr, bollinger, emaOfClose, kdj, maOfClose, macd, rsiOfClose, volumeMa } from './indicators'
-import type { TradeChartData, TradeChartFillDisplay, TradeChartFillTimeSemantics } from './tradeChart'
+import type { TradeChartData, TradeChartFillTimeSemantics } from './tradeChart'
 
 interface PriceLineVisibility {
   signal?: boolean
-  tiers?: boolean
   average?: boolean
   invalid?: boolean
   extensions?: boolean
@@ -42,7 +41,6 @@ const props = defineProps<{
   trade: TradeChartData
   overlays?: ChartOverlay[]
   focusTime?: string | number | null
-  fillDisplay?: TradeChartFillDisplay
   fillTimeSemantics?: TradeChartFillTimeSemantics
   indicators?: {
     volume?: boolean
@@ -242,34 +240,29 @@ function samePrice(left: number, right: number): boolean {
 }
 
 // ── 从 trade 派生的成交与档位事实 ─────────────────────────────────────────
-// 这些原先内联在渲染函数里，抽成 computed 后标线重绘和标记生成可以共用，
-// 也让「哪些是数据推导、哪些是绘图动作」在结构上分开。
+// 成交始终来自账本 fills，按 K 线和方向归组后表达。
 
 const isShort = computed(() => {
   const side = String(props.trade.side || '').toLowerCase()
   return side.includes('short') || side === 'sell'
 })
-const entrySideLabel = computed(() => (isShort.value ? '卖' : '买'))
 const allFills = computed(() => props.trade.fills || [])
-const entryFills = computed(() => {
-  const entryOrderSide = isShort.value ? 'sell' : 'buy'
-  return allFills.value.filter((fill) => fill.side?.toLowerCase() === entryOrderSide)
-})
-const displayedFills = computed(() => (props.fillDisplay === 'all' ? allFills.value : entryFills.value))
-const tierPrices = computed(() =>
-  (props.trade.tier_prices || props.trade.orders?.map((item) => item.price) || []).slice(0, 3),
-)
+const displayedFills = computed(() => allFills.value)
+
+type FillSide = 'buy' | 'sell'
+
+function normalizedFillSide(value: string | null | undefined): FillSide | null {
+  const side = String(value || '').toLowerCase()
+  if (side === 'buy' || side.includes('long')) return 'buy'
+  if (side === 'sell' || side.includes('short')) return 'sell'
+  return null
+}
 
 function isLineVisible(key: keyof PriceLineVisibility): boolean {
   return (props.lineVisibility || {})[key] !== false
 }
 
-/**
- * 计算当前应该绘制的价格线。
- *
- * 同价位只保留优先级最高的语义（成交价盖过同价限价），因此这里必须
- * 按「信号 → 档位 → 均价 → 失效价 → 策略扩展位」的顺序累加。
- */
+/** 计算策略参考线；成交价不作为水平线，避免和实际成交 marker 重复表达。 */
 function buildPriceLines(): PriceLineSpec[] {
   const colors = palette.value
   const lines: PriceLineSpec[] = []
@@ -288,23 +281,7 @@ function buildPriceLines(): PriceLineSpec[] {
     else if (lines[duplicate].priority < priority) lines[duplicate] = next
   }
 
-  const tierIsFilled = (price: number, index: number) =>
-    entryFills.value.some((fill) => fill.tier === index + 1 || samePrice(fill.price, price))
-
   if (isLineVisible('signal')) addLine(props.trade.signal_price, '信号', colors.signal, LineStyle.Dashed, 1, 10)
-  if (isLineVisible('tiers')) {
-    tierPrices.value.forEach((price, index) => {
-      const filled = tierIsFilled(price, index)
-      addLine(
-        price,
-        filled ? `${entrySideLabel.value}${index + 1}` : `限${entrySideLabel.value}${index + 1}`,
-        filled ? colors.filled : colors.pending,
-        filled ? LineStyle.Solid : LineStyle.Dashed,
-        1,
-        filled ? 50 : 40,
-      )
-    })
-  }
   if (isLineVisible('average')) {
     addLine(
       props.trade.average_entry_price ?? props.trade.entry_price,
@@ -1077,68 +1054,61 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     }
   }
 
-  const entryPosition = isShort.value ? 'aboveBar' : 'belowBar'
-  const exitPosition = isShort.value ? 'belowBar' : 'aboveBar'
-  const entryShape = isShort.value ? 'arrowDown' : 'arrowUp'
-  const exitShape = isShort.value ? 'arrowUp' : 'arrowDown'
-
-  const tierForFill = (price: number, fallbackIndex: number) => {
-    const index = tierPrices.value.findIndex((tierPrice) => samePrice(tierPrice, price))
-    return index >= 0 ? index + 1 : fallbackIndex + 1
+  type FillGroup = {
+    time: UTCTimestamp
+    side: FillSide
+    count: number
+    totalQuantity: number
+    vwap: number | null
   }
-  const fillCounts = new Map<'buy' | 'sell', number>()
-  const displayedFillDetails = displayedFills.value.map((fill, index) => {
-    const fillSide = String(fill.side || '').toLowerCase()
-    const isBuy = fillSide === 'buy' || fillSide.includes('long')
-    const sideKey = isBuy ? 'buy' : 'sell'
-    const count = (fillCounts.get(sideKey) || 0) + 1
-    fillCounts.set(sideKey, count)
-    const showAll = props.fillDisplay === 'all'
-    return {
-      fill,
-      label: showAll ? `${isBuy ? '买' : '卖'}${count}` : `${entrySideLabel.value}${tierForFill(fill.price, index)}`,
-      position: showAll
-        ? isBuy
-          ? ('belowBar' as const)
-          : ('aboveBar' as const)
-        : (entryPosition as 'aboveBar' | 'belowBar'),
-      shape: showAll
-        ? isBuy
-          ? ('arrowUp' as const)
-          : ('arrowDown' as const)
-        : (entryShape as 'arrowUp' | 'arrowDown'),
-      color: showAll ? (isBuy ? colors.filled : colors.invalid) : colors.filled,
+  const firstFill = displayedFills.value.find(
+    (fill) => normalizedFillSide(fill.side) !== null && fillBarTime(fill.time || fill.fill_time) !== null,
+  )
+  const fillGroups = new Map<string, FillGroup>()
+  for (const fill of displayedFills.value) {
+    const time = fillBarTime(fill.time || fill.fill_time)
+    if (time === null) continue
+    const side = normalizedFillSide(fill.side)
+    if (side === null) continue
+    const key = `${Number(time)}:${side}`
+    const group = fillGroups.get(key) || {
+      time,
+      side,
+      count: 0,
+      totalQuantity: 0,
+      vwap: null,
     }
-  })
+    group.count += 1
+    const price = typeof fill.price === 'number' && Number.isFinite(fill.price) ? fill.price : null
+    const quantity = typeof fill.quantity === 'number' && Number.isFinite(fill.quantity) ? fill.quantity : null
+    if (price !== null && group.vwap === null) group.vwap = price
+    if (price !== null && quantity !== null && quantity > 0) {
+      const nextQuantity = group.totalQuantity + quantity
+      const nextQuote = (group.vwap ?? 0) * group.totalQuantity + price * quantity
+      group.totalQuantity = nextQuantity
+      group.vwap = nextQuote / nextQuantity
+    }
+    fillGroups.set(key, group)
+  }
 
   const markers: SeriesMarker<UTCTimestamp>[] = []
   const signalTime = barTimeAt(props.trade.signal_time)
   if (signalTime)
-    markers.push({ time: signalTime, position: entryPosition, color: colors.signal, shape: 'circle', text: '信号' })
-  for (const detail of displayedFillDetails) {
-    const time = fillBarTime(detail.fill.time)
-    if (time)
-      markers.push({ time, position: detail.position, color: detail.color, shape: detail.shape, text: detail.label })
-  }
-  const firstFill = displayedFills.value[0] ?? entryFills.value[0]
-  const entryTime = fillBarTime(firstFill?.time ?? props.trade.entry_time)
-  if (entryTime && !markers.some((marker) => Number(marker.time) === Number(entryTime))) {
     markers.push({
-      time: entryTime,
-      position: entryPosition,
-      color: colors.entryMarker,
-      shape: entryShape,
-      text: '首单',
+      time: signalTime,
+      position: isShort.value ? 'aboveBar' : 'belowBar',
+      color: colors.signal,
+      shape: 'circle',
+      text: '信号',
     })
-  }
-  const exitTime = fillBarTime(props.trade.exit_time)
-  if (props.fillDisplay !== 'all' && exitTime) {
+  for (const group of fillGroups.values()) {
+    const isBuy = group.side === 'buy'
     markers.push({
-      time: exitTime,
-      position: exitPosition,
-      color: Number(props.trade.net_pnl || 0) >= 0 ? colors.exitProfit : colors.exitLoss,
-      shape: exitShape,
-      text: '退出',
+      time: group.time,
+      position: isBuy ? 'belowBar' : 'aboveBar',
+      color: isBuy ? colors.up : colors.down,
+      shape: isBuy ? 'arrowUp' : 'arrowDown',
+      text: `${group.count === 1 ? '' : group.count}${isBuy ? 'B' : 'S'}`,
     })
   }
 
@@ -1148,7 +1118,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     [...markers, ...overlayMarkers].sort((a, b) => Number(a.time) - Number(b.time)),
   )
 
-  // 十字光标要显示落在该 K 线上的策略事件价格，先按 K 线时间归组。
+  // 十字光标要显示落在该 K 线上的策略事件价格，成交按 K 线和方向归组。
   const eventPrices = new Map<number, EventPrice[]>()
   const addEventPrice = (
     label: string,
@@ -1160,13 +1130,10 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     const time = isFill ? fillBarTime(value) : barTimeAt(value)
     if (time === null || typeof price !== 'number') return
     const current = eventPrices.get(Number(time)) || []
-    const samePriceIndex = current.findIndex((item) => samePrice(item.price, price))
-    if (samePriceIndex === -1) current.push({ label, price, priority })
-    else if (current[samePriceIndex].priority < priority) current[samePriceIndex] = { label, price, priority }
+    current.push({ label, price, priority })
     eventPrices.set(Number(time), current)
   }
   addEventPrice('信号价格', props.trade.signal_time, props.trade.signal_price, false, 10)
-  displayedFillDetails.forEach(({ fill, label }) => addEventPrice(label, fill.time, fill.price, true, 50))
   addEventPrice(
     '开仓均价',
     props.trade.entry_time,
@@ -1174,13 +1141,24 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     true,
     30,
   )
-  if (props.fillDisplay !== 'all') addEventPrice('退出价格', props.trade.exit_time, props.trade.exit_price, true, 50)
+  for (const group of fillGroups.values()) {
+    if (group.vwap === null) continue
+    const current = eventPrices.get(Number(group.time)) || []
+    const sideLabel = group.side === 'buy' ? '买入成交' : '卖出成交'
+    current.push({
+      label: group.count === 1 ? sideLabel : `${group.count}笔${sideLabel}`,
+      price: group.vwap,
+      priority: 50,
+    })
+    eventPrices.set(Number(group.time), current)
+  }
 
   const handleCrosshair = createCrosshairHandler({ series, eventPrices, pricePrecision, candleSpacing })
 
   const initialFocusTime = Number(
     props.focusTime == null
-      ? (fillCandleSeconds(firstFill?.time ?? props.trade.entry_time) ?? seconds(props.trade.signal_time))
+      ? (fillCandleSeconds(firstFill?.time || firstFill?.fill_time || props.trade.entry_time) ??
+          seconds(props.trade.signal_time))
       : (seconds(props.focusTime) ?? renderedBarTimes[Math.floor(renderedBarTimes.length / 2)]),
   )
   let focusIndex = renderedBarTimes.findIndex((time) => time >= initialFocusTime)
@@ -1277,7 +1255,8 @@ function focusEvent(value: string | number | null | undefined) {
 }
 
 function focusEntry() {
-  focusEvent(allFills.value[0]?.time ?? props.trade.entry_time)
+  const firstFill = allFills.value.find((fill) => normalizedFillSide(fill.side) !== null)
+  focusEvent(firstFill?.time || firstFill?.fill_time || props.trade.entry_time)
 }
 function focusExit() {
   focusEvent(props.trade.exit_time)

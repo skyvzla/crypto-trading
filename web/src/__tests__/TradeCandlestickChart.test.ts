@@ -133,7 +133,7 @@ describe('TradeCandlestickChart', () => {
     expect(chartOptions.grid.vertLines.color).toBe('#e2e8f0')
     expect(chartOptions.grid.horzLines.color).toBe('#e2e8f0')
     expect(setData).toHaveBeenCalledOnce()
-    expect(createPriceLine).toHaveBeenCalledTimes(4)
+    expect(createPriceLine).toHaveBeenCalledTimes(2)
     expect(observe).toHaveBeenCalledOnce()
     wrapper.unmount()
     expect(disconnect).toHaveBeenCalled()
@@ -292,13 +292,12 @@ describe('TradeCandlestickChart', () => {
     const markers = createSeriesMarkers.mock.calls.at(-1)?.[1] as Array<{ time: number; text: string }>
     expect(markers).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ time: start + 39, text: '卖1' }),
-        expect.objectContaining({ time: start + 40, text: '卖2' }),
-        expect.objectContaining({ time: start + 49, text: '退出' }),
+        expect.objectContaining({ time: start + 39, text: 'S' }),
+        expect.objectContaining({ time: start + 40, text: 'S' }),
+        expect.objectContaining({ time: start + 49, text: 'B' }),
       ]),
     )
-    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖1', lineWidth: 1 }))
-    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖2', lineWidth: 1 }))
+    expect(markers.some((marker) => marker.text === '首单' || marker.text === '退出')).toBe(false)
   })
 
   it('按真实交易所时间逐笔标记账本买卖成交', async () => {
@@ -314,7 +313,6 @@ describe('TradeCandlestickChart', () => {
     mount(TradeCandlestickChart, {
       props: {
         candles,
-        fillDisplay: 'all',
         fillTimeSemantics: 'exchange',
         trade: {
           id: 'campaign-chart',
@@ -337,15 +335,60 @@ describe('TradeCandlestickChart', () => {
     const markers = createSeriesMarkers.mock.calls.at(-1)?.[1] as Array<{ time: number; text: string }>
     expect(markers).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ time: start + 40, text: '买1' }),
-        expect.objectContaining({ time: start + 41, text: '卖1' }),
-        expect.objectContaining({ time: start + 50, text: '买2' }),
+        expect.objectContaining({ time: start + 40, text: 'B' }),
+        expect.objectContaining({ time: start + 41, text: 'S' }),
+        expect.objectContaining({ time: start + 50, text: 'B' }),
       ]),
     )
-    expect(markers.some((marker) => marker.text === '退出')).toBe(false)
   })
 
-  it('成交价优先于同价限价，并以统一名称绘制未成交档位和极值标签', async () => {
+  it('同一K线按方向合并成交，并为同K买卖分别保留标记', async () => {
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 3 }, (_, index) => ({
+      time: start + index,
+      open: 1,
+      high: 1.2,
+      low: 0.9,
+      close: 1.1,
+      volume: 10,
+    }))
+    mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        fillTimeSemantics: 'exchange',
+        trade: {
+          id: 'same-bar-fills',
+          symbol: 'AKEUSDT',
+          entry_time: start * 1000,
+          entry_price: 1.1,
+          net_pnl: 1,
+          fills: [
+            { id: 'sell-1', time: (start + 1) * 1000, price: 1.1, quantity: 1, side: 'SELL' },
+            { id: 'sell-2', time: (start + 1) * 1000, price: 1.2, quantity: 2, side: 'SELL' },
+            { id: 'buy-1', time: (start + 1) * 1000, price: 1.05, quantity: 1, side: 'BUY' },
+            { id: 'unknown-1', time: (start + 1) * 1000, price: 1.3, quantity: 1, side: 'UNKNOWN' },
+          ],
+        },
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const markers = createSeriesMarkers.mock.calls.at(-1)?.[1] as Array<{
+      time: number
+      position: string
+      shape: string
+      text: string
+    }>
+    expect(markers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ time: start + 1, position: 'aboveBar', shape: 'arrowDown', text: '2S' }),
+        expect.objectContaining({ time: start + 1, position: 'belowBar', shape: 'arrowUp', text: 'B' }),
+      ]),
+    )
+    expect(markers.filter((marker) => marker.time === start + 1 && marker.text !== '信号')).toHaveLength(2)
+    expect(markers.some((marker) => marker.text === '3S')).toBe(false)
+  })
+
+  it('不创建成交或档位价格线，并保留策略参考线与极值标签', async () => {
     const start = 1_754_000_000
     mount(TradeCandlestickChart, {
       props: {
@@ -372,9 +415,9 @@ describe('TradeCandlestickChart', () => {
       },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '卖1', price: 1.1 }))
-    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '限卖2', price: 1.2 }))
-    expect(createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ title: '限卖3', price: 1.3 }))
+    expect(
+      createPriceLine.mock.calls.some(([line]) => /(?:tier|限)?(?:买|卖)\d/i.test((line as { title: string }).title)),
+    ).toBe(false)
     expect(createPriceLine).not.toHaveBeenCalledWith(
       expect.objectContaining({ title: '失效价', price: 1.4, color: undefined }),
     )
@@ -387,7 +430,7 @@ describe('TradeCandlestickChart', () => {
       position: string
       text: string
     }>
-    expect(markers).toEqual(expect.arrayContaining([expect.objectContaining({ time: start, text: '卖1' })]))
+    expect(markers).toEqual(expect.arrayContaining([expect.objectContaining({ time: start, text: 'S' })]))
     expect(markers.some((marker) => marker.text === '最高' || marker.text === '最低')).toBe(false)
   })
 
@@ -406,15 +449,18 @@ describe('TradeCandlestickChart', () => {
           side: 'SHORT',
           entry_time: start * 1000,
           entry_price: 1.1,
+          signal_price: 1.05,
           invalid_price: 1.4,
           tier_prices: [1.1, 1.2, 1.3],
           net_pnl: 1,
         },
-        lineVisibility: { tiers: false },
+        lineVisibility: { signal: false },
       },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(createPriceLine.mock.calls.some(([line]) => /^限卖|^卖/.test((line as { title: string }).title))).toBe(false)
+    expect(
+      createPriceLine.mock.calls.some(([line]) => /(?:tier|限)?(?:买|卖)\d/i.test((line as { title: string }).title)),
+    ).toBe(false)
     expect(createPriceLine.mock.calls.every(([line]) => (line as { lineWidth: number }).lineWidth === 1)).toBe(true)
     const labels = wrapper.findAll('.extrema-price-label')
     expect(labels.map((label) => label.text())).toEqual(expect.arrayContaining(['1.345', '0.789']))
@@ -716,7 +762,7 @@ describe('TradeCandlestickChart', () => {
           tier_prices: [1.1, 1.2, 1.3],
           net_pnl: 1,
         },
-        lineVisibility: { tiers: true, average: true, invalid: true, signal: true, extensions: true },
+        lineVisibility: { average: true, invalid: true, signal: true, extensions: true },
       },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -725,7 +771,7 @@ describe('TradeCandlestickChart', () => {
     expect(linesAfterMount).toBeGreaterThan(0)
 
     await wrapper.setProps({
-      lineVisibility: { tiers: false, average: true, invalid: true, signal: true, extensions: true },
+      lineVisibility: { average: true, invalid: true, signal: false, extensions: true },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
@@ -733,7 +779,7 @@ describe('TradeCandlestickChart', () => {
     expect(remove).toHaveBeenCalledTimes(removeCount)
     expect(removePriceLine).toHaveBeenCalledTimes(linesAfterMount)
     const redrawn = createPriceLine.mock.calls.slice(linesAfterMount)
-    expect(redrawn.some(([line]) => /^限卖|^卖/.test((line as { title: string }).title))).toBe(false)
+    expect(redrawn.some(([line]) => /(?:tier|限)?(?:买|卖)\d/i.test((line as { title: string }).title))).toBe(false)
   })
 
   it('切换指标时重建窗格但保留当前视窗', async () => {

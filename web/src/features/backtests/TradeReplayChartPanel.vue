@@ -30,7 +30,7 @@ import { getChartTheme } from '@/features/backtests/chartTheme'
 import { CHART_INTERVALS, DEFAULT_CHART_INTERVAL, isChartInterval, type ChartInterval } from '@/shared/chartIntervals'
 import { timestampMs } from '@/shared/time'
 import { IS_DARK_THEME } from '@/shared/theme'
-import type { TradeChartData, TradeChartFillDisplay, TradeChartFillTimeSemantics } from './tradeChart'
+import type { TradeChartData, TradeChartFillTimeSemantics } from './tradeChart'
 
 const intervalMs: Record<ChartInterval, number> = {
   '1s': 1_000,
@@ -51,14 +51,12 @@ const props = withDefaults(
     mode?: 'backtest' | 'market'
     researchId?: string
     overlays?: ChartOverlay[]
-    fillDisplay?: TradeChartFillDisplay
     fillTimeSemantics?: TradeChartFillTimeSemantics
     exitLabel?: string
     strategyLines?: boolean
   }>(),
   {
     mode: 'backtest',
-    fillDisplay: 'entry',
     fillTimeSemantics: 'backtest-confirmation',
     exitLabel: '退出成交',
     strategyLines: true,
@@ -78,20 +76,12 @@ const palette = computed(() => getChartTheme(isDarkTheme.value))
  */
 const legendItems = computed(() => {
   const colors = palette.value
-  if (props.fillDisplay === 'all') {
-    return [
-      { label: '买入', color: colors.filled, dashed: false, strong: true },
-      { label: '卖出', color: colors.invalid, dashed: false, strong: false },
-      { label: '开仓均价', color: colors.average, dashed: false, strong: false },
-    ]
-  }
   return [
+    { label: 'B 买入成交', color: colors.up, dashed: false, strong: true },
+    { label: 'S 卖出成交', color: colors.down, dashed: false, strong: false },
     { label: '信号', color: colors.signal, dashed: true, strong: false },
-    { label: '未成交挂单', color: colors.pending, dashed: true, strong: false },
-    { label: '实际成交', color: colors.filled, dashed: false, strong: true },
     { label: '开仓均价', color: colors.average, dashed: false, strong: false },
     { label: '失效价', color: colors.invalid, dashed: true, strong: false },
-    { label: '退出', color: colors.exitProfit, dashed: false, strong: false },
   ]
 })
 
@@ -104,7 +94,7 @@ const isFullscreen = ref(false)
 const indicatorSettingsOpen = ref(false)
 const indicatorSettingsSaving = ref(false)
 const indicatorSettings = ref<ChartIndicatorSettings>(cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS))
-const lineVisibility = ref({ signal: true, tiers: true, average: true, invalid: true, extensions: true })
+const lineVisibility = ref({ signal: true, average: true, invalid: true, extensions: true })
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
 
@@ -350,7 +340,6 @@ watch(
             <a-card size="small" :bordered="false" @click.stop>
               <a-space direction="vertical" :size="8">
                 <a-checkbox v-if="strategyLines" v-model:checked="lineVisibility.signal">信号价</a-checkbox>
-                <a-checkbox v-if="strategyLines" v-model:checked="lineVisibility.tiers">限价与成交档位</a-checkbox>
                 <a-checkbox v-model:checked="lineVisibility.average">开仓均价</a-checkbox>
                 <a-checkbox v-if="strategyLines" v-model:checked="lineVisibility.invalid">失效价</a-checkbox>
                 <a-checkbox v-if="strategyLines" v-model:checked="lineVisibility.extensions">策略扩展价位</a-checkbox>
@@ -429,7 +418,6 @@ watch(
         :indicator-settings="indicatorSettings"
         :line-visibility="lineVisibility"
         :focus-time="focusTimeMs"
-        :fill-display="fillDisplay"
         :fill-time-semantics="fillTimeSemantics"
         @request-more="requestMore"
       />

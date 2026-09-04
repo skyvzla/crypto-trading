@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
@@ -17,6 +18,121 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _bool_value(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+def _payload(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _trade_order_side(value: Any) -> str | None:
+    """Convert a trade's position side to the exchange order direction."""
+    if value is None:
+        return None
+    side = str(value).strip().upper()
+    if side in {"SHORT", "SELL"}:
+        return "SELL"
+    if side in {"LONG", "BUY"}:
+        return "BUY"
+    return side or None
+
+
+def _normalise_order(row: Mapping[str, Any]) -> dict[str, Any]:
+    payload = _payload(row.get("payload"))
+    order_id = str(row.get("order_id") or "")
+    created_at = row.get("created_at")
+    fill_time = row.get("fill_time")
+    cancel_time = payload.get("cancel_time")
+    status = row.get("status")
+    completed_time = cancel_time
+    if completed_time is None and str(status or "").upper() == "FILLED":
+        completed_time = fill_time
+    return {
+        "id": order_id,
+        "order_id": order_id,
+        "client_order_id": payload.get("client_order_id"),
+        "account_id": payload.get("account_id"),
+        "strategy_id": payload.get("strategy_id"),
+        "campaign_id": (
+            str(row["campaign_id"])
+            if row.get("campaign_id") is not None
+            else None
+        ),
+        "symbol": row.get("symbol"),
+        "side": row.get("side"),
+        "order_type": payload.get("type"),
+        "type": payload.get("type"),
+        "price": _float_or_none(row.get("price")),
+        "quantity": _float_or_none(row.get("quantity")),
+        "status": status,
+        "created_at": created_at,
+        "created_time": created_at,
+        "completed_time": completed_time,
+        "fill_time": fill_time,
+        "cancel_time": cancel_time,
+        "ttl_ms": payload.get("ttl_ms"),
+        "reduce_only": _bool_value(payload.get("reduce_only")),
+        "filled_quantity": _float_or_none(payload.get("filled_quantity")),
+        "avg_fill_price": _float_or_none(payload.get("avg_fill_price")),
+        "commission": _float_or_none(payload.get("commission")),
+        "commission_asset": payload.get("commission_asset"),
+        "is_maker": _bool_value(payload.get("is_maker")),
+        "trigger_reason": payload.get("trigger_reason"),
+        "tier": payload.get("tier"),
+        "payload": payload,
+    }
+
+
+def _normalise_fill(
+    row: Mapping[str, Any],
+    order: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload = _payload(row.get("payload"))
+    fill_id = str(row.get("fill_id") or "")
+    order_id = str(row.get("order_id") or order.get("order_id") or "")
+    fill_time = row.get("fill_time")
+    order_type = payload.get("type") or order.get("order_type")
+    return {
+        "id": fill_id,
+        "fill_id": fill_id,
+        "order_id": order_id,
+        "symbol": row.get("symbol") or order.get("symbol"),
+        "side": row.get("side") or order.get("side"),
+        "order_type": order_type,
+        "type": order_type,
+        "time": fill_time,
+        "fill_time": fill_time,
+        "price": _float_or_none(row.get("price")),
+        "quantity": _float_or_none(row.get("quantity")),
+        "commission": _float_or_none(
+            row.get("commission")
+            if row.get("commission") is not None else payload.get("commission")
+        ),
+        "commission_asset": payload.get("commission_asset") or order.get("commission_asset"),
+        "is_maker": _bool_value(
+            payload.get("is_maker")
+            if payload.get("is_maker") is not None else order.get("is_maker")
+        ),
+        "client_order_id": payload.get("client_order_id") or order.get("client_order_id"),
+        "reduce_only": _bool_value(
+            payload.get("reduce_only")
+            if payload.get("reduce_only") is not None else order.get("reduce_only")
+        ),
+        "trigger_reason": payload.get("trigger_reason") or order.get("trigger_reason"),
+        "tier": (
+            payload.get("tier")
+            if payload.get("tier") is not None
+            else order.get("tier")
+        ),
+        "payload": payload,
+    }
 
 
 class BacktestRepository:
@@ -140,7 +256,7 @@ class BacktestRepository:
             "average_win": "average_win",
             "average_loss": "average_loss",
             "average_holding_seconds": "average_holding_seconds",
-            "full_tier_fill_rate": "full_tier_fill_rate",
+            "limit_order_fill_rate": "limit_order_fill_rate",
         }
         sort_sql = sort_expressions.get(sort_by, "net_pnl")
         direction = "ASC" if sort_order.lower() == "asc" else "DESC"
@@ -163,20 +279,56 @@ class BacktestRepository:
                    COALESCE(SUM(net_pnl), 0) AS net_pnl,
                    COALESCE(AVG(exit_time - entry_time) / 1000.0, 0)
                        AS average_holding_seconds,
-                   COUNT(*) FILTER (WHERE
-                       COALESCE(NULLIF(strategy_data->>'tier1_fill_count', '')::INTEGER, 0) > 0
-                       AND COALESCE(NULLIF(strategy_data->>'tier2_fill_count', '')::INTEGER, 0) > 0
-                       AND COALESCE(NULLIF(strategy_data->>'tier3_fill_count', '')::INTEGER, 0) > 0
-                   )::BIGINT
-                       AS three_tier_count,
                    COUNT(DISTINCT run_id)::BIGINT AS run_count
             FROM unique_trades
             GROUP BY symbol)
+            , limit_entry_orders AS (
+                SELECT DISTINCT t.symbol, o.research_id, o.run_id, o.order_id,
+                       EXISTS (
+                           SELECT 1
+                           FROM backtest_fills f
+                           WHERE f.research_id = o.research_id
+                             AND f.run_id = o.run_id
+                             AND f.order_id = o.order_id
+                       ) AS has_fill
+                FROM unique_trades t
+                JOIN backtest_orders o
+                  ON o.research_id = t.research_id
+                 AND o.run_id = t.run_id
+                 AND o.symbol = t.symbol
+                 AND (
+                     o.campaign_id = t.campaign_id
+                     OR (
+                         o.campaign_id IS NULL
+                         AND t.campaign_id IS NULL
+                         AND COALESCE(o.fill_time, o.created_at) >= t.entry_time
+                         AND (t.exit_time IS NULL OR o.created_at <= t.exit_time)
+                     )
+                 )
+               WHERE UPPER(o.payload->>'type') = 'LIMIT'
+                  AND UPPER(o.side) = CASE UPPER(t.side)
+                      WHEN 'SHORT' THEN 'SELL'
+                      WHEN 'LONG' THEN 'BUY'
+                      ELSE UPPER(t.side)
+                  END
+                  AND COALESCE((o.payload->>'reduce_only')::BOOLEAN, FALSE) = FALSE
+            )
+            , limit_order_stats AS (
+                SELECT symbol,
+                       COUNT(*)::BIGINT AS limit_order_count,
+                       COUNT(*) FILTER (WHERE has_fill)::BIGINT
+                           AS filled_limit_order_count
+                FROM limit_entry_orders
+                GROUP BY symbol
+            )
             SELECT summary.*,
                    win_count::NUMERIC / NULLIF(trade_count, 0) AS win_rate,
-                   three_tier_count::NUMERIC / NULLIF(trade_count, 0)
-                       AS full_tier_fill_rate
+                   CASE
+                       WHEN limit_order_count > 0
+                       THEN filled_limit_order_count::NUMERIC / limit_order_count
+                   END AS limit_order_fill_rate
             FROM summary
+            LEFT JOIN limit_order_stats USING (symbol)
             WHERE symbol ILIKE %s
             ORDER BY {sort_sql} {direction} NULLS LAST, symbol
             LIMIT %s OFFSET %s
@@ -191,8 +343,9 @@ class BacktestRepository:
         for row in rows:
             trades = int(row["trade_count"])
             row["win_rate"] = int(row["win_count"]) / trades if trades else 0.0
-            row["full_tier_fill_rate"] = (
-                int(row["three_tier_count"]) / trades if trades else 0.0
+            fill_rate = row.get("limit_order_fill_rate")
+            row["limit_order_fill_rate"] = (
+                float(fill_rate) if fill_rate is not None else None
             )
         return rows, int(total["count"] if total else 0)
 
@@ -227,7 +380,7 @@ class BacktestRepository:
             "entry_price": "entry_price",
             "exit_time": "exit_time",
             "exit_price": "exit_price",
-            "filled_tier_count": "entry_fill_count",
+            "entry_fill_count": "entry_fill_count",
             "holding_seconds": "exit_time - entry_time",
             "net_pnl": "net_pnl",
             "net_return": "net_return",
@@ -239,7 +392,7 @@ class BacktestRepository:
         fields = (
             "id, run_id, trade_id, campaign_id, symbol, side, signal_time, "
             "entry_time, exit_time, entry_price, exit_price, "
-            "entry_fill_count AS filled_tier_count, "
+            "entry_fill_count, "
             "(exit_time - entry_time) / 1000.0 AS holding_seconds, "
             "net_pnl, net_return, winner, status, exit_reason, parameters, "
             "strategy_data AS metrics"
@@ -307,26 +460,45 @@ class BacktestRepository:
             return None
         campaign_id = trade.get("campaign_id")
         run_id = trade["run_id"]
+        order_side = _trade_order_side(trade.get("side"))
         orders = await self._fetchall(
             "SELECT order_id, campaign_id, symbol, side, price, quantity, status, "
             "created_at, fill_time, payload FROM backtest_orders "
             "WHERE research_id = %s AND run_id = %s "
-            "AND ((%s::TEXT IS NULL AND campaign_id IS NULL) "
-            "OR campaign_id = %s::TEXT) "
+            "AND symbol = %s "
+            "AND (campaign_id = %s::TEXT OR (campaign_id IS NULL "
+            "AND (COALESCE((payload->>'reduce_only')::BOOLEAN, FALSE) "
+            "OR (%s::TEXT IS NULL AND UPPER(side) = UPPER(%s::TEXT))) "
+            "AND COALESCE(fill_time, created_at) >= COALESCE(%s::BIGINT, %s::BIGINT) "
+            "AND (%s::BIGINT IS NULL OR created_at <= %s::BIGINT))) "
             "ORDER BY created_at, order_id",
-            (research_id, run_id, campaign_id, campaign_id),
+            (
+                research_id,
+                run_id,
+                trade["symbol"],
+                campaign_id,
+                campaign_id,
+                order_side,
+                trade.get("signal_time"),
+                trade.get("entry_time"),
+                trade.get("exit_time"),
+                trade.get("exit_time"),
+            ),
         )
-        fills = await self._fetchall(
-            "SELECT f.fill_id, f.order_id, f.symbol, f.side, f.price, f.quantity, "
-            "f.commission, f.fill_time, f.payload FROM backtest_fills f "
-            "JOIN backtest_orders o ON o.research_id = f.research_id "
-            "AND o.run_id = f.run_id AND o.order_id = f.order_id "
-            "WHERE f.research_id = %s AND f.run_id = %s "
-            "AND ((%s::TEXT IS NULL AND o.campaign_id IS NULL) "
-            "OR o.campaign_id = %s::TEXT) "
-            "ORDER BY f.fill_time, f.fill_id",
-            (research_id, run_id, campaign_id, campaign_id),
-        )
+        order_ids = [row["order_id"] for row in orders]
+        fills = []
+        if order_ids:
+            fills = await self._fetchall(
+                "SELECT f.fill_id, f.order_id, f.symbol, f.side, f.price, "
+                "f.quantity, f.commission, f.fill_time, f.payload "
+                "FROM backtest_fills f "
+                "JOIN backtest_orders o ON o.research_id = f.research_id "
+                "AND o.run_id = f.run_id AND o.order_id = f.order_id "
+                "WHERE f.research_id = %s AND f.run_id = %s "
+                "AND o.symbol = %s AND o.order_id = ANY(%s) "
+                "ORDER BY f.fill_time, f.fill_id",
+                (research_id, run_id, trade["symbol"], order_ids),
+            )
         strategy_data = trade.get("strategy_data") or {}
         trade["entry_price"] = _float_or_none(trade.get("entry_price"))
         trade["exit_price"] = _float_or_none(trade.get("exit_price"))
@@ -350,33 +522,59 @@ class BacktestRepository:
         trade["tier_prices"] = [
             value for value in trade["tier_prices"] if value is not None
         ]
-        trade["filled_tier_count"] = trade.get("entry_fill_count")
         trade["holding_seconds"] = (
             (trade["exit_time"] - trade["entry_time"]) / 1000
             if trade.get("entry_time") is not None and trade.get("exit_time") is not None
             else None
         )
         trade["metrics"] = strategy_data
-        trade["orders"] = [
-            {
-                **row,
-                "id": row.pop("order_id"),
-                "created_time": row.pop("created_at"),
-                "price": _float_or_none(row.get("price")),
-                "quantity": _float_or_none(row.get("quantity")),
+        trade["orders"] = [_normalise_order(row) for row in orders]
+        orders_by_id = {order["order_id"]: order for order in trade["orders"]}
+        trade["fills"] = []
+        fills_by_order: dict[str, list[dict[str, Any]]] = {}
+        for fill_row in fills:
+            order_id = str(fill_row.get("order_id") or "")
+            fill = _normalise_fill(
+                fill_row,
+                orders_by_id.get(order_id, {}),
+            )
+            trade["fills"].append(fill)
+            fills_by_order.setdefault(fill["order_id"], []).append(fill)
+        for order in trade["orders"]:
+            order_fills = fills_by_order.get(order["order_id"], [])
+            if not order_fills:
+                continue
+            total_quantity = sum(
+                (fill["quantity"] or 0.0) for fill in order_fills
+            )
+            if order["filled_quantity"] is None:
+                order["filled_quantity"] = total_quantity
+            priced_fills = [
+                fill
+                for fill in order_fills
+                if fill["price"] is not None
+                and fill["quantity"] is not None
+                and fill["quantity"] > 0
+            ]
+            priced_quantity = sum(fill["quantity"] for fill in priced_fills)
+            if order["avg_fill_price"] is None and priced_quantity > 0:
+                order["avg_fill_price"] = sum(
+                    fill["price"] * fill["quantity"] for fill in priced_fills
+                ) / priced_quantity
+            commissions = [
+                fill["commission"]
+                for fill in order_fills
+                if fill["commission"] is not None
+            ]
+            if order["commission"] is None and commissions:
+                order["commission"] = sum(commissions)
+            commission_assets = {
+                fill["commission_asset"]
+                for fill in order_fills
+                if fill["commission_asset"]
             }
-            for row in orders
-        ]
-        trade["fills"] = [
-            {
-                **row,
-                "id": row.pop("fill_id"),
-                "time": row.pop("fill_time"),
-                "price": _float_or_none(row.get("price")),
-                "quantity": _float_or_none(row.get("quantity")),
-            }
-            for row in fills
-        ]
+            if order["commission_asset"] is None and len(commission_assets) == 1:
+                order["commission_asset"] = commission_assets.pop()
         return trade
 
     async def list_events(

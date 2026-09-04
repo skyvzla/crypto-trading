@@ -97,7 +97,7 @@ function makeTrade() {
     net_return: 0.0297,
     winner: true,
     exit_reason: 'take_profit',
-    filled_tier_count: 1,
+    entry_fill_count: 1,
     holding_seconds: 3600,
     tier_prices: [101, 100, 99],
     orders: [

@@ -279,7 +279,6 @@ watch(
         :key="routeKey"
         :trade="campaignChartTrade"
         mode="market"
-        fill-display="all"
         fill-time-semantics="exchange"
         exit-label="最后成交"
         :strategy-lines="false"

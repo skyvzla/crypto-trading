@@ -116,12 +116,12 @@ const columns: TableColumnsType<BacktestSymbolSummary> = [
     customRender: ({ record: row }) => formatDuration(row.average_holding_seconds),
   },
   {
-    title: '三档成交',
-    key: 'full_tier_fill_rate',
-    dataIndex: 'full_tier_fill_rate',
-    width: 100,
+    title: '挂单成交率',
+    key: 'limit_order_fill_rate',
+    dataIndex: 'limit_order_fill_rate',
+    width: 110,
     sorter: true,
-    customRender: ({ record: row }) => formatPercent(row.full_tier_fill_rate),
+    customRender: ({ record: row }) => formatPercent(row.limit_order_fill_rate),
   },
   {
     title: '',

@@ -668,7 +668,7 @@ export interface BacktestSymbolSummary {
   max_profit?: number | null
   max_loss?: number | null
   average_holding_seconds?: number | null
-  full_tier_fill_rate?: number | null
+  limit_order_fill_rate?: number | null
   run_count?: number
   metrics?: JsonObject
 }
@@ -688,7 +688,7 @@ export interface BacktestTradeSummary {
   net_return?: number | null
   winner?: boolean
   exit_reason?: string | null
-  filled_tier_count?: number | null
+  entry_fill_count?: number | null
   holding_seconds?: number | null
   run_id?: string | null
   parameters?: JsonObject
@@ -715,20 +715,55 @@ export interface BacktestReplayTradesResponse {
 
 export interface BacktestOrder {
   id: string
+  order_id?: string
+  client_order_id?: string | null
+  account_id?: string | null
+  strategy_id?: string | null
   tier?: number | null
-  price: number
+  symbol?: string | null
+  side?: string | null
+  type?: string | null
+  order_type?: string | null
+  price?: number | null
   quantity?: number | null
   status?: string | null
+  reduce_only?: boolean | null
+  created_at?: string | number | null
   created_time?: string | number | null
+  completed_time?: string | number | null
+  ttl_ms?: number | null
+  filled_quantity?: number | null
+  avg_fill_price?: number | null
+  fill_time?: string | number | null
+  cancel_time?: string | number | null
+  commission?: number | null
+  commission_asset?: string | null
+  is_maker?: boolean | null
+  campaign_id?: string | null
+  trigger_reason?: string | null
+  payload?: JsonObject
 }
 
 export interface BacktestFill {
   id: string
+  fill_id?: string
+  order_id?: string | null
   tier?: number | null
-  time: string | number
-  price: number
-  quantity?: number | null
+  symbol?: string | null
   side?: string | null
+  type?: string | null
+  order_type?: string | null
+  time?: string | number | null
+  fill_time?: string | number | null
+  price?: number | null
+  quantity?: number | null
+  commission?: number | null
+  commission_asset?: string | null
+  is_maker?: boolean | null
+  client_order_id?: string | null
+  reduce_only?: boolean | null
+  trigger_reason?: string | null
+  payload?: JsonObject
 }
 
 export interface ChartOverlay {
@@ -770,8 +805,8 @@ export interface BacktestTradeDetail extends BacktestTradeSummary {
   signal_price?: number | null
   average_entry_price?: number | null
   invalid_price?: number | null
-  orders?: BacktestOrder[]
-  fills?: BacktestFill[]
+  orders: BacktestOrder[]
+  fills: BacktestFill[]
   tier_prices?: number[]
   attributes?: JsonObject
   strategy_data?: JsonObject

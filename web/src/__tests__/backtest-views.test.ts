@@ -435,7 +435,15 @@ describe('回测关键视图', () => {
 
   it('交易对列表从 URL 恢复筛选和服务端排序', async () => {
     vi.mocked(backtestApi.symbols).mockResolvedValue({
-      items: [{ symbol: 'AKEUSDT', trade_count: 2, win_rate: 0.5, net_pnl: -10 }],
+      items: [
+        {
+          symbol: 'AKEUSDT',
+          trade_count: 2,
+          win_rate: 0.5,
+          net_pnl: -10,
+          limit_order_fill_rate: null,
+        },
+      ],
       total: 1,
       limit: 25,
       offset: 0,
@@ -446,6 +454,8 @@ describe('回测关键视图', () => {
     expect(backtestApi.symbols).toHaveBeenCalledWith('r-1', 25, 0, 'AKE', 'win_rate', 'asc')
     expect((wrapper.get('input').element as HTMLInputElement).value).toBe('AKE')
     expect(wrapper.findAll('.ant-table-column-sorters').length).toBeGreaterThanOrEqual(8)
+    expect(wrapper.text()).toContain('挂单成交率')
+    expect(wrapper.text()).toContain('-')
   })
 
   it('交易对筛选无结果时仍可清除条件并恢复列表', async () => {
@@ -483,6 +493,7 @@ describe('回测关键视图', () => {
           net_pnl: -10,
           net_return: -0.1,
           winner: false,
+          entry_fill_count: 2,
         },
       ],
       total: 1,
@@ -508,6 +519,8 @@ describe('回测关键视图', () => {
     )
     expect(wrapper.find('input[placeholder="最低盈亏 U"]').exists()).toBe(true)
     expect(wrapper.findAll('.ant-table-column-sorters').length).toBeGreaterThanOrEqual(10)
+    expect(wrapper.text()).toContain('入场成交笔数')
+    expect(wrapper.text()).toContain('2')
   })
 
   it('收益曲线默认以500U资金池、500U储备和50%盈利复投回放', async () => {
@@ -559,6 +572,8 @@ describe('回测关键视图', () => {
       exit_time: 1_750_001_800_000,
       exit_price: 1.2,
       net_pnl: -10,
+      orders: [],
+      fills: [],
     })
     vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
     vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
@@ -592,10 +607,80 @@ describe('回测关键视图', () => {
       trade_id: 'backtest-trade:AKEUSDT:1',
       campaign_id: 'spike_short:AKEUSDT:1750000000000',
       side: 'SHORT',
-      tier_prices: [1.1, 1.2, 1.3],
+      signal_time: 1_749_999_000_000,
+      signal_price: 1.05,
+      invalid_price: 1.4,
+      orders: [
+        {
+          id: 'order-entry-1',
+          order_id: 'order-entry-1',
+          symbol: 'AKEUSDT',
+          side: 'SELL',
+          order_type: 'LIMIT',
+          type: 'LIMIT',
+          price: 1.1,
+          quantity: 3,
+          filled_quantity: 1.5,
+          avg_fill_price: 1.095,
+          status: 'PARTIALLY_FILLED',
+          reduce_only: false,
+          created_time: 1_750_000_100_000,
+          fill_time: 1_750_000_300_000,
+        },
+        {
+          id: 'order-exit-1',
+          order_id: 'order-exit-1',
+          symbol: 'AKEUSDT',
+          side: 'BUY',
+          order_type: 'MARKET',
+          type: 'MARKET',
+          price: null,
+          quantity: 1.5,
+          filled_quantity: 1.5,
+          avg_fill_price: 1.2,
+          status: 'FILLED',
+          reduce_only: true,
+          created_time: 1_750_001_700_000,
+          fill_time: 1_750_001_800_000,
+        },
+      ],
       fills: [
-        { id: 'f-1', time: 1_750_000_000_000, price: 1.1, side: 'SELL' },
-        { id: 'f-exit', time: 1_750_001_800_000, price: 1.2, side: 'BUY' },
+        {
+          id: 'f-entry-1a',
+          fill_id: 'f-entry-1a',
+          order_id: 'order-entry-1',
+          time: 1_750_000_200_000,
+          price: 1.09,
+          quantity: 0.5,
+          commission: 0.001,
+          commission_asset: 'USDT',
+          is_maker: true,
+          side: 'SELL',
+        },
+        {
+          id: 'f-entry-1b',
+          fill_id: 'f-entry-1b',
+          order_id: 'order-entry-1',
+          time: 1_750_000_300_000,
+          price: 1.1,
+          quantity: 1,
+          commission: 0.002,
+          commission_asset: 'USDT',
+          is_maker: false,
+          side: 'SELL',
+        },
+        {
+          id: 'f-exit-1',
+          fill_id: 'f-exit-1',
+          order_id: 'order-exit-1',
+          time: 1_750_001_800_000,
+          price: 1.2,
+          quantity: 1.5,
+          commission: 0.003,
+          commission_asset: 'USDT',
+          is_maker: false,
+          side: 'BUY',
+        },
       ],
     })
     vi.mocked(backtestApi.events).mockResolvedValue({
@@ -641,15 +726,31 @@ describe('回测关键视图', () => {
     expect(wrapper.find('.event-parameters').text()).toContain('5.00%')
     expect(wrapper.find('.event-parameters tbody tr').classes()).toContain('is-major')
     expect(wrapper.text()).not.toContain('{"rise_5s"')
-    expect(wrapper.text()).toContain('已成交 1 / 3 档')
-    expect(wrapper.text()).toContain('卖1')
-    expect(wrapper.text()).toContain('限卖2')
+    expect(wrapper.text()).toContain('交易基准')
+    expect(wrapper.text()).toContain('信号时间')
+    expect(wrapper.text()).toContain('信号价格')
+    expect(wrapper.text()).toContain('失效价格')
+    expect(wrapper.text()).not.toContain('成交档位')
+    expect(wrapper.text()).not.toContain('卖1')
+    expect(wrapper.text()).not.toContain('限卖')
+    expect(wrapper.text()).toContain('订单明细')
+    expect(wrapper.find('.trade-summary-strip').text()).toContain('订单数2')
+    expect(wrapper.find('.trade-summary-strip').text()).toContain('成交笔数3')
+    expect(wrapper.text()).toContain('开仓/只减仓')
+    expect(wrapper.text()).toContain('成交均价')
+    expect(wrapper.text()).toContain('完成/最后成交时间')
+    expect(wrapper.findAll('.orders-table .ant-table-tbody > .ant-table-row')).toHaveLength(2)
+    expect(wrapper.find('.orders-table').text()).toContain('1.5')
+    expect(wrapper.find('.orders-table').text()).toContain('PARTIALLY_FILLED')
+    expect(wrapper.find('.orders-table').text()).toContain('只减仓')
+    expect(wrapper.find('.orders-table').text()).toContain('MARKET')
+    expect(wrapper.find('.orders-table').text()).toContain('order-entry-1')
+    expect(wrapper.find('.orders-table').text()).toContain('order-exit-1')
+    expect(wrapper.find('.fills-table').exists()).toBe(false)
     expect(wrapper.text()).toContain('交易 ID')
     expect(wrapper.text()).toContain('backtest-trade:AKEUSDT:1')
     expect(wrapper.text()).toContain('信号 ID')
     expect(wrapper.text()).toContain('spike_short:AKEUSDT:1750000000000')
-    expect(wrapper.text()).toContain('触发 K线')
-    expect(wrapper.text()).toContain('确认')
     expect(wrapper.find('button[aria-label="标线显示"]').exists()).toBe(true)
     expect(wrapper.find('.line-visibility-menu').exists()).toBe(false)
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
@@ -694,6 +795,8 @@ describe('回测关键视图', () => {
       exit_price: 1.2,
       net_pnl: -10,
       tier_prices: [1.1],
+      orders: [],
+      fills: [],
     })
     vi.mocked(backtestApi.events).mockResolvedValue({
       items: [
@@ -724,7 +827,8 @@ describe('回测关键视图', () => {
     await flushPromises()
 
     expect(wrapper.find('.replay-details').exists()).toBe(false)
-    expect(wrapper.find('.trade-details-section h3').text()).toBe('成交明细')
+    expect(wrapper.find('.trade-details-section h3').text()).toBe('交易基准')
+    expect(wrapper.find('.order-details-section h3').text()).toBe('订单明细')
     expect(wrapper.find('.timeline-section > h3').text()).toBe('事件时间线')
     expect(wrapper.find('.timeline-panel').exists()).toBe(true)
     expect(wrapper.find('.timeline-panel h3').exists()).toBe(false)
@@ -734,5 +838,131 @@ describe('回测关键视图', () => {
     const descriptions = wrapper.find('.trade-details-section').findComponent({ name: 'ADescriptions' })
     expect(descriptions.exists()).toBe(true)
     expect(descriptions.props('column')).toEqual({ xs: 1, sm: 2, md: 2, lg: 4, xl: 4, xxl: 6 })
+  })
+
+  it('单笔复盘展开订单时只展示同一 order_id 的部分成交明细', async () => {
+    vi.mocked(backtestApi.trade).mockResolvedValue({
+      id: 't-partial',
+      symbol: 'AKEUSDT',
+      strategy_id: 'spike-short',
+      entry_time: 1_750_000_000_000,
+      entry_price: 1.1,
+      exit_time: 1_750_001_800_000,
+      exit_price: 1.2,
+      net_pnl: 2,
+      orders: [
+        {
+          id: 'order-partial',
+          order_id: 'order-partial',
+          symbol: 'AKEUSDT',
+          side: 'SELL',
+          type: 'LIMIT',
+          price: 1.1,
+          quantity: 2,
+          filled_quantity: 1,
+          avg_fill_price: 1.095,
+          status: 'PARTIALLY_FILLED',
+          reduce_only: false,
+          created_time: 1_750_000_100_000,
+          fill_time: 1_750_000_300_000,
+        },
+        {
+          id: 'order-other',
+          order_id: 'order-other',
+          symbol: 'AKEUSDT',
+          side: 'BUY',
+          type: 'MARKET',
+          quantity: 1,
+          filled_quantity: 1,
+          avg_fill_price: 1.2,
+          status: 'FILLED',
+          reduce_only: true,
+          created_time: 1_750_001_700_000,
+          fill_time: 1_750_001_800_000,
+        },
+        {
+          id: 'order-empty',
+          order_id: 'order-empty',
+          symbol: 'AKEUSDT',
+          side: 'SELL',
+          type: 'LIMIT',
+          price: 1.15,
+          quantity: 1,
+          filled_quantity: 0,
+          status: 'CANCELED',
+          reduce_only: false,
+          created_time: 1_750_000_100_000,
+          cancel_time: 1_750_000_400_000,
+        },
+      ],
+      fills: [
+        {
+          id: 'fill-partial-a',
+          fill_id: 'fill-partial-a',
+          order_id: 'order-partial',
+          time: 1_750_000_200_000,
+          price: 1.09,
+          quantity: 0.4,
+          commission: 0.001,
+          commission_asset: 'USDT',
+          is_maker: true,
+        },
+        {
+          id: 'fill-partial-b',
+          fill_id: 'fill-partial-b',
+          order_id: 'order-partial',
+          time: 1_750_000_300_000,
+          price: 1.1,
+          quantity: 0.6,
+          commission: 0.002,
+          commission_asset: 'USDT',
+          is_maker: false,
+        },
+        {
+          id: 'fill-other',
+          fill_id: 'fill-other',
+          order_id: 'order-other',
+          time: 1_750_001_800_000,
+          price: 1.2,
+          quantity: 1,
+          commission: 0.003,
+          commission_asset: 'USDT',
+          is_maker: false,
+        },
+      ],
+    })
+    vi.mocked(backtestApi.events).mockResolvedValue({ items: [] })
+    vi.mocked(backtestApi.strategySchema).mockResolvedValue(null)
+    vi.mocked(backtestApi.candles).mockResolvedValue({
+      symbol: 'AKEUSDT',
+      interval: '5m',
+      source: 'binance',
+      candles: [],
+    })
+    await atRoute('/backtests/r-1/trades/t-partial')
+    const wrapper = mount(BacktestTradeReplayView, {
+      global: { stubs: { TradeCandlestickChart: true } },
+    })
+    await flushPromises()
+
+    const expandButtons = wrapper
+      .findAll('.orders-table button[aria-label="Expand row"]')
+      .filter((button) => !button.classes().includes('ant-table-row-expand-icon-spaced'))
+    expect(expandButtons).toHaveLength(2)
+    expect(
+      wrapper.get('.orders-table tr[data-row-key="order-empty"] button[aria-label="Expand row"]').classes(),
+    ).toContain('ant-table-row-expand-icon-spaced')
+    const expandButton = expandButtons[0]
+    expect(expandButton.exists()).toBe(true)
+    await expandButton.trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.fills-table').exists()).toBe(true)
+    expect(wrapper.find('.fills-table').text()).toContain('fill-partial-a')
+    expect(wrapper.find('.fills-table').text()).toContain('fill-partial-b')
+    expect(wrapper.find('.fills-table').text()).not.toContain('fill-other')
+    expect(wrapper.find('.fills-table').text()).toContain('Maker')
+    expect(wrapper.find('.fills-table').text()).toContain('Taker')
+    expect(wrapper.find('.fills-table').text()).toContain('0.001 USDT')
   })
 })

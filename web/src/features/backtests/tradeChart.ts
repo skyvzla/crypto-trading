@@ -1,6 +1,5 @@
 import type { BacktestFill, BacktestOrder, JsonObject } from '@/api/types'
 
-export type TradeChartFillDisplay = 'entry' | 'all'
 export type TradeChartFillTimeSemantics = 'backtest-confirmation' | 'exchange'
 
 export interface TradeChartData {
