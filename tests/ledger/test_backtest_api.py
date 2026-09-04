@@ -373,8 +373,8 @@ async def test_repository_get_trade_scopes_orders_and_fills_to_trade_lifecycle()
     order_query, order_parameters = pool.calls[1]
     assert "campaign_id IS NULL" in order_query
     assert "reduce_only" in order_query
-    assert "COALESCE(fill_time, created_at) >= COALESCE(%s::BIGINT, %s::BIGINT)" in order_query
-    assert "%s::BIGINT IS NULL OR created_at <= %s::BIGINT" in order_query
+    assert "COALESCE(created_at, fill_time) > %s::BIGINT" in order_query
+    assert "COALESCE(created_at, fill_time) < %s::BIGINT" in order_query
     assert order_parameters == (
         research_id,
         "run-1",
@@ -382,8 +382,12 @@ async def test_repository_get_trade_scopes_orders_and_fills_to_trade_lifecycle()
         "campaign-1",
         "campaign-1",
         "SELL",
-        None,
         100,
+        100,
+        100,
+        "campaign-1",
+        "SELL",
+        300,
         300,
         300,
     )
@@ -427,7 +431,7 @@ async def test_repository_get_trade_returns_empty_execution_arrays_without_fill_
     order_query, order_parameters = pool.calls[1]
     assert "%s::TEXT IS NULL" in order_query
     assert "UPPER(side) = UPPER(%s::TEXT)" in order_query
-    assert "%s::BIGINT IS NULL OR created_at <= %s::BIGINT" in order_query
+    assert "%s::BIGINT IS NULL OR COALESCE(created_at, fill_time)" in order_query
     assert order_parameters == (
         research_id,
         "legacy-run",
@@ -436,7 +440,11 @@ async def test_repository_get_trade_returns_empty_execution_arrays_without_fill_
         None,
         None,
         None,
-        500,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
     )
@@ -483,7 +491,8 @@ async def test_repository_list_symbols_reports_limit_order_fill_rate_and_null_de
     assert "CASE UPPER(t.side)" in query
     assert "WHEN 'SHORT' THEN 'SELL'" in query
     assert "t.campaign_id IS NULL" in query
-    assert "COALESCE(o.fill_time, o.created_at) >= t.entry_time" in query
+    assert "GREATEST(t.signal_time, t.previous_exit_time)" in query
+    assert "COALESCE(o.created_at, o.fill_time)" in query
     assert parameters == (research_id, "%", 20, 0)
 
 

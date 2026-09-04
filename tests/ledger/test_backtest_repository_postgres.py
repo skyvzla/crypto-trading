@@ -168,6 +168,92 @@ async def _seed_open_trade(pool):
     return research_id, trade_row_id
 
 
+async def _seed_legacy_trade_windows(pool):
+    research_id = uuid4()
+    first_trade_id = uuid4()
+    second_trade_id = uuid4()
+    run_id = f"legacy-{uuid4().hex}"
+    async with pool.connection() as connection:
+        await connection.execute(
+            """
+            INSERT INTO backtest_researches (
+                id, source_key, name, strategy_id, status
+            ) VALUES (%s, %s, 'legacy integration', 'legacy', 'completed')
+            """,
+            (research_id, uuid4().hex),
+        )
+        await connection.execute(
+            """
+            INSERT INTO backtest_runs (research_id, run_id, symbol, status)
+            VALUES (%s, %s, 'BTCUSDT', 'completed')
+            """,
+            (research_id, run_id),
+        )
+        await connection.execute(
+            """
+            INSERT INTO backtest_trades (
+                id, research_id, run_id, trade_id, campaign_id, symbol, side,
+                signal_time, entry_time, exit_time, entry_price, exit_price,
+                status, strategy_data
+            ) VALUES
+                (%s, %s, %s, 'legacy-1', NULL, 'BTCUSDT', 'SHORT',
+                 NULL, 100, 200, 100, 90, 'CLOSED', '{}'::JSONB),
+                (%s, %s, %s, 'legacy-2', NULL, 'BTCUSDT', 'SHORT',
+                 NULL, 200, 300, 90, 80, 'CLOSED', '{}'::JSONB)
+            """,
+            (
+                first_trade_id,
+                research_id,
+                run_id,
+                second_trade_id,
+                research_id,
+                run_id,
+            ),
+        )
+        await connection.execute(
+            """
+            INSERT INTO backtest_orders (
+                research_id, run_id, order_id, campaign_id, symbol, side,
+                price, quantity, status, created_at, fill_time, payload
+            ) VALUES
+                (%s, %s, 'legacy-entry-filled', NULL, 'BTCUSDT', 'SELL',
+                 100, 1, 'FILLED', 90, 100,
+                 '{"type":"LIMIT","reduce_only":false}'::JSONB),
+                (%s, %s, 'legacy-entry-unfilled', NULL, 'BTCUSDT', 'SELL',
+                 101, 1, 'CANCELED', 90, NULL,
+                 '{"type":"LIMIT","reduce_only":false,"cancel_time":150}'::JSONB),
+                (%s, %s, 'legacy-exit-1', NULL, 'BTCUSDT', 'BUY',
+                 NULL, 1, 'FILLED', 200, 200,
+                 '{"type":"MARKET","reduce_only":true}'::JSONB),
+                (%s, %s, 'legacy-entry-2', NULL, 'BTCUSDT', 'SELL',
+                 90, 1, 'FILLED', 200, 200,
+                 '{"type":"LIMIT","reduce_only":false}'::JSONB),
+                (%s, %s, 'legacy-exit-2', NULL, 'BTCUSDT', 'BUY',
+                 NULL, 1, 'FILLED', 290, 300,
+                 '{"type":"MARKET","reduce_only":true}'::JSONB)
+            """,
+            (research_id, run_id) * 5,
+        )
+        await connection.execute(
+            """
+            INSERT INTO backtest_fills (
+                research_id, run_id, fill_id, order_id, symbol, side,
+                price, quantity, commission, fill_time, payload
+            ) VALUES
+                (%s, %s, 'legacy-fill-entry-1', 'legacy-entry-filled',
+                 'BTCUSDT', 'SELL', 100, 1, 0, 100, '{}'::JSONB),
+                (%s, %s, 'legacy-fill-exit-1', 'legacy-exit-1',
+                 'BTCUSDT', 'BUY', 90, 1, 0, 200, '{}'::JSONB),
+                (%s, %s, 'legacy-fill-entry-2', 'legacy-entry-2',
+                 'BTCUSDT', 'SELL', 90, 1, 0, 200, '{}'::JSONB),
+                (%s, %s, 'legacy-fill-exit-2', 'legacy-exit-2',
+                 'BTCUSDT', 'BUY', 80, 1, 0, 300, '{}'::JSONB)
+            """,
+            (research_id, run_id) * 4,
+        )
+    return research_id, first_trade_id, second_trade_id
+
+
 @pytest.mark.asyncio
 async def test_open_trade_execution_records_and_limit_fill_rate(backtest_repository):
     repository, pool = backtest_repository
@@ -193,3 +279,40 @@ async def test_open_trade_execution_records_and_limit_fill_rate(backtest_reposit
     )
     assert total == 1
     assert rows[0]["limit_order_fill_rate"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_legacy_trade_windows_keep_sibling_orders_without_cross_linking(
+    backtest_repository,
+):
+    repository, pool = backtest_repository
+    research_id, first_trade_id, second_trade_id = await _seed_legacy_trade_windows(
+        pool
+    )
+
+    first = await repository.get_trade(research_id, first_trade_id)
+    second = await repository.get_trade(research_id, second_trade_id)
+
+    assert first is not None
+    assert [order["order_id"] for order in first["orders"]] == [
+        "legacy-entry-filled",
+        "legacy-entry-unfilled",
+        "legacy-exit-1",
+    ]
+    assert second is not None
+    assert [order["order_id"] for order in second["orders"]] == [
+        "legacy-entry-2",
+        "legacy-exit-2",
+    ]
+    assert {fill["order_id"] for fill in second["fills"]} == {
+        "legacy-entry-2",
+        "legacy-exit-2",
+    }
+
+    rows, _ = await repository.list_symbols(
+        research_id,
+        limit=10,
+        offset=0,
+        sort_by="limit_order_fill_rate",
+    )
+    assert rows[0]["limit_order_fill_rate"] == pytest.approx(2 / 3)

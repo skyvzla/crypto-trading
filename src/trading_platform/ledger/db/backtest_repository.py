@@ -263,10 +263,19 @@ class BacktestRepository:
         pattern = f"%{symbol_filter.strip().upper()}%" if symbol_filter else "%"
         rows = await self._fetchall(
             f"""
-            WITH unique_trades AS (
-                SELECT DISTINCT ON (symbol, trade_id) *
+            WITH trades_with_windows AS (
+                SELECT *,
+                       MAX(exit_time) OVER (
+                           PARTITION BY research_id, run_id, symbol
+                           ORDER BY entry_time, id
+                           ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                       ) AS previous_exit_time
                 FROM backtest_trades
                 WHERE research_id = %s
+            )
+            , unique_trades AS (
+                SELECT DISTINCT ON (symbol, trade_id) *
+                FROM trades_with_windows
                 ORDER BY symbol, trade_id, run_id
             )
             , summary AS (SELECT symbol,
@@ -301,8 +310,15 @@ class BacktestRepository:
                      OR (
                          o.campaign_id IS NULL
                          AND t.campaign_id IS NULL
-                         AND COALESCE(o.fill_time, o.created_at) >= t.entry_time
-                         AND (t.exit_time IS NULL OR o.created_at <= t.exit_time)
+                         AND (
+                             GREATEST(t.signal_time, t.previous_exit_time) IS NULL
+                             OR COALESCE(o.created_at, o.fill_time)
+                                >= GREATEST(t.signal_time, t.previous_exit_time)
+                         )
+                         AND (
+                             t.exit_time IS NULL
+                             OR COALESCE(o.created_at, o.fill_time) < t.exit_time
+                         )
                      )
                  )
                WHERE UPPER(o.payload->>'type') = 'LIMIT'
@@ -451,7 +467,11 @@ class BacktestRepository:
         self, research_id: UUID, trade_id: UUID
     ) -> dict[str, Any] | None:
         trade = await self._fetchone(
-            "SELECT t.*, r.strategy_id, r.strategy_version, r.name AS research_name "
+            "SELECT t.*, r.strategy_id, r.strategy_version, r.name AS research_name, "
+            "(SELECT MAX(previous.exit_time) FROM backtest_trades previous "
+            "WHERE previous.research_id = t.research_id "
+            "AND previous.run_id = t.run_id AND previous.symbol = t.symbol "
+            "AND previous.entry_time < t.entry_time) AS previous_exit_time "
             "FROM backtest_trades t JOIN backtest_researches r ON r.id = t.research_id "
             "WHERE t.research_id = %s AND t.id = %s",
             (research_id, trade_id),
@@ -461,6 +481,18 @@ class BacktestRepository:
         campaign_id = trade.get("campaign_id")
         run_id = trade["run_id"]
         order_side = _trade_order_side(trade.get("side"))
+        legacy_start_time = max(
+            (
+                value
+                for value in (
+                    trade.get("signal_time"),
+                    trade.get("previous_exit_time"),
+                    trade.get("entry_time") if campaign_id is not None else None,
+                )
+                if value is not None
+            ),
+            default=None,
+        )
         orders = await self._fetchall(
             "SELECT order_id, campaign_id, symbol, side, price, quantity, status, "
             "created_at, fill_time, payload FROM backtest_orders "
@@ -468,9 +500,19 @@ class BacktestRepository:
             "AND symbol = %s "
             "AND (campaign_id = %s::TEXT OR (campaign_id IS NULL "
             "AND (COALESCE((payload->>'reduce_only')::BOOLEAN, FALSE) "
-            "OR (%s::TEXT IS NULL AND UPPER(side) = UPPER(%s::TEXT))) "
-            "AND COALESCE(fill_time, created_at) >= COALESCE(%s::BIGINT, %s::BIGINT) "
-            "AND (%s::BIGINT IS NULL OR created_at <= %s::BIGINT))) "
+            "OR (%s::TEXT IS NULL "
+            "AND NOT COALESCE((payload->>'reduce_only')::BOOLEAN, FALSE) "
+            "AND UPPER(side) = UPPER(%s::TEXT))) "
+            "AND (%s::BIGINT IS NULL "
+            "OR COALESCE(created_at, fill_time) > %s::BIGINT "
+            "OR (COALESCE(created_at, fill_time) = %s::BIGINT "
+            "AND %s::TEXT IS NULL "
+            "AND NOT COALESCE((payload->>'reduce_only')::BOOLEAN, FALSE) "
+            "AND UPPER(side) = UPPER(%s::TEXT))) "
+            "AND (%s::BIGINT IS NULL "
+            "OR COALESCE(created_at, fill_time) < %s::BIGINT "
+            "OR (COALESCE(created_at, fill_time) = %s::BIGINT "
+            "AND COALESCE((payload->>'reduce_only')::BOOLEAN, FALSE))))) "
             "ORDER BY created_at, order_id",
             (
                 research_id,
@@ -479,8 +521,12 @@ class BacktestRepository:
                 campaign_id,
                 campaign_id,
                 order_side,
-                trade.get("signal_time"),
-                trade.get("entry_time"),
+                legacy_start_time,
+                legacy_start_time,
+                legacy_start_time,
+                campaign_id,
+                order_side,
+                trade.get("exit_time"),
                 trade.get("exit_time"),
                 trade.get("exit_time"),
             ),
