@@ -46,6 +46,12 @@ describe('ChartIndicatorSettingsModal', () => {
 
     const maCheckbox = maItem.get('input[type="checkbox"]')
     await maCheckbox.setValue(true)
+
+    const bollItem = wrapper.findAll('.indicator-list-item').find((item) => item.text().includes('布林通道'))!
+    await bollItem.trigger('click')
+    expect(wrapper.get('section[aria-label="BOLL 参数"]').text()).toContain('通道填充')
+    expect(wrapper.get('section[aria-label="BOLL 参数"]').text()).not.toContain('中轨')
+
     await wrapper.get('.save-probe').trigger('click')
 
     const saved = wrapper.emitted('save')?.[0]?.[0] as typeof settings

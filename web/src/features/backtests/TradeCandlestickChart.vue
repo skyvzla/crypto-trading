@@ -26,6 +26,7 @@ import { IS_DARK_THEME } from '@/shared/theme'
 import { STORAGE_KEYS, readStored, readStoredRecord, removeStored, writeStored } from '@/shared/storage'
 import { getChartTheme, type ChartTheme } from './chartTheme'
 import { cloneChartIndicatorSettings, DEFAULT_CHART_INDICATOR_SETTINGS } from './chartIndicatorSettings'
+import { BollingerBandPrimitive, colorWithOpacity } from './bollingerBandPrimitive'
 import { atr, bollinger, emaOfClose, kdj, maOfClose, macd, rsiOfClose, volumeMa } from './indicators'
 import type { TradeChartData, TradeChartFillTimeSemantics } from './tradeChart'
 
@@ -476,19 +477,23 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
   if (settings.main.boll.enabled) {
     const definitions = [
       { key: 'upper' as const, label: 'BOLL UP', color: settings.main.boll.colors.upper },
-      { key: 'middle' as const, label: 'MID', color: settings.main.boll.colors.middle },
       { key: 'lower' as const, label: 'DOWN', color: settings.main.boll.colors.lower },
     ]
     const group: IndicatorGroup = { key: 'boll', paneIndex: 0, values: [] }
     definitions.forEach((definition) => {
       const series = instance.addSeries(LineSeries, {
         ...hiddenLatestValue,
-        color: definition.color,
+        color: colorWithOpacity(definition.color, 0.42),
         lineWidth: 1,
+        crosshairMarkerVisible: false,
         priceFormat,
       })
       group.values.push({ label: definition.label, color: definition.color, series })
     })
+    const band = new BollingerBandPrimitive({
+      fillColor: colorWithOpacity(settings.main.boll.colors.middle, 0.12),
+    })
+    group.values[0].series.attachPrimitive(band)
     const update = (next: ChartCandle[]) => {
       const result = bollinger(next, {
         period: settings.main.boll.period,
@@ -499,6 +504,13 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         group.values[index].series.setData(lineData(next, seriesValues))
         return seriesValues.at(-1) ?? null
       })
+      band.setData(
+        next.map((bar, index) => {
+          const upper = result.upper[index]
+          const lower = result.lower[index]
+          return upper === null || lower === null ? null : { time: bar.time, upper, lower }
+        }),
+      )
       updateGroupLatestValues(group, values)
     }
     update(data)

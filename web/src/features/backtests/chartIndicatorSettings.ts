@@ -14,7 +14,7 @@ export interface ChartIndicatorDefinition {
 export const CHART_INDICATORS: ChartIndicatorDefinition[] = [
   { key: 'ema', group: 'main', name: 'EMA', description: '指数移动平均线' },
   { key: 'ma', group: 'main', name: 'MA', description: '简单移动平均线' },
-  { key: 'boll', group: 'main', name: 'BOLL', description: '布林带' },
+  { key: 'boll', group: 'main', name: 'BOLL', description: '布林通道' },
   { key: 'volume', group: 'sub', name: 'VOL', description: '成交量与均量线' },
   { key: 'macd', group: 'sub', name: 'MACD', description: '指数平滑异同移动平均线' },
   { key: 'kdj', group: 'sub', name: 'KDJ', description: '随机指标' },

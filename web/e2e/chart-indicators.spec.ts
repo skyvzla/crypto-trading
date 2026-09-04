@@ -268,6 +268,28 @@ async function assertChartIsVisibleAndSettled(page: Page, minimumLabels = 1) {
   expect(geometry.overflow.scrollWidth).toBeLessThanOrEqual(geometry.overflow.clientWidth + 1)
 }
 
+async function bollingerFillPixelCount(page: Page) {
+  return page.locator('.candlestick-host canvas').evaluateAll((canvases) =>
+    canvases.reduce((total, canvas) => {
+      const context = canvas.getContext('2d')
+      if (!context) return total
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
+      let matches = 0
+      for (let index = 0; index < pixels.length; index += 4) {
+        const red = pixels[index]
+        const green = pixels[index + 1]
+        const blue = pixels[index + 2]
+        const alpha = pixels[index + 3]
+        const transparentLayerMatch = alpha >= 24 && alpha <= 38 && red >= 220 && green >= 150 && blue <= 40
+        const lightCanvasMatch =
+          alpha >= 245 && red >= 248 && green >= 236 && green <= 250 && blue >= 214 && blue <= 235
+        if (transparentLayerMatch || lightCanvasMatch) matches += 1
+      }
+      return total + matches
+    }, 0),
+  )
+}
+
 test('单笔复盘支持主副图指标配置并保持图表布局稳定', async ({ page }, testInfo) => {
   const { putSeen } = await installApiMocks(page)
   await page.goto(`/#/backtests/${researchId}/trades/${tradeId}`)
@@ -295,6 +317,18 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await maItem.getByRole('checkbox').check()
   await expect(maItem.getByRole('checkbox')).toBeChecked()
 
+  const emaItem = page.locator('.indicator-list-item').filter({ hasText: '指数移动平均线' })
+  await emaItem.getByRole('checkbox').check()
+  await expect(emaItem.getByRole('checkbox')).toBeChecked()
+
+  const bollItem = page.locator('.indicator-list-item').filter({ hasText: '布林通道' })
+  await bollItem.click()
+  const bollEditor = page.locator('section[aria-label="BOLL 参数"]')
+  await expect(bollEditor).toBeVisible()
+  await expect(bollEditor.getByText('通道填充', { exact: true })).toBeVisible()
+  await bollItem.getByRole('checkbox').check()
+  await expect(bollItem.getByRole('checkbox')).toBeChecked()
+
   const rsiItem = page.locator('.indicator-list-item').filter({ hasText: '相对强弱指标' })
   await rsiItem.click()
   const rsiEditor = page.locator('section[aria-label="RSI 参数"]')
@@ -310,6 +344,9 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   expect(saved).toMatchObject({
     default_interval: '15m',
     main: {
+      ema: {
+        enabled: true,
+      },
       ma: {
         enabled: true,
         lines: [
@@ -317,6 +354,9 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
           { period: 10, color: '#22c55e' },
           { period: 20, color: '#3b82f6' },
         ],
+      },
+      boll: {
+        enabled: true,
       },
     },
     sub: {
@@ -333,9 +373,15 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await expect(page.locator('.ant-modal:visible')).toHaveCount(0)
 
   await assertChartIsVisibleAndSettled(page, 3)
-  await expect(page.locator('.indicator-hover-label').first()).toContainText('MA(7)')
+  const mainIndicatorLabel = page.locator('.indicator-hover-label').first()
+  await expect(mainIndicatorLabel).toContainText('EMA(9)')
+  await expect(mainIndicatorLabel).toContainText('MA(7)')
+  await expect(mainIndicatorLabel).toContainText('BOLL UP')
+  await expect(mainIndicatorLabel).toContainText('DOWN')
+  await expect(mainIndicatorLabel).not.toContainText('MID')
   await expect(page.locator('.indicator-hover-label').last()).toContainText('RSI(14)')
   await expect(page.locator('.indicator-hover-label').last()).toContainText(/-?\d/)
+  await expect.poll(() => bollingerFillPixelCount(page)).toBeGreaterThan(100)
 
   const overflow = await page.evaluate(() => ({
     documentWidth: document.documentElement.scrollWidth,
