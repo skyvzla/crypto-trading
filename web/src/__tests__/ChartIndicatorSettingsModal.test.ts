@@ -37,7 +37,7 @@ describe('ChartIndicatorSettingsModal', () => {
     expect(wrapper.get('h2').text()).toBe('图表设置')
     expect(wrapper.findAll('.indicator-list-item')).toHaveLength(8)
 
-    await wrapper.get('select[aria-label="默认周期"]').setValue('15m')
+    await wrapper.get('select[id="default-chart-interval"]').setValue('15m')
 
     const maItem = wrapper.findAll('.indicator-list-item').find((item) => item.text().includes('简单移动平均线'))!
     await maItem.trigger('click')

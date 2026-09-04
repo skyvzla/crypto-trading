@@ -90,7 +90,6 @@ function save() {
         id="default-chart-interval"
         v-model:value="draft.default_interval"
         class="default-interval-select"
-        aria-label="默认周期"
         size="small"
       >
         <a-select-option v-for="item in CHART_INTERVALS" :key="item" :value="item">{{ item }}</a-select-option>
