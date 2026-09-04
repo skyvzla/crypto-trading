@@ -25,6 +25,7 @@
   --text: #1e293b;
   --muted: #64748b;
   --chart-overlay: rgba(255, 255, 255, 0.96);
+  --chart-indicator-overlay: rgba(255, 255, 255, 0.72);
 }
 
 :root[data-theme='dark'] {
@@ -42,6 +43,7 @@
   --text: #dbe7f5;
   --muted: #94a8c1;
   --chart-overlay: rgba(17, 24, 39, 0.96);
+  --chart-indicator-overlay: rgba(17, 24, 39, 0.72);
 }
 
 /* ── 元素重置 ─────────────────────────────────────────────────────── */

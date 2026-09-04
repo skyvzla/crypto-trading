@@ -20,6 +20,7 @@ const paneSetStretchFactor = vi.fn()
 const subscribeCrosshairMove = vi.fn()
 const subscribeVisibleLogicalRangeChange = vi.fn()
 let visibleLogicalRange = { from: 0, to: 100 }
+let logicalTimes: number[] = []
 const seriesApis: Array<Record<string, unknown>> = []
 const seriesOptions: Array<Record<string, unknown>> = []
 const paneMocks = Array.from({ length: 8 }, (_, index) => ({
@@ -36,11 +37,22 @@ vi.mock('lightweight-charts', () => ({
   ColorType: { Solid: 'solid' },
   CrosshairMode: { Normal: 0 },
   LineStyle: { Solid: 0, Dashed: 2, Dotted: 1 },
+  MismatchDirection: { None: 0 },
   createSeriesMarkers: (...args: unknown[]) => createSeriesMarkers(...args),
   createChart: vi.fn(() => ({
     addSeries: (_definition: unknown, options: Record<string, unknown> = {}) => {
+      const isFirstSeries = seriesApis.length === 0
+      let ownData: Array<Record<string, unknown>> = []
       const api = {
-        setData,
+        setData: (data: Array<Record<string, unknown>>) => {
+          setData(data)
+          ownData = data
+          if (isFirstSeries) logicalTimes = data.map((point) => Number(point.time))
+        },
+        dataByIndex: (index: number) => {
+          const time = logicalTimes[index]
+          return ownData.find((point) => Number(point.time) === time) ?? null
+        },
         // 真实 API 返回可移除的价格线句柄，标线显隐依赖它做就地增删。
         createPriceLine: (...args: unknown[]) => {
           createPriceLine(...args)
@@ -58,7 +70,10 @@ vi.mock('lightweight-charts', () => ({
       getVisibleRange: vi.fn(() => ({ from: 1_754_000_030, to: 1_754_000_060 })),
       getVisibleLogicalRange: vi.fn(() => visibleLogicalRange),
       setVisibleRange,
-      setVisibleLogicalRange,
+      setVisibleLogicalRange: (range: { from: number; to: number }) => {
+        visibleLogicalRange = range
+        setVisibleLogicalRange(range)
+      },
       timeToCoordinate: vi.fn(() => 100),
       subscribeVisibleLogicalRangeChange: (handler: unknown) => subscribeVisibleLogicalRangeChange(handler),
       unsubscribeVisibleLogicalRangeChange: vi.fn(),
@@ -76,6 +91,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   seriesApis.length = 0
   seriesOptions.length = 0
+  logicalTimes = []
   visibleLogicalRange = { from: 0, to: 100 }
   localStorage.clear()
   vi.stubGlobal(
@@ -548,18 +564,106 @@ describe('TradeCandlestickChart', () => {
     const paneLabels = wrapper.findAll('.indicator-hover-label')
     expect(paneLabels).toHaveLength(6)
     expect(paneLabels[0].findAll('.indicator-value-line')).toHaveLength(4)
-    expect(paneLabels[0].text()).toContain('EMA9')
-    expect(paneLabels[0].text()).toContain('MA5')
-    expect(paneLabels[0].text()).toContain('上轨')
-    expect(paneLabels[1].text()).toContain('MAVOL5')
-    expect(paneLabels[4].text()).toContain('RSI6')
-    expect(paneLabels[5].text()).toContain('ATR14')
+    const indicatorNames = [
+      'EMA9',
+      'MA5',
+      '上轨',
+      '中轨',
+      '下轨',
+      'VOL',
+      'MAVOL5',
+      'DIF',
+      'DEA',
+      'MACD',
+      'RSI6',
+      'ATR14',
+    ]
+    indicatorNames.forEach((name) => expect(paneLabels.map((label) => label.text()).join(' ')).not.toContain(name))
+    const indicatorLines = paneLabels.flatMap((label, paneIndex) =>
+      label.findAll('.indicator-value-line').slice(paneIndex === 0 ? 1 : 0),
+    )
+    indicatorLines.forEach((line) => {
+      line.findAll('span').forEach((value) => expect(value.text().trim()).toMatch(/^-?\d/))
+    })
+    expect(paneLabels[0].text()).toMatch(/\d/)
+    expect(getComputedStyle(paneLabels[0].element).zIndex).toBe('6')
     expect(seriesOptions.filter((options) => options.lastValueVisible === false).length).toBe(seriesOptions.length)
+    expect(seriesOptions.filter((options) => options.priceLineVisible === false).length).toBe(seriesOptions.length)
+    expect(seriesOptions.every((options) => options.title === undefined)).toBe(true)
 
     const guideTitles = createPriceLine.mock.calls.map(([line]) => (line as { title?: string }).title)
     expect(guideTitles).toContain('0轴')
     expect(guideTitles).toContain('均量5')
     expect(guideTitles).toContain('50')
+  })
+
+  it('无十字光标时按可见范围最右侧K线刷新OHLC和指标值', async () => {
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    Object.values(settings.main).forEach((indicator) => {
+      indicator.enabled = false
+    })
+    Object.values(settings.sub).forEach((indicator) => {
+      indicator.enabled = false
+    })
+    settings.main.ma.enabled = true
+    settings.main.ma.lines = [{ period: 2, color: '#f59e0b' }]
+    const start = 1_754_000_000
+    const candles = Array.from({ length: 6 }, (_, index) => {
+      const price = (index + 1) * 10
+      return {
+        time: start + index * 60,
+        open: price,
+        high: price + 1,
+        low: price - 1,
+        close: price,
+        volume: 100 + index,
+      }
+    })
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles,
+        trade: {
+          id: 't-visible-indicator',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: (start + 3 * 60) * 1000,
+          entry_price: 40,
+          net_pnl: 1,
+        },
+        indicatorSettings: settings,
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    let lines = wrapper.findAll('.indicator-value-line')
+    expect(lines[0].text()).toContain('开60.00')
+    expect(lines[1].text()).toBe('55.00')
+
+    const rangeHandler = subscribeVisibleLogicalRangeChange.mock.calls.at(-1)?.[0] as (range: {
+      from: number
+      to: number
+    }) => void
+    visibleLogicalRange = { from: 1.2, to: 3.8 }
+    rangeHandler(visibleLogicalRange)
+    await wrapper.vm.$nextTick()
+
+    lines = wrapper.findAll('.indicator-value-line')
+    expect(lines[0].text()).toContain('开40.00')
+    expect(lines[1].text()).toBe('35.00')
+    expect(wrapper.text()).not.toContain('MA2')
+
+    visibleLogicalRange = { from: 0, to: 0.8 }
+    rangeHandler(visibleLogicalRange)
+    await wrapper.vm.$nextTick()
+    lines = wrapper.findAll('.indicator-value-line')
+    expect(lines).toHaveLength(1)
+    expect(lines[0].text()).toContain('开10.00')
+    expect(wrapper.text()).not.toContain('15.00')
+
+    visibleLogicalRange = { from: 0.5, to: 0.8 }
+    rangeHandler(visibleLogicalRange)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.findAll('.indicator-hover-label')).toHaveLength(0)
   })
 
   it('低价币价格轴、价格线和EMA保留行情实际精度', async () => {
@@ -699,14 +803,14 @@ describe('TradeCandlestickChart', () => {
     await wrapper.setProps({ indicatorSettings: enabledSettings })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(vi.mocked(createChart).mock.calls.length).toBe(initialCharts + 1)
-    expect(seriesOptions.at(-1)?.title).toBe('MA20')
+    expect(seriesOptions.at(-1)?.title).toBeUndefined()
 
     const changedSettings = cloneChartIndicatorSettings(enabledSettings)
     changedSettings.main.ma.lines[0].period = 7
     await wrapper.setProps({ indicatorSettings: changedSettings })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(vi.mocked(createChart).mock.calls.length).toBe(initialCharts + 2)
-    expect(seriesOptions.some((options) => options.title === 'MA7')).toBe(true)
+    expect(seriesOptions.every((options) => options.title === undefined)).toBe(true)
   })
 
   it('悬停在指标 warm-up 区间时不显示未来的最新指标值，并限制标签在 pane 内', async () => {

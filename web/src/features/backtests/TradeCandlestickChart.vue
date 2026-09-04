@@ -8,6 +8,7 @@ import {
   HistogramSeries,
   LineSeries,
   LineStyle,
+  MismatchDirection,
   createChart,
   createSeriesMarkers,
   type IChartApi,
@@ -73,6 +74,7 @@ interface PaneValue {
   label: string
   value: string
   color: string
+  showLabel?: boolean
 }
 
 interface PaneValueLine {
@@ -455,7 +457,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         ...hiddenLatestValue,
         color: line.color,
         lineWidth: 1,
-        title: `EMA${line.period}`,
         priceFormat,
       })
       group.values.push({ label: `EMA${line.period}`, color: line.color, series })
@@ -480,7 +481,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         ...hiddenLatestValue,
         color: line.color,
         lineWidth: 1,
-        title: `MA${line.period}`,
         priceFormat,
       })
       group.values.push({ label: `MA${line.period}`, color: line.color, series })
@@ -510,7 +510,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         ...hiddenLatestValue,
         color: definition.color,
         lineWidth: 1,
-        title: `BOLL ${definition.label}`,
         priceFormat,
       })
       group.values.push({ label: definition.label, color: definition.color, series })
@@ -556,7 +555,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
           ...hiddenLatestValue,
           color: line.color,
           lineWidth: 1,
-          title: `MAVOL${line.period}`,
           priceFormat: { type: 'volume' },
           priceScaleId: 'volume',
         },
@@ -610,7 +608,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         ...hiddenLatestValue,
         color: macdSettings.colors.dif,
         lineWidth: 1,
-        title: 'DIF',
         priceFormat,
       },
       paneIndex,
@@ -621,7 +618,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         ...hiddenLatestValue,
         color: macdSettings.colors.dea,
         lineWidth: 1,
-        title: 'DEA',
         priceFormat,
       },
       paneIndex,
@@ -679,17 +675,17 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
     const kdjSettings = settings.sub.kdj
     const kSeries = instance.addSeries(
       LineSeries,
-      { ...hiddenLatestValue, color: kdjSettings.colors.k, lineWidth: 1, title: 'K', priceFormat: percentFormat },
+      { ...hiddenLatestValue, color: kdjSettings.colors.k, lineWidth: 1, priceFormat: percentFormat },
       paneIndex,
     )
     const dSeries = instance.addSeries(
       LineSeries,
-      { ...hiddenLatestValue, color: kdjSettings.colors.d, lineWidth: 1, title: 'D', priceFormat: percentFormat },
+      { ...hiddenLatestValue, color: kdjSettings.colors.d, lineWidth: 1, priceFormat: percentFormat },
       paneIndex,
     )
     const jSeries = instance.addSeries(
       LineSeries,
-      { ...hiddenLatestValue, color: kdjSettings.colors.j, lineWidth: 1, title: 'J', priceFormat: percentFormat },
+      { ...hiddenLatestValue, color: kdjSettings.colors.j, lineWidth: 1, priceFormat: percentFormat },
       paneIndex,
     )
     const group: IndicatorGroup = {
@@ -733,7 +729,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
           ...hiddenLatestValue,
           color: line.color,
           lineWidth: 1,
-          title: `RSI${line.period}`,
           priceFormat: percentFormat,
         },
         paneIndex,
@@ -772,7 +767,6 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         ...hiddenLatestValue,
         color: atrSettings.color,
         lineWidth: 1,
-        title: `ATR${atrSettings.period}`,
         priceFormat,
       },
       paneIndex,
@@ -925,12 +919,47 @@ function formatIndicatorValue(value: number, format?: 'volume' | 'percent'): str
   return Number(value).toFixed(indicatorPricePrecision)
 }
 
+/**
+ * 读取当前可见范围内最右侧的完整 K 线逻辑索引。
+ *
+ * lightweight-charts 的 logical range 端点可能是小数或落在数据范围外，
+ * 因此先判断范围是否和已加载数据相交，再用右端点向下取整。通过 K 线
+ * series 的 dataByIndex 校验逻辑索引，避免按时间自行换算产生偏移。
+ */
+function visibleCandleIndex(visibleRange?: { from: number; to: number } | null): number | null {
+  if (!renderedCandles.length) return null
+  const range = visibleRange === undefined ? chart?.timeScale().getVisibleLogicalRange() : visibleRange
+  if (!range || !Number.isFinite(range.from) || !Number.isFinite(range.to)) return null
+  if (range.to < 0 || range.from > renderedCandles.length - 1) return null
+
+  const index = Math.min(renderedCandles.length - 1, Math.floor(range.to))
+  if (index < 0 || index < range.from || index > range.to) return null
+  const data = candleSeries?.dataByIndex(index, MismatchDirection.None) as { time?: Time } | null | undefined
+  if (data?.time !== undefined) {
+    const matchedIndex = renderedCandles.findIndex((bar) => Number(bar.time) === Number(data.time))
+    if (matchedIndex >= 0) return matchedIndex
+  }
+  return index
+}
+
+function visibleCandleAt(index: number): ChartCandle | undefined {
+  const data = candleSeries?.dataByIndex(index, MismatchDirection.None) as ChartCandle | null | undefined
+  return data && typeof data.open === 'number' ? data : renderedCandles[index]
+}
+
+function indicatorValueAt(item: IndicatorGroup['values'][number], index: number): number | undefined {
+  const data = item.series.dataByIndex(index, MismatchDirection.None) as { value?: number } | null
+  return typeof data?.value === 'number' && Number.isFinite(data.value) ? data.value : undefined
+}
+
 function updatePaneLabels(
   seriesData?: MouseEventParams<Time>['seriesData'],
   candle?: { open?: number; high?: number; low?: number; close?: number },
+  visibleRange?: { from: number; to: number } | null,
 ) {
   const paneLines = new Map<number, PaneValueLine[]>()
-  const selectedCandle = candle ?? renderedCandles.at(-1)
+  const selectedIndex = candle == null ? visibleCandleIndex(visibleRange) : null
+  const selectedCandle = candle ?? (selectedIndex == null ? undefined : visibleCandleAt(selectedIndex))
   if (selectedCandle) {
     const priceValues = [
       { label: '开', value: selectedCandle.open },
@@ -944,6 +973,7 @@ function updatePaneLabels(
               label: item.label,
               value: Number(item.value).toFixed(indicatorPricePrecision),
               color: palette.value.text,
+              showLabel: true,
             },
           ]
         : [],
@@ -955,9 +985,15 @@ function updatePaneLabels(
     const values = group.values.flatMap((item) => {
       const point = seriesData?.get(item.series as ISeriesApi<SeriesType, Time>) as { value?: number } | undefined
       const value =
-        seriesData === undefined ? item.latestValue : typeof point?.value === 'number' ? point.value : undefined
+        seriesData === undefined
+          ? selectedIndex == null
+            ? undefined
+            : indicatorValueAt(item, selectedIndex)
+          : typeof point?.value === 'number'
+            ? point.value
+            : undefined
       return typeof value === 'number'
-        ? [{ label: item.label, value: formatIndicatorValue(value, item.format), color: item.color }]
+        ? [{ label: item.label, value: formatIndicatorValue(value, item.format), color: item.color, showLabel: false }]
         : []
     })
     if (!values.length) return
@@ -1224,6 +1260,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   unsubscribeCrosshair = () => chart?.unsubscribeCrosshairMove(handleCrosshair)
 
   const requestMore = (range: { from: number; to: number } | null, force = false) => {
+    if (hoverLabel.value === null) updatePaneLabels(undefined, undefined, range)
     updateExtremaPoints()
     refreshExtremaLabels()
     if (!range || (!force && Date.now() < suppressEdgeRequestsUntil)) return
@@ -1258,6 +1295,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
       from: Math.max(0, focusIndex - FOCUS_HALF_WINDOW_BARS),
       to: Math.min(renderedBarTimes.length - 1, focusIndex + FOCUS_HALF_WINDOW_BARS),
     })
+  updatePaneLabels()
   timeScale.subscribeVisibleLogicalRangeChange(requestMore)
   unsubscribeRange = () => timeScale.unsubscribeVisibleLogicalRangeChange(requestMore)
 
@@ -1447,7 +1485,7 @@ onBeforeUnmount(() => {
       >
         <div v-for="line in label.lines" :key="line.key" class="indicator-value-line">
           <span v-for="item in line.values" :key="item.label" :style="{ color: item.color }">
-            {{ item.label }} {{ item.value }}
+            <template v-if="item.showLabel">{{ item.label }} </template>{{ item.value }}
           </span>
         </div>
       </div>
@@ -1511,7 +1549,7 @@ onBeforeUnmount(() => {
 }
 .indicator-hover-label {
   position: absolute;
-  z-index: 2;
+  z-index: 6;
   left: 9px;
   display: grid;
   gap: 2px;
@@ -1520,7 +1558,7 @@ onBeforeUnmount(() => {
   padding: 3px 6px;
   border-radius: 3px;
   border: 1px solid var(--line);
-  background: var(--chart-overlay);
+  background: var(--chart-indicator-overlay);
   font: var(--type-meta)/1.3 var(--font-family-mono);
   overflow: hidden;
   pointer-events: none;
