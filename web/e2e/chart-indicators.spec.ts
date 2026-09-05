@@ -290,6 +290,98 @@ async function bollingerFillPixelCount(page: Page) {
   )
 }
 
+async function assertDisplaySettingsLayout(modal: Locator) {
+  const displayPanel = modal.locator('[data-testid="display-tab-panel"]')
+  await expect(displayPanel).toBeVisible()
+  await expect(modal.getByRole('tab', { name: '显示', exact: true })).toHaveAttribute('aria-selected', 'true')
+
+  const geometry = await displayPanel.evaluate((panel) => {
+    const rectangle = (element: Element) => {
+      const rect = element.getBoundingClientRect()
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width }
+    }
+    const intervalRow = panel.querySelector('[data-testid="default-interval-row"]')!
+    const spacingRow = panel.querySelector('[data-testid="default-bar-spacing-row"]')!
+    const spacingControl = spacingRow.querySelector('.zoom-setting-control')!
+    const slider = spacingRow.querySelector('.ant-slider')!
+    const spacingInput = spacingRow.querySelector('.ant-input-number-group-wrapper, .ant-input-number')!
+    const rowParts = [intervalRow, spacingRow].map((row) => {
+      const children = Array.from(row.children)
+      return { label: rectangle(children[0]), control: rectangle(children[1]) }
+    })
+    const panels = Array.from(panel.querySelectorAll<HTMLElement>('.settings-panel')).map((element) => ({
+      rect: rectangle(element),
+      borderWidth: getComputedStyle(element).borderTopWidth,
+      background: getComputedStyle(element).backgroundColor,
+    }))
+    return {
+      interval: rectangle(intervalRow),
+      spacing: rectangle(spacingRow),
+      rowParts,
+      panels,
+      spacingControls: {
+        wrapper: rectangle(spacingControl),
+        slider: rectangle(slider),
+        input: rectangle(spacingInput),
+        marks: Array.from(spacingRow.querySelectorAll('.ant-slider-mark-text')).map(rectangle),
+      },
+      overflow: { scrollWidth: panel.scrollWidth, clientWidth: panel.clientWidth },
+    }
+  })
+
+  expect(geometry.spacing.top).toBeGreaterThanOrEqual(geometry.interval.bottom - 1)
+  expect(Math.abs(geometry.interval.left - geometry.spacing.left)).toBeLessThanOrEqual(1)
+  expect(Math.abs(geometry.interval.width - geometry.spacing.width)).toBeLessThanOrEqual(1)
+  expect(geometry.overflow.scrollWidth).toBeLessThanOrEqual(geometry.overflow.clientWidth + 1)
+  expect(geometry.panels).toHaveLength(2)
+  expect(geometry.panels.every((panel) => panel.borderWidth !== '0px' && panel.background !== 'rgba(0, 0, 0, 0)')).toBe(
+    true,
+  )
+  for (const parts of geometry.rowParts) {
+    const separated = parts.label.right <= parts.control.left + 1 || parts.label.bottom <= parts.control.top + 1
+    expect(separated, 'display setting label overlaps its control').toBe(true)
+  }
+
+  const controls = geometry.spacingControls
+  const controlsSeparated =
+    controls.slider.right <= controls.input.left + 1 ||
+    controls.input.right <= controls.slider.left + 1 ||
+    controls.slider.bottom <= controls.input.top + 1 ||
+    controls.input.bottom <= controls.slider.top + 1
+  expect(controlsSeparated, 'bar spacing slider overlaps its numeric input').toBe(true)
+
+  for (const control of [controls.slider, controls.input, ...controls.marks]) {
+    expect(control.left).toBeGreaterThanOrEqual(geometry.spacing.left - 1)
+    expect(control.right).toBeLessThanOrEqual(geometry.spacing.right + 1)
+    expect(control.top).toBeGreaterThanOrEqual(geometry.spacing.top - 1)
+    expect(control.bottom).toBeLessThanOrEqual(geometry.spacing.bottom + 1)
+  }
+  for (const mark of controls.marks) {
+    const overlapsInput =
+      mark.left < controls.input.right - 1 &&
+      mark.right > controls.input.left + 1 &&
+      mark.top < controls.input.bottom - 1 &&
+      mark.bottom > controls.input.top + 1
+    expect(overlapsInput, 'bar spacing mark overlaps its numeric input').toBe(false)
+  }
+}
+
+async function assertIndicatorPanelsSeparated(modal: Locator, viewportWidth: number) {
+  const activePanel = modal.locator('.ant-tabs-tabpane-active')
+  const list = activePanel.locator('.indicator-list')
+  const editor = activePanel.locator('.indicator-editor')
+  await expect(list).toBeVisible()
+  await expect(editor).toBeVisible()
+  const [listBox, editorBox] = await Promise.all([list.boundingBox(), editor.boundingBox()])
+  expect(listBox).not.toBeNull()
+  expect(editorBox).not.toBeNull()
+  if (!listBox || !editorBox) return
+  const separated = listBox.x + listBox.width <= editorBox.x + 1 || listBox.y + listBox.height <= editorBox.y + 1
+  expect(separated, 'indicator list panel overlaps parameter panel').toBe(true)
+  if (viewportWidth <= 720) expect(editorBox.y).toBeGreaterThanOrEqual(listBox.y + listBox.height - 1)
+  else expect(editorBox.x).toBeGreaterThanOrEqual(listBox.x + listBox.width - 1)
+}
+
 test('单笔复盘支持主副图指标配置并保持图表布局稳定', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'mobile') await page.setViewportSize({ width: 360, height: 844 })
   const { putSeen } = await installApiMocks(page)
@@ -301,15 +393,20 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await page.locator('[aria-label="图表设置"]').click()
   const modal = page.locator('.ant-modal:visible')
   await expect(modal).toBeVisible()
-  await expect(page.getByText('主图指标', { exact: true })).toBeVisible()
-  await expect(page.getByText('副图指标', { exact: true })).toBeVisible()
+  await expect(modal.getByRole('tab')).toHaveCount(3)
+  await expect(modal.getByRole('tab').allTextContents()).resolves.toEqual(['显示', '主图指标', '副图指标'])
   await expect(modal.getByRole('combobox', { name: '默认周期' })).toBeVisible()
+  await assertDisplaySettingsLayout(modal)
   const modalOverflow = await modal.evaluate((element) => ({
     scrollWidth: element.scrollWidth,
     clientWidth: element.clientWidth,
   }))
   expect(modalOverflow.scrollWidth).toBeLessThanOrEqual(modalOverflow.clientWidth + 1)
-  const barSpacingInput = modal.locator('section[aria-label="显示设置"] .ant-input-number input')
+  await page.screenshot({
+    path: testInfo.outputPath(`${testInfo.project.name}-chart-settings-display.png`),
+    fullPage: true,
+  })
+  const barSpacingInput = modal.locator('[data-testid="default-bar-spacing-row"] .ant-input-number input')
   await barSpacingInput.fill('12.5')
   await barSpacingInput.press('Tab')
   await modal.getByRole('checkbox', { name: '信号价' }).uncheck()
@@ -318,7 +415,13 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await modal.locator('.default-interval-select').click()
   await page.locator('.ant-select-dropdown:visible').getByText('15m', { exact: true }).click()
 
-  const maItem = page.locator('.indicator-list-item').filter({ hasText: '简单移动平均线' })
+  await modal.getByRole('tab', { name: '主图指标', exact: true }).click()
+  await expect(modal.locator('[data-testid="main-tab-panel"]')).toBeVisible()
+  await expect(modal.locator('[data-testid="display-tab-panel"]')).toBeHidden()
+  await expect(modal.locator('.ant-tabs-tabpane-active .indicator-list-item strong')).toHaveText(['EMA', 'MA', 'BOLL'])
+  await assertIndicatorPanelsSeparated(modal, page.viewportSize()?.width ?? 0)
+
+  const maItem = modal.locator('.ant-tabs-tabpane-active .indicator-list-item').filter({ hasText: '简单移动平均线' })
   await maItem.click()
   const maEditor = page.locator('section[aria-label="MA 参数"]')
   await expect(maEditor).toBeVisible()
@@ -329,11 +432,11 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await maItem.getByRole('checkbox').check()
   await expect(maItem.getByRole('checkbox')).toBeChecked()
 
-  const emaItem = page.locator('.indicator-list-item').filter({ hasText: '指数移动平均线' })
+  const emaItem = modal.locator('.ant-tabs-tabpane-active .indicator-list-item').filter({ hasText: '指数移动平均线' })
   await emaItem.getByRole('checkbox').check()
   await expect(emaItem.getByRole('checkbox')).toBeChecked()
 
-  const bollItem = page.locator('.indicator-list-item').filter({ hasText: '布林通道' })
+  const bollItem = modal.locator('.ant-tabs-tabpane-active .indicator-list-item').filter({ hasText: '布林通道' })
   await bollItem.click()
   const bollEditor = page.locator('section[aria-label="BOLL 参数"]')
   await expect(bollEditor).toBeVisible()
@@ -343,7 +446,19 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await bollItem.getByRole('checkbox').check()
   await expect(bollItem.getByRole('checkbox')).toBeChecked()
 
-  const rsiItem = page.locator('.indicator-list-item').filter({ hasText: '相对强弱指标' })
+  await modal.getByRole('tab', { name: '副图指标', exact: true }).click()
+  await expect(modal.locator('[data-testid="sub-tab-panel"]')).toBeVisible()
+  await expect(modal.locator('[data-testid="main-tab-panel"]')).toBeHidden()
+  await expect(modal.locator('.ant-tabs-tabpane-active .indicator-list-item strong')).toHaveText([
+    'VOL',
+    'MACD',
+    'KDJ',
+    'RSI',
+    'ATR',
+  ])
+  await assertIndicatorPanelsSeparated(modal, page.viewportSize()?.width ?? 0)
+
+  const rsiItem = modal.locator('.ant-tabs-tabpane-active .indicator-list-item').filter({ hasText: '相对强弱指标' })
   await rsiItem.click()
   const rsiEditor = page.locator('section[aria-label="RSI 参数"]')
   await expect(rsiEditor).toBeVisible()
@@ -352,6 +467,10 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await rsiPeriod.press('Tab')
   await rsiItem.getByRole('checkbox').check()
   await expect(rsiItem.getByRole('checkbox')).toBeChecked()
+  await page.screenshot({
+    path: testInfo.outputPath(`${testInfo.project.name}-chart-settings-sub.png`),
+    fullPage: true,
+  })
 
   await modal.getByRole('button', { name: '保存设置' }).click()
   const saved = await putSeen

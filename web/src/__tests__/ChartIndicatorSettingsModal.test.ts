@@ -7,7 +7,7 @@ import {
 } from '@/features/backtests/chartIndicatorSettings'
 
 describe('ChartIndicatorSettingsModal', () => {
-  it('按主副图列出指标，选择后显示对应参数且保存完整副本', async () => {
+  it('用独立 Tabs 和 panels 隔离显示、主图与副图设置，并保存完整副本', async () => {
     const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     const wrapper = mount(ChartIndicatorSettingsModal, {
       props: { open: true, settings },
@@ -32,16 +32,31 @@ describe('ChartIndicatorSettingsModal', () => {
       },
     })
 
-    expect(wrapper.text()).toContain('主图指标')
-    expect(wrapper.text()).toContain('副图指标')
     expect(wrapper.get('h2').text()).toBe('图表设置')
-    expect(wrapper.findAll('.indicator-list-item')).toHaveLength(9)
+    expect(wrapper.findAll('[role="tab"]').map((tab) => tab.text())).toEqual(['显示', '主图指标', '副图指标'])
+    expect(wrapper.get('.ant-tabs-tabpane-active [data-testid="display-tab-panel"]')).toBeTruthy()
+    expect(wrapper.find('[data-testid="main-tab-panel"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="sub-tab-panel"]').exists()).toBe(false)
     expect(wrapper.get('section[aria-label="显示设置"]').text()).toContain('默认 K 线宽度')
+    expect(wrapper.get('[data-testid="default-interval-row"]').classes()).toContain('display-setting-row')
+    expect(wrapper.get('[data-testid="default-bar-spacing-row"]').classes()).toContain('display-setting-row')
+    expect(wrapper.get('[data-testid="price-lines-panel"]').classes()).toContain('settings-panel')
     expect(wrapper.findAll('.price-line-row')).toHaveLength(4)
 
     await wrapper.get('select[id="default-chart-interval"]').setValue('15m')
 
-    const maItem = wrapper.findAll('.indicator-list-item').find((item) => item.text().includes('简单移动平均线'))!
+    await wrapper.findAll('[role="tab"]')[1].trigger('click')
+    expect(wrapper.get('.ant-tabs-tabpane-active [data-testid="main-tab-panel"]')).toBeTruthy()
+    expect(wrapper.findAll('.ant-tabs-tabpane-active .indicator-list-item strong').map((item) => item.text())).toEqual([
+      'EMA',
+      'MA',
+      'BOLL',
+    ])
+    expect(wrapper.find('.indicator-list > h3').exists()).toBe(false)
+
+    const maItem = wrapper
+      .findAll('.ant-tabs-tabpane-active .indicator-list-item')
+      .find((item) => item.text().includes('简单移动平均线'))!
     await maItem.trigger('click')
     expect(wrapper.get('section[aria-label="MA 参数"]').text()).toContain('增加周期')
     expect(wrapper.findAll('input[type="color"]')).toHaveLength(3)
@@ -51,12 +66,24 @@ describe('ChartIndicatorSettingsModal', () => {
     const maCheckbox = maItem.get('input[type="checkbox"]')
     await maCheckbox.setValue(true)
 
-    const bollItem = wrapper.findAll('.indicator-list-item').find((item) => item.text().includes('布林通道'))!
+    const bollItem = wrapper
+      .findAll('.ant-tabs-tabpane-active .indicator-list-item')
+      .find((item) => item.text().includes('布林通道'))!
     await bollItem.trigger('click')
     const bollEditor = wrapper.get('section[aria-label="BOLL 参数"]')
     expect(bollEditor.text()).toContain('通道边界')
     expect(bollEditor.text()).toContain('中轨')
     expect(bollEditor.text()).toContain('通道填充')
+
+    await wrapper.findAll('[role="tab"]')[2].trigger('click')
+    expect(wrapper.get('.ant-tabs-tabpane-active [data-testid="sub-tab-panel"]')).toBeTruthy()
+    expect(wrapper.findAll('.ant-tabs-tabpane-active .indicator-list-item strong').map((item) => item.text())).toEqual([
+      'VOL',
+      'MACD',
+      'KDJ',
+      'RSI',
+      'ATR',
+    ])
 
     await wrapper.get('.save-probe').trigger('click')
 
