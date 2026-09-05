@@ -24,20 +24,29 @@ export const CHART_INDICATORS: ChartIndicatorDefinition[] = [
 
 export const DEFAULT_CHART_INDICATOR_SETTINGS: ChartIndicatorSettings = {
   default_interval: DEFAULT_CHART_INTERVAL,
+  display: {
+    default_bar_spacing: 8,
+    price_lines: {
+      signal: { visible: true, style: 'dashed', width: 1 },
+      average: { visible: true, style: 'solid', width: 1 },
+      invalid: { visible: true, style: 'dotted', width: 1 },
+      extensions: { visible: true, style: 'dashed', width: 1 },
+    },
+  },
   main: {
     ema: {
       enabled: false,
       lines: [
-        { period: 9, color: '#f5c451' },
-        { period: 21, color: '#66b3ff' },
+        { period: 9, color: '#f5c451', style: 'solid', width: 1 },
+        { period: 21, color: '#66b3ff', style: 'solid', width: 1 },
       ],
     },
     ma: {
       enabled: false,
       lines: [
-        { period: 5, color: '#f59e0b' },
-        { period: 10, color: '#22c55e' },
-        { period: 20, color: '#3b82f6' },
+        { period: 5, color: '#f59e0b', style: 'solid', width: 1 },
+        { period: 10, color: '#22c55e', style: 'solid', width: 1 },
+        { period: 20, color: '#3b82f6', style: 'solid', width: 1 },
       ],
     },
     boll: {
@@ -49,14 +58,18 @@ export const DEFAULT_CHART_INDICATOR_SETTINGS: ChartIndicatorSettings = {
         middle: '#eab308',
         lower: '#22c55e',
       },
+      lines: {
+        boundary: { style: 'solid', width: 1 },
+        middle: { style: 'dashed', width: 1 },
+      },
     },
   },
   sub: {
     volume: {
       enabled: true,
       ma_lines: [
-        { period: 5, color: '#f5c451' },
-        { period: 20, color: '#4da3ff' },
+        { period: 5, color: '#f5c451', style: 'solid', width: 1 },
+        { period: 20, color: '#4da3ff', style: 'solid', width: 1 },
       ],
     },
     macd: {
@@ -70,6 +83,10 @@ export const DEFAULT_CHART_INDICATOR_SETTINGS: ChartIndicatorSettings = {
         histogram_up: '#2ebd85',
         histogram_down: '#f05252',
       },
+      lines: {
+        dif: { style: 'solid', width: 1 },
+        dea: { style: 'solid', width: 1 },
+      },
     },
     kdj: {
       enabled: false,
@@ -79,19 +96,25 @@ export const DEFAULT_CHART_INDICATOR_SETTINGS: ChartIndicatorSettings = {
         d: '#f5c451',
         j: '#d98bff',
       },
+      lines: {
+        k: { style: 'solid', width: 1 },
+        d: { style: 'solid', width: 1 },
+        j: { style: 'solid', width: 1 },
+      },
     },
     rsi: {
       enabled: false,
       lines: [
-        { period: 6, color: '#f5c451' },
-        { period: 12, color: '#4da3ff' },
-        { period: 24, color: '#d98bff' },
+        { period: 6, color: '#f5c451', style: 'solid', width: 1 },
+        { period: 12, color: '#4da3ff', style: 'solid', width: 1 },
+        { period: 24, color: '#d98bff', style: 'solid', width: 1 },
       ],
     },
     atr: {
       enabled: false,
       period: 14,
       color: '#14b8a6',
+      line: { style: 'solid', width: 1 },
     },
   },
 }

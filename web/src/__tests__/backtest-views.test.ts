@@ -126,7 +126,7 @@ describe('回测关键视图', () => {
     expect(wrapper.find('.chart-loading').exists()).toBe(true)
     expect(wrapper.find('.chart-loading').text()).toContain('加载图表设置')
     expect(wrapper.find('.query-empty').exists()).toBe(false)
-    expect(wrapper.get('button[aria-label="配置技术指标"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('button[aria-label="图表设置"]').attributes('disabled')).toBeDefined()
     expect(backtestApi.candles).not.toHaveBeenCalled()
 
     resolveSettings(cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS))
@@ -751,8 +751,8 @@ describe('回测关键视图', () => {
     expect(wrapper.text()).toContain('backtest-trade:AKEUSDT:1')
     expect(wrapper.text()).toContain('信号 ID')
     expect(wrapper.text()).toContain('spike_short:AKEUSDT:1750000000000')
-    expect(wrapper.find('button[aria-label="标线显示"]').exists()).toBe(true)
-    expect(wrapper.find('.line-visibility-menu').exists()).toBe(false)
+    expect(wrapper.find('button[aria-label="图表设置"]').exists()).toBe(true)
+    expect(wrapper.find('button[aria-label="标线显示"]').exists()).toBe(false)
     expect(wrapper.find('.ant-timeline-item-label').exists()).toBe(false)
     expect(wrapper.find('button[aria-label="返回"]').exists()).toBe(true)
     expect(backtestApi.candles).toHaveBeenLastCalledWith(

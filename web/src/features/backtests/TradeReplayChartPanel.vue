@@ -12,7 +12,6 @@ import {
   RefreshCw,
   RotateCcw,
   Settings2,
-  SlidersHorizontal,
 } from 'lucide-vue-next'
 import { backtestApi } from '@/api/backtests'
 import { chartSettingsApi } from '@/api/chartSettings'
@@ -76,12 +75,19 @@ const palette = computed(() => getChartTheme(isDarkTheme.value))
  */
 const legendItems = computed(() => {
   const colors = palette.value
+  const priceLines = indicatorSettings.value.display.price_lines
   return [
-    { label: 'B 买入成交', color: colors.up, dashed: false, strong: true },
-    { label: 'S 卖出成交', color: colors.down, dashed: false, strong: false },
-    { label: '信号', color: colors.signal, dashed: true, strong: false },
-    { label: '开仓均价', color: colors.average, dashed: false, strong: false },
-    { label: '失效价', color: colors.invalid, dashed: true, strong: false },
+    { label: 'B 买入成交', color: colors.up, style: 'solid', width: 3, strong: true },
+    { label: 'S 卖出成交', color: colors.down, style: 'solid', width: 2, strong: false },
+    ...(priceLines.signal.visible
+      ? [{ label: '信号', color: colors.signal, ...priceLines.signal, strong: false }]
+      : []),
+    ...(priceLines.average.visible
+      ? [{ label: '开仓均价', color: colors.average, ...priceLines.average, strong: false }]
+      : []),
+    ...(priceLines.invalid.visible
+      ? [{ label: '失效价', color: colors.invalid, ...priceLines.invalid, strong: false }]
+      : []),
   ]
 })
 
@@ -94,7 +100,6 @@ const isFullscreen = ref(false)
 const indicatorSettingsOpen = ref(false)
 const indicatorSettingsSaving = ref(false)
 const indicatorSettings = ref<ChartIndicatorSettings>(cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS))
-const lineVisibility = ref({ signal: true, average: true, invalid: true, extensions: true })
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
 
@@ -317,36 +322,20 @@ watch(
           >
         </a-tooltip>
         <a-divider type="vertical" />
-        <a-tooltip :title="`配置技术指标：${activeIndicatorNames.join('、') || '未启用'}`">
+        <a-tooltip :title="`图表设置；已启用指标：${activeIndicatorNames.join('、') || '无'}`">
           <a-button
             type="text"
             class="chart-tool-button"
-            aria-label="配置技术指标"
+            aria-label="图表设置"
             :disabled="!settingsResolved"
             @click="openIndicatorSettings"
           >
             <template #icon>
               <Settings2 :size="16" />
             </template>
-            指标
+            设置
           </a-button>
         </a-tooltip>
-        <a-dropdown :trigger="['click']">
-          <a-tooltip title="标线显示"
-            ><a-button type="text" shape="circle" class="chart-icon-button" aria-label="标线显示"
-              ><template #icon><SlidersHorizontal :size="16" /></template></a-button
-          ></a-tooltip>
-          <template #overlay>
-            <a-card size="small" :bordered="false" @click.stop>
-              <a-space direction="vertical" :size="8">
-                <a-checkbox v-if="strategyLines" v-model:checked="lineVisibility.signal">信号价</a-checkbox>
-                <a-checkbox v-model:checked="lineVisibility.average">开仓均价</a-checkbox>
-                <a-checkbox v-if="strategyLines" v-model:checked="lineVisibility.invalid">失效价</a-checkbox>
-                <a-checkbox v-if="strategyLines" v-model:checked="lineVisibility.extensions">策略扩展价位</a-checkbox>
-              </a-space>
-            </a-card>
-          </template>
-        </a-dropdown>
         <a-divider type="vertical" />
         <a-tooltip title="跳转到第一笔成交"
           ><a-button
@@ -416,7 +405,6 @@ watch(
         :trade="trade"
         :overlays="overlays"
         :indicator-settings="indicatorSettings"
-        :line-visibility="lineVisibility"
         :focus-time="focusTimeMs"
         :fill-time-semantics="fillTimeSemantics"
         @request-more="requestMore"
@@ -428,8 +416,12 @@ watch(
         v-for="item in legendItems"
         :key="item.label"
         class="legend-item"
-        :class="{ 'is-dashed': item.dashed, 'is-strong': item.strong }"
-        :style="{ color: item.color }"
+        :class="{
+          'is-dashed': item.style === 'dashed',
+          'is-dotted': item.style === 'dotted',
+          'is-strong': item.strong,
+        }"
+        :style="{ color: item.color, '--legend-line-width': `${item.width}px` }"
         ><i />{{ item.label }}</span
       >
     </div>
@@ -437,6 +429,7 @@ watch(
       v-model:open="indicatorSettingsOpen"
       :settings="indicatorSettings"
       :saving="indicatorSettingsSaving"
+      :strategy-lines="strategyLines"
       @save="saveIndicatorSettings"
     />
   </section>

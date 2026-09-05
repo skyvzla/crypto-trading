@@ -35,7 +35,9 @@ describe('ChartIndicatorSettingsModal', () => {
     expect(wrapper.text()).toContain('主图指标')
     expect(wrapper.text()).toContain('副图指标')
     expect(wrapper.get('h2').text()).toBe('图表设置')
-    expect(wrapper.findAll('.indicator-list-item')).toHaveLength(8)
+    expect(wrapper.findAll('.indicator-list-item')).toHaveLength(9)
+    expect(wrapper.get('section[aria-label="显示设置"]').text()).toContain('默认 K 线宽度')
+    expect(wrapper.findAll('.price-line-row')).toHaveLength(4)
 
     await wrapper.get('select[id="default-chart-interval"]').setValue('15m')
 
@@ -43,6 +45,8 @@ describe('ChartIndicatorSettingsModal', () => {
     await maItem.trigger('click')
     expect(wrapper.get('section[aria-label="MA 参数"]').text()).toContain('增加周期')
     expect(wrapper.findAll('input[type="color"]')).toHaveLength(3)
+    expect((wrapper.get('select[aria-label="第 1 条线线型"]').element as HTMLSelectElement).value).toBe('solid')
+    await wrapper.get('select[aria-label="第 1 条线线型"]').setValue('dotted')
 
     const maCheckbox = maItem.get('input[type="checkbox"]')
     await maCheckbox.setValue(true)
@@ -60,6 +64,9 @@ describe('ChartIndicatorSettingsModal', () => {
     expect(saved.main.ma.enabled).toBe(true)
     expect(saved.default_interval).toBe('15m')
     expect(saved.main.ma.lines.map((line) => line.period)).toEqual([5, 10, 20])
+    expect(saved.main.ma.lines[0]).toMatchObject({ style: 'dotted', width: 1 })
+    expect(saved.display.default_bar_spacing).toBe(8)
+    expect(saved.display.price_lines.invalid).toMatchObject({ visible: true, style: 'dotted', width: 1 })
     expect(saved).not.toBe(settings)
   })
 })

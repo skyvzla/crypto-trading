@@ -291,18 +291,30 @@ async function bollingerFillPixelCount(page: Page) {
 }
 
 test('单笔复盘支持主副图指标配置并保持图表布局稳定', async ({ page }, testInfo) => {
+  if (testInfo.project.name === 'mobile') await page.setViewportSize({ width: 360, height: 844 })
   const { putSeen } = await installApiMocks(page)
   await page.goto(`/#/backtests/${researchId}/trades/${tradeId}`)
 
   await expect(page.getByRole('heading', { name: 'BTCUSDT 单笔复盘' })).toBeVisible()
   await assertChartIsVisibleAndSettled(page)
 
-  await page.locator('[aria-label="配置技术指标"]').click()
+  await page.locator('[aria-label="图表设置"]').click()
   const modal = page.locator('.ant-modal:visible')
   await expect(modal).toBeVisible()
   await expect(page.getByText('主图指标', { exact: true })).toBeVisible()
   await expect(page.getByText('副图指标', { exact: true })).toBeVisible()
   await expect(modal.getByRole('combobox', { name: '默认周期' })).toBeVisible()
+  const modalOverflow = await modal.evaluate((element) => ({
+    scrollWidth: element.scrollWidth,
+    clientWidth: element.clientWidth,
+  }))
+  expect(modalOverflow.scrollWidth).toBeLessThanOrEqual(modalOverflow.clientWidth + 1)
+  const barSpacingInput = modal.locator('section[aria-label="显示设置"] .ant-input-number input')
+  await barSpacingInput.fill('12.5')
+  await barSpacingInput.press('Tab')
+  await modal.getByRole('checkbox', { name: '信号价' }).uncheck()
+  await modal.getByRole('combobox', { name: '信号价线型' }).click()
+  await page.locator('.ant-select-dropdown:visible').getByText('点线', { exact: true }).click()
   await modal.locator('.default-interval-select').click()
   await page.locator('.ant-select-dropdown:visible').getByText('15m', { exact: true }).click()
 
@@ -345,6 +357,12 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   const saved = await putSeen
   expect(saved).toMatchObject({
     default_interval: '15m',
+    display: {
+      default_bar_spacing: 12.5,
+      price_lines: {
+        signal: { visible: false, style: 'dotted', width: 1 },
+      },
+    },
     main: {
       ema: {
         enabled: true,

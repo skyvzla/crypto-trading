@@ -13,6 +13,7 @@ const createPriceLine = vi.fn()
 const removePriceLine = vi.fn()
 const setVisibleLogicalRange = vi.fn()
 const setVisibleRange = vi.fn()
+const timeScaleApplyOptions = vi.fn()
 const createSeriesMarkers = vi.fn()
 const attachPrimitive = vi.fn()
 const observe = vi.fn()
@@ -72,6 +73,8 @@ vi.mock('lightweight-charts', () => ({
       getVisibleRange: vi.fn(() => ({ from: 1_754_000_030, to: 1_754_000_060 })),
       getVisibleLogicalRange: vi.fn(() => visibleLogicalRange),
       setVisibleRange,
+      applyOptions: timeScaleApplyOptions,
+      width: () => 480,
       setVisibleLogicalRange: (range: { from: number; to: number }) => {
         visibleLogicalRange = range
         setVisibleLogicalRange(range)
@@ -142,7 +145,7 @@ describe('TradeCandlestickChart', () => {
     expect(remove).toHaveBeenCalled()
   })
 
-  it('默认以首笔成交为中心显示前后各30根，并支持跳转退出', async () => {
+  it('按默认 K 线宽度响应式设置可见范围，并在切换宽度和跳转时保持中心', async () => {
     const start = 1_754_000_000
     const candles = Array.from({ length: 101 }, (_, index) => ({
       time: start + index,
@@ -152,6 +155,7 @@ describe('TradeCandlestickChart', () => {
       close: 1.1,
       volume: 10,
     }))
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     const wrapper = mount(TradeCandlestickChart, {
       props: {
         candles,
@@ -167,12 +171,21 @@ describe('TradeCandlestickChart', () => {
           net_pnl: -10,
           fills: [{ id: 'f-1', time: (start + 40) * 1000, price: 1.1, tier: 1 }],
         },
+        indicatorSettings: settings,
       },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(setVisibleLogicalRange).toHaveBeenCalledWith({ from: 9, to: 69 })
     ;(wrapper.vm as unknown as { focusExit: () => void }).focusExit()
-    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith({ from: 49, to: 100 })
+    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith({ from: 49, to: 109 })
+
+    const updatedSettings = cloneChartIndicatorSettings(settings)
+    updatedSettings.display.default_bar_spacing = 12
+    await wrapper.setProps({ indicatorSettings: updatedSettings })
+    expect(timeScaleApplyOptions).toHaveBeenLastCalledWith({ barSpacing: 12 })
+    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith({ from: 59, to: 99 })
+    ;(wrapper.vm as unknown as { focusEntry: () => void }).focusEntry()
+    expect(setVisibleLogicalRange).toHaveBeenLastCalledWith({ from: 19, to: 59 })
     expect(createSeriesMarkers).toHaveBeenCalled()
   })
 
@@ -438,6 +451,8 @@ describe('TradeCandlestickChart', () => {
 
   it('极值显示为主题适配的价格文本，且可独立隐藏各类标线', async () => {
     const start = 1_754_000_000
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    settings.display.price_lines.signal.visible = false
     const wrapper = mount(TradeCandlestickChart, {
       props: {
         candles: [
@@ -456,7 +471,7 @@ describe('TradeCandlestickChart', () => {
           tier_prices: [1.1, 1.2, 1.3],
           net_pnl: 1,
         },
-        lineVisibility: { signal: false },
+        indicatorSettings: settings,
       },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -658,6 +673,64 @@ describe('TradeCandlestickChart', () => {
     expect(guideTitles).not.toContain('50')
   })
 
+  it('将全部技术指标的线型和粗细传给图表引擎', async () => {
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
+    Object.values(settings.main).forEach((indicator) => {
+      indicator.enabled = true
+    })
+    Object.values(settings.sub).forEach((indicator) => {
+      indicator.enabled = true
+    })
+    Object.assign(settings.main.ema.lines[0], { style: 'dotted', width: 4 })
+    Object.assign(settings.main.ma.lines[0], { style: 'dashed', width: 3 })
+    Object.assign(settings.main.boll.lines.boundary, { style: 'dotted', width: 2 })
+    Object.assign(settings.main.boll.lines.middle, { style: 'solid', width: 4 })
+    Object.assign(settings.sub.volume.ma_lines[0], { style: 'dashed', width: 2 })
+    Object.assign(settings.sub.macd.lines.dif, { style: 'dotted', width: 3 })
+    Object.assign(settings.sub.kdj.lines.k, { style: 'dashed', width: 4 })
+    Object.assign(settings.sub.rsi.lines[0], { style: 'dotted', width: 2 })
+    Object.assign(settings.sub.atr.line, { style: 'dashed', width: 3 })
+
+    const start = 1_754_000_000
+    mount(TradeCandlestickChart, {
+      props: {
+        candles: Array.from({ length: 40 }, (_, index) => ({
+          time: start + index * 60,
+          open: 10 + index * 0.1,
+          high: 10.5 + index * 0.1,
+          low: 9.5 + index * 0.1,
+          close: 10.2 + index * 0.1,
+          volume: 1_000 + index * 20,
+        })),
+        trade: {
+          id: 't-line-appearance',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: (start + 20 * 60) * 1000,
+          entry_price: 12,
+          net_pnl: 1,
+        },
+        indicatorSettings: settings,
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    const expectedAppearances = [
+      { color: '#f5c451', lineStyle: LineStyle.Dotted, lineWidth: 4 },
+      { color: '#f59e0b', lineStyle: LineStyle.Dashed, lineWidth: 3 },
+      { color: '#ef44446b', lineStyle: LineStyle.Dotted, lineWidth: 2 },
+      { color: '#eab308b8', lineStyle: LineStyle.Solid, lineWidth: 4 },
+      { color: '#f5c451', lineStyle: LineStyle.Dashed, lineWidth: 2 },
+      { color: '#4da3ff', lineStyle: LineStyle.Dotted, lineWidth: 3 },
+      { color: '#4da3ff', lineStyle: LineStyle.Dashed, lineWidth: 4 },
+      { color: '#f5c451', lineStyle: LineStyle.Dotted, lineWidth: 2 },
+      { color: '#14b8a6', lineStyle: LineStyle.Dashed, lineWidth: 3 },
+    ]
+    expectedAppearances.forEach((appearance) => {
+      expect(seriesOptions).toContainEqual(expect.objectContaining(appearance))
+    })
+  })
+
   it('无十字光标时按可见范围最右侧K线刷新OHLC和指标值', async () => {
     const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     Object.values(settings.main).forEach((indicator) => {
@@ -667,7 +740,7 @@ describe('TradeCandlestickChart', () => {
       indicator.enabled = false
     })
     settings.main.ma.enabled = true
-    settings.main.ma.lines = [{ period: 2, color: '#f59e0b' }]
+    settings.main.ma.lines = [{ period: 2, color: '#f59e0b', style: 'solid', width: 1 }]
     const start = 1_754_000_000
     const candles = Array.from({ length: 6 }, (_, index) => {
       const price = (index + 1) * 10
@@ -752,8 +825,9 @@ describe('TradeCandlestickChart', () => {
     seriesOptions.slice(0, 6).forEach((options) => expect(options.priceFormat).toEqual(expected))
   })
 
-  it('切换标线显隐时就地增删价格线，不重建图表', async () => {
+  it('更新图表设置中的标线配置时就地增删价格线，不重建图表', async () => {
     const start = 1_754_000_000
+    const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     const wrapper = mount(TradeCandlestickChart, {
       props: {
         candles: [
@@ -771,7 +845,7 @@ describe('TradeCandlestickChart', () => {
           tier_prices: [1.1, 1.2, 1.3],
           net_pnl: 1,
         },
-        lineVisibility: { average: true, invalid: true, signal: true, extensions: true },
+        indicatorSettings: settings,
       },
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
@@ -779,9 +853,11 @@ describe('TradeCandlestickChart', () => {
     const linesAfterMount = createPriceLine.mock.calls.length
     expect(linesAfterMount).toBeGreaterThan(0)
 
-    await wrapper.setProps({
-      lineVisibility: { average: true, invalid: true, signal: false, extensions: true },
-    })
+    const updatedSettings = cloneChartIndicatorSettings(settings)
+    updatedSettings.display.price_lines.signal.visible = false
+    updatedSettings.display.price_lines.invalid.style = 'dashed'
+    updatedSettings.display.price_lines.invalid.width = 3
+    await wrapper.setProps({ indicatorSettings: updatedSettings })
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     // 图表没有被销毁重建，只是把旧价格线摘掉重画。
@@ -789,6 +865,9 @@ describe('TradeCandlestickChart', () => {
     expect(removePriceLine).toHaveBeenCalledTimes(linesAfterMount)
     const redrawn = createPriceLine.mock.calls.slice(linesAfterMount)
     expect(redrawn.some(([line]) => /(?:tier|限)?(?:买|卖)\d/i.test((line as { title: string }).title))).toBe(false)
+    expect(redrawn).toContainEqual([
+      expect.objectContaining({ title: '失效价', lineStyle: LineStyle.Dashed, lineWidth: 3 }),
+    ])
   })
 
   it('切换指标时重建窗格但保留当前视窗', async () => {

@@ -20,7 +20,13 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import type { BacktestCandle, ChartIndicatorSettings, ChartOverlay } from '@/api/types'
+import type {
+  BacktestCandle,
+  ChartIndicatorSettings,
+  ChartLineAppearance,
+  ChartLineStyle,
+  ChartOverlay,
+} from '@/api/types'
 import { formatLedgerDateTime, timestampMs } from '@/shared/time'
 import { IS_DARK_THEME } from '@/shared/theme'
 import { STORAGE_KEYS, readStored, readStoredRecord, removeStored, writeStored } from '@/shared/storage'
@@ -29,13 +35,6 @@ import { cloneChartIndicatorSettings, DEFAULT_CHART_INDICATOR_SETTINGS } from '.
 import { BollingerBandPrimitive, colorWithOpacity } from './bollingerBandPrimitive'
 import { atr, bollinger, emaOfClose, kdj, maOfClose, macd, rsiOfClose, volumeMa } from './indicators'
 import type { TradeChartData, TradeChartFillTimeSemantics } from './tradeChart'
-
-interface PriceLineVisibility {
-  signal?: boolean
-  average?: boolean
-  invalid?: boolean
-  extensions?: boolean
-}
 
 const props = defineProps<{
   candles: BacktestCandle[]
@@ -50,7 +49,6 @@ const props = defineProps<{
     kdj?: boolean
   }
   indicatorSettings?: ChartIndicatorSettings
-  lineVisibility?: PriceLineVisibility
 }>()
 const emit = defineEmits<{ 'request-more': [direction: 'before' | 'after'] }>()
 const isDarkTheme = inject(
@@ -64,8 +62,7 @@ const MIN_CHART_HEIGHT = 360
 const VIEWPORT_HEIGHT_MARGIN = 80
 /** 视窗接近数据边缘时的预取节流窗口，避免重建后立刻重复请求。 */
 const EDGE_REQUEST_SUPPRESS_MS = 500
-/** 默认展示的前后 K 线根数。 */
-const FOCUS_HALF_WINDOW_BARS = 30
+const FALLBACK_CHART_WIDTH = 480
 
 const host = ref<HTMLElement | null>(null)
 const hoverLabel = ref<{ left: number; top: number; lines: Array<{ label: string; value: string }> } | null>(null)
@@ -259,13 +256,55 @@ function normalizedFillSide(value: string | null | undefined): FillSide | null {
   return null
 }
 
-function isLineVisible(key: keyof PriceLineVisibility): boolean {
-  return (props.lineVisibility || {})[key] !== false
+function lineStyle(style: ChartLineStyle): LineStyle {
+  return {
+    solid: LineStyle.Solid,
+    dashed: LineStyle.Dashed,
+    dotted: LineStyle.Dotted,
+  }[style]
+}
+
+function lineOptions(appearance: ChartLineAppearance) {
+  return {
+    lineStyle: lineStyle(appearance.style),
+    lineWidth: appearance.width,
+  }
+}
+
+function displaySettings(): ChartIndicatorSettings['display'] {
+  return props.indicatorSettings?.display ?? DEFAULT_CHART_INDICATOR_SETTINGS.display
+}
+
+function defaultBarSpacing(): number {
+  return displaySettings().default_bar_spacing
+}
+
+function focusedLogicalRange(index: number): { from: number; to: number } {
+  const chartWidth = chart?.timeScale().width() || host.value?.clientWidth || FALLBACK_CHART_WIDTH
+  const visibleBars = chartWidth / defaultBarSpacing()
+  const barsBefore = visibleBars / 2
+  const barsAfter = visibleBars - barsBefore
+  return {
+    from: index - barsBefore,
+    to: index + barsAfter,
+  }
+}
+
+function applyDefaultBarSpacing() {
+  if (!chart) return
+  const timeScale = chart.timeScale()
+  const visibleRange = timeScale.getVisibleLogicalRange()
+  timeScale.applyOptions({ barSpacing: defaultBarSpacing() })
+  if (!visibleRange) return
+  const center = (visibleRange.from + visibleRange.to) / 2
+  suppressEdgeRequestsUntil = Date.now() + EDGE_REQUEST_SUPPRESS_MS
+  timeScale.setVisibleLogicalRange(focusedLogicalRange(center))
 }
 
 /** 计算策略参考线；成交价不作为水平线，避免和实际成交 marker 重复表达。 */
 function buildPriceLines(): PriceLineSpec[] {
   const colors = palette.value
+  const settings = displaySettings().price_lines
   const lines: PriceLineSpec[] = []
   const addLine = (
     price: number | null | undefined,
@@ -282,27 +321,49 @@ function buildPriceLines(): PriceLineSpec[] {
     else if (lines[duplicate].priority < priority) lines[duplicate] = next
   }
 
-  if (isLineVisible('signal')) addLine(props.trade.signal_price, '信号', colors.signal, LineStyle.Dashed, 1, 10)
-  if (isLineVisible('average')) {
+  if (settings.signal.visible) {
+    addLine(
+      props.trade.signal_price,
+      '信号',
+      colors.signal,
+      lineStyle(settings.signal.style),
+      settings.signal.width,
+      10,
+    )
+  }
+  if (settings.average.visible) {
     addLine(
       props.trade.average_entry_price ?? props.trade.entry_price,
       '开仓均价',
       colors.average,
-      LineStyle.Solid,
-      1,
+      lineStyle(settings.average.style),
+      settings.average.width,
       30,
     )
   }
-  if (isLineVisible('invalid')) addLine(props.trade.invalid_price, '失效价', colors.invalid, LineStyle.Dotted, 1, 60)
+  if (settings.invalid.visible) {
+    addLine(
+      props.trade.invalid_price,
+      '失效价',
+      colors.invalid,
+      lineStyle(settings.invalid.style),
+      settings.invalid.width,
+      60,
+    )
+  }
 
   for (const overlay of props.overlays || []) {
     if (HANDLED_OVERLAY_KEYS.has(overlay.key)) continue
-    if (!isLineVisible('extensions') || overlay.kind === 'marker') continue
+    if (!settings.extensions.visible || overlay.kind === 'marker') continue
     const value = overlayNumericValue(overlay.key)
     if (typeof value !== 'number') continue
-    const styles = { solid: LineStyle.Solid, dashed: LineStyle.Dashed, dotted: LineStyle.Dotted }
-    const style = typeof overlay.line_style === 'number' ? overlay.line_style : styles[overlay.line_style || 'dashed']
-    addLine(value, overlay.label || overlay.key, overlay.color || colors.overlayLine, style)
+    addLine(
+      value,
+      overlay.label || overlay.key,
+      overlay.color || colors.overlayLine,
+      lineStyle(settings.extensions.style),
+      settings.extensions.width,
+    )
   }
   return lines
 }
@@ -432,7 +493,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
       const series = instance.addSeries(LineSeries, {
         ...hiddenLatestValue,
         color: line.color,
-        lineWidth: 1,
+        ...lineOptions(line),
         priceFormat,
       })
       group.values.push({ label: `EMA(${line.period})`, color: line.color, series })
@@ -456,7 +517,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
       const series = instance.addSeries(LineSeries, {
         ...hiddenLatestValue,
         color: line.color,
-        lineWidth: 1,
+        ...lineOptions(line),
         priceFormat,
       })
       group.values.push({ label: `MA(${line.period})`, color: line.color, series })
@@ -476,17 +537,31 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
 
   if (settings.main.boll.enabled) {
     const definitions = [
-      { key: 'upper' as const, label: 'BOLL UP', color: settings.main.boll.colors.upper },
-      { key: 'middle' as const, label: 'MID', color: settings.main.boll.colors.middle },
-      { key: 'lower' as const, label: 'DOWN', color: settings.main.boll.colors.upper },
+      {
+        key: 'upper' as const,
+        label: 'BOLL UP',
+        color: settings.main.boll.colors.upper,
+        line: settings.main.boll.lines.boundary,
+      },
+      {
+        key: 'middle' as const,
+        label: 'MID',
+        color: settings.main.boll.colors.middle,
+        line: settings.main.boll.lines.middle,
+      },
+      {
+        key: 'lower' as const,
+        label: 'DOWN',
+        color: settings.main.boll.colors.upper,
+        line: settings.main.boll.lines.boundary,
+      },
     ]
     const group: IndicatorGroup = { key: 'boll', paneIndex: 0, values: [] }
     definitions.forEach((definition) => {
       const series = instance.addSeries(LineSeries, {
         ...hiddenLatestValue,
         color: colorWithOpacity(definition.color, definition.key === 'middle' ? 0.72 : 0.42),
-        lineWidth: 1,
-        lineStyle: definition.key === 'middle' ? LineStyle.Dashed : LineStyle.Solid,
+        ...lineOptions(definition.line),
         crosshairMarkerVisible: false,
         priceFormat,
       })
@@ -542,7 +617,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         {
           ...hiddenLatestValue,
           color: line.color,
-          lineWidth: 1,
+          ...lineOptions(line),
           priceFormat: { type: 'volume' },
           priceScaleId: 'volume',
         },
@@ -582,7 +657,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
       {
         ...hiddenLatestValue,
         color: macdSettings.colors.dif,
-        lineWidth: 1,
+        ...lineOptions(macdSettings.lines.dif),
         priceFormat,
       },
       paneIndex,
@@ -592,7 +667,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
       {
         ...hiddenLatestValue,
         color: macdSettings.colors.dea,
-        lineWidth: 1,
+        ...lineOptions(macdSettings.lines.dea),
         priceFormat,
       },
       paneIndex,
@@ -642,17 +717,32 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
     const kdjSettings = settings.sub.kdj
     const kSeries = instance.addSeries(
       LineSeries,
-      { ...hiddenLatestValue, color: kdjSettings.colors.k, lineWidth: 1, priceFormat: percentFormat },
+      {
+        ...hiddenLatestValue,
+        color: kdjSettings.colors.k,
+        ...lineOptions(kdjSettings.lines.k),
+        priceFormat: percentFormat,
+      },
       paneIndex,
     )
     const dSeries = instance.addSeries(
       LineSeries,
-      { ...hiddenLatestValue, color: kdjSettings.colors.d, lineWidth: 1, priceFormat: percentFormat },
+      {
+        ...hiddenLatestValue,
+        color: kdjSettings.colors.d,
+        ...lineOptions(kdjSettings.lines.d),
+        priceFormat: percentFormat,
+      },
       paneIndex,
     )
     const jSeries = instance.addSeries(
       LineSeries,
-      { ...hiddenLatestValue, color: kdjSettings.colors.j, lineWidth: 1, priceFormat: percentFormat },
+      {
+        ...hiddenLatestValue,
+        color: kdjSettings.colors.j,
+        ...lineOptions(kdjSettings.lines.j),
+        priceFormat: percentFormat,
+      },
       paneIndex,
     )
     const group: IndicatorGroup = {
@@ -685,7 +775,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
         {
           ...hiddenLatestValue,
           color: line.color,
-          lineWidth: 1,
+          ...lineOptions(line),
           priceFormat: percentFormat,
         },
         paneIndex,
@@ -713,7 +803,7 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
       {
         ...hiddenLatestValue,
         color: atrSettings.color,
-        lineWidth: 1,
+        ...lineOptions(atrSettings.line),
         priceFormat,
       },
       paneIndex,
@@ -1016,7 +1106,12 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
     },
     grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
     rightPriceScale: { borderColor: colors.border },
-    timeScale: { borderColor: colors.border, timeVisible: true, secondsVisible: candleSpacing < 60 },
+    timeScale: {
+      borderColor: colors.border,
+      timeVisible: true,
+      secondsVisible: candleSpacing < 60,
+      barSpacing: defaultBarSpacing(),
+    },
     crosshair: { mode: CrosshairMode.Normal, vertLine: { color: colors.border }, horzLine: { color: colors.border } },
     localization: {
       locale: 'zh-CN',
@@ -1212,11 +1307,7 @@ async function renderChart(preservedRange: { from: Time; to: Time } | null = nul
   handleVisibleRangeChange = requestMore
   suppressEdgeRequestsUntil = Date.now() + EDGE_REQUEST_SUPPRESS_MS
   if (preservedRange) timeScale.setVisibleRange(preservedRange)
-  else
-    timeScale.setVisibleLogicalRange({
-      from: Math.max(0, focusIndex - FOCUS_HALF_WINDOW_BARS),
-      to: Math.min(renderedBarTimes.length - 1, focusIndex + FOCUS_HALF_WINDOW_BARS),
-    })
+  else timeScale.setVisibleLogicalRange(focusedLogicalRange(focusIndex))
   updatePaneLabels()
   timeScale.subscribeVisibleLogicalRangeChange(requestMore)
   unsubscribeRange = () => timeScale.unsubscribeVisibleLogicalRangeChange(requestMore)
@@ -1257,10 +1348,7 @@ function centerOn(timeSeconds: number | null) {
   let index = renderedBarTimes.findIndex((item) => item >= timeSeconds)
   if (index < 0) index = renderedBarTimes.length - 1
   suppressEdgeRequestsUntil = Date.now() + EDGE_REQUEST_SUPPRESS_MS
-  chart.timeScale().setVisibleLogicalRange({
-    from: Math.max(0, index - FOCUS_HALF_WINDOW_BARS),
-    to: Math.min(renderedBarTimes.length - 1, index + FOCUS_HALF_WINDOW_BARS),
-  })
+  chart.timeScale().setVisibleLogicalRange(focusedLogicalRange(index))
 }
 
 function focusEvent(value: string | number | null | undefined) {
@@ -1353,16 +1441,26 @@ watch(
 
 // 指标增删或参数变更要重排窗格，只能重建；但保留视窗，避免勾一个指标就丢失缩放位置。
 watch(
-  () => [props.indicators, props.indicatorSettings],
+  () =>
+    JSON.stringify({
+      indicators: props.indicators,
+      main: props.indicatorSettings?.main,
+      sub: props.indicatorSettings?.sub,
+    }),
   () => void requestRender(true),
+)
+
+// 标线配置只影响价格线，就地增删，避免改变当前缩放位置。
+watch(
+  () => props.indicatorSettings?.display.price_lines,
+  () => applyPriceLines(),
   { deep: true },
 )
 
-// 标线显隐只影响价格线，就地增删，不动图表。
+// 默认 K 线宽度保存后立即生效，并保留用户当前视窗的中心位置。
 watch(
-  () => props.lineVisibility,
-  () => applyPriceLines(),
-  { deep: true },
+  () => props.indicatorSettings?.display.default_bar_spacing,
+  () => applyDefaultBarSpacing(),
 )
 
 // 主题决定所有 series 颜色，只能重建，同样保留视窗。

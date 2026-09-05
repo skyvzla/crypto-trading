@@ -37,6 +37,7 @@ ChartInterval = Literal[
     "12h",
     "1d",
 ]
+ChartLineStyle = Literal["solid", "dashed", "dotted"]
 
 
 class _ChartModel(BaseModel):
@@ -45,9 +46,44 @@ class _ChartModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class LineAppearance(_ChartModel):
+    style: ChartLineStyle = "solid"
+    width: int = Field(default=1, ge=1, le=4)
+
+
+class PriceLineSetting(LineAppearance):
+    visible: bool = True
+
+
+class PriceLineSettings(_ChartModel):
+    signal: PriceLineSetting = Field(
+        default_factory=lambda: PriceLineSetting(style="dashed")
+    )
+    average: PriceLineSetting = Field(default_factory=PriceLineSetting)
+    invalid: PriceLineSetting = Field(
+        default_factory=lambda: PriceLineSetting(style="dotted")
+    )
+    extensions: PriceLineSetting = Field(
+        default_factory=lambda: PriceLineSetting(style="dashed")
+    )
+
+
+class ChartDisplaySettings(_ChartModel):
+    default_bar_spacing: float = Field(
+        default=8.0,
+        ge=2.0,
+        le=30.0,
+        multiple_of=0.5,
+        strict=False,
+    )
+    price_lines: PriceLineSettings = Field(default_factory=PriceLineSettings)
+
+
 class IndicatorLine(_ChartModel):
     period: int = Field(gt=0, le=500)
     color: Color
+    style: ChartLineStyle = "solid"
+    width: int = Field(default=1, ge=1, le=4)
 
 
 def _validate_unique_periods(lines: list[IndicatorLine]) -> list[IndicatorLine]:
@@ -63,6 +99,13 @@ class BollingerColors(_ChartModel):
     lower: Color
 
 
+class BollingerLines(_ChartModel):
+    boundary: LineAppearance = Field(default_factory=LineAppearance)
+    middle: LineAppearance = Field(
+        default_factory=lambda: LineAppearance(style="dashed")
+    )
+
+
 class MacdColors(_ChartModel):
     dif: Color
     dea: Color
@@ -70,10 +113,21 @@ class MacdColors(_ChartModel):
     histogram_down: Color
 
 
+class MacdLines(_ChartModel):
+    dif: LineAppearance = Field(default_factory=LineAppearance)
+    dea: LineAppearance = Field(default_factory=LineAppearance)
+
+
 class KdjColors(_ChartModel):
     k: Color
     d: Color
     j: Color
+
+
+class KdjLines(_ChartModel):
+    k: LineAppearance = Field(default_factory=LineAppearance)
+    d: LineAppearance = Field(default_factory=LineAppearance)
+    j: LineAppearance = Field(default_factory=LineAppearance)
 
 
 class EmaSettings(_ChartModel):
@@ -95,6 +149,7 @@ class BollSettings(_ChartModel):
     period: int = Field(default=20, gt=0, le=500)
     deviation: float = Field(default=2.0, gt=0, le=10, strict=False)
     colors: BollingerColors
+    lines: BollingerLines = Field(default_factory=BollingerLines)
 
 
 class MainChartSettings(_ChartModel):
@@ -116,6 +171,7 @@ class MacdSettings(_ChartModel):
     slow_period: int = Field(default=26, gt=0, le=500)
     signal_period: int = Field(default=9, gt=0, le=500)
     colors: MacdColors
+    lines: MacdLines = Field(default_factory=MacdLines)
 
     @model_validator(mode="after")
     def validate_period_order(self) -> "MacdSettings":
@@ -128,6 +184,7 @@ class KdjSettings(_ChartModel):
     enabled: bool = False
     period: int = Field(default=9, gt=0, le=500)
     colors: KdjColors
+    lines: KdjLines = Field(default_factory=KdjLines)
 
 
 class RsiSettings(_ChartModel):
@@ -141,6 +198,7 @@ class AtrSettings(_ChartModel):
     enabled: bool = False
     period: int = Field(default=14, gt=0, le=500)
     color: Color
+    line: LineAppearance = Field(default_factory=LineAppearance)
 
 
 class SubChartSettings(_ChartModel):
@@ -155,6 +213,7 @@ class ChartSettings(_ChartModel):
     """The complete replacement document accepted by the PUT endpoint."""
 
     default_interval: ChartInterval = "1s"
+    display: ChartDisplaySettings = Field(default_factory=ChartDisplaySettings)
     main: MainChartSettings
     sub: SubChartSettings
 
@@ -167,20 +226,58 @@ class ChartSettingsResponse(ChartSettings):
 
 DEFAULT_CHART_SETTINGS: dict[str, Any] = {
     "default_interval": "1s",
+    "display": {
+        "default_bar_spacing": 8.0,
+        "price_lines": {
+            "signal": {"visible": True, "style": "dashed", "width": 1},
+            "average": {"visible": True, "style": "solid", "width": 1},
+            "invalid": {"visible": True, "style": "dotted", "width": 1},
+            "extensions": {
+                "visible": True,
+                "style": "dashed",
+                "width": 1,
+            },
+        },
+    },
     "main": {
         "ema": {
             "enabled": False,
             "lines": [
-                {"period": 9, "color": "#f5c451"},
-                {"period": 21, "color": "#66b3ff"},
+                {
+                    "period": 9,
+                    "color": "#f5c451",
+                    "style": "solid",
+                    "width": 1,
+                },
+                {
+                    "period": 21,
+                    "color": "#66b3ff",
+                    "style": "solid",
+                    "width": 1,
+                },
             ],
         },
         "ma": {
             "enabled": False,
             "lines": [
-                {"period": 5, "color": "#f59e0b"},
-                {"period": 10, "color": "#22c55e"},
-                {"period": 20, "color": "#3b82f6"},
+                {
+                    "period": 5,
+                    "color": "#f59e0b",
+                    "style": "solid",
+                    "width": 1,
+                },
+                {
+                    "period": 10,
+                    "color": "#22c55e",
+                    "style": "solid",
+                    "width": 1,
+                },
+                {
+                    "period": 20,
+                    "color": "#3b82f6",
+                    "style": "solid",
+                    "width": 1,
+                },
             ],
         },
         "boll": {
@@ -192,14 +289,28 @@ DEFAULT_CHART_SETTINGS: dict[str, Any] = {
                 "middle": "#eab308",
                 "lower": "#22c55e",
             },
+            "lines": {
+                "boundary": {"style": "solid", "width": 1},
+                "middle": {"style": "dashed", "width": 1},
+            },
         },
     },
     "sub": {
         "volume": {
             "enabled": True,
             "ma_lines": [
-                {"period": 5, "color": "#f5c451"},
-                {"period": 20, "color": "#4da3ff"},
+                {
+                    "period": 5,
+                    "color": "#f5c451",
+                    "style": "solid",
+                    "width": 1,
+                },
+                {
+                    "period": 20,
+                    "color": "#4da3ff",
+                    "style": "solid",
+                    "width": 1,
+                },
             ],
         },
         "macd": {
@@ -213,21 +324,50 @@ DEFAULT_CHART_SETTINGS: dict[str, Any] = {
                 "histogram_up": "#2ebd85",
                 "histogram_down": "#f05252",
             },
+            "lines": {
+                "dif": {"style": "solid", "width": 1},
+                "dea": {"style": "solid", "width": 1},
+            },
         },
         "kdj": {
             "enabled": False,
             "period": 9,
             "colors": {"k": "#4da3ff", "d": "#f5c451", "j": "#d98bff"},
+            "lines": {
+                "k": {"style": "solid", "width": 1},
+                "d": {"style": "solid", "width": 1},
+                "j": {"style": "solid", "width": 1},
+            },
         },
         "rsi": {
             "enabled": False,
             "lines": [
-                {"period": 6, "color": "#f5c451"},
-                {"period": 12, "color": "#4da3ff"},
-                {"period": 24, "color": "#d98bff"},
+                {
+                    "period": 6,
+                    "color": "#f5c451",
+                    "style": "solid",
+                    "width": 1,
+                },
+                {
+                    "period": 12,
+                    "color": "#4da3ff",
+                    "style": "solid",
+                    "width": 1,
+                },
+                {
+                    "period": 24,
+                    "color": "#d98bff",
+                    "style": "solid",
+                    "width": 1,
+                },
             ],
         },
-        "atr": {"enabled": False, "period": 14, "color": "#14b8a6"},
+        "atr": {
+            "enabled": False,
+            "period": 14,
+            "color": "#14b8a6",
+            "line": {"style": "solid", "width": 1},
+        },
     },
 }
 

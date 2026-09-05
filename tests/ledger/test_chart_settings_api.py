@@ -73,28 +73,31 @@ async def test_get_returns_migration_defaults(chart_settings_client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["default_interval"] == "1s"
+    assert payload["display"] == DEFAULT_CHART_SETTINGS["display"]
     assert payload["main"]["ema"] == DEFAULT_CHART_SETTINGS["main"]["ema"]
     assert payload["main"]["ma"]["lines"] == [
-        {"period": 5, "color": "#f59e0b"},
-        {"period": 10, "color": "#22c55e"},
-        {"period": 20, "color": "#3b82f6"},
+        {"period": 5, "color": "#f59e0b", "style": "solid", "width": 1},
+        {"period": 10, "color": "#22c55e", "style": "solid", "width": 1},
+        {"period": 20, "color": "#3b82f6", "style": "solid", "width": 1},
     ]
     assert payload["sub"]["volume"]["ma_lines"] == [
-        {"period": 5, "color": "#f5c451"},
-        {"period": 20, "color": "#4da3ff"},
+        {"period": 5, "color": "#f5c451", "style": "solid", "width": 1},
+        {"period": 20, "color": "#4da3ff", "style": "solid", "width": 1},
     ]
     assert payload["updated_at"]
 
 
 @pytest.mark.asyncio
-async def test_get_adds_default_interval_to_legacy_document(chart_settings_client):
+async def test_get_enriches_legacy_document_with_display_and_line_defaults(
+    chart_settings_client,
+):
     client, pool, schema = chart_settings_client
 
     async with pool.connection() as conn:
         await conn.execute(
             sql.SQL(
                 "UPDATE {}.chart_settings "
-                "SET settings = settings - 'default_interval' "
+                "SET settings = settings - 'default_interval' - 'display' "
                 "WHERE setting_key = 'global'"
             ).format(sql.Identifier(schema))
         )
@@ -102,7 +105,15 @@ async def test_get_adds_default_interval_to_legacy_document(chart_settings_clien
     response = await client.get("/api/v1/chart-settings")
 
     assert response.status_code == 200
-    assert response.json()["default_interval"] == "1s"
+    payload = response.json()
+    assert payload["default_interval"] == "1s"
+    assert payload["display"] == DEFAULT_CHART_SETTINGS["display"]
+    assert payload["main"]["ema"]["lines"][0]["style"] == "solid"
+    assert payload["main"]["ema"]["lines"][0]["width"] == 1
+    assert payload["main"]["boll"]["lines"]["middle"] == {
+        "style": "dashed",
+        "width": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -113,13 +124,36 @@ async def test_put_replaces_document_and_get_reads_it(chart_settings_client):
     settings["main"]["ma"] = {
         "enabled": True,
         "lines": [
-            {"period": 3, "color": "#010203"},
-            {"period": 55, "color": "#abcdef80"},
+            {
+                "period": 3,
+                "color": "#010203",
+                "style": "dotted",
+                "width": 2,
+            },
+            {
+                "period": 55,
+                "color": "#abcdef80",
+                "style": "dashed",
+                "width": 4,
+            },
         ],
     }
     settings["sub"]["rsi"] = {
         "enabled": True,
-        "lines": [{"period": 7, "color": "#112233"}],
+        "lines": [
+            {
+                "period": 7,
+                "color": "#112233",
+                "style": "solid",
+                "width": 3,
+            }
+        ],
+    }
+    settings["display"]["default_bar_spacing"] = 12.5
+    settings["display"]["price_lines"]["average"] = {
+        "visible": False,
+        "style": "dotted",
+        "width": 2,
     }
 
     response = await client.put("/api/v1/chart-settings", json=settings)
@@ -127,12 +161,14 @@ async def test_put_replaces_document_and_get_reads_it(chart_settings_client):
     assert response.json()["main"]["ma"] == settings["main"]["ma"]
     assert response.json()["sub"]["rsi"] == settings["sub"]["rsi"]
     assert response.json()["default_interval"] == "15m"
+    assert response.json()["display"] == settings["display"]
 
     loaded = await client.get("/api/v1/chart-settings")
     assert loaded.status_code == 200
     assert loaded.json()["main"]["ma"] == settings["main"]["ma"]
     assert loaded.json()["sub"]["rsi"] == settings["sub"]["rsi"]
     assert loaded.json()["default_interval"] == "15m"
+    assert loaded.json()["display"] == settings["display"]
 
     async with pool.connection() as conn:
         row = await (
@@ -202,3 +238,35 @@ async def test_put_rejects_invalid_period_color_and_unknown_fields(chart_setting
     unknown["main"] = {**settings["main"], "future_indicator": {}}
     response = await client.put("/api/v1/chart-settings", json=unknown)
     assert response.status_code == 422
+
+    invalid_style = default_chart_settings().model_dump(mode="json")
+    invalid_style["main"]["ema"]["lines"][0]["style"] = "dash-dot"
+    response = await client.put("/api/v1/chart-settings", json=invalid_style)
+    assert response.status_code == 422
+
+    invalid_width = default_chart_settings().model_dump(mode="json")
+    invalid_width["display"]["price_lines"]["signal"]["width"] = 5
+    response = await client.put("/api/v1/chart-settings", json=invalid_width)
+    assert response.status_code == 422
+
+    invalid_zoom = default_chart_settings().model_dump(mode="json")
+    invalid_zoom["display"]["default_bar_spacing"] = 31
+    response = await client.put(
+        "/api/v1/chart-settings", json=invalid_zoom
+    )
+    assert response.status_code == 422
+
+    invalid_zoom_step = default_chart_settings().model_dump(mode="json")
+    invalid_zoom_step["display"]["default_bar_spacing"] = 8.25
+    response = await client.put(
+        "/api/v1/chart-settings", json=invalid_zoom_step
+    )
+    assert response.status_code == 422
+
+    for valid_zoom in (2, 30):
+        boundary_zoom = default_chart_settings().model_dump(mode="json")
+        boundary_zoom["display"]["default_bar_spacing"] = valid_zoom
+        response = await client.put(
+            "/api/v1/chart-settings", json=boundary_zoom
+        )
+        assert response.status_code == 200

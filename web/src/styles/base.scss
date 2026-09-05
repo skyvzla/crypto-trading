@@ -358,16 +358,19 @@ a {
 .legend-item i {
   display: inline-block;
   width: 18px;
-  border-top: 2px solid currentColor;
+  border-top: var(--legend-line-width, 2px) solid currentColor;
 }
 .legend-item.is-dashed i {
   border-top-style: dashed;
+}
+.legend-item.is-dotted i {
+  border-top-style: dotted;
 }
 .legend-item.is-strong {
   font-weight: 600;
 }
 .legend-item.is-strong i {
-  border-top-width: 3px;
+  border-top-width: var(--legend-line-width, 3px);
 }
 .detail-section {
   margin-top: 14px;

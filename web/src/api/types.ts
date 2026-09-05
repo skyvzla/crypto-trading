@@ -840,13 +840,34 @@ export interface BacktestCandlesResponse {
   candles: BacktestCandle[]
 }
 
-export interface ChartIndicatorLineSetting {
+export type ChartLineStyle = 'solid' | 'dashed' | 'dotted'
+export type ChartLineWidth = 1 | 2 | 3 | 4
+
+export interface ChartLineAppearance {
+  style: ChartLineStyle
+  width: ChartLineWidth
+}
+
+export interface ChartPriceLineSetting extends ChartLineAppearance {
+  visible: boolean
+}
+
+export interface ChartIndicatorLineSetting extends ChartLineAppearance {
   period: number
   color: string
 }
 
 export interface ChartIndicatorSettings {
   default_interval: ChartInterval
+  display: {
+    default_bar_spacing: number
+    price_lines: {
+      signal: ChartPriceLineSetting
+      average: ChartPriceLineSetting
+      invalid: ChartPriceLineSetting
+      extensions: ChartPriceLineSetting
+    }
+  }
   main: {
     ema: {
       enabled: boolean
@@ -864,6 +885,10 @@ export interface ChartIndicatorSettings {
         upper: string
         middle: string
         lower: string
+      }
+      lines: {
+        boundary: ChartLineAppearance
+        middle: ChartLineAppearance
       }
     }
   }
@@ -883,6 +908,10 @@ export interface ChartIndicatorSettings {
         histogram_up: string
         histogram_down: string
       }
+      lines: {
+        dif: ChartLineAppearance
+        dea: ChartLineAppearance
+      }
     }
     kdj: {
       enabled: boolean
@@ -891,6 +920,11 @@ export interface ChartIndicatorSettings {
         k: string
         d: string
         j: string
+      }
+      lines: {
+        k: ChartLineAppearance
+        d: ChartLineAppearance
+        j: ChartLineAppearance
       }
     }
     rsi: {
@@ -901,6 +935,7 @@ export interface ChartIndicatorSettings {
       enabled: boolean
       period: number
       color: string
+      line: ChartLineAppearance
     }
   }
 }

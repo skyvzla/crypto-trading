@@ -27,7 +27,7 @@ describe('图表指标配置', () => {
     const copy = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     copy.default_interval = '15m'
     copy.main.ma.lines[0].period = 30
-    copy.sub.volume.ma_lines.push({ period: 60, color: '#123456' })
+    copy.sub.volume.ma_lines.push({ period: 60, color: '#123456', style: 'dotted', width: 2 })
 
     expect(DEFAULT_CHART_INDICATOR_SETTINGS.default_interval).toBe('1s')
     expect(DEFAULT_CHART_INDICATOR_SETTINGS.main.ma.lines[0].period).toBe(5)
