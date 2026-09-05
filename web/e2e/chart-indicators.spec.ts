@@ -313,7 +313,7 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await barSpacingInput.fill('12.5')
   await barSpacingInput.press('Tab')
   await modal.getByRole('checkbox', { name: '信号价' }).uncheck()
-  await modal.getByRole('combobox', { name: '信号价线型' }).click()
+  await modal.locator('[aria-label="信号价线型"]').click()
   await page.locator('.ant-select-dropdown:visible').getByText('点线', { exact: true }).click()
   await modal.locator('.default-interval-select').click()
   await page.locator('.ant-select-dropdown:visible').getByText('15m', { exact: true }).click()
