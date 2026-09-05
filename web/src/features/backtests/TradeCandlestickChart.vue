@@ -477,21 +477,23 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
   if (settings.main.boll.enabled) {
     const definitions = [
       { key: 'upper' as const, label: 'BOLL UP', color: settings.main.boll.colors.upper },
-      { key: 'lower' as const, label: 'DOWN', color: settings.main.boll.colors.lower },
+      { key: 'middle' as const, label: 'MID', color: settings.main.boll.colors.middle },
+      { key: 'lower' as const, label: 'DOWN', color: settings.main.boll.colors.upper },
     ]
     const group: IndicatorGroup = { key: 'boll', paneIndex: 0, values: [] }
     definitions.forEach((definition) => {
       const series = instance.addSeries(LineSeries, {
         ...hiddenLatestValue,
-        color: colorWithOpacity(definition.color, 0.42),
+        color: colorWithOpacity(definition.color, definition.key === 'middle' ? 0.72 : 0.42),
         lineWidth: 1,
+        lineStyle: definition.key === 'middle' ? LineStyle.Dashed : LineStyle.Solid,
         crosshairMarkerVisible: false,
         priceFormat,
       })
       group.values.push({ label: definition.label, color: definition.color, series })
     })
     const band = new BollingerBandPrimitive({
-      fillColor: colorWithOpacity(settings.main.boll.colors.middle, 0.12),
+      fillColor: colorWithOpacity(settings.main.boll.colors.lower, 0.12),
     })
     group.values[0].series.attachPrimitive(band)
     const update = (next: ChartCandle[]) => {

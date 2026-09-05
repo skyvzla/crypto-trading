@@ -280,9 +280,9 @@ async function bollingerFillPixelCount(page: Page) {
         const green = pixels[index + 1]
         const blue = pixels[index + 2]
         const alpha = pixels[index + 3]
-        const transparentLayerMatch = alpha >= 24 && alpha <= 38 && red >= 220 && green >= 150 && blue <= 40
+        const transparentLayerMatch = alpha >= 24 && alpha <= 38 && red <= 80 && green >= 150 && blue >= 50
         const lightCanvasMatch =
-          alpha >= 245 && red >= 248 && green >= 236 && green <= 250 && blue >= 214 && blue <= 235
+          alpha >= 245 && red >= 220 && red <= 240 && green >= 242 && green <= 252 && blue >= 228 && blue <= 242
         if (transparentLayerMatch || lightCanvasMatch) matches += 1
       }
       return total + matches
@@ -325,6 +325,8 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await bollItem.click()
   const bollEditor = page.locator('section[aria-label="BOLL 参数"]')
   await expect(bollEditor).toBeVisible()
+  await expect(bollEditor.getByText('通道边界', { exact: true })).toBeVisible()
+  await expect(bollEditor.getByText('中轨', { exact: true })).toBeVisible()
   await expect(bollEditor.getByText('通道填充', { exact: true })).toBeVisible()
   await bollItem.getByRole('checkbox').check()
   await expect(bollItem.getByRole('checkbox')).toBeChecked()
@@ -377,8 +379,8 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await expect(mainIndicatorLabel).toContainText('EMA(9)')
   await expect(mainIndicatorLabel).toContainText('MA(7)')
   await expect(mainIndicatorLabel).toContainText('BOLL UP')
+  await expect(mainIndicatorLabel).toContainText('MID')
   await expect(mainIndicatorLabel).toContainText('DOWN')
-  await expect(mainIndicatorLabel).not.toContainText('MID')
   await expect(page.locator('.indicator-hover-label').last()).toContainText('RSI(14)')
   await expect(page.locator('.indicator-hover-label').last()).toContainText(/-?\d/)
   await expect.poll(() => bollingerFillPixelCount(page)).toBeGreaterThan(100)

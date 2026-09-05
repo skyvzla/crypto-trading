@@ -213,11 +213,11 @@ function save() {
           </div>
           <div class="named-colors">
             <label v-for="name in ['upper', 'middle', 'lower'] as const" :key="name" class="color-control">
-              <span>{{ { upper: '上轨边界', middle: '通道填充', lower: '下轨边界' }[name] }}</span>
+              <span>{{ { upper: '通道边界', middle: '中轨', lower: '通道填充' }[name] }}</span>
               <input
                 v-model="draft.main.boll.colors[name]"
                 type="color"
-                :aria-label="`BOLL ${{ upper: '上轨边界', middle: '通道填充', lower: '下轨边界' }[name]}颜色`"
+                :aria-label="`BOLL ${{ upper: '通道边界', middle: '中轨', lower: '通道填充' }[name]}颜色`"
               />
               <code>{{ draft.main.boll.colors[name] }}</code>
             </label>

@@ -1,6 +1,6 @@
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createChart } from 'lightweight-charts'
+import { createChart, LineStyle } from 'lightweight-charts'
 import TradeCandlestickChart from '@/features/backtests/TradeCandlestickChart.vue'
 import {
   cloneChartIndicatorSettings,
@@ -616,6 +616,7 @@ describe('TradeCandlestickChart', () => {
       'EMA(9)',
       'MA(5)',
       'BOLL UP',
+      'MID',
       'DOWN',
       'VOL',
       'MA(5)',
@@ -632,8 +633,7 @@ describe('TradeCandlestickChart', () => {
     expect(paneLabels[0].text()).not.toMatch(/开|高|低|收/)
     expect(paneLabels[0].text()).toMatch(/EMA\(9\) -?\d/)
     expect(paneLabels[0].text()).toMatch(/MA\(5\) -?\d/)
-    expect(paneLabels[0].text()).toMatch(/BOLL UP -?\d.+DOWN -?\d/)
-    expect(paneLabels[0].text()).not.toContain('MID')
+    expect(paneLabels[0].text()).toMatch(/BOLL UP -?\d.+MID -?\d.+DOWN -?\d/)
     expect(paneLabels[1].text()).toMatch(/VOL \d.+MA\(5\) \d.+MA\(20\) \d/)
     expect(paneLabels[2].text()).toMatch(/MACD DIF -?\d.+DEA -?\d.+HIST -?\d/)
     expect(paneLabels[3].text()).toMatch(/KDJ K -?\d.+D -?\d.+J -?\d/)
@@ -645,8 +645,12 @@ describe('TradeCandlestickChart', () => {
     expect(seriesOptions.filter((options) => options.priceLineVisible === false).length).toBe(seriesOptions.length)
     expect(seriesOptions.every((options) => options.title === undefined)).toBe(true)
     expect(attachPrimitive).toHaveBeenCalledOnce()
-    expect(seriesOptions).toContainEqual(expect.objectContaining({ color: '#ef44446b', crosshairMarkerVisible: false }))
-    expect(seriesOptions).toContainEqual(expect.objectContaining({ color: '#22c55e6b', crosshairMarkerVisible: false }))
+    expect(
+      seriesOptions.filter((options) => options.color === '#ef44446b' && options.crosshairMarkerVisible === false),
+    ).toHaveLength(2)
+    expect(seriesOptions).toContainEqual(
+      expect.objectContaining({ color: '#eab308b8', crosshairMarkerVisible: false, lineStyle: LineStyle.Dashed }),
+    )
 
     const guideTitles = createPriceLine.mock.calls.map(([line]) => (line as { title?: string }).title)
     expect(guideTitles).not.toContain('0轴')
