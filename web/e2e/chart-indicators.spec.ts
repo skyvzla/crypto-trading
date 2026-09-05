@@ -418,6 +418,7 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
   await modal.getByRole('tab', { name: '主图指标', exact: true }).click()
   await expect(modal.locator('[data-testid="main-tab-panel"]')).toBeVisible()
   await expect(modal.locator('[data-testid="display-tab-panel"]')).toBeHidden()
+  await expect(modal.locator('[data-testid="sub-tab-panel"]')).toHaveCount(0)
   await expect(modal.locator('.ant-tabs-tabpane-active .indicator-list-item strong')).toHaveText(['EMA', 'MA', 'BOLL'])
   await assertIndicatorPanelsSeparated(modal, page.viewportSize()?.width ?? 0)
 
@@ -448,7 +449,7 @@ test('单笔复盘支持主副图指标配置并保持图表布局稳定', async
 
   await modal.getByRole('tab', { name: '副图指标', exact: true }).click()
   await expect(modal.locator('[data-testid="sub-tab-panel"]')).toBeVisible()
-  await expect(modal.locator('[data-testid="main-tab-panel"]')).toBeHidden()
+  await expect(modal.locator('[data-testid="main-tab-panel"]')).toHaveCount(0)
   await expect(modal.locator('.ant-tabs-tabpane-active .indicator-list-item strong')).toHaveText([
     'VOL',
     'MACD',

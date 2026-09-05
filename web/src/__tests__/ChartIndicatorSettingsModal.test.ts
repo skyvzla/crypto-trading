@@ -77,6 +77,7 @@ describe('ChartIndicatorSettingsModal', () => {
 
     await wrapper.findAll('[role="tab"]')[2].trigger('click')
     expect(wrapper.get('.ant-tabs-tabpane-active [data-testid="sub-tab-panel"]')).toBeTruthy()
+    expect(wrapper.find('[data-testid="main-tab-panel"]').exists()).toBe(false)
     expect(wrapper.findAll('.ant-tabs-tabpane-active .indicator-list-item strong').map((item) => item.text())).toEqual([
       'VOL',
       'MACD',

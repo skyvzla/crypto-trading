@@ -210,7 +210,7 @@ function save() {
       </a-tab-pane>
 
       <a-tab-pane v-for="tab in ['main', 'sub'] as const" :key="tab" :tab="tab === 'main' ? '主图指标' : '副图指标'">
-        <div class="tab-panel indicator-tab-layout" :data-testid="`${tab}-tab-panel`">
+        <div v-if="activeTab === tab" class="tab-panel indicator-tab-layout" :data-testid="`${tab}-tab-panel`">
           <nav class="settings-panel indicator-list" :aria-label="tab === 'main' ? '主图指标列表' : '副图指标列表'">
             <div
               v-for="definition in tab === 'main' ? mainIndicators : subIndicators"
