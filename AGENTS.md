@@ -1,7 +1,7 @@
 # 用户偏好与项目约定
 
 - 默认使用中文回复；较大改动先给出简短计划，再执行并汇报验证结果。
-- 尽可能使用多agent并行处理任务。大部分情况下使用5.6luna-max作为subagent开发，使用5.6sol-medium review代码；如果2次 luna 没有完成任务，那就使用 5.6sol-medium 接管完成
+- 尽可能使用多agent并行处理任务。大部分情况下使用5.6luna-max作为subagent开发，使用5.6sol-medium review代码；如果2次 luna 没有完成任务（review无法完成才算有效失败，API错误就重试），那就使用 5.6sol-medium 接管完成
 - 有任何不确认的地方，请询问。不要猜测用户意图
 - 测试优先使用 Docker Compose 的隔离测试服务，不依赖宿主机环境；全量测试使用 13 个 pytest workers（`-n 13`），完成全量测试、代码审查和 `git diff --check`。
 - 容器优先：处理任何应用服务前，先检查 `docker compose config --services`、`docker compose ps` 和实际容器状态，以 Compose 中的服务关系、命令、环境和健康检查为准；存在对应容器时，不使用宿主机进程或开发服务器代替运行、验证或交付。代码修改后必须重新构建受影响服务的镜像、重启对应容器，并检查 Compose 状态和健康接口。当前 Web 静态产物构建在 `trading_platform-ledger` 镜像中并由 `ledger` 服务提供，因此 Web 修改后必须 build 并重启 `ledger` 容器，不启动宿主机 Vite 作为交付方式。
