@@ -19,6 +19,7 @@ Dynamic Spike Short Strategy - 冻结基线实现
 from collections import deque
 from decimal import Decimal
 from itertools import islice
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Iterable, List, Literal, Optional
 from dataclasses import dataclass, field, replace
 
@@ -580,6 +581,23 @@ class DynamicSpikeShortStrategy:
     def set_entry_enabled(self, enabled: bool) -> None:
         """控制新信号准入；已有信号仍继续失效、撤单和到期处理。"""
         self._entry_enabled = enabled
+
+    def set_metrics_series(self, metrics_series: Iterable[tuple[int, float, float]]) -> None:
+        """Replace the live metrics view while preserving deterministic as-of reads.
+
+        Live metrics arrive independently from bars.  Rebuilding the sorted view
+        here keeps the leaf strategy API identical to backtests and resets the
+        cursor so a newly received snapshot can be used immediately.
+        """
+        normalized = sorted(
+            {
+                (int(available_time), float(open_interest), float(long_short_ratio))
+                for available_time, open_interest, long_short_ratio in metrics_series
+            },
+            key=lambda item: item[0],
+        )
+        self.metrics_series = normalized
+        self._metrics_idx = 0
 
     def set_execution_enabled(self, enabled: bool) -> None:
         """执行事实不可信时只缓存行情，不推进订单状态机。"""
@@ -2793,6 +2811,35 @@ class DynamicSpikeBacktestStrategy:
         self._entry_enabled = enabled
         for strategy in self.strategies.values():
             strategy.set_entry_enabled(enabled)
+
+    def set_metrics_series(
+        self,
+        metrics_series: Mapping[str, Iterable[tuple[int, float, float]]]
+        | Iterable[tuple[int, float, float]],
+        *,
+        symbol: str | None = None,
+    ) -> None:
+        """Inject live/backtest metrics into the matching leaf strategies.
+
+        A mapping is used by live multi-symbol consumers; a plain sequence keeps
+        the helper convenient for single-symbol callers and existing backtests.
+        Strategies that do not declare metrics still receive the value harmlessly
+        because the base leaf stores it for a uniform runtime interface.
+        """
+        if symbol is not None:
+            leaf = self.strategies.get(symbol.strip().upper())
+            if leaf is None:
+                raise ValueError(f"unknown Spike symbol: {symbol}")
+            leaf.set_metrics_series(metrics_series)  # type: ignore[arg-type]
+            return
+        if isinstance(metrics_series, Mapping):
+            for item_symbol, series in metrics_series.items():
+                leaf = self.strategies.get(str(item_symbol).strip().upper())
+                if leaf is not None:
+                    leaf.set_metrics_series(series)
+            return
+        for leaf in self.strategies.values():
+            leaf.set_metrics_series(metrics_series)
 
     def set_blocked_entry_symbols(self, symbols: Iterable[str]) -> None:
         self._blocked_entry_symbols = frozenset(

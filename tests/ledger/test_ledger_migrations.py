@@ -129,6 +129,77 @@ async def test_existing_schema_is_adopted_without_losing_rows(migration_db):
 
 
 @pytest.mark.asyncio
+async def test_client_order_id_constraint_is_account_scoped_when_upgrading(
+    migration_db, tmp_path: Path
+):
+    pool, schema = migration_db
+    old_migrations = tmp_path / "migrations"
+    old_migrations.mkdir()
+    for source in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if int(source.stem.split("_", 1)[0]) > 14:
+            continue
+        shutil.copy(source, old_migrations / source.name)
+
+    await apply_migrations(pool, schema=schema, directory=old_migrations)
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            await conn.execute(
+                "INSERT INTO orders ("
+                "account_id, strategy_id, symbol, order_id, client_order_id, "
+                "side, order_type, quantity, status"
+                ") VALUES ('upgrade-a', 'spike_short', 'BTCUSDT', 'order-a', "
+                "'shared-client', 'SELL', 'LIMIT', 1, 'NEW')"
+            )
+
+    upgraded = await apply_migrations(pool, schema=schema)
+    repeated = await apply_migrations(pool, schema=schema)
+
+    assert upgraded.applied_versions == (15,)
+    assert repeated.applied_versions == ()
+
+    async with pool.connection() as conn:
+        constraints = await (
+            await conn.execute(
+                "SELECT conname, pg_get_constraintdef(oid) "
+                "FROM pg_constraint "
+                "WHERE conrelid = %s::regclass AND contype = 'u' "
+                "ORDER BY conname",
+                (f'"{schema}".orders',),
+            )
+        ).fetchall()
+    definitions = dict(constraints)
+    assert "orders_client_order_id_key" not in definitions
+    assert definitions["orders_account_client_order_id_key"] == (
+        "UNIQUE (account_id, client_order_id)"
+    )
+    assert definitions["orders_account_symbol_order_id_key"] == (
+        "UNIQUE (account_id, symbol, order_id)"
+    )
+
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            await conn.execute(
+                "INSERT INTO orders ("
+                "account_id, strategy_id, symbol, order_id, client_order_id, "
+                "side, order_type, quantity, status"
+                ") VALUES ('upgrade-b', 'spike_short', 'BTCUSDT', 'order-b', "
+                "'shared-client', 'SELL', 'LIMIT', 1, 'NEW')"
+            )
+
+
+
+
+@pytest.mark.asyncio
 async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
     migration_db, tmp_path
 ):
@@ -183,7 +254,7 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
 
     result = await apply_migrations(pool, schema=schema)
 
-    assert result.applied_versions == (12, 13, 14)
+    assert result.applied_versions == (12, 13, 14, 15)
     async with pool.connection() as conn:
         async with conn.transaction():
             await conn.execute(

@@ -33,6 +33,11 @@ from trading_platform.market.feed.binance_ws import (
     parse_aggtrade_message,
     parse_kline_message,
 )
+from trading_platform.market.metrics import (
+    MetricsQualityTracker,
+    MetricsRedisStore,
+    align_metrics_rows,
+)
 from trading_platform.market.quality import MarketDataQualityTracker
 from trading_platform.market.recovery import RecoveryError, RecoveryCoordinator
 from trading_platform.market.store.kline_store import KlineStore
@@ -57,6 +62,7 @@ class MarketLayerService:
     """
     WATERMARK_KEY = "market:continuity_watermarks:v2"
     BACKFILL_TIMEOUT_SECONDS = 30.0
+    METRICS_POLL_SECONDS = 30.0
 
     def __init__(
         self,
@@ -90,6 +96,8 @@ class MarketLayerService:
         # Redis 发布器和存储
         self.redis_publisher = RedisPublisher(redis_client)
         self.kline_store = KlineStore(redis_client)
+        self.metrics_store = MetricsRedisStore(redis_client)
+        self.metrics_quality = MetricsQualityTracker()
 
         # 运行状态
         self._running = False
@@ -101,16 +109,27 @@ class MarketLayerService:
         self._quality_generation = 0
         self._replay_watermarks: dict[str, int] = {}
         self._backfill_lock = asyncio.Lock()
+        self._metrics_task: asyncio.Task | None = None
+        self._metrics_wakeup = asyncio.Event()
 
     async def start(self) -> None:
         """启动服务"""
         self._running = True
+        self._metrics_task = asyncio.create_task(
+            self._metrics_loop(), name="market-metrics-5m"
+        )
         logger.info(f"行情层服务启动，instance_epoch={self.instance_epoch}")
 
     async def stop(self) -> None:
         """停止服务"""
         logger.info("正在停止行情层服务...")
         self._running = False
+
+        metrics_task = self._metrics_task
+        self._metrics_task = None
+        if metrics_task is not None:
+            metrics_task.cancel()
+            await asyncio.gather(metrics_task, return_exceptions=True)
 
         recovery_task = self._recovery_task
         self._recovery_task = None
@@ -140,6 +159,7 @@ class MarketLayerService:
         """
         async with self._refresh_lock:
             active_streams = self.subscription_manager.get_active_streams()
+            self._refresh_metrics_symbols(active_streams)
             needed_streams = sorted(
                 {
                     stream
@@ -189,6 +209,69 @@ class MarketLayerService:
                 self._ws_task = task
                 self._current_streams = needed_streams
                 task.add_done_callback(self._on_ws_task_done)
+
+    def _refresh_metrics_symbols(
+        self, active_streams: dict[str, dict[str, int]]
+    ) -> None:
+        symbols = {
+            symbol.upper()
+            for symbol, subscriptions in active_streams.items()
+            if subscriptions.get("metrics:5m", 0) > 0
+        }
+        self.metrics_quality.set_expected_symbols(symbols)
+        self._metrics_wakeup.set()
+
+    async def _metrics_loop(self) -> None:
+        while self._running:
+            self._metrics_wakeup.clear()
+            symbols = tuple(sorted(self.metrics_quality.snapshot()))
+            if symbols:
+                await asyncio.gather(
+                    *(self._collect_metrics_symbol(symbol) for symbol in symbols)
+                )
+            try:
+                await asyncio.wait_for(
+                    self._metrics_wakeup.wait(), timeout=self.METRICS_POLL_SECONDS
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _collect_metrics_symbol(self, symbol: str) -> None:
+        received_at_ms = int(time.time() * 1000)
+        try:
+            open_interest_rows, long_short_rows = await asyncio.gather(
+                self.rest_client.get_open_interest_history(symbol, period="5m", limit=2),
+                self.rest_client.get_global_long_short_account_ratio(
+                    symbol, period="5m", limit=2
+                ),
+            )
+            event = align_metrics_rows(
+                symbol,
+                open_interest_rows,
+                long_short_rows,
+                now_ms=received_at_ms,
+            )
+            await self.metrics_store.publish(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.metrics_quality.mark_failed(
+                symbol, f"metrics_collection_failed:{type(exc).__name__}"
+            )
+            logger.warning(
+                "%s 5m metrics collection failed: %s", symbol, type(exc).__name__
+            )
+            return
+        self.metrics_quality.mark_healthy(event, received_at_ms=received_at_ms)
+
+    def websocket_required(self) -> bool:
+        if self._current_streams:
+            return True
+        active_streams = self.subscription_manager.get_active_streams()
+        return any(
+            build_stream_names([symbol], list(subscriptions))
+            for symbol, subscriptions in active_streams.items()
+        )
 
     async def _restore_persisted_watermarks(self, streams: list[str]) -> None:
         values = await self.redis.hgetall(self.WATERMARK_KEY)
@@ -669,10 +752,7 @@ def create_app(
             redis_connected = False
 
         await service._recover_if_generation_changed()
-        websocket_required = bool(
-            service._current_streams
-            or service.subscription_manager.get_active_streams()
-        )
+        websocket_required = service.websocket_required()
         websocket_connected = (
             not websocket_required
             or (
@@ -684,11 +764,13 @@ def create_app(
         data_quality_ready = service.quality.ready
         pubsub_delivery_ready = service.redis_publisher.delivery_ready
         pubsub_required = websocket_required
+        metrics_quality_ready = service.metrics_quality.ready
         ready = (
             redis_connected
             and websocket_connected
             and data_quality_ready
             and (not pubsub_required or pubsub_delivery_ready)
+            and metrics_quality_ready
         )
         if not ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -707,22 +789,22 @@ def create_app(
             data_quality_issues=service.quality.issue_count,
             pubsub_delivery_ready=pubsub_delivery_ready,
             pubsub_delivery_issues=service.redis_publisher.delivery_issue_count,
+            metrics_quality_ready=metrics_quality_ready,
+            metrics_quality_issues=service.metrics_quality.issue_count,
         )
 
     @app.get("/quality")
     async def quality_status(response: Response) -> QualityResponse:
         await service._recover_if_generation_changed()
-        required = bool(
-            service._current_streams
-            or service.subscription_manager.get_active_streams()
-        )
+        required = service.websocket_required()
         websocket_connected = service.ws_client.connected
         pubsub_delivery_ready = service.redis_publisher.delivery_ready
-        ready = not required or (
+        websocket_ready = not required or (
             websocket_connected
             and service.quality.ready
             and pubsub_delivery_ready
         )
+        ready = websocket_ready and service.metrics_quality.ready
         if not ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return QualityResponse(
@@ -735,6 +817,7 @@ def create_app(
             pubsub_delivery_ready=pubsub_delivery_ready,
             pubsub_delivery_issues=service.redis_publisher.delivery_issue_count,
             pubsub_channels=service.redis_publisher.delivery_snapshot(),
+            metrics=service.metrics_quality.snapshot(),
         )
 
     return app, service

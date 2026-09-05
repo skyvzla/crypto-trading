@@ -28,6 +28,8 @@ class SubscriptionRequest(BaseModel):
                 continue
             if value.startswith("kline:") and value.split(":", 1)[1]:
                 continue
+            if value == "metrics:5m":
+                continue
             raise ValueError(f"不支持的订阅类型: {value}")
         return values
 
@@ -77,6 +79,8 @@ class HealthResponse(BaseModel):
     data_quality_issues: int = 0
     pubsub_delivery_ready: bool = True
     pubsub_delivery_issues: int = 0
+    metrics_quality_ready: bool = True
+    metrics_quality_issues: int = 0
 
 
 class QualityResponse(BaseModel):
@@ -91,6 +95,7 @@ class QualityResponse(BaseModel):
     pubsub_delivery_ready: bool = True
     pubsub_delivery_issues: int = 0
     pubsub_channels: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    metrics: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 # ==================== 订阅管理器 ====================

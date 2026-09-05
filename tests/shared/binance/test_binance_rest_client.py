@@ -1,3 +1,4 @@
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import httpx
@@ -16,6 +17,39 @@ def _client() -> BinanceRestClient:
 
 def test_income_history_uses_binance_documented_request_weight():
     assert get_endpoint_weight("GET", "/fapi/v1/income") == 30
+
+
+@pytest.mark.asyncio
+async def test_test_order_uses_non_matching_signed_endpoint():
+    client = _client()
+    client._request = AsyncMock(return_value={})
+
+    try:
+        result = await client.test_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            order_type="LIMIT",
+            quantity=Decimal("0.001"),
+            price=Decimal("100000"),
+            new_client_order_id="tp_preflight_1",
+        )
+    finally:
+        await client.close()
+
+    assert result == {}
+    client._request.assert_awaited_once_with(
+        "POST",
+        "/fapi/v1/order/test",
+        {
+            "symbol": "BTCUSDT",
+            "side": "SELL",
+            "type": "LIMIT",
+            "quantity": "0.001",
+            "price": "100000",
+            "timeInForce": "GTC",
+            "newClientOrderId": "tp_preflight_1",
+        },
+    )
 
 
 @pytest.mark.asyncio

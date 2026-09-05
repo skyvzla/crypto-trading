@@ -143,6 +143,54 @@ async def test_health_pagination_idempotency_and_pnl(ledger, client):
 
 
 @pytest.mark.asyncio
+async def test_orders_allow_same_client_order_id_across_accounts(ledger):
+    suffix = uuid4().hex[:10]
+    client_order_id = f"shared-client-{suffix}"
+    now = datetime.now(timezone.utc)
+
+    first = await ledger.insert_order(
+        Order(
+            account_id=f"account-a-{suffix}",
+            strategy_id="spike_short",
+            symbol="BTCUSDT",
+            order_id=f"order-a-{suffix}",
+            client_order_id=client_order_id,
+            side="SELL",
+            order_type="LIMIT",
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+            status="NEW",
+            exchange_created_at=now,
+        )
+    )
+    second = await ledger.insert_order(
+        Order(
+            account_id=f"account-b-{suffix}",
+            strategy_id="spike_short",
+            symbol="BTCUSDT",
+            order_id=f"order-b-{suffix}",
+            client_order_id=client_order_id,
+            side="SELL",
+            order_type="LIMIT",
+            quantity=Decimal("1"),
+            price=Decimal("100"),
+            status="NEW",
+            exchange_created_at=now,
+        )
+    )
+
+    assert first > 0
+    assert second > 0
+    assert second != first
+    assert len(
+        await ledger.get_orders(account_id=f"account-a-{suffix}")
+    ) == 1
+    assert len(
+        await ledger.get_orders(account_id=f"account-b-{suffix}")
+    ) == 1
+
+
+@pytest.mark.asyncio
 async def test_web_order_activity_and_trade_calendar_filters_are_server_side(
     ledger, client
 ):

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
 import signal
 import time
 from contextlib import AsyncExitStack
@@ -74,6 +76,9 @@ BAR_STREAM_STALE_SECONDS = 10.0
 RUNTIME_HEARTBEAT_SECONDS = 5.0
 EXCHANGE_RULE_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60
 MARKET_EVENT_QUEUE_MAXSIZE = 1_024
+METRICS_INTERVAL_MS = 5 * 60 * 1000
+METRICS_MAX_AGE_MS = 2 * METRICS_INTERVAL_MS
+METRICS_STREAM_RECOVERY_LIMIT = 900
 
 
 def _snapshot_from_database(
@@ -134,11 +139,7 @@ class SpikeLiveProcess:
         self.strategy_config = strategy_config
         self.strategy_definition = load_strategy_definition(settings.strategy_path)
         requirements = self.strategy_definition.data_requirements
-        if requirements.metrics_5m:
-            raise ValueError(
-                "live Spike runtime does not provide metrics_5m yet: "
-                f"{settings.strategy_path}"
-            )
+        self._metrics_required = bool(requirements.metrics_5m)
         if "1s" not in requirements.market_timeframes:
             raise ValueError(
                 "live Spike runtime currently requires a 1s-driven strategy: "
@@ -157,6 +158,12 @@ class SpikeLiveProcess:
         self._last_bar_trade_id: dict[str, int] = {}
         self._bar_continuity_streak: dict[str, int] = {}
         self._continuity_failed_symbols: set[str] = set()
+        self._metrics_series: dict[str, list[tuple[int, float, float]]] = {}
+        self._metrics_last_available_time: dict[str, int] = {}
+        self._metrics_received_monotonic: dict[str, float] = {}
+        self._metrics_continuity_failed_symbols: set[str] = set()
+        self._metrics_stream_ids: dict[str, str] = {}
+        self._metrics_poll_task: asyncio.Task | None = None
         self._market_instance_epoch: str | None = None
         self.http: httpx.AsyncClient | None = None
         self.redis: redis.Redis | None = None
@@ -223,6 +230,7 @@ class SpikeLiveProcess:
 
             await self._register_market_subscriptions()
             await self._start_bar_consumer()
+            await self._warm_metrics_history()
             await self._warm_strategy_history()
             await self._refresh_market_gate(require_ready=True)
             await self.admission.on_universe_scan()
@@ -251,6 +259,11 @@ class SpikeLiveProcess:
                     ),
                 ]
             )
+            if self._metrics_required:
+                self._metrics_poll_task = asyncio.create_task(
+                    self._metrics_loop(), name="spike-metrics-loop"
+                )
+                self._tasks.append(self._metrics_poll_task)
             await self._publish_runtime_status()
             self._tasks.append(
                 asyncio.create_task(
@@ -302,6 +315,7 @@ class SpikeLiveProcess:
             self.gate.set_condition("execution", False)
             self.gate.set_condition("market", False)
             self.gate.set_condition("event_queue", False)
+            self.gate.set_condition("metrics_5m", False)
         if self.runtime_callbacks is not None:
             self.runtime_callbacks.abort_startup_recovery()
         for task in self._tasks:
@@ -309,6 +323,7 @@ class SpikeLiveProcess:
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        self._metrics_poll_task = None
         self._queued_execution_started = False
         errors: list[BaseException] = []
         if self.coordinator is not None:
@@ -481,6 +496,9 @@ class SpikeLiveProcess:
             "capital",
         ):
             self.gate.set_condition(condition, False)
+        # Keep the metrics gate independent so missing/stale derivatives data
+        # closes only new entries while existing campaigns can still exit.
+        self.gate.set_condition("metrics_5m", not self._metrics_required)
         funding_source = self._build_funding_source(rest, pool)
         self.coordinator = SpikeExecutionCoordinator(
             strategy=strategy,
@@ -626,10 +644,11 @@ class SpikeLiveProcess:
             or None
         )
         if status is None:
+            metrics_ready = gates.get("metrics_5m", not self._metrics_required)
             safety_ready = all(
                 gates.get(name, False)
                 for name in ("execution", "market", "bar_stream")
-            ) and gates.get("event_queue", True)
+            ) and metrics_ready and gates.get("event_queue", True)
             status = "running" if safety_ready and not halted else "degraded"
         accepted = await self.db.upsert_strategy_runtime_status(
             StrategyRuntimeStatus(
@@ -777,10 +796,13 @@ class SpikeLiveProcess:
         timeframes = list(self.strategy_definition.data_requirements.market_timeframes)
         if self.settings.exit_policy == "candidate-v1" and "15m" not in timeframes:
             timeframes.append("15m")
-        return [
+        subscriptions = [
             "bar1s" if timeframe == "1s" else f"kline:{timeframe}"
             for timeframe in timeframes
         ]
+        if self._metrics_required:
+            subscriptions.append("metrics:5m")
+        return subscriptions
 
     async def _warm_strategy_history(self) -> None:
         assert self.coordinator is not None
@@ -820,6 +842,241 @@ class SpikeLiveProcess:
                 self._last_kline[(symbol, interval)] = completed[-1].close_time
         strategy.refresh_candidate_features()
         strategy.set_trading_enabled(True)
+
+    async def _warm_metrics_history(self) -> None:
+        """Replay the bounded Redis metrics stream before opening entries."""
+        if not self._metrics_required:
+            self._set_metrics_gate(True)
+            return
+        assert self.redis is not None
+        for symbol in self._market_symbols():
+            stream = f"metrics:stream:{symbol}:5m"
+            rows = await self.redis.xrevrange(
+                stream,
+                max="+",
+                min="-",
+                count=METRICS_STREAM_RECOVERY_LIMIT,
+            )
+            if not isinstance(rows, (list, tuple)):
+                rows = []
+            parsed = []
+            for stream_id, fields in rows or []:
+                if symbol not in self._metrics_stream_ids:
+                    self._metrics_stream_ids[symbol] = self._decode_stream_id(stream_id)
+                raw = fields.get("data") or fields.get(b"data")
+                parsed.append(raw)
+            for raw in reversed(parsed):
+                self._ingest_metrics_payload(
+                    raw,
+                    now_ms=int(time.time() * 1000),
+                    expected_symbol=symbol,
+                )
+
+            self._metrics_stream_ids.setdefault(symbol, "0-0")
+
+            # A publisher may have a latest snapshot while its replay stream is
+            # empty after retention/maintenance.  It is still safe to use that
+            # snapshot, but it cannot establish continuity for older periods.
+            latest = await self.redis.hget(f"metrics:{symbol}:5m", "latest")
+            if latest:
+                self._ingest_metrics_payload(
+                    latest,
+                    now_ms=int(time.time() * 1000),
+                    expected_symbol=symbol,
+                )
+        self._set_metrics_gate(self._metrics_gate_ready())
+
+    async def _metrics_loop(self) -> None:
+        """Consume live 5m metrics without entering the bar execution queue.
+
+        The canonical writer persists every snapshot to a Redis Stream and a
+        latest hash.  Polling the stream keeps this consumer independent from
+        Pub/Sub subscriber timing and also works across a Market restart.
+        """
+        if not self._metrics_required:
+            return
+        assert self.redis is not None
+        try:
+            while True:
+                now_ms = int(time.time() * 1000)
+                for symbol in self._market_symbols():
+                    cursor = self._metrics_stream_ids.get(symbol, "0-0")
+                    rows = await self.redis.xrange(
+                        f"metrics:stream:{symbol}:5m",
+                        min=f"({cursor}",
+                        max="+",
+                        count=METRICS_STREAM_RECOVERY_LIMIT,
+                    )
+                    if not isinstance(rows, (list, tuple)):
+                        rows = []
+                    for stream_id, fields in rows or []:
+                        self._metrics_stream_ids[symbol] = self._decode_stream_id(
+                            stream_id
+                        )
+                        raw = fields.get("data") or fields.get(b"data")
+                        self._ingest_metrics_payload(
+                            raw,
+                            now_ms=now_ms,
+                            expected_symbol=symbol,
+                        )
+                ready = self._metrics_gate_ready(now_ms=now_ms)
+                self._set_metrics_gate(ready)
+                if not ready:
+                    await self._cancel_entries_for_metrics()
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            self._set_metrics_gate(False)
+            raise
+
+    def _ingest_metrics_payload(
+        self,
+        raw: object,
+        *,
+        now_ms: int,
+        expected_symbol: str | None = None,
+    ) -> str | None:
+        """Validate one wire snapshot and update its as-of series."""
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(payload, dict):
+                raise ValueError("metrics payload must be an object")
+            symbol = str(payload["symbol"]).strip().upper()
+            expected = (
+                None
+                if expected_symbol is None
+                else expected_symbol.strip().upper()
+            )
+            if expected is not None and symbol != expected:
+                raise ValueError("metrics payload symbol does not match its stream")
+            if symbol not in set(self.settings.symbols):
+                raise ValueError("metrics payload contains an unmanaged symbol")
+            if payload.get("period", "5m") != "5m":
+                raise ValueError("metrics payload has an unexpected period")
+            available_raw = payload["available_time"]
+            if isinstance(available_raw, bool):
+                raise ValueError("metrics available_time must be an integer")
+            available_time = int(available_raw)
+            if isinstance(available_raw, float) and not available_raw.is_integer():
+                raise ValueError("metrics available_time must be an integer")
+            if (
+                available_time <= 0
+                or available_time % METRICS_INTERVAL_MS != 0
+                or available_time > now_ms
+            ):
+                raise ValueError("metrics available_time is invalid")
+            if "snapshot_time" in payload:
+                snapshot_raw = payload["snapshot_time"]
+                if isinstance(snapshot_raw, bool):
+                    raise ValueError("metrics snapshot_time must be an integer")
+                snapshot_time = int(snapshot_raw)
+                if isinstance(snapshot_raw, float) and not snapshot_raw.is_integer():
+                    raise ValueError("metrics snapshot_time must be an integer")
+                if snapshot_time + METRICS_INTERVAL_MS != available_time:
+                    raise ValueError("metrics snapshot/available time mismatch")
+            open_interest = float(payload["open_interest"])
+            long_short_ratio = float(payload["long_short_ratio"])
+            if (
+                not math.isfinite(open_interest)
+                or open_interest <= 0
+                or not math.isfinite(long_short_ratio)
+                or long_short_ratio <= 0
+            ):
+                raise ValueError("metrics values must be finite and positive")
+        except (KeyError, TypeError, ValueError, OverflowError, json.JSONDecodeError) as exc:
+            failed_symbol = (
+                expected_symbol.strip().upper()
+                if expected_symbol is not None
+                else self._payload_symbol(raw)
+            )
+            if failed_symbol in set(self.settings.symbols):
+                self._mark_metrics_failed(
+                    failed_symbol, f"invalid_payload:{type(exc).__name__}"
+                )
+            else:
+                self._set_metrics_gate(False)
+            logger.warning("invalid Spike metrics snapshot: %s", type(exc).__name__)
+            return None
+
+        series = self._metrics_series.setdefault(symbol, [])
+        previous_time = self._metrics_last_available_time.get(symbol)
+        if previous_time is not None:
+            if available_time < previous_time:
+                self._mark_metrics_failed(symbol, "available_time_regression")
+                return None
+            if available_time == previous_time:
+                if series and series[-1][1:] != (open_interest, long_short_ratio):
+                    self._mark_metrics_failed(symbol, "conflicting_duplicate")
+                self._metrics_received_monotonic[symbol] = time.monotonic()
+                return symbol
+            if available_time - previous_time != METRICS_INTERVAL_MS:
+                self._metrics_continuity_failed_symbols.add(symbol)
+                self._mark_metrics_failed(symbol, "metrics_gap")
+
+        self._metrics_last_available_time[symbol] = available_time
+        series.append((available_time, open_interest, long_short_ratio))
+        if len(series) > METRICS_STREAM_RECOVERY_LIMIT:
+            del series[: len(series) - METRICS_STREAM_RECOVERY_LIMIT]
+        self._metrics_received_monotonic[symbol] = time.monotonic()
+        if symbol in self._metrics_continuity_failed_symbols:
+            # Require one subsequent contiguous point after a gap before
+            # reopening.  The first point after the gap becomes the new base.
+            if previous_time is None or available_time - previous_time == METRICS_INTERVAL_MS:
+                self._metrics_continuity_failed_symbols.discard(symbol)
+        coordinator = self.coordinator
+        setter = None if coordinator is None else getattr(
+            getattr(coordinator, "strategy", None), "set_metrics_series", None
+        )
+        if callable(setter):
+            setter(series, symbol=symbol)
+        return symbol
+
+    @staticmethod
+    def _decode_stream_id(stream_id: object) -> str:
+        if isinstance(stream_id, bytes):
+            return stream_id.decode("ascii")
+        return str(stream_id)
+
+    @staticmethod
+    def _payload_symbol(raw: object) -> str:
+        try:
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+            return str(payload.get("symbol", "")).strip().upper() if isinstance(payload, dict) else ""
+        except Exception:
+            return ""
+
+    def _mark_metrics_failed(self, symbol: str, issue: str) -> None:
+        self._metrics_continuity_failed_symbols.add(symbol)
+        self._set_metrics_gate(False)
+        logger.warning("%s metrics gate closed: %s", symbol, issue)
+
+    def _metrics_gate_ready(self, *, now_ms: int | None = None) -> bool:
+        if not self._metrics_required:
+            return True
+        current = int(time.time() * 1000) if now_ms is None else now_ms
+        symbols = self._market_symbols()
+        if not symbols:
+            return False
+        return all(
+            symbol in self._metrics_last_available_time
+            and symbol not in self._metrics_continuity_failed_symbols
+            and current - self._metrics_last_available_time[symbol] <= METRICS_MAX_AGE_MS
+            and current >= self._metrics_last_available_time[symbol]
+            for symbol in symbols
+        )
+
+    def _set_metrics_gate(self, enabled: bool) -> None:
+        if self.gate is not None:
+            self.gate.set_condition("metrics_5m", bool(enabled))
+
+    async def _cancel_entries_for_metrics(self) -> None:
+        if self.coordinator is not None:
+            await self.coordinator.cancel_open_entry_orders()
 
     async def _refresh_market_gate(self, *, require_ready: bool = False) -> bool:
         assert self.http is not None
@@ -1254,9 +1511,16 @@ class SpikeLiveProcess:
         assert self.coordinator is not None
         market_ready = await self._refresh_market_gate()
         stream_ready = self._refresh_bar_stream_gate()
-        ready = market_ready and stream_ready
+        metrics_ready = self._refresh_metrics_gate()
+        ready = market_ready and stream_ready and metrics_ready
         if not ready:
             await self.coordinator.cancel_open_entry_orders()
+        return ready
+
+    def _refresh_metrics_gate(self, *, now_ms: int | None = None) -> bool:
+        """Close only new-entry admission when metrics become stale or incomplete."""
+        ready = self._metrics_gate_ready(now_ms=now_ms)
+        self._set_metrics_gate(ready)
         return ready
 
     def _refresh_bar_stream_gate(self, *, now: float | None = None) -> bool:

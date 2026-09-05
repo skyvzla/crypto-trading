@@ -171,7 +171,12 @@ services:
   spike:
     profiles: ["spike"]
     build: *app_build
-    command: ["python", "-m", "trading_platform.strategies.spike.main"]
+    command:
+      - sh
+      - -ceu
+      - >-
+        python scripts/spike_runtime_guard.py preflight &&
+        exec python -m trading_platform.strategies.spike.main
     init: true
     environment:
       REDIS_HOST: redis
@@ -185,9 +190,11 @@ services:
       DB_DATABASE: ${DB_DATABASE:-trading_platform}
       STRATEGY_ACCOUNT_ID: ${SPIKE_ACCOUNT_ID:-spike_testnet}
       STRATEGY_MARKET_API_URL: http://market:8000
+      STRATEGY_LEDGER_API_URL: http://ledger:8001
       STRATEGY_RISK_MAX_POSITION_VALUE_USDT: ${STRATEGY_RISK_MAX_POSITION_VALUE_USDT:-1000}
       STRATEGY_RISK_MAX_SYMBOLS: ${STRATEGY_RISK_MAX_SYMBOLS:-1}
       SPIKE_MODE: ${SPIKE_MODE:-testnet}
+      # V22 remains the business default; testnet orchestration must explicitly use V2.
       SPIKE_STRATEGY_PATH: ${SPIKE_STRATEGY_PATH:-trading_platform.strategies.spike.v2_2:V22}
       SPIKE_EXIT_POLICY: ${SPIKE_EXIT_POLICY:-candidate-v1}
       SPIKE_ACCOUNT_ID: ${SPIKE_ACCOUNT_ID:-spike_testnet}
@@ -197,7 +204,7 @@ services:
       SPIKE_PROFIT_REINVEST_RATIO: ${SPIKE_PROFIT_REINVEST_RATIO:-0.5}
       SPIKE_MINIMUM_TRADING_CAPITAL: ${SPIKE_MINIMUM_TRADING_CAPITAL:-10}
       SPIKE_ENTRY_TIER_MODE: ${SPIKE_ENTRY_TIER_MODE:-single-entry}
-      SPIKE_WAL_PATH: /app/data/wal/spike_short.jsonl
+      SPIKE_WAL_PATH: ${SPIKE_WAL_PATH:-/app/data/wal/spike_short.jsonl}
       SPIKE_DEDICATED_STRATEGY_ACCOUNT: "true"
       SPIKE_POLL_INTERVAL_SECONDS: "5"
       SPIKE_MAX_POLL_ATTEMPTS: "12"
@@ -220,6 +227,14 @@ services:
         condition: service_healthy
       market:
         condition: service_healthy
+      ledger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "scripts/spike_runtime_guard.py", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
     restart: unless-stopped
 
   strategy_kline:

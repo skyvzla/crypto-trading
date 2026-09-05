@@ -165,6 +165,46 @@ class BinanceRestClient:
         """读取 USD-M Futures 交易规则；该接口无需签名。"""
         return await self._request('GET', '/fapi/v1/exchangeInfo', {}, signed=False)
 
+    async def get_open_interest_history(
+        self, symbol: str, *, period: str = "5m", limit: int = 2
+    ) -> list[dict[str, Any]]:
+        """Read public USD-M aggregate open-interest history."""
+        if not symbol:
+            raise ValueError("symbol is required")
+        if period != "5m":
+            raise ValueError("only the 5m metrics period is supported")
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        result = await self._request(
+            "GET",
+            "/futures/data/openInterestHist",
+            {"symbol": symbol, "period": period, "limit": limit},
+            signed=False,
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("invalid Binance open-interest history response")
+        return result
+
+    async def get_global_long_short_account_ratio(
+        self, symbol: str, *, period: str = "5m", limit: int = 2
+    ) -> list[dict[str, Any]]:
+        """Read public USD-M global long/short account-ratio history."""
+        if not symbol:
+            raise ValueError("symbol is required")
+        if period != "5m":
+            raise ValueError("only the 5m metrics period is supported")
+        if not 1 <= limit <= 500:
+            raise ValueError("limit must be between 1 and 500")
+        result = await self._request(
+            "GET",
+            "/futures/data/globalLongShortAccountRatio",
+            {"symbol": symbol, "period": period, "limit": limit},
+            signed=False,
+        )
+        if not isinstance(result, list):
+            raise RuntimeError("invalid Binance long/short ratio response")
+        return result
+
     async def post_order(
         self,
         symbol: str,
@@ -212,6 +252,37 @@ class BinanceRestClient:
             params['reduceOnly'] = 'true'
 
         return await self._request('POST', '/fapi/v1/order', params)
+
+    async def test_order(
+        self,
+        symbol: str,
+        side: Literal['BUY', 'SELL'],
+        order_type: Literal['LIMIT', 'MARKET', 'STOP', 'TAKE_PROFIT'],
+        quantity: Decimal,
+        price: Decimal | None = None,
+        time_in_force: Literal['GTC', 'IOC', 'FOK', 'GTX'] = 'GTC',
+        new_client_order_id: str | None = None,
+        reduce_only: bool = False,
+    ) -> dict[str, Any]:
+        """Validate a signed order without sending it to the matching engine."""
+        params: dict[str, Any] = {
+            'symbol': symbol,
+            'side': side,
+            'type': order_type,
+            'quantity': str(quantity),
+        }
+        if price is not None:
+            params['price'] = str(price)
+        if order_type == 'LIMIT':
+            params['timeInForce'] = time_in_force
+        if new_client_order_id:
+            params['newClientOrderId'] = new_client_order_id
+        if reduce_only:
+            params['reduceOnly'] = 'true'
+        result = await self._request('POST', '/fapi/v1/order/test', params)
+        if not isinstance(result, dict):
+            raise RuntimeError("invalid Binance test order response")
+        return result
 
     async def cancel_order(
         self,

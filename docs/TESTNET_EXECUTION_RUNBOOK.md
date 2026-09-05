@@ -11,10 +11,38 @@ symbol，也不会把撤单前的旧仓位快照当成清仓结果。
 完整 Spike 进程使用显式 Compose profile 启动，默认 `docker compose up` 不会启动交易进程：
 
 ```bash
-docker compose --profile spike up --build
+SPIKE_STRATEGY_PATH=trading_platform.strategies.spike.v2:V2 \
+  docker compose --profile spike up -d --build spike
 ```
 
-启动前应先运行本 smoke；账户不是 one-way 或存在旧订单/仓位时不要启动 profile。
+Compose 的业务默认版本仍为 V22。testnet 启动必须像上例一样显式选择 V2；启动前应先运行本
+smoke，账户不是 one-way 或存在旧订单/仓位时不要启动 profile。
+
+## 只读与非撮合预检
+
+启动 Spike 或执行 smoke 前先运行预检。它会验证 testnet 端点、签名账户读取、交易权限、
+one-way 模式、USDT 可用余额、全账户挂单和持仓，并调用 Binance
+`POST /fapi/v1/order/test` 校验一笔规则化订单。该测试接口不会把订单发送到撮合引擎，
+不会产生挂单、成交或仓位：
+
+```bash
+docker compose --profile spike run --rm --no-deps \
+  -v "$PWD/reports:/app/reports" spike \
+  python scripts/binance_testnet_preflight.py \
+  --symbol BTCUSDT \
+  --require-flat \
+  --report reports/testnet_preflight.json
+```
+
+成功结果为 `PREFLIGHT_OK`，其中 `signed_read=true`、`can_trade=true`、
+`one_way_mode=true`、`matching_engine_submission=false`。默认最低可用余额读取
+`SPIKE_INITIAL_ACCOUNT_CAPITAL`；可用 `--minimum-available-usdt` 显式提高门槛。
+
+Binance 的公开 5 分钟持仓量和全市场多空比接口在正式公共域返回数据，但 testnet 域当前
+只返回非 JSON 占位响应。Market 不跨环境混用正式数据：需要 `metrics:5m` 的策略在 testnet
+会保持 metrics quality degraded 并关闭准入。仅验证 testnet 运行编排时，应显式使用不依赖
+该指标的 V2。直接以 Compose 默认 V22 连接 testnet 时，metrics gate degraded 是预期的
+fail-closed 行为；V22 的指标链路只使用正式行情环境验收，不允许从生产域向 testnet 混源。
 
 ## 安全边界
 
