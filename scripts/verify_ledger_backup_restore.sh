@@ -63,6 +63,10 @@ if (( current_version >= 6 )); then
   'backtest_report_rows', (SELECT COUNT(*) FROM backtest_report_rows),
   'backtest_strategy_schemas', (SELECT COUNT(*) FROM backtest_strategy_schemas),"
 fi
+if (( current_version >= 16 )); then
+  extra_count_sql+="
+  'execution_event_journal', (SELECT COUNT(*) FROM execution_event_journal),"
+fi
 
 count_sql="
 SELECT jsonb_build_object(

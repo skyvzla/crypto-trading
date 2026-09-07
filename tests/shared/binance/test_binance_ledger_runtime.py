@@ -87,6 +87,8 @@ async def test_account_update_is_written_to_position_ledger():
 
 
 def test_factory_wires_callbacks_and_explicit_recovery_parameters():
+    raw_event = Mock()
+    reconciliation_observer = Mock()
     runtime = create_binance_execution_runtime(
         rest_client=Mock(),
         executor=Mock(),
@@ -98,11 +100,15 @@ def test_factory_wires_callbacks_and_explicit_recovery_parameters():
         ws_base_url="wss://testnet.example/ws",
         poll_interval_seconds=7,
         max_poll_attempts=9,
+        on_raw_event=raw_event,
+        reconciliation_observer=reconciliation_observer,
     )
 
     assert runtime.user_stream.ws_base_url == "wss://testnet.example/ws"
     assert runtime.user_stream.on_execution_report is not None
     assert runtime.user_stream.on_account_update is not None
+    assert runtime.user_stream.on_raw_event is raw_event
+    assert runtime.reconciliation_observer is reconciliation_observer
     assert runtime.unknown_poller.poll_interval_seconds == 7
     assert runtime.unknown_poller.max_attempts == 9
     assert runtime.startup_reconciler.synchronizer.symbols == ("AKEUSDT",)

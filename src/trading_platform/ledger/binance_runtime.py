@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from trading_platform.ledger.binance_account_updates import BinanceAccountUpdateLedger
 from trading_platform.ledger.binance_reports import BinanceExecutionReportLedger
@@ -68,6 +68,8 @@ def create_binance_execution_runtime(
     ws_base_url: str,
     poll_interval_seconds: float,
     max_poll_attempts: int,
+    on_raw_event: Callable[[dict[str, Any]], Any] | None = None,
+    reconciliation_observer: Callable[[str, dict[str, Any]], Any] | None = None,
 ) -> BinanceExecutionRuntime:
     """使用显式业务归属和恢复参数构建 testnet/live 共用运行时。"""
     if not dedicated_strategy_account:
@@ -91,6 +93,7 @@ def create_binance_execution_runtime(
         ws_base_url=ws_base_url,
         on_execution_report=callbacks.handle_execution_report,
         on_account_update=callbacks.handle_account_update,
+        on_raw_event=on_raw_event,
     )
     poller = SubmitUnknownPollingService(
         executor,
@@ -114,4 +117,9 @@ def create_binance_execution_runtime(
         ),
         strict_reconciler,
     )
-    return BinanceExecutionRuntime(user_stream, poller, reconciler)
+    return BinanceExecutionRuntime(
+        user_stream,
+        poller,
+        reconciler,
+        reconciliation_observer=reconciliation_observer,
+    )

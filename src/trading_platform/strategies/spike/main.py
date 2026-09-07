@@ -12,12 +12,14 @@ from contextlib import AsyncExitStack
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 import httpx
 import redis.asyncio as redis
+import trading_platform
 
 from trading_platform.ledger.binance_runtime import create_binance_execution_runtime
 from trading_platform.ledger.db.models import (
@@ -41,10 +43,14 @@ from trading_platform.shared.config import (
     StrategyConfig,
 )
 from trading_platform.shared.events import Bar1s, Kline
+from trading_platform.shared.execution_event_journal import (
+    DurableExecutionEventJournal,
+)
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.logging_config import setup_logger
 from trading_platform.shared.postgres_lease import PostgresExecutionLease
 from trading_platform.shared.risk import RiskConfig, RiskGuard
+from trading_platform.shared.release_identity import source_tree_identity
 from trading_platform.strategies.admission import SubcategoryAdmissionService
 from trading_platform.strategies.campaign_store import RedisCampaignStore
 from trading_platform.strategies.spike.live import (
@@ -138,6 +144,14 @@ class SpikeLiveProcess:
         self.redis_config = redis_config
         self.strategy_config = strategy_config
         self.strategy_definition = load_strategy_definition(settings.strategy_path)
+        source_root = Path(trading_platform.__file__).resolve().parent
+        self.strategy_release_identity = source_tree_identity(source_root)
+        self.strategy_release_hash = self.strategy_release_identity[
+            "strategy_release_hash"
+        ]
+        self.strategy_release_hash_algorithm = self.strategy_release_identity[
+            "strategy_release_hash_algorithm"
+        ]
         requirements = self.strategy_definition.data_requirements
         self._metrics_required = bool(requirements.metrics_5m)
         if "1s" not in requirements.market_timeframes:
@@ -175,6 +189,7 @@ class SpikeLiveProcess:
         self.execution_lease: PostgresExecutionLease | None = None
         self.db: LedgerDB | None = None
         self.execution_rest: BinanceRestClient | None = None
+        self.event_journal: DurableExecutionEventJournal | None = None
         self.capital_store: CapitalStore | None = None
         self.capital_snapshot: CapitalSnapshot | None = None
         self.exchange_symbol_snapshot: ExchangeSymbolSnapshot | None = None
@@ -182,11 +197,13 @@ class SpikeLiveProcess:
         self.instance_id = uuid4().hex
         self.started_at = datetime.now(timezone.utc)
         self._runtime_fatal_reason: str | None = None
+        self._last_journal_gate_snapshot: dict[str, bool] | None = None
 
     async def start(self) -> None:
         if self.runtime is not None:
             return
         try:
+            self._ensure_event_journal()
             await self._build_resources()
             assert self.runtime is not None
             assert self.coordinator is not None
@@ -265,6 +282,17 @@ class SpikeLiveProcess:
                 )
                 self._tasks.append(self._metrics_poll_task)
             await self._publish_runtime_status()
+            await self._append_process_event(
+                "runtime.ready",
+                source="spike.runtime",
+                details={
+                    "mode": self.settings.mode,
+                    "strategy_path": self.settings.strategy_path,
+                    "strategy_name": self.strategy_definition.name,
+                    **self.strategy_release_identity,
+                    "symbols": list(self.settings.symbols),
+                },
+            )
             self._tasks.append(
                 asyncio.create_task(
                     self._runtime_heartbeat_loop(),
@@ -273,7 +301,23 @@ class SpikeLiveProcess:
             )
         except BaseException as exc:
             self._runtime_fatal_reason = f"startup failed: {type(exc).__name__}"
-            await self.stop()
+            if self.event_journal is not None:
+                try:
+                    await self._append_process_event(
+                        "runtime.start_failed",
+                        source="spike.runtime",
+                        severity="critical",
+                        details={
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc)[:500],
+                        },
+                    )
+                except BaseException:
+                    logger.exception("Failed to persist Spike startup failure event")
+            try:
+                await self.stop()
+            except BaseException:
+                logger.exception("Spike shutdown failed after startup failure")
             raise
 
     async def run(self) -> None:
@@ -311,6 +355,17 @@ class SpikeLiveProcess:
         self._stop.set()
 
     async def stop(self) -> None:
+        errors: list[BaseException] = []
+        if self.event_journal is not None:
+            try:
+                await self._append_process_event(
+                    "runtime.stopping",
+                    source="spike.runtime",
+                    severity="warning" if self._runtime_fatal_reason else "info",
+                    details={"fatal_reason": self._runtime_fatal_reason},
+                )
+            except BaseException as exc:
+                errors.append(exc)
         if self.gate is not None:
             self.gate.set_condition("execution", False)
             self.gate.set_condition("market", False)
@@ -325,7 +380,6 @@ class SpikeLiveProcess:
         self._tasks.clear()
         self._metrics_poll_task = None
         self._queued_execution_started = False
-        errors: list[BaseException] = []
         if self.coordinator is not None:
             try:
                 await self.coordinator.stop()
@@ -342,6 +396,19 @@ class SpikeLiveProcess:
                 await self._publish_runtime_status(
                     status="fatal" if self._runtime_fatal_reason else "stopped",
                     stopped=True,
+                )
+            except BaseException as exc:
+                errors.append(exc)
+        if self.event_journal is not None:
+            try:
+                await self._append_process_event(
+                    "runtime.stopped",
+                    source="spike.runtime",
+                    severity="error" if errors else "info",
+                    details={
+                        "fatal_reason": self._runtime_fatal_reason,
+                        "shutdown_error_types": [type(exc).__name__ for exc in errors],
+                    },
                 )
             except BaseException as exc:
                 errors.append(exc)
@@ -364,6 +431,26 @@ class SpikeLiveProcess:
             config=self.settings.formal_capital_config,
         )
 
+    def _ensure_event_journal(self) -> None:
+        if self.event_journal is not None:
+            return
+        self.event_journal = DurableExecutionEventJournal(
+            f"{self.settings.wal_path}.events.jsonl",
+            run_id=self.instance_id,
+            account_id=self.settings.account_id,
+            strategy_id=STRATEGY_ID,
+            persist=self._persist_execution_events,
+        )
+
+    async def _persist_execution_events(self, events: Sequence[Any]) -> int:
+        if self.db is None:
+            # The journal fsyncs before invoking this callback.  Raising here
+            # keeps the local record pending for the next DB-backed replay;
+            # returning zero would make a journal implementation that compacts
+            # after a callback discard an event that PostgreSQL never saw.
+            raise RuntimeError("execution event journal database is unavailable")
+        return await self.db.insert_execution_events(events)
+
     @staticmethod
     def _build_funding_source(
         rest: BinanceRestClient, pool: Any
@@ -378,6 +465,23 @@ class SpikeLiveProcess:
         self._stack.push_async_callback(self.execution_lease.release)
         db = LedgerDB(pool)
         self.db = db
+        self._ensure_event_journal()
+        # Flush records appended before the DB/lease became available, then
+        # continue appending with PostgreSQL persistence enabled.
+        await self.event_journal.start()
+        await self._append_process_event(
+            "runtime.initializing",
+            source="spike.runtime",
+            details={
+                "mode": self.settings.mode,
+                "strategy_path": self.settings.strategy_path,
+                "strategy_name": self.strategy_definition.name,
+                **self.strategy_release_identity,
+                "symbols": list(self.settings.symbols),
+                "exit_policy": self.settings.exit_policy,
+                "entry_tier_mode": self.settings.entry_tier_mode,
+            },
+        )
         self.capital_snapshot = await self._initialize_capital(pool)
         trading_capital = self.capital_snapshot.state.trading_capital
 
@@ -400,6 +504,7 @@ class SpikeLiveProcess:
             self.binance.api_key,
             self.binance.api_secret,
             base_url=self.binance.base_url,
+            event_observer=self._observe_binance_rest,
         )
         self.execution_rest = rest
         self._stack.push_async_callback(rest.close)
@@ -521,6 +626,7 @@ class SpikeLiveProcess:
                 snapshot,
                 recovery_allowed=True,
             ),
+            event_journal=self.event_journal,
         )
         self.admission = SubcategoryAdmissionService(
             source=db,
@@ -541,6 +647,8 @@ class SpikeLiveProcess:
             ws_base_url=self.binance.ws_base_url,
             poll_interval_seconds=self.settings.poll_interval_seconds,
             max_poll_attempts=self.settings.max_poll_attempts,
+            on_raw_event=self._observe_binance_user_event,
+            reconciliation_observer=self._observe_binance_reconciliation,
         )
         stream = self.runtime.user_stream
         ledger_callbacks = SimpleNamespace(
@@ -553,9 +661,11 @@ class SpikeLiveProcess:
             coordinator=self.coordinator,
             gate=self.gate,
             risk_guard=risk,
+            event_journal=self.event_journal,
         )
         callbacks.begin_startup_recovery()
         self.runtime_callbacks = callbacks
+        self.runtime.on_startup_failure = callbacks.abort_startup_recovery
         self.runtime.user_stream.on_execution_report = callbacks.handle_execution_report
         self.runtime.user_stream.on_account_update = callbacks.handle_account_update
         self.runtime.user_stream.on_disconnect = self._on_execution_stream_disconnected
@@ -614,6 +724,105 @@ class SpikeLiveProcess:
             self.gate.set_condition("execution", False)
         if self.coordinator is not None:
             self.coordinator.risk_guard.halt(reason)
+
+    async def _append_process_event(
+        self,
+        event_type: str,
+        *,
+        source: str,
+        event_time: int | None = None,
+        severity: str = "info",
+        trace_id: str | None = None,
+        symbol: str | None = None,
+        campaign_id: str | None = None,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        if self.event_journal is None:
+            return
+        await self.event_journal.append(
+            event_type,
+            source=source,
+            event_time=event_time,
+            severity=severity,
+            trace_id=trace_id,
+            symbol=symbol,
+            campaign_id=campaign_id,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            details=details,
+        )
+
+    async def _observe_binance_rest(
+        self, stage: str, details: dict[str, Any]
+    ) -> None:
+        params = details.get("params")
+        params = params if isinstance(params, dict) else {}
+        response = details.get("response_body")
+        response = response if isinstance(response, dict) else {}
+        client_order_id = str(
+            params.get("newClientOrderId")
+            or params.get("origClientOrderId")
+            or response.get("clientOrderId")
+            or ""
+        )
+        exchange_order_id = str(
+            params.get("orderId") or response.get("orderId") or ""
+        )
+        symbol = str(params.get("symbol") or response.get("symbol") or "")
+        severity = "info" if stage != "request_failed" else "error"
+        await self._append_process_event(
+            f"binance.rest.{stage}",
+            source="binance.rest",
+            severity=severity,
+            trace_id=client_order_id or None,
+            symbol=symbol or None,
+            client_order_id=client_order_id or None,
+            exchange_order_id=exchange_order_id or None,
+            details=details,
+        )
+
+    async def _observe_binance_user_event(self, event: dict[str, Any]) -> None:
+        event_type = str(event.get("e") or "UNKNOWN")
+        order = event.get("o")
+        order = order if isinstance(order, dict) else {}
+        account = event.get("a")
+        account = account if isinstance(account, dict) else {}
+        positions = account.get("P")
+        positions = positions if isinstance(positions, list) else []
+        first_position = positions[0] if positions and isinstance(positions[0], dict) else {}
+        client_order_id = str(order.get("c") or "")
+        exchange_order_id = str(order.get("i") or "")
+        symbol = str(order.get("s") or first_position.get("s") or "")
+        raw_event_time = event.get("E", event.get("T"))
+        event_time = (
+            int(raw_event_time)
+            if isinstance(raw_event_time, int) and not isinstance(raw_event_time, bool)
+            else None
+        )
+        await self._append_process_event(
+            "binance.user_stream.received",
+            source="binance.user_stream",
+            event_time=event_time,
+            trace_id=client_order_id or None,
+            symbol=symbol or None,
+            client_order_id=client_order_id or None,
+            exchange_order_id=exchange_order_id or None,
+            details={"event_type": event_type, "envelope": event},
+        )
+
+    async def _observe_binance_reconciliation(
+        self, stage: str, details: dict[str, Any]
+    ) -> None:
+        severity = "error" if stage == "failed" else "info"
+        await self._append_process_event(
+            f"runtime.reconciliation_{stage}",
+            source="spike.reconciliation",
+            severity=severity,
+            trace_id=str(details.get("trace_id") or "") or None,
+            details=details,
+        )
 
     async def _try_publish_fatal_status(self) -> None:
         try:
@@ -674,6 +883,26 @@ class SpikeLiveProcess:
                     "runtime status ownership lost to another instance"
                 )
             raise RuntimeError("runtime status ownership lost to another instance")
+        if gates != self._last_journal_gate_snapshot:
+            previous = self._last_journal_gate_snapshot
+            await self._append_process_event(
+                "runtime.gates_changed",
+                source="spike.runtime",
+                severity=(
+                    "warning"
+                    if halted or not bool(self.gate and self.gate.enabled)
+                    else "info"
+                ),
+                details={
+                    "previous": previous,
+                    "current": gates,
+                    "entry_enabled": bool(self.gate and self.gate.enabled),
+                    "halted": halted,
+                    "halt_reason": halt_reason,
+                    "runtime_status": status,
+                },
+            )
+            self._last_journal_gate_snapshot = gates
 
     def _restore_execution_gate(self) -> bool:
         if self.gate is None or self.coordinator is None or self.runtime is None:
@@ -859,13 +1088,21 @@ class SpikeLiveProcess:
             )
             if not isinstance(rows, (list, tuple)):
                 rows = []
-            parsed = []
+            parsed: list[tuple[str, object]] = []
             for stream_id, fields in rows or []:
+                decoded_stream_id = self._decode_stream_id(stream_id)
                 if symbol not in self._metrics_stream_ids:
-                    self._metrics_stream_ids[symbol] = self._decode_stream_id(stream_id)
+                    self._metrics_stream_ids[symbol] = decoded_stream_id
                 raw = fields.get("data") or fields.get(b"data")
-                parsed.append(raw)
-            for raw in reversed(parsed):
+                parsed.append((decoded_stream_id, raw))
+            for stream_id, raw in reversed(parsed):
+                await self._record_metrics_input(
+                    raw,
+                    now_ms=int(time.time() * 1000),
+                    expected_symbol=symbol,
+                    transport="redis_stream_replay",
+                    stream_id=stream_id,
+                )
                 self._ingest_metrics_payload(
                     raw,
                     now_ms=int(time.time() * 1000),
@@ -879,9 +1116,16 @@ class SpikeLiveProcess:
             # snapshot, but it cannot establish continuity for older periods.
             latest = await self.redis.hget(f"metrics:{symbol}:5m", "latest")
             if latest:
+                now_ms = int(time.time() * 1000)
+                await self._record_metrics_input(
+                    latest,
+                    now_ms=now_ms,
+                    expected_symbol=symbol,
+                    transport="redis_latest",
+                )
                 self._ingest_metrics_payload(
                     latest,
-                    now_ms=int(time.time() * 1000),
+                    now_ms=now_ms,
                     expected_symbol=symbol,
                 )
         self._set_metrics_gate(self._metrics_gate_ready())
@@ -910,10 +1154,16 @@ class SpikeLiveProcess:
                     if not isinstance(rows, (list, tuple)):
                         rows = []
                     for stream_id, fields in rows or []:
-                        self._metrics_stream_ids[symbol] = self._decode_stream_id(
-                            stream_id
-                        )
+                        decoded_stream_id = self._decode_stream_id(stream_id)
+                        self._metrics_stream_ids[symbol] = decoded_stream_id
                         raw = fields.get("data") or fields.get(b"data")
+                        await self._record_metrics_input(
+                            raw,
+                            now_ms=now_ms,
+                            expected_symbol=symbol,
+                            transport="redis_stream",
+                            stream_id=decoded_stream_id,
+                        )
                         self._ingest_metrics_payload(
                             raw,
                             now_ms=now_ms,
@@ -929,6 +1179,45 @@ class SpikeLiveProcess:
         except BaseException:
             self._set_metrics_gate(False)
             raise
+
+    async def _record_metrics_input(
+        self,
+        raw: object,
+        *,
+        now_ms: int,
+        expected_symbol: str,
+        transport: str,
+        stream_id: str | None = None,
+    ) -> None:
+        payload: object = raw
+        if isinstance(payload, bytes):
+            payload = payload.decode("utf-8", errors="replace")
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except json.JSONDecodeError:
+                pass
+        payload_event_time = (
+            payload.get("available_time") if isinstance(payload, dict) else None
+        )
+        event_time = (
+            int(payload_event_time)
+            if isinstance(payload_event_time, int) and not isinstance(payload_event_time, bool)
+            else now_ms
+        )
+        trace_suffix = stream_id or str(event_time)
+        await self._append_process_event(
+            "market.metrics_5m_received",
+            source="spike.metrics",
+            event_time=event_time,
+            trace_id=f"metrics:{expected_symbol}:{trace_suffix}",
+            symbol=expected_symbol,
+            details={
+                "transport": transport,
+                "stream_id": stream_id,
+                "payload": payload,
+            },
+        )
 
     def _ingest_metrics_payload(
         self,
@@ -1428,11 +1717,19 @@ class SpikeLiveProcess:
             if self.runtime is not None and self.runtime.is_running:
                 if self.coordinator.account.has_unresolved_orders():
                     self.gate.set_condition("execution", False)
+                    await self._append_process_event(
+                        "runtime.reconciliation_skipped",
+                        source="spike.reconciliation",
+                        severity="warning",
+                        details={
+                            "reason": "unresolved_orders",
+                            "unresolved_orders": True,
+                        },
+                    )
                     continue
-                reconciler = self.runtime.startup_reconciler
-                if reconciler is not None:
+                if self.runtime.startup_reconciler is not None:
                     try:
-                        await reconciler.reconcile_once()
+                        await self.runtime.reconcile_once("safety_periodic")
                     except Exception:
                         self.gate.set_condition("execution", False)
                     else:

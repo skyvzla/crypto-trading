@@ -1,4 +1,5 @@
 import asyncio
+import json
 import threading
 from unittest.mock import AsyncMock, Mock
 
@@ -264,6 +265,90 @@ async def test_account_updates_are_returned_to_event_loop_as_complete_events(mon
     await asyncio.wait_for(received.wait(), timeout=1)
     stream._ws_thread.cancel()
     await stream._ws_thread
+
+
+@pytest.mark.asyncio
+async def test_raw_event_is_complete_and_fifo_before_derived_callback(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    received = []
+    done = asyncio.Event()
+
+    async def on_raw_event(event):
+        received.append(("raw", event))
+
+    async def on_report(order):
+        received.append(("report", order))
+        done.set()
+
+    stream = UserDataStream(
+        rest,
+        on_raw_event=on_raw_event,
+        on_execution_report=on_report,
+    )
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+    await stream._connect_ws()
+
+    envelope = {
+        "e": "ORDER_TRADE_UPDATE",
+        "E": 1780000000100,
+        "o": {"c": "client-1", "X": "FILLED"},
+    }
+    FakeWebSocketApp.instance.callbacks["on_message"](
+        FakeWebSocketApp.instance, json.dumps(envelope)
+    )
+    await asyncio.wait_for(done.wait(), timeout=1)
+
+    assert [kind for kind, _ in received] == ["raw", "report"]
+    assert received[0][1] == envelope
+    assert received[1][1] == envelope["o"]
+    await stream.stop()
+
+
+@pytest.mark.asyncio
+async def test_raw_event_failure_is_fatal_and_blocks_derived_callbacks(monkeypatch):
+    monkeypatch.setattr(
+        "trading_platform.shared.binance.user_stream.websocket.WebSocketApp",
+        FakeWebSocketApp,
+    )
+    rest = Mock(
+        create_listen_key=AsyncMock(return_value="listen-key"),
+        close_listen_key=AsyncMock(),
+    )
+    report = AsyncMock()
+
+    async def fail_raw(_event):
+        raise RuntimeError("event journal unavailable")
+
+    stream = UserDataStream(
+        rest,
+        on_raw_event=fail_raw,
+        on_execution_report=report,
+    )
+    stream._loop = asyncio.get_running_loop()
+    stream._running = True
+    stream.listen_key = "listen-key"
+    stream._run_ws = AsyncMock(side_effect=_idle_forever)
+    await stream._connect_ws()
+    FakeWebSocketApp.instance.callbacks["on_message"](
+        FakeWebSocketApp.instance,
+        '{"e":"ORDER_TRADE_UPDATE","o":{"c":"client-1"}}',
+    )
+
+    failure = await asyncio.wait_for(stream.wait_fatal(), timeout=1)
+    assert str(failure) == "event journal unavailable"
+    await asyncio.sleep(0)
+    report.assert_not_awaited()
+    await stream.stop()
 
 
 @pytest.mark.asyncio

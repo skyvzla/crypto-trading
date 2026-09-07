@@ -1,13 +1,16 @@
 import asyncio
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from trading_platform.shared.binance.live_executor import BinanceOrderExecutor
 from trading_platform.shared.events import Bar1s, OrderIntent
+from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.campaign_store import CampaignLease
-from trading_platform.strategies.spike.execution_queue import ExecutionQueue
+from trading_platform.strategies.spike.execution_queue import ExecutionJob, ExecutionQueue
 from trading_platform.strategies.spike.live import (
     CompositeEntryGate,
     SpikeExecutionCoordinator,
@@ -91,6 +94,23 @@ class LiveSignalIntentStrategy(IntentStrategy):
         return self.expires_at_by_campaign.get(campaign_id)
 
 
+class CollectingJournal:
+    def __init__(self):
+        self.events = []
+
+    async def append(self, event_type, **kwargs):
+        event_id = f"journal-{len(self.events) + 1}"
+        values = {
+            **kwargs,
+            "event_id": event_id,
+            "trace_id": kwargs.get("trace_id") or event_id,
+            "event_type": event_type,
+        }
+        event = SimpleNamespace(**values)
+        self.events.append(event)
+        return event
+
+
 class MemoryCampaignStore:
     def __init__(self):
         self.active = None
@@ -116,7 +136,9 @@ class ReleasingMemoryCampaignStore(MemoryCampaignStore):
         return True
 
 
-def coordinator_for(strategy, executor, *, queue=None, account=None):
+def coordinator_for(
+    strategy, executor, *, queue=None, account=None, event_journal=None
+):
     gate = CompositeEntryGate(strategy)
     for name in ("execution", "market", "campaign"):
         gate.set_condition(name, True)
@@ -137,6 +159,7 @@ def coordinator_for(strategy, executor, *, queue=None, account=None):
         gate=gate,
         account_id="spike-test",
         execution_queue=queue,
+        event_journal=event_journal,
     )
     return coordinator, gate
 
@@ -406,6 +429,7 @@ async def test_full_entry_execution_queue_closes_entries_but_keeps_exit():
             "BNBUSDT": [exit_intent("BNBUSDT")],
         }
     )
+    journal = CollectingJournal()
     queue = ExecutionQueue(max_pending_entries=1)
     queued_entry = entry("BTCUSDT", 500)
     queue.put_nowait("entry", intent=queued_entry, event_time=500)
@@ -414,6 +438,7 @@ async def test_full_entry_execution_queue_closes_entries_but_keeps_exit():
         Mock(submit=AsyncMock(return_value=Mock(status="NEW"))),
         queue=queue,
         account=account,
+        event_journal=journal,
     )
 
     await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
@@ -425,8 +450,269 @@ async def test_full_entry_execution_queue_closes_entries_but_keeps_exit():
     jobs = [await coordinator.execution_queue.get() for _ in range(3)]
     assert [job.kind for job in jobs] == ["exit", "cancel", "entry"]
     assert jobs[-1].intent == queued_entry
+    queued_events = [
+        event
+        for event in journal.events
+        if event.event_type == "execution.intent_queued"
+    ]
+    rejected_events = [
+        event
+        for event in journal.events
+        if event.event_type == "execution.intent_rejected"
+    ]
+    assert [event.client_order_id for event in queued_events] == [
+        "exit-BNBUSDT"
+    ]
+    assert {
+        event.client_order_id for event in rejected_events
+    } == {"spike_short_BTCUSDT_1000_tier1", "spike_short_ETHUSDT_2000_tier1"}
     for _ in jobs:
         coordinator.execution_queue.task_done()
+
+
+@pytest.mark.asyncio
+async def test_journal_records_market_input_before_strategy_and_intent_before_worker():
+    journal = CollectingJournal()
+    order_intent = entry("BTCUSDT", 1_000)
+
+    class OrderingStrategy(IntentStrategy):
+        def on_bar1s(self, current):
+            assert [item.event_type for item in journal.events] == [
+                "market.bar1s_received"
+            ]
+            return super().on_bar1s(current)
+
+    strategy = OrderingStrategy({"BTCUSDT": [order_intent]})
+
+    async def submit(intent, **_kwargs):
+        assert journal.events[-1].event_type == "execution.order_submit_started"
+        return SimpleNamespace(
+            status="NEW",
+            client_order_id=intent.client_order_id,
+            exchange_order_id="12345",
+            payload={"status": "NEW"},
+        )
+
+    coordinator, _ = coordinator_for(
+        strategy,
+        Mock(submit=AsyncMock(side_effect=submit)),
+        event_journal=journal,
+    )
+    current = bar("BTCUSDT", 1)
+
+    await coordinator.on_bar1s_queued(current)
+
+    assert [item.event_type for item in journal.events] == [
+        "market.bar1s_received",
+        "market.bar1s_processed",
+        "execution.intent_queued",
+        "strategy.audit.signal_acquired",
+    ]
+    assert journal.events[0].details == current.to_dict()
+    assert journal.events[1].details == {"intent_count": 1}
+    assert journal.events[2].details["intent"]["client_order_id"] == (
+        order_intent.client_order_id
+    )
+
+    worker = coordinator.start_execution_worker()
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+    assert [item.event_type for item in journal.events][-7:] == [
+        "execution.job_started",
+        "campaign.acquire_started",
+        "campaign.acquire_result",
+        "strategy.audit.campaign_acquired",
+        "execution.order_submit_started",
+        "execution.order_submit_result",
+        "execution.job_completed",
+    ]
+    assert journal.events[-1].details["queue_sequence"] == 1
+    await coordinator.stop_execution_worker()
+    assert worker.done()
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_is_journaled_and_closes_event_queue_gate():
+    journal = CollectingJournal()
+    strategy = IntentStrategy({"BTCUSDT": [entry("BTCUSDT", 1_000)]})
+    coordinator, gate = coordinator_for(
+        strategy,
+        Mock(submit=AsyncMock(side_effect=RuntimeError("exchange unavailable"))),
+        event_journal=journal,
+    )
+
+    await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
+    worker = coordinator.start_execution_worker()
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+
+    assert gate.condition("event_queue") is False
+    assert journal.events[-1].event_type == "execution.job_failed"
+    assert journal.events[-1].severity == "error"
+    assert journal.events[-1].details["error_type"] == "RuntimeError"
+    assert journal.events[-1].details["error_message"] == "exchange unavailable"
+    with pytest.raises(RuntimeError, match="exchange unavailable"):
+        await worker
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_journal_error_does_not_replace_execution_error():
+    class FailingJobJournal(CollectingJournal):
+        async def append(self, event_type, **kwargs):
+            if event_type == "execution.job_failed":
+                raise OSError("journal disk full")
+            return await super().append(event_type, **kwargs)
+
+    journal = FailingJobJournal()
+    strategy = IntentStrategy({"BTCUSDT": [entry("BTCUSDT", 1_000)]})
+    coordinator, gate = coordinator_for(
+        strategy,
+        Mock(submit=AsyncMock(side_effect=RuntimeError("exchange unavailable"))),
+        event_journal=journal,
+    )
+
+    await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
+    worker = coordinator.start_execution_worker()
+    await asyncio.wait_for(coordinator.execution_queue.join(), timeout=1)
+
+    assert gate.condition("event_queue") is False
+    with pytest.raises(RuntimeError, match="exchange unavailable") as raised:
+        await worker
+    notes = "\n".join(raised.value.__notes__ or ())
+    assert "execution.job_failed journal append failed" in notes
+    assert "OSError: journal disk full" in notes
+
+
+@pytest.mark.asyncio
+async def test_worker_cancellation_journal_error_does_not_replace_cancelled_error():
+    class FailingCancellationJournal(CollectingJournal):
+        async def append(self, event_type, **kwargs):
+            if event_type == "execution.job_cancelled":
+                raise OSError("journal disk full")
+            return await super().append(event_type, **kwargs)
+
+    journal = FailingCancellationJournal()
+    strategy = IntentStrategy({"BTCUSDT": []})
+    coordinator, _ = coordinator_for(
+        strategy,
+        Mock(),
+        event_journal=journal,
+    )
+    coordinator._flush_cancellations = AsyncMock(side_effect=asyncio.CancelledError())
+    job = ExecutionJob(priority=1, sequence=1, kind="cancel", event_time=1_000)
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await coordinator._handle_execution_job(job)
+
+    notes = "\n".join(raised.value.__notes__ or ())
+    assert "execution.job_cancelled journal append failed" in notes
+    assert "OSError: journal disk full" in notes
+
+
+@pytest.mark.asyncio
+async def test_order_submit_cancellation_after_wal_fsync_is_journaled(tmp_path):
+    submit_started = asyncio.Event()
+    release_submit = asyncio.Event()
+
+    async def post_order(**_kwargs):
+        submit_started.set()
+        await release_submit.wait()
+        return {"status": "NEW", "orderId": 42}
+
+    wal_path = tmp_path / "orders.jsonl"
+    executor = BinanceOrderExecutor(
+        Mock(post_order=AsyncMock(side_effect=post_order), query_order=AsyncMock()),
+        OrderWAL(wal_path),
+        account_id="spike-test",
+        now_ms=lambda: 1_000,
+    )
+    journal = CollectingJournal()
+    coordinator, _ = coordinator_for(
+        IntentStrategy({"BTCUSDT": []}), executor, event_journal=journal
+    )
+    intent = entry("BTCUSDT", 1_000)
+    intent.campaign_id = "spike_short:BTCUSDT:1000"
+    coordinator._owned_campaign_id = intent.campaign_id
+
+    task = asyncio.create_task(coordinator._submit(intent))
+    await asyncio.wait_for(submit_started.wait(), timeout=1)
+    assert wal_path.read_text().splitlines()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [event.event_type for event in journal.events] == [
+        "execution.order_submit_started",
+        "execution.order_submit_cancelled",
+    ]
+    assert journal.events[-1].details["error_type"] == "CancelledError"
+
+
+@pytest.mark.asyncio
+async def test_order_submit_failure_is_journaled_without_replacing_original_error():
+    journal = CollectingJournal()
+    coordinator, _ = coordinator_for(
+        IntentStrategy({"BTCUSDT": []}),
+        Mock(submit=AsyncMock(side_effect=RuntimeError("exchange unavailable"))),
+        event_journal=journal,
+    )
+    intent = entry("BTCUSDT", 1_000)
+    intent.campaign_id = "spike_short:BTCUSDT:1000"
+    coordinator._owned_campaign_id = intent.campaign_id
+
+    with pytest.raises(RuntimeError, match="exchange unavailable"):
+        await coordinator._submit(intent)
+
+    assert [event.event_type for event in journal.events] == [
+        "execution.order_submit_started",
+        "execution.order_submit_failed",
+    ]
+    assert journal.events[-1].details["error_type"] == "RuntimeError"
+
+
+@pytest.mark.asyncio
+async def test_order_submit_cancel_journal_failure_keeps_cancelled_error():
+    class FailingSubmitCancellationJournal(CollectingJournal):
+        async def append(self, event_type, **kwargs):
+            if event_type == "execution.order_submit_cancelled":
+                raise OSError("journal disk full")
+            return await super().append(event_type, **kwargs)
+
+    journal = FailingSubmitCancellationJournal()
+    coordinator, _ = coordinator_for(
+        IntentStrategy({"BTCUSDT": []}),
+        Mock(submit=AsyncMock(side_effect=asyncio.CancelledError())),
+        event_journal=journal,
+    )
+    intent = entry("BTCUSDT", 1_000)
+    intent.campaign_id = "spike_short:BTCUSDT:1000"
+    coordinator._owned_campaign_id = intent.campaign_id
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await coordinator._submit(intent)
+
+    notes = "\n".join(raised.value.__notes__ or ())
+    assert "execution.order_submit_cancelled journal append failed" in notes
+    assert "OSError: journal disk full" in notes
+
+
+@pytest.mark.asyncio
+async def test_journal_failure_propagates_fail_closed_before_strategy_runs():
+    strategy = IntentStrategy({"BTCUSDT": [entry("BTCUSDT", 1_000)]})
+    strategy.on_bar1s = Mock(wraps=strategy.on_bar1s)
+    journal = Mock(append=AsyncMock(side_effect=OSError("journal disk full")))
+    coordinator, gate = coordinator_for(
+        strategy,
+        Mock(submit=AsyncMock()),
+        event_journal=journal,
+    )
+
+    with pytest.raises(OSError, match="journal disk full"):
+        await coordinator.on_bar1s_queued(bar("BTCUSDT", 1))
+
+    strategy.on_bar1s.assert_not_called()
+    assert gate.condition("execution") is False
+    assert coordinator.risk_guard.halted is True
+    assert coordinator.risk_guard.halt_reason == "execution event journal write failed"
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,8 @@
 import asyncio
+import json
 from dataclasses import replace
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -64,6 +66,123 @@ class AuditedStrategyStub(StrategyStub):
         events = self.audit_events
         self.audit_events = []
         return events
+
+
+class RecordingJournal:
+    def __init__(self):
+        self.events = []
+
+    async def append(self, event_type, **kwargs):
+        event_id = f"event-{len(self.events) + 1}"
+        values = {
+            **kwargs,
+            "event_id": event_id,
+            "trace_id": kwargs.get("trace_id") or event_id,
+            "event_type": event_type,
+        }
+        event = SimpleNamespace(**values)
+        self.events.append(event)
+        return event
+
+
+class FailingEventJournal(RecordingJournal):
+    def __init__(self, failed_event_type):
+        super().__init__()
+        self.failed_event_type = failed_event_type
+
+    async def append(self, event_type, **kwargs):
+        if event_type == self.failed_event_type:
+            raise OSError("journal disk full")
+        return await super().append(event_type, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_observer_maps_runtime_stages_to_spike_journal():
+    process = SpikeLiveProcess(
+        SpikeLiveSettings(
+            account_id="spike-test", symbols=["AKEUSDT"], total_notional="10"
+        ),
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    journal = RecordingJournal()
+    process.event_journal = journal
+
+    await process._observe_binance_reconciliation(
+        "started", {"reason": "startup", "trace_id": "trace-1"}
+    )
+    await process._observe_binance_reconciliation(
+        "completed",
+        {
+            "reason": "startup",
+            "trace_id": "trace-1",
+            "result_type": "BinanceReconciliationResult",
+            "result_fields": {"open_order_count": 0, "position_count": 0},
+        },
+    )
+    await process._observe_binance_reconciliation(
+        "failed",
+        {
+            "reason": "reconnect",
+            "trace_id": "trace-2",
+            "error_type": "TimeoutError",
+            "error_message": "exchange unavailable",
+        },
+    )
+
+    assert [event.event_type for event in journal.events] == [
+        "runtime.reconciliation_started",
+        "runtime.reconciliation_completed",
+        "runtime.reconciliation_failed",
+    ]
+    assert all(event.source == "spike.reconciliation" for event in journal.events)
+    assert [event.trace_id for event in journal.events] == [
+        "trace-1",
+        "trace-1",
+        "trace-2",
+    ]
+    assert journal.events[1].details["result_fields"] == {
+        "open_order_count": 0,
+        "position_count": 0,
+    }
+    assert journal.events[2].details["error_type"] == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_before_database_keeps_local_journal_and_original_error(
+    tmp_path,
+):
+    process = SpikeLiveProcess(
+        SpikeLiveSettings(
+            account_id="spike-test",
+            symbols=["AKEUSDT"],
+            total_notional="10",
+            wal_path=str(tmp_path / "spike.jsonl"),
+        ),
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    process._build_resources = AsyncMock(
+        side_effect=ConnectionError("postgres unavailable")
+    )
+
+    with pytest.raises(ConnectionError, match="postgres unavailable"):
+        await process.start()
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "spike.jsonl.events.jsonl").read_text().splitlines()
+    ]
+    assert [record["event_type"] for record in records] == [
+        "runtime.start_failed",
+        "runtime.stopping",
+        "runtime.stopped",
+    ]
+    assert records[0]["details"]["error_type"] == "ConnectionError"
 
 
 def test_database_admission_builds_managed_symbol_snapshot():
@@ -421,9 +540,128 @@ async def test_audit_events_are_not_drained_without_a_sink():
 
 
 @pytest.mark.asyncio
+async def test_strategy_audit_event_is_mirrored_once_and_legacy_sink_is_retained():
+    event = StrategyAuditEvent(
+        event_time=1_000,
+        event_type="signal_triggered",
+        symbol="BTCUSDT",
+        strategy_id="spike_short",
+        campaign_id="spike_short:BTCUSDT:1000",
+        details={"trigger_price": "100"},
+    )
+    strategy = AuditedStrategyStub([event])
+    journal = RecordingJournal()
+    sink = AsyncMock()
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+        audit_sink=sink,
+        event_journal=journal,
+    )
+
+    assert await coordinator._publish_audit() is True
+    assert await coordinator._publish_audit() is True
+
+    sink.assert_awaited_once_with((event,))
+    assert [item.event_type for item in journal.events] == [
+        "strategy.audit.signal_triggered"
+    ]
+    assert journal.events[0].campaign_id == event.campaign_id
+    assert journal.events[0].details == event.details
+
+
+@pytest.mark.asyncio
+async def test_journal_only_mirrors_strategy_and_campaign_audit_events_and_clears_pending():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    strategy_event = StrategyAuditEvent(
+        event_time=1_000,
+        event_type="signal_triggered",
+        symbol="BTCUSDT",
+        strategy_id="spike_short",
+        campaign_id=campaign_id,
+        details={"trigger_price": "100"},
+    )
+    strategy = AuditedStrategyStub([strategy_event])
+    journal = RecordingJournal()
+    store = Mock(
+        get_active=AsyncMock(return_value=None),
+        acquire=AsyncMock(return_value=True),
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+        event_journal=journal,
+    )
+
+    assert await coordinator._stage_strategy_audit_events() is True
+    assert await coordinator._acquire_campaign(campaign_id, "BTCUSDT", 1_001)
+    assert await coordinator._publish_audit() is True
+
+    assert [item.event_type for item in journal.events] == [
+        "strategy.audit.signal_triggered",
+        "campaign.acquire_started",
+        "campaign.acquire_result",
+        "strategy.audit.campaign_acquired",
+    ]
+    assert coordinator._pending_audit_events == ()
+    assert strategy.audit_events == []
+
+
+@pytest.mark.asyncio
+async def test_strategy_audit_sink_retry_does_not_duplicate_journal_mirror():
+    event = StrategyAuditEvent(
+        event_time=1_000,
+        event_type="signal_triggered",
+        symbol="BTCUSDT",
+        strategy_id="spike_short",
+        campaign_id="spike_short:BTCUSDT:1000",
+        details={"trigger_price": "100"},
+    )
+    strategy = AuditedStrategyStub([event])
+    journal = RecordingJournal()
+    sink = AsyncMock(side_effect=[RuntimeError("postgres unavailable"), None])
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=Mock(),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+        audit_sink=sink,
+        event_journal=journal,
+    )
+
+    assert await coordinator._publish_audit() is False
+    assert [item.event_type for item in journal.events] == [
+        "strategy.audit.signal_triggered"
+    ]
+    assert await coordinator._publish_audit() is True
+
+    assert sink.await_count == 2
+    assert sink.await_args_list[0].args == ((event,),)
+    assert sink.await_args_list[1].args == ((event,),)
+    assert [item.event_type for item in journal.events] == [
+        "strategy.audit.signal_triggered"
+    ]
+    assert coordinator._pending_audit_events == ()
+
+
+@pytest.mark.asyncio
 async def test_campaign_acquire_and_recovery_emit_lifecycle_audit_events():
     campaign_id = "spike_short:BTCUSDT:1000"
     acquired_sink = AsyncMock()
+    acquired_journal = RecordingJournal()
     acquired_store = Mock(
         get_active=AsyncMock(return_value=None),
         acquire=AsyncMock(return_value=True),
@@ -438,6 +676,7 @@ async def test_campaign_acquire_and_recovery_emit_lifecycle_audit_events():
         gate=CompositeEntryGate(acquired_strategy),
         account_id="spike-test",
         audit_sink=acquired_sink,
+        event_journal=acquired_journal,
     )
 
     assert await acquired._acquire_campaign(campaign_id, "BTCUSDT", 1_001)
@@ -454,8 +693,14 @@ async def test_campaign_acquire_and_recovery_emit_lifecycle_audit_events():
             ),
         )
     )
+    assert [item.event_type for item in acquired_journal.events] == [
+        "campaign.acquire_started",
+        "campaign.acquire_result",
+        "strategy.audit.campaign_acquired"
+    ]
 
     recovered_sink = AsyncMock()
+    recovered_journal = RecordingJournal()
     lease = CampaignLease(
         campaign_id,
         "spike_short",
@@ -473,6 +718,7 @@ async def test_campaign_acquire_and_recovery_emit_lifecycle_audit_events():
         gate=CompositeEntryGate(recovered_strategy),
         account_id="spike-test",
         audit_sink=recovered_sink,
+        event_journal=recovered_journal,
         now_ms=lambda: 2_000,
     )
 
@@ -486,10 +732,261 @@ async def test_campaign_acquire_and_recovery_emit_lifecycle_audit_events():
                 symbol="BTCUSDT",
                 strategy_id="spike_short",
                 campaign_id=campaign_id,
-                details={},
+                details={
+                    "campaign_id": campaign_id,
+                    "strategy_id": "spike_short",
+                    "symbol": "BTCUSDT",
+                    "started_at_ms": 1_001,
+                    "origin_price": "100",
+                    "origin_checked": False,
+                    "reduced_at_origin": False,
+                    "exit_requested": False,
+                    "entry_bucket": None,
+                },
             ),
         )
     )
+    assert [item.event_type for item in recovered_journal.events] == [
+        "campaign.recovery_snapshot",
+        "strategy.audit.campaign_recovered"
+    ]
+    snapshot = recovered_journal.events[0]
+    assert snapshot.details == {
+        "active": True,
+        "campaign_id": campaign_id,
+        "strategy_id": "spike_short",
+        "symbol": "BTCUSDT",
+        "started_at_ms": 1_001,
+        "origin_price": "100",
+        "origin_checked": False,
+        "reduced_at_origin": False,
+        "exit_requested": False,
+        "entry_bucket": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_campaign_recovery_snapshot_records_empty_redis_after_unresolved_release():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    journal = RecordingJournal()
+    lease = CampaignLease(campaign_id, "spike_short", "BTCUSDT", 1_001)
+    first_strategy = StrategyStub()
+    first = SpikeExecutionCoordinator(
+        strategy=first_strategy,
+        account=Mock(
+            has_open_position=Mock(return_value=False),
+            has_pending_position_update=Mock(return_value=False),
+            all_orders_terminal=Mock(return_value=True),
+        ),
+        executor=Mock(),
+        campaign_store=Mock(
+            release=AsyncMock(side_effect=RuntimeError("redis timeout"))
+        ),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(first_strategy),
+        account_id="spike-test",
+        event_journal=journal,
+    )
+    first._owned_campaign_id = campaign_id
+    first._owned_campaign_lease = lease
+
+    with pytest.raises(RuntimeError, match="redis timeout"):
+        await first.maybe_release_campaign("BTCUSDT")
+    assert [item.event_type for item in journal.events] == [
+        "campaign.release_started",
+        "campaign.release_failed",
+    ]
+
+    second_strategy = StrategyStub()
+    second = SpikeExecutionCoordinator(
+        strategy=second_strategy,
+        account=Mock(symbols_with_live_risk=Mock(return_value=set())),
+        executor=Mock(),
+        campaign_store=Mock(get_active=AsyncMock(return_value=None)),
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(second_strategy),
+        account_id="spike-test",
+        event_journal=journal,
+        now_ms=lambda: 2_000,
+    )
+
+    await second.restore_campaign_gate()
+
+    assert journal.events[-1].event_type == "campaign.recovery_snapshot"
+    snapshot = journal.events[-1]
+    assert snapshot.details == {"active": False}
+    assert snapshot.campaign_id is None
+    assert snapshot.symbol is None
+
+
+@pytest.mark.asyncio
+async def test_campaign_recovery_snapshot_failure_fails_closed_without_masking_missing_campaign_error():
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    risk = RiskGuard("spike-test", RiskConfig())
+    journal = FailingEventJournal("campaign.recovery_snapshot")
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(symbols_with_live_risk=Mock(return_value={"BTCUSDT"})),
+        executor=Mock(),
+        campaign_store=Mock(get_active=AsyncMock(return_value=None)),
+        risk_guard=risk,
+        gate=gate,
+        account_id="spike-test",
+        event_journal=journal,
+    )
+
+    with pytest.raises(RuntimeError, match="Redis Campaign disappeared") as raised:
+        await coordinator.restore_campaign_gate()
+
+    assert gate.condition("execution") is False
+    assert gate.condition("campaign") is False
+    assert risk.halted is True
+    assert any("campaign.recovery_snapshot journal append failed" in note for note in raised.value.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_campaign_acquire_store_failure_writes_failed_fact_and_reraises_store_error():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    store_error = RuntimeError("redis unavailable")
+    strategy = StrategyStub()
+    journal = RecordingJournal()
+    store = Mock(
+        get_active=AsyncMock(return_value=None),
+        acquire=AsyncMock(side_effect=store_error),
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+        event_journal=journal,
+    )
+
+    with pytest.raises(RuntimeError, match="redis unavailable") as raised:
+        await coordinator._acquire_campaign(campaign_id, "BTCUSDT", 1_001)
+
+    assert raised.value is store_error
+    assert [item.event_type for item in journal.events] == [
+        "campaign.acquire_started",
+        "campaign.acquire_failed",
+    ]
+    started, failed = journal.events
+    assert started.trace_id == failed.trace_id == campaign_id
+    assert failed.causation_id == started.event_id
+    assert failed.details["error_type"] == "RuntimeError"
+    assert failed.details["error_message"] == "redis unavailable"
+    assert coordinator._owned_campaign_id is None
+
+
+@pytest.mark.asyncio
+async def test_campaign_acquire_failed_fact_failure_is_not_the_store_error():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    store_error = RuntimeError("redis unavailable")
+    strategy = StrategyStub()
+    journal = FailingEventJournal("campaign.acquire_failed")
+    store = Mock(
+        get_active=AsyncMock(return_value=None),
+        acquire=AsyncMock(side_effect=store_error),
+    )
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+        event_journal=journal,
+    )
+
+    with pytest.raises(RuntimeError, match="redis unavailable") as raised:
+        await coordinator._acquire_campaign(campaign_id, "BTCUSDT", 1_001)
+
+    assert raised.value is store_error
+    assert [item.event_type for item in journal.events] == [
+        "campaign.acquire_started",
+    ]
+    assert any("campaign.acquire_failed journal append failed" in note for note in raised.value.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_campaign_release_store_failure_writes_failed_fact_and_keeps_lease():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    store_error = RuntimeError("redis unavailable")
+    strategy = StrategyStub()
+    journal = RecordingJournal()
+    store = Mock(release=AsyncMock(side_effect=store_error))
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("campaign", False)
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(
+            has_open_position=Mock(return_value=False),
+            has_pending_position_update=Mock(return_value=False),
+            all_orders_terminal=Mock(return_value=True),
+        ),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=gate,
+        account_id="spike-test",
+        event_journal=journal,
+        now_ms=lambda: 2_000,
+    )
+    lease = CampaignLease(campaign_id, "spike_short", "BTCUSDT", 1_001)
+    coordinator._owned_campaign_id = campaign_id
+    coordinator._owned_campaign_lease = lease
+
+    with pytest.raises(RuntimeError, match="redis unavailable") as raised:
+        await coordinator.maybe_release_campaign("BTCUSDT")
+
+    assert raised.value is store_error
+    assert [item.event_type for item in journal.events] == [
+        "campaign.release_started",
+        "campaign.release_failed",
+    ]
+    assert journal.events[1].causation_id == journal.events[0].event_id
+    assert coordinator._owned_campaign_id == campaign_id
+    assert coordinator._owned_campaign_lease == lease
+
+
+@pytest.mark.asyncio
+async def test_campaign_exit_state_store_failure_writes_failed_fact_and_keeps_local_state():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    store_error = RuntimeError("redis unavailable")
+    strategy = StrategyStub()
+    strategy.campaign_exit_state = Mock(return_value=(True, True, False))
+    journal = RecordingJournal()
+    store = Mock(update_exit_state=AsyncMock(side_effect=store_error))
+    coordinator = SpikeExecutionCoordinator(
+        strategy=strategy,
+        account=Mock(),
+        executor=Mock(),
+        campaign_store=store,
+        risk_guard=RiskGuard("spike-test", RiskConfig()),
+        gate=CompositeEntryGate(strategy),
+        account_id="spike-test",
+        event_journal=journal,
+        now_ms=lambda: 3_000,
+    )
+    lease = CampaignLease(campaign_id, "spike_short", "BTCUSDT", 1_001)
+    coordinator._owned_campaign_id = campaign_id
+    coordinator._owned_campaign_lease = lease
+
+    with pytest.raises(RuntimeError, match="redis unavailable") as raised:
+        await coordinator._persist_exit_state("BTCUSDT")
+
+    assert raised.value is store_error
+    assert [item.event_type for item in journal.events] == [
+        "campaign.exit_state_update_started",
+        "campaign.exit_state_update_failed",
+    ]
+    assert journal.events[1].causation_id == journal.events[0].event_id
+    assert coordinator._owned_campaign_lease == lease
 
 
 @pytest.mark.asyncio
@@ -498,6 +995,7 @@ async def test_campaign_exit_state_change_emits_audit_with_persisted_state():
     strategy = StrategyStub()
     strategy.campaign_exit_state = Mock(return_value=(True, True, False))
     sink = AsyncMock()
+    journal = RecordingJournal()
     store = Mock(update_exit_state=AsyncMock(return_value=True))
     coordinator = SpikeExecutionCoordinator(
         strategy=strategy,
@@ -508,6 +1006,7 @@ async def test_campaign_exit_state_change_emits_audit_with_persisted_state():
         gate=CompositeEntryGate(strategy),
         account_id="spike-test",
         audit_sink=sink,
+        event_journal=journal,
         now_ms=lambda: 3_000,
     )
     coordinator._owned_campaign_id = campaign_id
@@ -540,6 +1039,11 @@ async def test_campaign_exit_state_change_emits_audit_with_persisted_state():
             ),
         )
     )
+    assert [item.event_type for item in journal.events] == [
+        "campaign.exit_state_update_started",
+        "campaign.exit_state_update_result",
+        "strategy.audit.campaign_exit_state_changed"
+    ]
 
 
 @pytest.mark.asyncio
@@ -551,6 +1055,7 @@ async def test_campaign_release_audit_failure_halts_and_retries_same_event():
     gate.set_condition("campaign", False)
     risk = RiskGuard("spike-test", RiskConfig())
     sink = AsyncMock(side_effect=[RuntimeError("postgres unavailable"), None])
+    journal = RecordingJournal()
     store = Mock(release=AsyncMock(return_value=True))
     coordinator = SpikeExecutionCoordinator(
         strategy=strategy,
@@ -565,6 +1070,7 @@ async def test_campaign_release_audit_failure_halts_and_retries_same_event():
         gate=gate,
         account_id="spike-test",
         audit_sink=sink,
+        event_journal=journal,
         now_ms=lambda: 4_000,
     )
     coordinator._owned_campaign_id = campaign_id
@@ -590,11 +1096,21 @@ async def test_campaign_release_audit_failure_halts_and_retries_same_event():
     assert allowed is False
     assert "strategy audit write failed: RuntimeError" in reason
     sink.assert_awaited_once_with((expected,))
+    assert [item.event_type for item in journal.events] == [
+        "campaign.release_started",
+        "campaign.release_result",
+        "strategy.audit.campaign_released"
+    ]
 
     assert await coordinator._publish_audit() is True
     assert sink.await_count == 2
     assert sink.await_args_list[1].args == ((expected,),)
     assert coordinator._pending_audit_events == ()
+    assert [item.event_type for item in journal.events] == [
+        "campaign.release_started",
+        "campaign.release_result",
+        "strategy.audit.campaign_released",
+    ]
 
 
 def test_settings_default_to_testnet_and_live_requires_exact_confirmation():
@@ -602,6 +1118,7 @@ def test_settings_default_to_testnet_and_live_requires_exact_confirmation():
         account_id="spike-test", symbols="btcusdt", total_notional="100"
     )
     assert settings.mode == "testnet"
+    assert settings.strategy_path == "trading_platform.strategies.spike.v2_2:V22"
     assert settings.exit_policy == "candidate-v1"
     assert settings.symbols == ["BTCUSDT"]
 
@@ -701,7 +1218,9 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
     process._warm_strategy_history = AsyncMock(
         side_effect=lambda: events.append("warmup")
     )
+    process._warm_metrics_history = AsyncMock()
     process._refresh_exchange_symbol_admission = AsyncMock(return_value=True)
+    process.event_journal = RecordingJournal()
 
     async def market_gate(*, require_ready=False):
         events.append("market_gate")
@@ -729,6 +1248,16 @@ async def test_process_starts_bar_consumer_before_waiting_for_market_quality():
 
     assert events.index("registered") < events.index("bar_consumer")
     assert events.index("bar_consumer") < events.index("market_gate")
+    ready_event = next(
+        event for event in process.event_journal.events if event.event_type == "runtime.ready"
+    )
+    assert ready_event.details["strategy_path"] == process.settings.strategy_path
+    assert ready_event.details["strategy_name"] == process.strategy_definition.name
+    assert ready_event.details["strategy_release_hash"] == process.strategy_release_hash
+    assert (
+        ready_event.details["strategy_release_hash_algorithm"]
+        == process.strategy_release_hash_algorithm
+    )
 
 
 @pytest.mark.asyncio
@@ -1396,6 +1925,7 @@ async def test_full_process_exits_fatal_when_submit_unknown_attempts_exhausted()
     process.gate = CompositeEntryGate(strategy)
     for name in ("execution", "market", "bar_stream", "campaign"):
         process.gate.set_condition(name, True)
+    process.gate.set_condition("metrics_5m", True)
     risk = RiskGuard("spike-test", RiskConfig())
     resolver = Mock(
         resolve_recovered_unknowns_once=AsyncMock(
@@ -2324,6 +2854,152 @@ def test_recovered_campaign_must_cover_only_its_symbol():
 
 
 @pytest.mark.asyncio
+async def test_execution_report_journal_records_received_before_processing_and_success():
+    journal = RecordingJournal()
+    order_data = {
+        "s": "BTCUSDT",
+        "c": "client-1",
+        "i": 123,
+        "x": "NEW",
+        "signature": "must-be-redacted-by-real-journal",
+    }
+    delegate = Mock(
+        handle_execution_report=AsyncMock(),
+        handle_account_update=AsyncMock(),
+    )
+    coordinator = Mock(
+        on_fill=AsyncMock(),
+        reconcile_entry_expirations=AsyncMock(),
+        reconcile_exchange_symbol_admission=AsyncMock(),
+        maybe_release_campaign=AsyncMock(),
+    )
+    account = Mock(handle_execution_report=Mock(return_value=None))
+    gate = CompositeEntryGate(StrategyStub())
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=delegate,
+        account=account,
+        coordinator=coordinator,
+        gate=gate,
+        event_journal=journal,
+    )
+
+    await callbacks.handle_execution_report(order_data)
+
+    assert [item.event_type for item in journal.events] == [
+        "exchange.order_trade_update_received",
+        "exchange.order_trade_update_processed",
+    ]
+    assert journal.events[0].details == {"payload": order_data}
+    assert journal.events[0].trace_id == "client-1"
+    assert journal.events[1].causation_id == journal.events[0].event_id
+    assert journal.events[1].details == {"fill_generated": False}
+    delegate.handle_execution_report.assert_awaited_once_with(order_data)
+
+
+@pytest.mark.asyncio
+async def test_account_update_journal_records_complete_payload_and_success():
+    journal = RecordingJournal()
+    event = {
+        "e": "ACCOUNT_UPDATE",
+        "E": 1_000,
+        "T": 999,
+        "a": {"P": [{"s": "BTCUSDT"}]},
+    }
+    coordinator = Mock(
+        reconcile_position=AsyncMock(),
+        maybe_release_campaign=AsyncMock(),
+    )
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=Mock(handle_account_update=AsyncMock()),
+        account=Mock(handle_account_update=AsyncMock()),
+        coordinator=coordinator,
+        gate=CompositeEntryGate(StrategyStub()),
+        event_journal=journal,
+    )
+
+    await callbacks.handle_account_update(event)
+
+    assert [item.event_type for item in journal.events] == [
+        "exchange.account_update_received",
+        "exchange.account_update_processed",
+    ]
+    assert journal.events[0].details == {"payload": event}
+    assert journal.events[1].details == {"position_count": 1}
+    coordinator.reconcile_position.assert_awaited_once_with("BTCUSDT")
+
+
+@pytest.mark.asyncio
+async def test_execution_report_failure_is_journaled_with_same_trace():
+    journal = RecordingJournal()
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=Mock(
+            handle_execution_report=AsyncMock(
+                side_effect=RuntimeError("ledger unavailable")
+            )
+        ),
+        account=Mock(),
+        coordinator=Mock(),
+        gate=gate,
+        risk_guard=risk,
+        event_journal=journal,
+    )
+
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        await callbacks.handle_execution_report(
+            {"s": "BTCUSDT", "c": "client-1", "i": "123"}
+        )
+
+    assert [item.event_type for item in journal.events] == [
+        "exchange.order_trade_update_received",
+        "exchange.order_trade_update_failed",
+    ]
+    assert journal.events[1].trace_id == "client-1"
+    assert journal.events[1].causation_id == journal.events[0].event_id
+    assert journal.events[1].details == {
+        "error_type": "RuntimeError",
+        "error_message": "ledger unavailable",
+    }
+    assert gate.condition("execution") is False
+    assert risk.halted is True
+
+
+@pytest.mark.asyncio
+async def test_execution_report_failure_journal_error_does_not_replace_processing_error():
+    journal = FailingEventJournal("exchange.order_trade_update_failed")
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=Mock(
+            handle_execution_report=AsyncMock(
+                side_effect=RuntimeError("ledger unavailable")
+            )
+        ),
+        account=Mock(),
+        coordinator=Mock(),
+        gate=gate,
+        risk_guard=risk,
+        event_journal=journal,
+    )
+
+    with pytest.raises(RuntimeError, match="ledger unavailable") as raised:
+        await callbacks.handle_execution_report(
+            {"s": "BTCUSDT", "c": "client-1", "i": "123"}
+        )
+
+    notes = "\n".join(raised.value.__notes__ or ())
+    assert "exchange.order_trade_update_failed journal append failed" in notes
+    assert "OSError: journal disk full" in notes
+    assert gate.condition("execution") is False
+    assert risk.halted is True
+
+
+@pytest.mark.asyncio
 async def test_callback_failure_closes_execution_gate():
     strategy = StrategyStub()
     gate = CompositeEntryGate(strategy)
@@ -2395,3 +3071,33 @@ async def test_account_update_callback_failure_halts_risk_guard():
     assert risk.halted is True
     assert risk.halt_reason == "account update handling failed"
     assert gate.enabled is False
+
+
+@pytest.mark.asyncio
+async def test_account_update_failure_journal_error_does_not_replace_processing_error():
+    journal = FailingEventJournal("exchange.account_update_failed")
+    strategy = StrategyStub()
+    gate = CompositeEntryGate(strategy)
+    gate.set_condition("execution", True)
+    risk = RiskGuard("spike-test", RiskConfig())
+    callbacks = SpikeRuntimeCallbacks(
+        delegate=Mock(
+            handle_account_update=AsyncMock(
+                side_effect=RuntimeError("ledger unavailable")
+            )
+        ),
+        account=Mock(),
+        coordinator=Mock(),
+        gate=gate,
+        risk_guard=risk,
+        event_journal=journal,
+    )
+
+    with pytest.raises(RuntimeError, match="ledger unavailable") as raised:
+        await callbacks.handle_account_update({"a": {"P": []}})
+
+    notes = "\n".join(raised.value.__notes__ or ())
+    assert "exchange.account_update_failed journal append failed" in notes
+    assert "OSError: journal disk full" in notes
+    assert gate.condition("execution") is False
+    assert risk.halted is True

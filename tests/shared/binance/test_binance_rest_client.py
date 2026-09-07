@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -343,3 +344,325 @@ async def test_get_income_history_preserves_transport_timeout():
             await client.get_income_history(limit=1)
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_request_observer_reports_order_and_redacts_sensitive_fields():
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    async def observer(stage: str, details: dict[str, object]) -> None:
+        observed.append((stage, details))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/fapi/v1/order"
+        return httpx.Response(
+            200,
+            json={"ok": True, "token": "response-token"},
+            headers={
+                "X-MBX-USED-WEIGHT-1M": "11",
+                "X-MBX-ORDER-COUNT-10S": "2",
+                "X-Other": "ignored",
+            },
+        )
+
+    client = BinanceRestClient(
+        api_key="test-api-key",
+        api_secret="test-api-secret",
+        event_observer=observer,
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        result = await client._request(
+            "GET",
+            "/fapi/v1/order?token=path-token",
+            {
+                "apiKey": "request-api-key",
+                "listenKey": "request-listen-key",
+                "password": "request-password",
+                "symbol": "BTCUSDT",
+            },
+            signed=False,
+        )
+    finally:
+        await client.close()
+
+    assert result == {"ok": True, "token": "response-token"}
+    assert [stage for stage, _ in observed] == [
+        "request_started",
+        "request_succeeded",
+    ]
+    started = observed[0][1]
+    succeeded = observed[1][1]
+    assert started["method"] == "GET"
+    assert started["status_code"] is None
+    assert started["params"]["apiKey"] == "[REDACTED]"
+    assert started["params"]["listenKey"] == "[REDACTED]"
+    assert started["params"]["password"] == "[REDACTED]"
+    assert started["path"] == "/fapi/v1/order?token=[REDACTED]"
+    assert succeeded["status_code"] == 200
+    assert succeeded["rate_headers"] == {
+        "X-MBX-USED-WEIGHT-1M": "11",
+        "X-MBX-ORDER-COUNT-10S": "2",
+    }
+    assert succeeded["response_body"] == {
+        "ok": True,
+        "token": "[REDACTED]",
+    }
+    assert isinstance(succeeded["duration_ms"], (int, float))
+
+
+@pytest.mark.asyncio
+async def test_request_observer_reports_business_error_once_with_body():
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    def observer(stage: str, details: dict[str, object]) -> None:
+        observed.append((stage, details))
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"code": -1121, "msg": "Invalid symbol", "token": "secret"},
+        )
+
+    client = BinanceRestClient(
+        api_key="api-key",
+        api_secret="api-secret",
+        event_observer=observer,
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(BinanceAPIException) as error:
+            await client._request("GET", "/fapi/v1/order", {}, signed=False)
+    finally:
+        await client.close()
+
+    assert error.value.code == -1121
+    assert [stage for stage, _ in observed] == [
+        "request_started",
+        "request_failed",
+    ]
+    failed = observed[1][1]
+    assert failed["status_code"] == 400
+    assert failed["response_body"]["token"] == "[REDACTED]"
+    assert failed["error"] == "Binance API Error -1121: Invalid symbol"
+
+
+@pytest.mark.asyncio
+async def test_request_observer_reports_timeout_and_propagates_timeout():
+    observed: list[str] = []
+
+    async def observer(stage: str, _details: dict[str, object]) -> None:
+        observed.append(stage)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    client = BinanceRestClient(
+        api_key="api-key", api_secret="api-secret", event_observer=observer
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(httpx.ReadTimeout, match="read timed out"):
+            await client._request("GET", "/fapi/v1/order", {}, signed=False)
+    finally:
+        await client.close()
+
+    assert observed == ["request_started", "request_failed"]
+
+
+@pytest.mark.asyncio
+async def test_request_observer_failure_before_http_prevents_network():
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    def observer(stage: str, _details: dict[str, object]) -> None:
+        if stage == "request_started":
+            raise RuntimeError("journal unavailable")
+
+    client = BinanceRestClient(
+        api_key="api-key", api_secret="api-secret", event_observer=observer
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="journal unavailable"):
+            await client._request("GET", "/fapi/v1/order", {}, signed=False)
+    finally:
+        await client.close()
+
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_request_observer_failure_after_http_is_propagated_without_duplicate_failure():
+    observed: list[str] = []
+
+    def observer(stage: str, _details: dict[str, object]) -> None:
+        observed.append(stage)
+        if stage == "request_succeeded":
+            raise RuntimeError("journal write failed")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"orderId": 42})
+
+    client = BinanceRestClient(
+        api_key="api-key", api_secret="api-secret", event_observer=observer
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="journal write failed"):
+            await client._request("POST", "/fapi/v1/order", {}, signed=False)
+    finally:
+        await client.close()
+
+    assert observed == ["request_started", "request_succeeded"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected_code"),
+    [
+        (httpx.Response(400, json={"code": -1121, "msg": "Invalid symbol"}), -1121),
+    ],
+)
+async def test_request_observer_failure_does_not_replace_binance_api_error(
+    response: httpx.Response, expected_code: int
+):
+    async def observer(stage: str, _details: dict[str, object]) -> None:
+        if stage == "request_failed":
+            raise OSError("journal unavailable")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    client = BinanceRestClient(
+        api_key="api-key", api_secret="api-secret", event_observer=observer
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(BinanceAPIException, match="Invalid symbol") as raised:
+            await client._request("GET", "/fapi/v1/order", {}, signed=False)
+    finally:
+        await client.close()
+
+    assert raised.value.code == expected_code
+    assert any("request request_failed observer failed" in note for note in raised.value.__notes__)
+    assert any("OSError: journal unavailable" in note for note in raised.value.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_request_observer_failure_does_not_replace_timeout_error():
+    async def observer(stage: str, _details: dict[str, object]) -> None:
+        if stage == "request_failed":
+            raise OSError("journal unavailable")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    client = BinanceRestClient(
+        api_key="api-key", api_secret="api-secret", event_observer=observer
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(httpx.ReadTimeout, match="read timed out") as raised:
+            await client._request("GET", "/fapi/v1/order", {}, signed=False)
+    finally:
+        await client.close()
+
+    assert any("request request_failed observer failed" in note for note in raised.value.__notes__)
+
+
+@pytest.mark.asyncio
+async def test_request_observer_failure_does_not_replace_response_parse_error():
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    async def observer(stage: str, details: dict[str, object]) -> None:
+        observed.append((stage, details))
+        if stage == "request_failed":
+            raise OSError("journal unavailable")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not-json")
+
+    client = BinanceRestClient(
+        api_key="api-key", api_secret="api-secret", event_observer=observer
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="Request failed") as raised:
+            await client._request("GET", "/fapi/v1/order", {}, signed=False)
+    finally:
+        await client.close()
+
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert any("request request_failed observer failed" in note for note in raised.value.__notes__)
+    assert observed[-1][1]["error_type"] in {"JSONDecodeError", "ValueError"}
+
+
+@pytest.mark.asyncio
+async def test_request_cancelled_is_terminal_and_observer_failure_keeps_cancelled_error():
+    observed: list[tuple[str, dict[str, object]]] = []
+
+    async def observer(stage: str, details: dict[str, object]) -> None:
+        observed.append((stage, details))
+        if stage == "request_cancelled":
+            raise OSError("journal unavailable")
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        raise asyncio.CancelledError()
+
+    client = BinanceRestClient(
+        api_key="api-key", api_secret="api-secret", event_observer=observer
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url=client.base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await client._request("GET", "/fapi/v1/order", {}, signed=False)
+    finally:
+        await client.close()
+
+    assert [stage for stage, _ in observed] == [
+        "request_started",
+        "request_cancelled",
+    ]
+    assert observed[-1][1]["error_type"] == "CancelledError"
+    assert any("request request_cancelled observer failed" in note for note in raised.value.__notes__)

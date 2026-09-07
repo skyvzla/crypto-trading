@@ -38,6 +38,7 @@ class UserDataStream:
         connect_timeout_seconds: float = 10.0,
         callback_drain_timeout_seconds: float = 10.0,
         max_reconnect_attempts: int = 10,
+        on_raw_event: Callable[[dict[str, Any]], None] | None = None,
     ):
         """
         Args:
@@ -47,6 +48,7 @@ class UserDataStream:
             on_account_update: ACCOUNT_UPDATE 完整事件回调
             on_reconnect: 重连完成回调
             on_disconnect: 连接断开回调
+            on_raw_event: 已解析的完整 WebSocket envelope 回调
         """
         if connect_timeout_seconds <= 0:
             raise ValueError("connect_timeout_seconds must be positive")
@@ -60,6 +62,7 @@ class UserDataStream:
         self.on_account_update = on_account_update
         self.on_reconnect = on_reconnect
         self.on_disconnect = on_disconnect
+        self.on_raw_event = on_raw_event
         self.connect_timeout_seconds = connect_timeout_seconds
         self.callback_drain_timeout_seconds = callback_drain_timeout_seconds
         self.max_reconnect_attempts = max_reconnect_attempts
@@ -215,7 +218,12 @@ class UserDataStream:
                 return
             try:
                 data = json.loads(message)
+                if not isinstance(data, dict):
+                    raise ValueError("User Data Stream event envelope must be an object")
                 event_type = data.get('e')
+
+                if self.on_raw_event:
+                    self._schedule_callback("raw_event", data)
 
                 if event_type == 'ORDER_TRADE_UPDATE':
                     # executionReport 事件
@@ -439,6 +447,8 @@ class UserDataStream:
                     await self._handle_execution_report(payload)
                 elif kind == "account_update":
                     await self._handle_account_update(payload)
+                elif kind == "raw_event":
+                    await self._handle_raw_event(payload)
                 else:
                     raise RuntimeError(
                         f"unknown User Data Stream callback kind: {kind}"
@@ -554,6 +564,14 @@ class UserDataStream:
         if not self.on_account_update:
             return
         result = self.on_account_update(event)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _handle_raw_event(self, event: dict[str, Any]) -> None:
+        """Deliver the complete parsed envelope before derived callbacks."""
+        if not self.on_raw_event:
+            return
+        result = self.on_raw_event(event)
         if inspect.isawaitable(result):
             await result
 

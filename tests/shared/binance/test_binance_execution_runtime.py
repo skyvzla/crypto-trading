@@ -1,9 +1,16 @@
 import asyncio
+from dataclasses import dataclass
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from trading_platform.shared.binance.runtime import BinanceExecutionRuntime
+
+
+@dataclass(frozen=True)
+class ReconciliationResult:
+    open_order_count: int
+    position_count: int
 
 
 def _runtime():
@@ -160,4 +167,223 @@ async def test_runtime_reconciliation_failure_is_fail_closed():
 
     poller.stop.assert_awaited_once()
     stream.stop.assert_awaited_once()
+    assert runtime.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_startup_reconciliation_observer_is_fifo_and_keeps_trace():
+    stream = Mock(start=AsyncMock(), stop=AsyncMock(), on_reconnect=None)
+    poller = Mock(
+        resolver=Mock(resolve_recovered_unknowns_once=AsyncMock(return_value={})),
+        start=Mock(),
+        stop=AsyncMock(),
+    )
+    result = ReconciliationResult(open_order_count=2, position_count=1)
+    reconciler = Mock(reconcile_once=AsyncMock(return_value=result))
+    observed = []
+
+    async def observer(stage, details):
+        observed.append((stage, details))
+
+    runtime = BinanceExecutionRuntime(
+        stream,
+        poller,
+        reconciler,
+        reconciliation_observer=observer,
+    )
+
+    await runtime.start()
+
+    assert [stage for stage, _ in observed] == ["started", "completed"]
+    assert observed[0][1]["reason"] == "startup"
+    assert observed[1][1]["reason"] == "startup"
+    assert observed[0][1]["trace_id"] == observed[1][1]["trace_id"]
+    assert observed[1][1]["result_type"] == "ReconciliationResult"
+    assert observed[1][1]["result_fields"] == {
+        "open_order_count": 2,
+        "position_count": 1,
+    }
+    reconciler.reconcile_once.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_runtime_reconnect_reconciliation_observer_is_fifo_and_keeps_trace():
+    stream = Mock(start=AsyncMock(), stop=AsyncMock(), on_reconnect=None)
+    poller = Mock(
+        resolver=Mock(resolve_recovered_unknowns_once=AsyncMock(return_value={})),
+        start=Mock(),
+        stop=AsyncMock(),
+    )
+    reconciler = Mock(reconcile_once=AsyncMock(return_value={"open_orders": 0}))
+    observed = []
+
+    def observer(stage, details):
+        observed.append((stage, details))
+
+    runtime = BinanceExecutionRuntime(
+        stream,
+        poller,
+        reconciler,
+        reconciliation_observer=observer,
+    )
+    runtime._previous_reconnect = None
+
+    await stream.on_reconnect()
+
+    assert [stage for stage, _ in observed] == ["started", "completed"]
+    assert observed[0][1]["reason"] == "reconnect"
+    assert observed[1][1]["reason"] == "reconnect"
+    assert observed[0][1]["trace_id"] == observed[1][1]["trace_id"]
+    assert observed[1][1]["result_type"] == "dict"
+    assert observed[1][1]["result_fields"] == {"open_orders": 0}
+
+
+@pytest.mark.asyncio
+async def test_runtime_manual_reconciliation_failure_is_observed_with_same_trace():
+    stream = Mock(start=AsyncMock(), stop=AsyncMock(), on_reconnect=None)
+    poller = Mock(resolver=Mock(resolve_recovered_unknowns_once=AsyncMock()))
+    reconciler = Mock(
+        reconcile_once=AsyncMock(side_effect=RuntimeError("state mismatch"))
+    )
+    observed = []
+
+    async def observer(stage, details):
+        observed.append((stage, details))
+
+    runtime = BinanceExecutionRuntime(
+        stream,
+        poller,
+        reconciler,
+        reconciliation_observer=observer,
+    )
+
+    with pytest.raises(RuntimeError, match="state mismatch"):
+        await runtime.reconcile_once("safety_periodic")
+
+    assert [stage for stage, _ in observed] == ["started", "failed"]
+    assert observed[0][1]["reason"] == "safety_periodic"
+    assert observed[1][1]["reason"] == "safety_periodic"
+    assert observed[0][1]["trace_id"] == observed[1][1]["trace_id"]
+    assert observed[1][1]["error_type"] == "RuntimeError"
+    assert observed[1][1]["error_message"] == "state mismatch"
+
+
+@pytest.mark.asyncio
+async def test_runtime_reconciliation_observer_failure_is_fail_closed():
+    stream = Mock(start=AsyncMock(), stop=AsyncMock(), on_reconnect=None)
+    poller = Mock(
+        resolver=Mock(resolve_recovered_unknowns_once=AsyncMock(return_value={})),
+        start=Mock(),
+        stop=AsyncMock(),
+    )
+    reconciler = Mock(reconcile_once=AsyncMock())
+
+    async def observer(_stage, _details):
+        raise OSError("journal unavailable")
+
+    runtime = BinanceExecutionRuntime(
+        stream,
+        poller,
+        reconciler,
+        reconciliation_observer=observer,
+    )
+
+    with pytest.raises(OSError, match="journal unavailable"):
+        await runtime.start()
+
+    reconciler.reconcile_once.assert_not_awaited()
+    poller.start.assert_not_called()
+    poller.stop.assert_awaited_once()
+    stream.stop.assert_awaited_once()
+    assert runtime.is_running is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_reconciliation_observer_failure_does_not_replace_reconciliation_error():
+    stream = Mock(start=AsyncMock(), stop=AsyncMock(), on_reconnect=None)
+    poller = Mock(
+        resolver=Mock(resolve_recovered_unknowns_once=AsyncMock(return_value={})),
+        start=Mock(),
+        stop=AsyncMock(),
+    )
+    reconciler = Mock(
+        reconcile_once=AsyncMock(side_effect=RuntimeError("state mismatch"))
+    )
+
+    async def observer(stage, _details):
+        if stage == "failed":
+            raise OSError("journal unavailable")
+
+    runtime = BinanceExecutionRuntime(
+        stream,
+        poller,
+        reconciler,
+        reconciliation_observer=observer,
+    )
+
+    with pytest.raises(RuntimeError, match="state mismatch") as raised:
+        await runtime.reconcile_once("safety_periodic")
+
+    notes = "\n".join(raised.value.__notes__ or ())
+    assert "reconciliation failed observer raised OSError: journal unavailable" in notes
+
+
+@pytest.mark.asyncio
+async def test_runtime_start_failure_aborts_startup_recovery_before_stream_stop():
+    calls = []
+    stream = Mock(start=AsyncMock(), stop=AsyncMock(), on_reconnect=None)
+    stream.stop.side_effect = lambda: calls.append("stream-stop")
+    poller = Mock(
+        resolver=Mock(resolve_recovered_unknowns_once=AsyncMock()),
+        start=Mock(),
+        stop=AsyncMock(side_effect=lambda: calls.append("poller-stop")),
+    )
+    reconciler = Mock(
+        reconcile_once=AsyncMock(side_effect=RuntimeError("state mismatch"))
+    )
+    startup_failure = AsyncMock(side_effect=lambda: calls.append("abort-startup"))
+    runtime = BinanceExecutionRuntime(
+        stream,
+        poller,
+        reconciler,
+        on_startup_failure=startup_failure,
+    )
+
+    with pytest.raises(RuntimeError, match="state mismatch"):
+        await runtime.start()
+
+    assert calls == ["abort-startup", "poller-stop", "stream-stop"]
+    startup_failure.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_runtime_start_cleanup_errors_do_not_replace_startup_error():
+    stream = Mock(start=AsyncMock(), stop=AsyncMock(), on_reconnect=None)
+    stream.stop.side_effect = OSError("stream cleanup failed")
+    poller = Mock(
+        resolver=Mock(resolve_recovered_unknowns_once=AsyncMock()),
+        start=Mock(),
+        stop=AsyncMock(side_effect=ValueError("poller cleanup failed")),
+    )
+    reconciler = Mock(
+        reconcile_once=AsyncMock(side_effect=RuntimeError("original startup error"))
+    )
+    startup_failure = AsyncMock(side_effect=LookupError("callback cleanup failed"))
+    runtime = BinanceExecutionRuntime(
+        stream,
+        poller,
+        reconciler,
+        on_startup_failure=startup_failure,
+    )
+
+    with pytest.raises(RuntimeError, match="original startup error") as raised:
+        await runtime.start()
+
+    notes = "\n".join(raised.value.__notes__ or ())
+    assert "startup failure callback" in notes
+    assert "callback cleanup failed" in notes
+    assert "unknown-order poller stop" in notes
+    assert "poller cleanup failed" in notes
+    assert "user data stream stop" in notes
+    assert "stream cleanup failed" in notes
     assert runtime.is_running is False

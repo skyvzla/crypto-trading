@@ -1,5 +1,7 @@
 """账本查询与 subcategory 交易池准入 API。"""
 
+import hmac
+import os
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Literal, Optional
@@ -10,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from trading_platform.ledger.db.models import (
     CampaignPnLFactsError,
+    ExecutionEventRecord,
     ExchangeCategory,
     ExchangeSymbol,
     ExchangeSymbolSyncState,
@@ -263,6 +266,30 @@ class StrategyAuditResponse(BaseModel):
     created_at: datetime
 
 
+class ExecutionEventResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    event_id: str
+    run_id: str
+    sequence: int
+    event_time: int
+    event_type: str
+    source: str
+    severity: str
+    account_id: str
+    strategy_id: str
+    trace_id: str
+    causation_id: Optional[str] = None
+    symbol: Optional[str] = None
+    campaign_id: Optional[str] = None
+    client_order_id: Optional[str] = None
+    exchange_order_id: Optional[str] = None
+    details: dict[str, Any]
+    payload_hash: str
+    received_at: datetime
+
+
 class StrategyRuntimeStatusResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -485,6 +512,32 @@ async def get_db(request: Request) -> LedgerDB:
     if db is None:
         raise HTTPException(status_code=503, detail="Database not initialized")
     return db
+
+
+async def require_execution_event_query_token(request: Request) -> None:
+    expected = os.getenv("EXECUTION_EVENT_QUERY_TOKEN")
+    if not expected:
+        raise HTTPException(
+            status_code=503,
+            detail="execution event query is not configured",
+        )
+
+    authorization = request.headers.get("authorization", "")
+    scheme, separator, supplied = authorization.partition(" ")
+    valid = False
+    if separator and scheme.casefold() == "bearer" and supplied:
+        try:
+            valid = hmac.compare_digest(
+                supplied.encode("utf-8"), expected.encode("utf-8")
+            )
+        except (TypeError, UnicodeError):
+            valid = False
+    if not valid:
+        raise HTTPException(
+            status_code=401,
+            detail="invalid execution event query credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def _filter_kwargs(
@@ -1463,6 +1516,62 @@ async def list_strategy_audit_events(
     )
     return Page(
         items=[StrategyAuditResponse.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/execution-events", response_model=Page)
+async def list_execution_events(
+    _authorized: None = Depends(require_execution_event_query_token),
+    account_id: Optional[str] = Query(None, max_length=64),
+    strategy_id: Optional[str] = Query(None, max_length=128),
+    run_id: Optional[str] = Query(None, max_length=128),
+    trace_id: Optional[str] = Query(None, max_length=128),
+    event_type: Optional[str] = Query(None, max_length=128),
+    source: Optional[str] = Query(None, max_length=64),
+    severity: Optional[str] = Query(None, max_length=32),
+    symbol: Optional[str] = Query(None, max_length=32),
+    campaign_id: Optional[str] = Query(None, max_length=128),
+    client_order_id: Optional[str] = Query(None, max_length=128),
+    exchange_order_id: Optional[str] = Query(None, max_length=128),
+    event_time_from: Optional[int] = Query(None, ge=0),
+    event_time_to: Optional[int] = Query(None, ge=0),
+    event_time_start: Optional[int] = Query(None, ge=0),
+    event_time_end: Optional[int] = Query(None, ge=0),
+    start_event_time: Optional[int] = Query(None, ge=0),
+    end_event_time: Optional[int] = Query(None, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> Page:
+    try:
+        items, total = await db.list_execution_events(
+            account_id=account_id,
+            strategy_id=strategy_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            event_type=event_type,
+            source=source,
+            severity=severity,
+            symbol=symbol,
+            campaign_id=campaign_id,
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            event_time_from=event_time_from,
+            event_time_to=event_time_to,
+            event_time_start=event_time_start,
+            event_time_end=event_time_end,
+            start_event_time=start_event_time,
+            end_event_time=end_event_time,
+            limit=limit,
+            offset=offset,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return Page(
+        items=[ExecutionEventResponse.model_validate(item) for item in items],
         total=total,
         limit=limit,
         offset=offset,

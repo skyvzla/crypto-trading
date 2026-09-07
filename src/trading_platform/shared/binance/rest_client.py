@@ -2,9 +2,13 @@
 Binance Futures REST API 客户端
 使用 httpx 异步调用，支持签名、限速、重试
 """
+import asyncio
 import hashlib
 import hmac
+import inspect
+import re
 import time
+from collections.abc import Awaitable, Callable
 from decimal import Decimal
 from typing import Any, Literal
 from urllib.parse import urlencode
@@ -12,6 +16,22 @@ from urllib.parse import urlencode
 import httpx
 
 from .rate_limiter import DEFAULT_RATE_LIMITER, RateLimiter, get_endpoint_weight
+
+
+EventObserver = Callable[[str, dict[str, Any]], Awaitable[None] | None]
+
+_BINANCE_RATE_HEADERS = (
+    "X-MBX-USED-WEIGHT-1M",
+    "X-MBX-USED-WEIGHT-1S",
+    "X-MBX-ORDER-COUNT-10S",
+    "X-MBX-ORDER-COUNT-1D",
+    "Retry-After",
+)
+_SENSITIVE_QUERY_VALUE = re.compile(
+    r"(?i)(api[_-]?key|secret|signature|authorization|listen[_-]?key|password|token)"
+    r"(\s*[=:]\s*)([^&\s,;]+)"
+)
+_REDACTED = "[REDACTED]"
 
 
 class BinanceAPIException(Exception):
@@ -42,6 +62,7 @@ class BinanceRestClient:
         base_url: str = "https://fapi.binance.com",
         rate_limiter: RateLimiter | None = None,
         timeout: float = 10.0,
+        event_observer: EventObserver | None = None,
     ):
         """
         Args:
@@ -56,6 +77,7 @@ class BinanceRestClient:
         self.base_url = base_url.rstrip('/')
         self.rate_limiter = rate_limiter or DEFAULT_RATE_LIMITER
         self.timeout = timeout
+        self.event_observer = event_observer
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -96,6 +118,151 @@ class BinanceRestClient:
         params['signature'] = signature
         return params
 
+    @staticmethod
+    def _collect_sensitive_values(value: Any) -> set[str]:
+        values: set[str] = set()
+        if isinstance(value, dict):
+            for key, child in value.items():
+                normalized = str(key).replace("_", "").replace("-", "").lower()
+                if any(
+                    marker in normalized
+                    for marker in (
+                        "apikey",
+                        "secret",
+                        "signature",
+                        "authorization",
+                        "listenkey",
+                        "password",
+                        "token",
+                    )
+                ):
+                    if isinstance(child, (str, int, float)):
+                        values.add(str(child))
+                values.update(BinanceRestClient._collect_sensitive_values(child))
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                values.update(BinanceRestClient._collect_sensitive_values(child))
+        return values
+
+    def _redact_observer_value(
+        self, value: Any, *, sensitive_values: set[str] | None = None
+    ) -> Any:
+        """Redact credentials both by field name and from textual errors."""
+
+        from trading_platform.shared.execution_event_journal import (
+            redact_event_details,
+        )
+
+        safe = redact_event_details(value)
+        values = set(sensitive_values or ())
+        if self.api_key:
+            values.add(self.api_key)
+        if self.api_secret:
+            values.add(self.api_secret)
+
+        def replace_text(text: str) -> str:
+            for secret in sorted(values, key=len, reverse=True):
+                if secret:
+                    text = text.replace(secret, _REDACTED)
+            return _SENSITIVE_QUERY_VALUE.sub(
+                lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
+                text,
+            )
+
+        if isinstance(safe, str):
+            return replace_text(safe)
+        if isinstance(safe, dict):
+            return {
+                key: self._redact_observer_value(item, sensitive_values=values)
+                for key, item in safe.items()
+            }
+        if isinstance(safe, list):
+            return [
+                self._redact_observer_value(item, sensitive_values=values)
+                for item in safe
+            ]
+        if isinstance(safe, tuple):
+            return tuple(
+                self._redact_observer_value(item, sensitive_values=values)
+                for item in safe
+            )
+        return safe
+
+    async def _observe(self, stage: str, details: dict[str, Any]) -> None:
+        observer = self.event_observer
+        if observer is None:
+            return
+        result = observer(stage, details)
+        if inspect.isawaitable(result):
+            await result
+
+    async def _observe_preserving_error(
+        self,
+        stage: str,
+        details: dict[str, Any],
+        primary_error: BaseException,
+    ) -> None:
+        """Best-effort terminal observation that never replaces the request error."""
+
+        try:
+            await self._observe(stage, details)
+        except BaseException as observer_error:
+            primary_error.add_note(
+                f"request {stage} observer failed: "
+                f"{type(observer_error).__name__}: {observer_error}"
+            )
+
+    @staticmethod
+    def _response_body(response: httpx.Response) -> Any:
+        try:
+            return response.json()
+        except (ValueError, TypeError):
+            return response.text
+
+    @staticmethod
+    def _rate_headers(response: httpx.Response) -> dict[str, str]:
+        return {
+            name: response.headers[name]
+            for name in _BINANCE_RATE_HEADERS
+            if name in response.headers
+        }
+
+    def _observer_details(
+        self,
+        *,
+        method: str,
+        path: str,
+        params: dict[str, Any],
+        started_at: float,
+        response: httpx.Response | None = None,
+        response_body: Any = None,
+        error: BaseException | str | None = None,
+    ) -> dict[str, Any]:
+        sensitive_values = self._collect_sensitive_values(params)
+        details: dict[str, Any] = {
+            "method": method,
+            "path": self._redact_observer_value(
+                path, sensitive_values=sensitive_values
+            ),
+            "params": self._redact_observer_value(
+                params, sensitive_values=sensitive_values
+            ),
+            "status_code": response.status_code if response is not None else None,
+            "rate_headers": (
+                self._rate_headers(response) if response is not None else {}
+            ),
+            "duration_ms": max(0, round((time.monotonic() - started_at) * 1000, 3)),
+            "response_body": self._redact_observer_value(
+                response_body, sensitive_values=sensitive_values
+            ),
+        }
+        if error is not None:
+            details["error"] = self._redact_observer_value(
+                str(error), sensitive_values=sensitive_values
+            )
+            details["error_type"] = type(error).__name__
+        return details
+
     async def _request(
         self,
         method: str,
@@ -119,7 +286,7 @@ class BinanceRestClient:
             BinanceAPIException: API 错误
             httpx.TimeoutException: 请求超时
         """
-        params = params or {}
+        params = dict(params or {})
 
         # 签名
         if signed:
@@ -128,6 +295,18 @@ class BinanceRestClient:
         # 限速
         weight = get_endpoint_weight(method, path)
         await self.rate_limiter.acquire(weight)
+
+        started_at = time.monotonic()
+        # Observer failure before this point intentionally prevents the network call.
+        await self._observe(
+            "request_started",
+            self._observer_details(
+                method=method,
+                path=path,
+                params=params,
+                started_at=started_at,
+            ),
+        )
 
         # 发送请求
         try:
@@ -141,23 +320,189 @@ class BinanceRestClient:
                 response = await self._client.put(path, data=params)
             else:
                 raise ValueError(f"Unsupported method: {method}")
+        except asyncio.CancelledError as error:
+            await self._observe_preserving_error(
+                "request_cancelled",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    error=error,
+                ),
+                error,
+            )
+            raise
+        except httpx.TimeoutException as error:
+            await self._observe_preserving_error(
+                "request_failed",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    error=error,
+                ),
+                error,
+            )
+            raise
+        except BinanceAPIException as error:
+            await self._observe_preserving_error(
+                "request_failed",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    error=error,
+                ),
+                error,
+            )
+            raise
+        except Exception as error:
+            request_error = RuntimeError(f"Request failed: {error}")
+            await self._observe_preserving_error(
+                "request_failed",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    error=error,
+                ),
+                request_error,
+            )
+            raise request_error from error
 
-            # 检查响应
-            if response.status_code == 200:
-                return response.json()
-            else:
-                error_data = response.json()
-                raise BinanceAPIException(
-                    code=error_data.get('code', -1),
-                    message=error_data.get('msg', 'Unknown error')
+        try:
+            response_body = self._response_body(response)
+        except asyncio.CancelledError as error:
+            await self._observe_preserving_error(
+                "request_cancelled",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    error=error,
+                ),
+                error,
+            )
+            raise
+        except Exception as error:
+            request_error = RuntimeError(f"Request failed: {error}")
+            await self._observe_preserving_error(
+                "request_failed",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    error=error,
+                ),
+                request_error,
+            )
+            raise request_error from error
+        if 200 <= response.status_code < 300:
+            try:
+                payload = response.json()
+            except asyncio.CancelledError as error:
+                await self._observe_preserving_error(
+                    "request_cancelled",
+                    self._observer_details(
+                        method=method,
+                        path=path,
+                        params=params,
+                        started_at=started_at,
+                        response=response,
+                        response_body=response_body,
+                        error=error,
+                    ),
+                    error,
                 )
+                raise
+            except Exception as error:
+                request_error = RuntimeError(f"Request failed: {error}")
+                await self._observe_preserving_error(
+                    "request_failed",
+                    self._observer_details(
+                        method=method,
+                        path=path,
+                        params=params,
+                        started_at=started_at,
+                        response=response,
+                        response_body=response_body,
+                        error=error,
+                    ),
+                    request_error,
+                )
+                raise request_error from error
+            await self._observe(
+                "request_succeeded",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    response=response,
+                    response_body=payload,
+                ),
+            )
+            return payload
 
-        except httpx.TimeoutException:
+        try:
+            error_data = response.json()
+            error_code = error_data.get('code', -1)
+            error_message = error_data.get('msg', 'Unknown error')
+            api_error = BinanceAPIException(
+                code=error_code,
+                message=error_message,
+            )
+        except asyncio.CancelledError as error:
+            await self._observe_preserving_error(
+                "request_cancelled",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    response=response,
+                    response_body=response_body,
+                    error=error,
+                ),
+                error,
+            )
             raise
-        except BinanceAPIException:
-            raise
-        except Exception as e:
-            raise RuntimeError(f"Request failed: {e}") from e
+        except Exception as error:
+            request_error = RuntimeError(f"Request failed: {error}")
+            await self._observe_preserving_error(
+                "request_failed",
+                self._observer_details(
+                    method=method,
+                    path=path,
+                    params=params,
+                    started_at=started_at,
+                    response=response,
+                    response_body=response_body,
+                    error=error,
+                ),
+                request_error,
+            )
+            raise request_error from error
+        await self._observe_preserving_error(
+            "request_failed",
+            self._observer_details(
+                method=method,
+                path=path,
+                params=params,
+                started_at=started_at,
+                response=response,
+                response_body=error_data,
+                error=api_error,
+            ),
+            api_error,
+        )
+        raise api_error
 
     # ========== 订单接口 ==========
 

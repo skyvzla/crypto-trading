@@ -13,6 +13,7 @@ from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
+from trading_platform.shared.execution_event_journal import ExecutionEvent
 from trading_platform.shared.events import StrategyAuditEvent
 from trading_platform.shared.symbol_universe_query import (
     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
@@ -125,6 +126,31 @@ class StrategyAuditRecord:
     campaign_id: Optional[str] = None
     details: dict[str, Any] | None = None
     created_at: Optional[datetime] = None
+
+
+@dataclass
+class ExecutionEventRecord:
+    """One immutable event from the cross-runtime execution journal."""
+
+    id: Optional[int] = None
+    event_id: str = ""
+    run_id: str = ""
+    sequence: int = 0
+    event_time: int = 0
+    event_type: str = ""
+    source: str = ""
+    severity: str = ""
+    account_id: str = ""
+    strategy_id: str = ""
+    trace_id: str = ""
+    causation_id: Optional[str] = None
+    symbol: Optional[str] = None
+    campaign_id: Optional[str] = None
+    client_order_id: Optional[str] = None
+    exchange_order_id: Optional[str] = None
+    details: dict[str, Any] | None = None
+    payload_hash: str = ""
+    received_at: Optional[datetime] = None
 
 
 @dataclass
@@ -467,6 +493,22 @@ class LedgerDB:
         ON CONFLICT (event_key) DO NOTHING
         RETURNING id
     """
+    _EXECUTION_EVENT_INSERT = """
+        INSERT INTO execution_event_journal (
+            event_id, run_id, sequence, event_time, event_type, source,
+            severity, account_id, strategy_id, trace_id, causation_id,
+            symbol, campaign_id, client_order_id, exchange_order_id,
+            details, payload_hash
+        ) VALUES (
+            %(event_id)s, %(run_id)s, %(sequence)s, %(event_time)s,
+            %(event_type)s, %(source)s, %(severity)s, %(account_id)s,
+            %(strategy_id)s, %(trace_id)s, %(causation_id)s, %(symbol)s,
+            %(campaign_id)s, %(client_order_id)s, %(exchange_order_id)s,
+            %(details)s, %(payload_hash)s
+        )
+        ON CONFLICT (event_id) DO NOTHING
+        RETURNING id
+    """
 
     def __init__(self, pool: AsyncConnectionPool):
         self.pool = pool
@@ -573,6 +615,253 @@ class LedgerDB:
                 ).fetchone()
                 inserted += int(row is not None)
         return inserted
+
+    @staticmethod
+    def _execution_event_payload(event: ExecutionEvent) -> dict[str, Any]:
+        """Return the canonical, persisted event payload before DB metadata."""
+
+        payload = event.to_dict()
+        # ``ExecutionEvent`` currently provides this method, but keeping this
+        # conversion local makes the persistence boundary explicit and avoids
+        # hashing database-generated fields such as ``id`` or ``received_at``.
+        details = payload.get("details", event.details)
+        canonical_details = json.dumps(
+            details,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        payload["details"] = json.loads(canonical_details)
+        return payload
+
+    @classmethod
+    def _execution_event_record(
+        cls, event: ExecutionEvent
+    ) -> tuple[dict[str, object], str]:
+        payload = cls._execution_event_payload(event)
+        canonical_payload = json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        payload_hash = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+        params = payload.copy()
+        params["details"] = Jsonb(payload["details"])
+        params["payload_hash"] = payload_hash
+        return params, payload_hash
+
+    async def insert_execution_events(
+        self,
+        events: Sequence[ExecutionEvent],
+    ) -> int:
+        """Atomically append a batch of execution events and deduplicate replays.
+
+        A repeated event ID is accepted only when its immutable payload is the
+        same.  Any conflicting event ID, run sequence, or malformed row aborts
+        the whole transaction, so callers never observe a partially appended
+        batch.
+        """
+
+        if not events:
+            return 0
+        records = [self._execution_event_record(event) for event in events]
+        inserted = 0
+        async with self.transaction() as conn:
+            for event, (params, payload_hash) in zip(events, records, strict=True):
+                row = await (
+                    await conn.execute(self._EXECUTION_EVENT_INSERT, params)
+                ).fetchone()
+                if row is not None:
+                    inserted += 1
+                    continue
+
+                existing = await (
+                    await conn.execute(
+                        "SELECT event_id, run_id, sequence, event_time, event_type, "
+                        "source, severity, account_id, strategy_id, trace_id, "
+                        "causation_id, symbol, campaign_id, client_order_id, "
+                        "exchange_order_id, details, payload_hash "
+                        "FROM execution_event_journal WHERE event_id = %s",
+                        (event.event_id,),
+                    )
+                ).fetchone()
+                if existing is None:
+                    # The insert can only have been skipped by another unique
+                    # constraint (normally run_id/sequence).  Let PostgreSQL
+                    # surface that invariant violation instead of treating it
+                    # as a successful replay.
+                    raise RuntimeError(
+                        "execution event insert was skipped without an event_id conflict"
+                    )
+                existing_payload = dict(
+                    zip(
+                        (
+                            "event_id",
+                            "run_id",
+                            "sequence",
+                            "event_time",
+                            "event_type",
+                            "source",
+                            "severity",
+                            "account_id",
+                            "strategy_id",
+                            "trace_id",
+                            "causation_id",
+                            "symbol",
+                            "campaign_id",
+                            "client_order_id",
+                            "exchange_order_id",
+                            "details",
+                            "payload_hash",
+                        ),
+                        existing,
+                        strict=True,
+                    )
+                )
+                if (
+                    existing_payload["payload_hash"] != payload_hash
+                    or existing_payload["event_id"] != event.event_id
+                ):
+                    raise ValueError(
+                        f"execution event {event.event_id} conflicts with an existing payload"
+                    )
+
+                # A hash collision is not a valid replay proof.  Compare the
+                # canonical payload as well so a manually corrupted row cannot
+                # be silently accepted.
+                existing_details = existing_payload["details"] or {}
+                existing_payload["details"] = existing_details
+                expected_payload = self._execution_event_payload(event)
+                stored_payload = {
+                    key: existing_payload[key]
+                    for key in (
+                        "event_id",
+                        "run_id",
+                        "sequence",
+                        "event_time",
+                        "event_type",
+                        "source",
+                        "severity",
+                        "account_id",
+                        "strategy_id",
+                        "trace_id",
+                        "causation_id",
+                        "symbol",
+                        "campaign_id",
+                        "client_order_id",
+                        "exchange_order_id",
+                        "details",
+                    )
+                }
+                if stored_payload != expected_payload:
+                    raise ValueError(
+                        f"execution event {event.event_id} conflicts with an existing payload"
+                    )
+        return inserted
+
+    async def list_execution_events(
+        self,
+        *,
+        account_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        event_type: Optional[str] = None,
+        source: Optional[str] = None,
+        severity: Optional[str] = None,
+        symbol: Optional[str] = None,
+        campaign_id: Optional[str] = None,
+        client_order_id: Optional[str] = None,
+        exchange_order_id: Optional[str] = None,
+        event_time_from: Optional[int] = None,
+        event_time_to: Optional[int] = None,
+        event_time_start: Optional[int] = None,
+        event_time_end: Optional[int] = None,
+        start_event_time: Optional[int] = None,
+        end_event_time: Optional[int] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[ExecutionEventRecord], int]:
+        """List events in replay order for a run or timeline order globally.
+
+        A run has its own monotonic sequence, which is the authoritative
+        ordering for reconstruction.  Unscoped queries remain chronological
+        by ``event_time`` with the database ID as a deterministic tie-breaker.
+
+        ``event_time_from``/``event_time_to`` are inclusive bounds.  The
+        alternate names are accepted for callers that mirror the API query
+        vocabulary; supplying more than one spelling for the same bound is a
+        programming error.
+        """
+
+        def _bound(
+            values: tuple[Optional[int], ...], name: str
+        ) -> Optional[int]:
+            supplied = [value for value in values if value is not None]
+            if len({*supplied}) > 1:
+                raise ValueError(f"conflicting {name} bounds")
+            return supplied[0] if supplied else None
+
+        start = _bound(
+            (event_time_from, event_time_start, start_event_time),
+            "event_time start",
+        )
+        end = _bound(
+            (event_time_to, event_time_end, end_event_time),
+            "event_time end",
+        )
+        if start is not None and end is not None and start > end:
+            raise ValueError("event_time start must not be after event_time end")
+
+        parts: list[str] = []
+        params: dict[str, object] = {"limit": limit, "offset": offset}
+        for key, value in (
+            ("account_id", account_id),
+            ("strategy_id", strategy_id),
+            ("run_id", run_id),
+            ("trace_id", trace_id),
+            ("event_type", event_type),
+            ("source", source),
+            ("severity", severity),
+            ("symbol", symbol),
+            ("campaign_id", campaign_id),
+            ("client_order_id", client_order_id),
+            ("exchange_order_id", exchange_order_id),
+        ):
+            if value is not None:
+                parts.append(f"{key} = %({key})s")
+                params[key] = value
+        if start is not None:
+            parts.append("event_time >= %(event_time_from)s")
+            params["event_time_from"] = start
+        if end is not None:
+            parts.append("event_time <= %(event_time_to)s")
+            params["event_time_to"] = end
+        where = " WHERE " + " AND ".join(parts) if parts else ""
+        order_by = (
+            "sequence ASC, id ASC"
+            if run_id is not None
+            else "event_time ASC, id ASC"
+        )
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(ExecutionEventRecord))
+            await cursor.execute(
+                "SELECT * FROM execution_event_journal"
+                f"{where} ORDER BY {order_by} "
+                "LIMIT %(limit)s OFFSET %(offset)s",
+                params,
+            )
+            items = await cursor.fetchall()
+            total = await (
+                await conn.execute(
+                    f"SELECT COUNT(*) FROM execution_event_journal{where}",
+                    params,
+                )
+            ).fetchone()
+        return items, int(total[0])
 
     async def list_strategy_audit_events(
         self,

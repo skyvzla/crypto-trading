@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, NoReturn, Protocol
@@ -22,6 +22,10 @@ from trading_platform.shared.events import (
     Kline,
     OrderIntent,
     StrategyAuditEvent,
+)
+from trading_platform.shared.execution_event_journal import (
+    DurableExecutionEventJournal,
+    ExecutionEvent,
 )
 from trading_platform.shared.risk import RiskGuard
 from trading_platform.strategies.campaign_store import CampaignLease, RedisCampaignStore
@@ -73,7 +77,7 @@ class SpikeLiveSettings(BaseSettings):
     )
 
     mode: Literal["testnet", "live"] = "testnet"
-    strategy_path: str = "trading_platform.strategies.spike.v1:V1"
+    strategy_path: str = "trading_platform.strategies.spike.v2_2:V22"
     exit_policy: Literal["execution-test-d007", "candidate-v1"] = "candidate-v1"
     live_confirmation: str = ""
     account_id: str
@@ -280,6 +284,7 @@ class SpikeExecutionCoordinator:
             [CapitalSnapshot], Awaitable[bool]
         ]
         | None = None,
+        event_journal: DurableExecutionEventJournal | None = None,
     ):
         self.strategy = strategy
         self.account = account
@@ -293,6 +298,7 @@ class SpikeExecutionCoordinator:
         self.capital_store = capital_store
         self.funding_source = funding_source
         self.capital_admission_refresh = capital_admission_refresh
+        self.event_journal = event_journal
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._lock = asyncio.Lock()
         self._campaign_lock = asyncio.Lock()
@@ -304,6 +310,7 @@ class SpikeExecutionCoordinator:
         self._expiry_fatal_event = asyncio.Event()
         self._expiry_fatal_exception: BaseException | None = None
         self._pending_audit_events: tuple[StrategyAuditEvent, ...] = ()
+        self._journaled_audit_count = 0
         self._audit_lock = asyncio.Lock()
         self.execution_queue = execution_queue or ExecutionQueue()
         self._execution_worker = ExecutionWorker(
@@ -342,16 +349,48 @@ class SpikeExecutionCoordinator:
 
         async with self._campaign_lock:
             await self._restore_campaign_gate_locked()
+        await self._publish_audit()
 
     async def _restore_campaign_gate_locked(self) -> None:
         previous_campaign_id = self._owned_campaign_id
         lease = await self.campaign_store.get_active()
+        missing_campaign_error: RuntimeError | None = None
         if lease is None:
             live_risk = self.account.symbols_with_live_risk()
             if previous_campaign_id is not None or live_risk:
                 self.gate.set_condition("campaign", False)
                 self.risk_guard.halt("Redis Campaign disappeared while risk remains")
-                raise RuntimeError("Redis Campaign disappeared while risk remains")
+                missing_campaign_error = RuntimeError(
+                    "Redis Campaign disappeared while risk remains"
+                )
+        snapshot_details: dict[str, Any] = {"active": lease is not None}
+        if lease is not None:
+            snapshot_details.update(self._campaign_lease_details(lease))
+        try:
+            await self._append_execution_event(
+                "campaign.recovery_snapshot",
+                source="spike.campaign",
+                event_time=self._now_ms(),
+                trace_id=(
+                    lease.campaign_id
+                    if lease is not None
+                    else f"campaign-recovery:{self.account_id}"
+                ),
+                symbol=None if lease is None else lease.symbol,
+                campaign_id=None if lease is None else lease.campaign_id,
+                details=snapshot_details,
+            )
+        except BaseException as snapshot_error:
+            if missing_campaign_error is not None:
+                missing_campaign_error.add_note(
+                    "campaign.recovery_snapshot journal append failed: "
+                    f"{type(snapshot_error).__name__}: {snapshot_error}"
+                )
+                raise missing_campaign_error
+            raise
+        if missing_campaign_error is not None:
+            raise missing_campaign_error
+        if lease is None:
             self._owned_campaign_id = None
             self._owned_campaign_lease = None
             self.gate.set_condition("campaign", True)
@@ -366,6 +405,7 @@ class SpikeExecutionCoordinator:
                 "campaign_recovered",
                 lease,
                 event_time=self._now_ms(),
+                details=self._campaign_lease_details(lease),
             )
         self.gate.set_condition("campaign", self._owned_campaign_id is not None)
 
@@ -544,9 +584,126 @@ class SpikeExecutionCoordinator:
         self.gate.set_condition("campaign", False)
         raise RuntimeError(message)
 
+    async def _append_execution_event(
+        self,
+        event_type: str,
+        *,
+        source: str,
+        event_time: int | None = None,
+        severity: str = "info",
+        trace_id: str | None = None,
+        causation_id: str | None = None,
+        symbol: str | None = None,
+        campaign_id: str | None = None,
+        client_order_id: str | None = None,
+        exchange_order_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> ExecutionEvent | None:
+        if self.event_journal is None:
+            return None
+        try:
+            return await self.event_journal.append(
+                event_type,
+                source=source,
+                event_time=event_time,
+                severity=severity,
+                trace_id=trace_id,
+                causation_id=causation_id,
+                symbol=symbol,
+                campaign_id=campaign_id,
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                details=details,
+            )
+        except BaseException:
+            self.gate.set_condition("execution", False)
+            self.risk_guard.halt("execution event journal write failed")
+            raise
+
+    @staticmethod
+    def _intent_details(intent: OrderIntent) -> dict[str, Any]:
+        return {
+            "symbol": intent.symbol,
+            "side": intent.side,
+            "price": str(intent.price),
+            "quantity": str(intent.quantity),
+            "client_order_id": intent.client_order_id,
+            "ttl_ms": intent.ttl_ms,
+            "order_type": intent.order_type,
+            "reduce_only": intent.reduce_only,
+            "strategy_id": intent.strategy_id,
+            "trigger_reason": intent.trigger_reason,
+            "campaign_id": intent.campaign_id,
+        }
+
+    @staticmethod
+    def _exception_details(exc: BaseException) -> dict[str, str]:
+        return {
+            "error_type": type(exc).__name__,
+            "error_message": str(exc)[:500],
+        }
+
+    @staticmethod
+    def _campaign_lease_details(lease: CampaignLease) -> dict[str, Any]:
+        """Return the complete lease payload for Campaign lifecycle events."""
+
+        return asdict(lease)
+
+    async def _append_campaign_failed(
+        self,
+        operation: str,
+        lease: CampaignLease,
+        *,
+        event_time: int,
+        started: ExecutionEvent | None,
+        exc: BaseException,
+        result_key: str,
+    ) -> None:
+        """Best-effort failure fact that never replaces the store exception."""
+
+        try:
+            await self._append_execution_event(
+                f"campaign.{operation}_failed",
+                source="spike.campaign",
+                event_time=event_time,
+                severity="error",
+                trace_id=lease.campaign_id,
+                causation_id=None if started is None else started.event_id,
+                symbol=lease.symbol,
+                campaign_id=lease.campaign_id,
+                details={
+                    **self._campaign_lease_details(lease),
+                    result_key: False,
+                    **self._exception_details(exc),
+                },
+            )
+        except BaseException as journal_exc:
+            exc.add_note(
+                f"campaign.{operation}_failed journal append failed: "
+                f"{type(journal_exc).__name__}: {journal_exc}"
+            )
+
     async def on_bar1s(self, bar: Bar1s) -> None:
         async with self._lock:
+            trace_id = f"bar1s:{bar.symbol}:{bar.available_time}"
+            received = await self._append_execution_event(
+                "market.bar1s_received",
+                source="spike.market",
+                event_time=bar.available_time,
+                trace_id=trace_id,
+                symbol=bar.symbol,
+                details=bar.to_dict(),
+            )
             intents = self.strategy.on_bar1s(bar)
+            await self._append_execution_event(
+                "market.bar1s_processed",
+                source="spike.strategy",
+                event_time=bar.available_time,
+                trace_id=trace_id,
+                causation_id=None if received is None else received.event_id,
+                symbol=bar.symbol,
+                details={"intent_count": len(intents)},
+            )
             execution_complete = await self._execute(
                 intents, event_time=bar.available_time
             )
@@ -560,8 +717,28 @@ class SpikeExecutionCoordinator:
         """只计算策略并排队执行，不在策略事件循环中等待交易所 REST。"""
 
         async with self._lock:
+            trace_id = f"bar1s:{bar.symbol}:{bar.available_time}"
+            received = await self._append_execution_event(
+                "market.bar1s_received",
+                source="spike.market",
+                event_time=bar.available_time,
+                trace_id=trace_id,
+                symbol=bar.symbol,
+                details=bar.to_dict(),
+            )
             intents = self.strategy.on_bar1s(bar)
-            queued = self._enqueue_intents(intents, event_time=bar.available_time)
+            await self._append_execution_event(
+                "market.bar1s_processed",
+                source="spike.strategy",
+                event_time=bar.available_time,
+                trace_id=trace_id,
+                causation_id=None if received is None else received.event_id,
+                symbol=bar.symbol,
+                details={"intent_count": len(intents)},
+            )
+            queued = await self._enqueue_intents(
+                intents, event_time=bar.available_time
+            )
             audit_pending = await self._stage_strategy_audit_events()
             if not queued and (
                 audit_pending or self.account.has_pending_cancellations
@@ -570,7 +747,27 @@ class SpikeExecutionCoordinator:
 
     async def on_kline(self, kline: Kline) -> None:
         async with self._lock:
+            trace_id = (
+                f"kline:{kline.symbol}:{kline.interval}:{kline.available_time}"
+            )
+            received = await self._append_execution_event(
+                "market.kline_received",
+                source="spike.market",
+                event_time=kline.available_time,
+                trace_id=trace_id,
+                symbol=kline.symbol,
+                details=kline.to_dict(),
+            )
             intents = self.strategy.on_kline(kline)
+            await self._append_execution_event(
+                "market.kline_processed",
+                source="spike.strategy",
+                event_time=kline.available_time,
+                trace_id=trace_id,
+                causation_id=None if received is None else received.event_id,
+                symbol=kline.symbol,
+                details={"intent_count": len(intents)},
+            )
             execution_complete = await self._execute(
                 intents, event_time=kline.available_time
             )
@@ -583,8 +780,30 @@ class SpikeExecutionCoordinator:
         """与 1s Bar 共用同一个异步执行通道。"""
 
         async with self._lock:
+            trace_id = (
+                f"kline:{kline.symbol}:{kline.interval}:{kline.available_time}"
+            )
+            received = await self._append_execution_event(
+                "market.kline_received",
+                source="spike.market",
+                event_time=kline.available_time,
+                trace_id=trace_id,
+                symbol=kline.symbol,
+                details=kline.to_dict(),
+            )
             intents = self.strategy.on_kline(kline)
-            queued = self._enqueue_intents(intents, event_time=kline.available_time)
+            await self._append_execution_event(
+                "market.kline_processed",
+                source="spike.strategy",
+                event_time=kline.available_time,
+                trace_id=trace_id,
+                causation_id=None if received is None else received.event_id,
+                symbol=kline.symbol,
+                details={"intent_count": len(intents)},
+            )
+            queued = await self._enqueue_intents(
+                intents, event_time=kline.available_time
+            )
             audit_pending = await self._stage_strategy_audit_events()
             if not queued and (
                 audit_pending or self.account.has_pending_cancellations
@@ -712,14 +931,14 @@ class SpikeExecutionCoordinator:
         exits = [intent for intent in intents if intent.reduce_only]
         approved_entries: list[OrderIntent] = []
         if require_arbitrated and raw_entries and not entries:
-            self._skip_queued_entry(
+            await self._skip_queued_entry(
                 raw_entries[0],
                 status="invalid",
                 reason="symbol_blocked",
                 event_time=self._now_ms(),
             )
         elif require_arbitrated and entries and not self.gate.enabled:
-            self._skip_queued_entry(
+            await self._skip_queued_entry(
                 entries[0],
                 status="invalid",
                 reason="entry_gate_closed",
@@ -742,7 +961,7 @@ class SpikeExecutionCoordinator:
                     require_arbitrated
                     and self._signal_arbiter.active_campaign_id != campaign_id
                 ):
-                    self._skip_queued_entry(
+                    await self._skip_queued_entry(
                         entries[0],
                         status="overlap",
                         reason="arbitration_lost",
@@ -753,7 +972,7 @@ class SpikeExecutionCoordinator:
                     expires_at is None or expires_at <= now_ms
                 ):
                     status = "stale" if expires_at is not None else "invalid"
-                    self._skip_queued_entry(
+                    await self._skip_queued_entry(
                         entries[0],
                         status=status,
                         reason=(
@@ -768,7 +987,7 @@ class SpikeExecutionCoordinator:
                     campaign_id, entries[0].symbol, event_time
                 ):
                     self.gate.set_condition("campaign", False)
-                    self._skip_queued_entry(
+                    await self._skip_queued_entry(
                         entries[0],
                         status="overlap",
                         reason="campaign_unavailable",
@@ -786,7 +1005,7 @@ class SpikeExecutionCoordinator:
                             entries[0].symbol, f"entry rejected:{reason}"
                         )
                         if require_arbitrated:
-                            self._skip_queued_entry(
+                            await self._skip_queued_entry(
                                 entries[0],
                                 status="invalid",
                                 reason="risk_rejected",
@@ -825,7 +1044,7 @@ class SpikeExecutionCoordinator:
                     self._submissions_inflight -= len(approved_exits)
         return True
 
-    def _skip_queued_entry(
+    async def _skip_queued_entry(
         self,
         intent: OrderIntent,
         *,
@@ -834,6 +1053,21 @@ class SpikeExecutionCoordinator:
         event_time: int,
     ) -> None:
         campaign_id = self._campaign_id(intent)
+        await self._append_execution_event(
+            "execution.intent_skipped",
+            source="spike.execution_queue",
+            event_time=event_time,
+            severity="warning",
+            trace_id=intent.client_order_id,
+            symbol=intent.symbol,
+            campaign_id=campaign_id,
+            client_order_id=intent.client_order_id,
+            details={
+                "status": status,
+                "reason": reason,
+                "intent": self._intent_details(intent),
+            },
+        )
         self._pending_audit_events += (
             StrategyAuditEvent(
                 event_time=event_time,
@@ -850,7 +1084,7 @@ class SpikeExecutionCoordinator:
         ):
             self._signal_arbiter.release(campaign_id)
 
-    def _enqueue_intents(
+    async def _enqueue_intents(
         self, intents: list[OrderIntent], *, event_time: int
     ) -> int:
         """退出永不因入场积压被拒；同优先级按策略事件到达顺序排队。"""
@@ -868,12 +1102,57 @@ class SpikeExecutionCoordinator:
             self.execution_queue.put_nowait(
                 "exit", intent=intent, event_time=event_time
             )
+            await self._append_execution_event(
+                "execution.intent_queued",
+                source="spike.execution_queue",
+                event_time=event_time,
+                trace_id=intent.client_order_id,
+                symbol=intent.symbol,
+                campaign_id=intent.campaign_id,
+                client_order_id=intent.client_order_id,
+                details={"kind": "exit", "intent": self._intent_details(intent)},
+            )
             queued += 1
+        blocked_entries = [
+            intent
+            for intent in intents
+            if not intent.reduce_only and intent not in entries
+        ]
+        for intent in blocked_entries:
+            await self._append_execution_event(
+                "execution.intent_rejected",
+                source="spike.execution_queue",
+                event_time=event_time,
+                severity="warning",
+                trace_id=intent.client_order_id,
+                symbol=intent.symbol,
+                campaign_id=intent.campaign_id,
+                client_order_id=intent.client_order_id,
+                details={
+                    "reason": "symbol_blocked",
+                    "intent": self._intent_details(intent),
+                },
+            )
         campaigns: dict[str, list[OrderIntent]] = {}
         for intent in entries:
             campaigns.setdefault(self._campaign_id(intent), []).append(intent)
         for campaign_id, campaign_entries in campaigns.items():
             if not self.gate.enabled:
+                for intent in campaign_entries:
+                    await self._append_execution_event(
+                        "execution.intent_rejected",
+                        source="spike.execution_queue",
+                        event_time=event_time,
+                        severity="warning",
+                        trace_id=intent.client_order_id,
+                        symbol=intent.symbol,
+                        campaign_id=campaign_id,
+                        client_order_id=intent.client_order_id,
+                        details={
+                            "reason": "entry_gate_closed",
+                            "intent": self._intent_details(intent),
+                        },
+                    )
                 continue
             symbol, signal_time = parse_entry_client_order_id(
                 campaign_entries[0].client_order_id,
@@ -887,6 +1166,21 @@ class SpikeExecutionCoordinator:
             )
             result = self._signal_arbiter.arbitrate(now_ms=event_time)[0]
             if result.status != "acquired":
+                for intent in campaign_entries:
+                    await self._append_execution_event(
+                        "execution.intent_rejected",
+                        source="spike.execution_queue",
+                        event_time=event_time,
+                        severity="warning",
+                        trace_id=intent.client_order_id,
+                        symbol=intent.symbol,
+                        campaign_id=candidate.campaign_id,
+                        client_order_id=intent.client_order_id,
+                        details={
+                            "reason": result.status,
+                            "intent": self._intent_details(intent),
+                        },
+                    )
                 self._pending_audit_events += (
                     StrategyAuditEvent(
                         event_time=event_time,
@@ -914,12 +1208,36 @@ class SpikeExecutionCoordinator:
                         "entry", intent=intent, event_time=event_time
                     )
                 except asyncio.QueueFull:
+                    await self._append_execution_event(
+                        "execution.intent_rejected",
+                        source="spike.execution_queue",
+                        event_time=event_time,
+                        severity="warning",
+                        trace_id=intent.client_order_id,
+                        symbol=intent.symbol,
+                        campaign_id=campaign_id,
+                        client_order_id=intent.client_order_id,
+                        details={
+                            "reason": "entry_execution_queue_full",
+                            "intent": self._intent_details(intent),
+                        },
+                    )
                     self.close_entry_pipeline(
                         "entry execution queue full",
                         symbol=intent.symbol,
                         event_time=event_time,
                     )
                     continue
+                await self._append_execution_event(
+                    "execution.intent_queued",
+                    source="spike.execution_queue",
+                    event_time=event_time,
+                    trace_id=intent.client_order_id,
+                    symbol=intent.symbol,
+                    campaign_id=campaign_id,
+                    client_order_id=intent.client_order_id,
+                    details={"kind": "entry", "intent": self._intent_details(intent)},
+                )
                 queued += 1
         return queued
 
@@ -959,6 +1277,26 @@ class SpikeExecutionCoordinator:
             self._enqueue_maintenance(event_time=event_time)
 
     async def _handle_execution_job(self, job: ExecutionJob) -> None:
+        intent = job.intent
+        trace_id = (
+            intent.client_order_id
+            if intent is not None
+            else f"execution-job:{job.sequence}"
+        )
+        common = {
+            "kind": job.kind,
+            "queue_sequence": job.sequence,
+            "queued_event_time": job.event_time,
+        }
+        await self._append_execution_event(
+            "execution.job_started",
+            source="spike.execution_worker",
+            trace_id=trace_id,
+            symbol=None if intent is None else intent.symbol,
+            campaign_id=None if intent is None else intent.campaign_id,
+            client_order_id=None if intent is None else intent.client_order_id,
+            details=common,
+        )
         if job.kind == "cancel":
             self._maintenance_queued = False
         try:
@@ -987,10 +1325,51 @@ class SpikeExecutionCoordinator:
             )
             if release_symbol is not None:
                 await self.maybe_release_campaign(release_symbol)
-        except asyncio.CancelledError:
+            await self._append_execution_event(
+                "execution.job_completed",
+                source="spike.execution_worker",
+                trace_id=trace_id,
+                symbol=None if intent is None else intent.symbol,
+                campaign_id=None if intent is None else intent.campaign_id,
+                client_order_id=None if intent is None else intent.client_order_id,
+                details=common,
+            )
+        except asyncio.CancelledError as exc:
+            try:
+                await self._append_execution_event(
+                    "execution.job_cancelled",
+                    source="spike.execution_worker",
+                    severity="warning",
+                    trace_id=trace_id,
+                    symbol=None if intent is None else intent.symbol,
+                    campaign_id=None if intent is None else intent.campaign_id,
+                    client_order_id=None if intent is None else intent.client_order_id,
+                    details={**common, **self._exception_details(exc)},
+                )
+            except BaseException as journal_exc:
+                exc.add_note(
+                    "execution.job_cancelled journal append failed: "
+                    f"{type(journal_exc).__name__}: {journal_exc}"
+                )
             raise
-        except BaseException:
+        except BaseException as exc:
             self.gate.set_condition("event_queue", False)
+            try:
+                await self._append_execution_event(
+                    "execution.job_failed",
+                    source="spike.execution_worker",
+                    severity="error",
+                    trace_id=trace_id,
+                    symbol=None if intent is None else intent.symbol,
+                    campaign_id=None if intent is None else intent.campaign_id,
+                    client_order_id=None if intent is None else intent.client_order_id,
+                    details={**common, **self._exception_details(exc)},
+                )
+            except BaseException as journal_exc:
+                exc.add_note(
+                    "execution.job_failed journal append failed: "
+                    f"{type(journal_exc).__name__}: {journal_exc}"
+                )
             raise
 
     async def _submit(self, intent: OrderIntent) -> None:
@@ -1002,10 +1381,76 @@ class SpikeExecutionCoordinator:
             self.gate.set_condition("campaign", False)
             raise RuntimeError("order intent Campaign does not match owned Campaign")
         intent = replace(intent, campaign_id=campaign_id)
-        record = await self.executor.submit(
-            intent,
-            reference_price=intent.price,
+        started = await self._append_execution_event(
+            "execution.order_submit_started",
+            source="spike.executor",
+            trace_id=intent.client_order_id,
+            symbol=intent.symbol,
+            campaign_id=campaign_id,
+            client_order_id=intent.client_order_id,
+            details={"intent": self._intent_details(intent)},
         )
+        try:
+            record = await self.executor.submit(
+                intent,
+                reference_price=intent.price,
+            )
+        except asyncio.CancelledError as exc:
+            try:
+                await self._append_execution_event(
+                    "execution.order_submit_cancelled",
+                    source="spike.executor",
+                    severity="warning",
+                    trace_id=intent.client_order_id,
+                    causation_id=None if started is None else started.event_id,
+                    symbol=intent.symbol,
+                    campaign_id=campaign_id,
+                    client_order_id=intent.client_order_id,
+                    details={**self._intent_details(intent), **self._exception_details(exc)},
+                )
+            except BaseException as journal_exc:
+                exc.add_note(
+                    "execution.order_submit_cancelled journal append failed: "
+                    f"{type(journal_exc).__name__}: {journal_exc}"
+                )
+            raise
+        except BaseException as exc:
+            try:
+                await self._append_execution_event(
+                    "execution.order_submit_failed",
+                    source="spike.executor",
+                    severity="error",
+                    trace_id=intent.client_order_id,
+                    causation_id=None if started is None else started.event_id,
+                    symbol=intent.symbol,
+                    campaign_id=campaign_id,
+                    client_order_id=intent.client_order_id,
+                    details={**self._intent_details(intent), **self._exception_details(exc)},
+                )
+            except BaseException as journal_exc:
+                exc.add_note(
+                    "execution.order_submit_failed journal append failed: "
+                    f"{type(journal_exc).__name__}: {journal_exc}"
+                )
+            raise
+        if self.event_journal is not None:
+            severity = (
+                "warning"
+                if record.status == "SUBMIT_UNKNOWN"
+                else "error" if record.status == "REJECTED" else "info"
+            )
+            await self._append_execution_event(
+                "execution.order_submit_result",
+                source="spike.executor",
+                severity=severity,
+                trace_id=intent.client_order_id,
+                causation_id=None if started is None else started.event_id,
+                symbol=intent.symbol,
+                campaign_id=campaign_id,
+                client_order_id=record.client_order_id,
+                exchange_order_id=record.exchange_order_id,
+                details={"status": record.status, "payload": record.payload},
+            )
         if record.status == "SUBMIT_UNKNOWN":
             self.gate.set_condition("execution", False)
             self.risk_guard.halt("submit status unknown")
@@ -1092,7 +1537,40 @@ class SpikeExecutionCoordinator:
             origin_price=None if origin_price is None else str(origin_price),
             entry_bucket=entry_bucket,
         )
-        acquired = await self.campaign_store.acquire(lease)
+        started = await self._append_execution_event(
+            "campaign.acquire_started",
+            source="spike.campaign",
+            event_time=event_time,
+            trace_id=campaign_id,
+            symbol=symbol,
+            campaign_id=campaign_id,
+            details=self._campaign_lease_details(lease),
+        )
+        try:
+            acquired = await self.campaign_store.acquire(lease)
+        except BaseException as exc:
+            await self._append_campaign_failed(
+                "acquire",
+                lease,
+                event_time=event_time,
+                started=started,
+                exc=exc,
+                result_key="acquired",
+            )
+            raise
+        await self._append_execution_event(
+            "campaign.acquire_result",
+            source="spike.campaign",
+            event_time=event_time,
+            causation_id=None if started is None else started.event_id,
+            trace_id=campaign_id,
+            symbol=symbol,
+            campaign_id=campaign_id,
+            details={
+                **self._campaign_lease_details(lease),
+                "acquired": acquired,
+            },
+        )
         if acquired:
             self._owned_campaign_id = campaign_id
             self._owned_campaign_lease = lease
@@ -1101,6 +1579,8 @@ class SpikeExecutionCoordinator:
                 lease,
                 event_time=event_time,
             )
+            if not await self._publish_audit():
+                return False
         return acquired
 
     async def _persist_exit_state(self, symbol: str) -> None:
@@ -1124,11 +1604,48 @@ class SpikeExecutionCoordinator:
             lease.exit_requested,
         ):
             return
-        updated = await self.campaign_store.update_exit_state(
-            lease.campaign_id,
-            origin_checked=origin_checked,
-            reduced_at_origin=reduced_at_origin,
-            exit_requested=exit_requested,
+        event_time = self._now_ms()
+        state_details = {
+            **self._campaign_lease_details(lease),
+            "origin_checked": origin_checked,
+            "reduced_at_origin": reduced_at_origin,
+            "exit_requested": exit_requested,
+        }
+        started = await self._append_execution_event(
+            "campaign.exit_state_update_started",
+            source="spike.campaign",
+            event_time=event_time,
+            trace_id=lease.campaign_id,
+            symbol=lease.symbol,
+            campaign_id=lease.campaign_id,
+            details=state_details,
+        )
+        try:
+            updated = await self.campaign_store.update_exit_state(
+                lease.campaign_id,
+                origin_checked=origin_checked,
+                reduced_at_origin=reduced_at_origin,
+                exit_requested=exit_requested,
+            )
+        except BaseException as exc:
+            await self._append_campaign_failed(
+                "exit_state_update",
+                lease,
+                event_time=event_time,
+                started=started,
+                exc=exc,
+                result_key="updated",
+            )
+            raise
+        await self._append_execution_event(
+            "campaign.exit_state_update_result",
+            source="spike.campaign",
+            event_time=event_time,
+            causation_id=None if started is None else started.event_id,
+            trace_id=lease.campaign_id,
+            symbol=lease.symbol,
+            campaign_id=lease.campaign_id,
+            details={**state_details, "updated": updated},
         )
         if not updated:
             self.gate.set_condition("campaign", False)
@@ -1149,6 +1666,7 @@ class SpikeExecutionCoordinator:
                 "exit_requested": exit_requested,
             },
         )
+        await self._publish_audit()
 
     async def maybe_release_campaign(self, symbol: str) -> bool:
         async with self._campaign_lock:
@@ -1185,7 +1703,41 @@ class SpikeExecutionCoordinator:
             if not self.account.all_orders_terminal(symbol):
                 return False
             await self._settle_campaign(lease)
-            released = await self.campaign_store.release(campaign_id)
+            event_time = self._now_ms()
+            started = await self._append_execution_event(
+                "campaign.release_started",
+                source="spike.campaign",
+                event_time=event_time,
+                trace_id=campaign_id,
+                symbol=lease.symbol,
+                campaign_id=campaign_id,
+                details=self._campaign_lease_details(lease),
+            )
+            try:
+                released = await self.campaign_store.release(campaign_id)
+            except BaseException as exc:
+                await self._append_campaign_failed(
+                    "release",
+                    lease,
+                    event_time=event_time,
+                    started=started,
+                    exc=exc,
+                    result_key="released",
+                )
+                raise
+            await self._append_execution_event(
+                "campaign.release_result",
+                source="spike.campaign",
+                event_time=event_time,
+                causation_id=None if started is None else started.event_id,
+                trace_id=campaign_id,
+                symbol=lease.symbol,
+                campaign_id=campaign_id,
+                details={
+                    **self._campaign_lease_details(lease),
+                    "released": released,
+                },
+            )
             if released:
                 self._owned_campaign_id = None
                 self._owned_campaign_lease = None
@@ -1327,12 +1879,17 @@ class SpikeExecutionCoordinator:
         await self._flush_cancellations()
 
     async def _publish_audit(self) -> bool:
-        if self.audit_sink is None:
+        if self.audit_sink is None and self.event_journal is None:
             return True
         async with self._audit_lock:
-            self._drain_strategy_audit_events()
+            await self._drain_strategy_audit_events()
+            await self._mirror_pending_audit_events()
             events = self._pending_audit_events
             if not events:
+                return True
+            if self.audit_sink is None:
+                self._pending_audit_events = ()
+                self._journaled_audit_count = 0
                 return True
             try:
                 await self.audit_sink(events)
@@ -1345,19 +1902,39 @@ class SpikeExecutionCoordinator:
                 )
                 return False
             self._pending_audit_events = self._pending_audit_events[len(events) :]
+            self._journaled_audit_count = 0
             return True
 
     async def _stage_strategy_audit_events(self) -> bool:
-        if self.audit_sink is None:
+        if self.audit_sink is None and self.event_journal is None:
             return False
         async with self._audit_lock:
-            return self._drain_strategy_audit_events()
+            await self._drain_strategy_audit_events()
+            await self._mirror_pending_audit_events()
+            return bool(self._pending_audit_events)
 
-    def _drain_strategy_audit_events(self) -> bool:
+    async def _drain_strategy_audit_events(self) -> bool:
         events = tuple(self.strategy.drain_audit_events())
         if events:
             self._pending_audit_events += events
         return bool(self._pending_audit_events)
+
+    async def _mirror_pending_audit_events(self) -> None:
+        if self.event_journal is None:
+            self._journaled_audit_count = len(self._pending_audit_events)
+            return
+        while self._journaled_audit_count < len(self._pending_audit_events):
+            event = self._pending_audit_events[self._journaled_audit_count]
+            await self._append_execution_event(
+                f"strategy.audit.{event.event_type}",
+                source="spike.strategy",
+                event_time=event.event_time,
+                trace_id=event.campaign_id,
+                symbol=event.symbol,
+                campaign_id=event.campaign_id,
+                details=event.details,
+            )
+            self._journaled_audit_count += 1
 
     def _close_on_audit_failure(self, reason: str) -> None:
         self.gate.set_condition("execution", False)
@@ -1412,12 +1989,14 @@ class SpikeRuntimeCallbacks:
         coordinator: SpikeExecutionCoordinator,
         gate: CompositeEntryGate,
         risk_guard: RiskGuard | None = None,
+        event_journal: DurableExecutionEventJournal | None = None,
     ):
         self.delegate = delegate
         self.account = account
         self.coordinator = coordinator
         self.gate = gate
         self.risk_guard = risk_guard
+        self.event_journal = event_journal
         self._startup_recovery_ready = asyncio.Event()
         self._startup_recovery_ready.set()
         self._startup_recovery_failed = False
@@ -1438,8 +2017,28 @@ class SpikeRuntimeCallbacks:
         if self._startup_recovery_failed:
             raise RuntimeError("Spike startup recovery failed")
 
+    async def _append_execution_event(
+        self, event_type: str, **kwargs: Any
+    ) -> ExecutionEvent | None:
+        if self.event_journal is None:
+            return None
+        return await self.event_journal.append(
+            event_type, source="spike.user_stream", **kwargs
+        )
+
     async def handle_execution_report(self, order_data: dict[str, Any]) -> None:
+        received: ExecutionEvent | None = None
+        client_order_id = str(order_data.get("c") or "") or None
+        exchange_order_id = str(order_data.get("i") or "") or None
         try:
+            received = await self._append_execution_event(
+                "exchange.order_trade_update_received",
+                trace_id=client_order_id,
+                symbol=str(order_data.get("s") or "") or None,
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                details={"payload": order_data},
+            )
             await self._wait_for_startup_recovery()
             await self.delegate.handle_execution_report(order_data)
             fill = self.account.handle_execution_report(order_data)
@@ -1450,14 +2049,49 @@ class SpikeRuntimeCallbacks:
             symbol = str(order_data.get("s") or "")
             if symbol:
                 await self.coordinator.maybe_release_campaign(symbol)
-        except BaseException:
+            await self._append_execution_event(
+                "exchange.order_trade_update_processed",
+                trace_id=(
+                    client_order_id
+                    if client_order_id is not None
+                    else None if received is None else received.trace_id
+                ),
+                causation_id=None if received is None else received.event_id,
+                symbol=symbol or None,
+                client_order_id=client_order_id,
+                exchange_order_id=exchange_order_id,
+                details={"fill_generated": fill is not None},
+            )
+        except BaseException as exc:
             self.gate.set_condition("execution", False)
             if self.risk_guard is not None:
                 self.risk_guard.halt("execution report handling failed")
+            if received is not None:
+                try:
+                    await self._append_execution_event(
+                        "exchange.order_trade_update_failed",
+                        severity="error",
+                        trace_id=received.trace_id,
+                        causation_id=received.event_id,
+                        symbol=str(order_data.get("s") or "") or None,
+                        client_order_id=client_order_id,
+                        exchange_order_id=exchange_order_id,
+                        details=SpikeExecutionCoordinator._exception_details(exc),
+                    )
+                except BaseException as journal_exc:
+                    exc.add_note(
+                        "exchange.order_trade_update_failed journal append failed: "
+                        f"{type(journal_exc).__name__}: {journal_exc}"
+                    )
             raise
 
     async def handle_account_update(self, event: dict[str, Any]) -> None:
+        received: ExecutionEvent | None = None
         try:
+            received = await self._append_execution_event(
+                "exchange.account_update_received",
+                details={"payload": event},
+            )
             await self._wait_for_startup_recovery()
             await self.delegate.handle_account_update(event)
             await self.account.handle_account_update(event)
@@ -1465,8 +2099,28 @@ class SpikeRuntimeCallbacks:
             for symbol in {str(item.get("s") or "") for item in positions} - {""}:
                 await self.coordinator.reconcile_position(symbol)
                 await self.coordinator.maybe_release_campaign(symbol)
-        except BaseException:
+            await self._append_execution_event(
+                "exchange.account_update_processed",
+                trace_id=None if received is None else received.trace_id,
+                causation_id=None if received is None else received.event_id,
+                details={"position_count": len(positions)},
+            )
+        except BaseException as exc:
             self.gate.set_condition("execution", False)
             if self.risk_guard is not None:
                 self.risk_guard.halt("account update handling failed")
+            if received is not None:
+                try:
+                    await self._append_execution_event(
+                        "exchange.account_update_failed",
+                        severity="error",
+                        trace_id=received.trace_id,
+                        causation_id=received.event_id,
+                        details=SpikeExecutionCoordinator._exception_details(exc),
+                    )
+                except BaseException as journal_exc:
+                    exc.add_note(
+                        "exchange.account_update_failed journal append failed: "
+                        f"{type(journal_exc).__name__}: {journal_exc}"
+                    )
             raise

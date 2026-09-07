@@ -95,6 +95,7 @@ services:
       BACKTEST_ARCHIVE_INDEX_PATH: ${BACKTEST_ARCHIVE_INDEX_PATH:-/app/data/market/candles/archive_index.parquet}
       LEDGER_HOST: 0.0.0.0
       LEDGER_PORT: 8001
+      EXECUTION_EVENT_QUERY_TOKEN: ${EXECUTION_EVENT_QUERY_TOKEN:-}
     ports:
       - "8001:8001"
     volumes:
@@ -194,7 +195,7 @@ services:
       STRATEGY_RISK_MAX_POSITION_VALUE_USDT: ${STRATEGY_RISK_MAX_POSITION_VALUE_USDT:-1000}
       STRATEGY_RISK_MAX_SYMBOLS: ${STRATEGY_RISK_MAX_SYMBOLS:-1}
       SPIKE_MODE: ${SPIKE_MODE:-testnet}
-      # V22 remains the business default; testnet orchestration must explicitly use V2.
+      # The live/testnet runtime uses the immutable baseline V22 definition by default.
       SPIKE_STRATEGY_PATH: ${SPIKE_STRATEGY_PATH:-trading_platform.strategies.spike.v2_2:V22}
       SPIKE_EXIT_POLICY: ${SPIKE_EXIT_POLICY:-candidate-v1}
       SPIKE_ACCOUNT_ID: ${SPIKE_ACCOUNT_ID:-spike_testnet}

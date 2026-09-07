@@ -555,7 +555,13 @@ async def test_live_market_subscription_requests_15m_klines():
         f"/subscriptions/{process._consumer_id}",
         json={
             "symbols": ["AKEUSDT"],
-            "types": ["bar1s", "kline:1m", "kline:5m", "kline:15m"],
+            "types": [
+                "bar1s",
+                "kline:1m",
+                "kline:5m",
+                "kline:15m",
+                "metrics:5m",
+            ],
         },
     )
     response.raise_for_status.assert_called_once_with()
