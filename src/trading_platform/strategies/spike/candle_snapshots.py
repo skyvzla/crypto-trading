@@ -54,8 +54,27 @@ class SnapshotManifestDB(Protocol):
     ) -> CampaignCandleSnapshotManifest:
         ...
 
+    async def list_collecting_campaign_snapshots(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+    ) -> list[CampaignCandleSnapshotManifest]:
+        ...
+
+    async def list_failed_campaign_snapshots_missing_event(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+    ) -> list[CampaignCandleSnapshotManifest]:
+        ...
+
 
 SnapshotEventSink = Callable[..., Awaitable[None]]
+ORPHAN_COLLECTING_SNAPSHOT_REASON = (
+    "snapshot recovery found collecting manifest without local staging or completion outbox"
+)
 
 
 class SnapshotRuntimeError(RuntimeError):
@@ -110,6 +129,40 @@ class LiveCandleSnapshotRuntime:
         self._manifest_worker: asyncio.Task[None] | None = None
         self._stopping = False
         self._pending_snapshot_ids: set[str] = set()
+        self._store_lock = asyncio.Lock()
+
+    async def _run_store_call(
+        self, operation: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
+        """Serialize store access and outlive cancellation of ``to_thread``."""
+
+        async with self._store_lock:
+            task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError as cancelled:
+                # Cancelling the awaiter does not stop its worker thread.  Keep
+                # the store lock until that thread has actually returned, even
+                # if shutdown cancels this task more than once.
+                while not task.done():
+                    try:
+                        await asyncio.shield(task)
+                    except asyncio.CancelledError:
+                        continue
+                    except BaseException:
+                        # The worker has finished with an exception.  Leave
+                        # it for the result() call below to mark as observed,
+                        # then restore the caller's cancellation.
+                        break
+                # The caller was cancelled while the worker was still
+                # running.  Observe the worker outcome so asyncio does not
+                # report an unhandled exception, but preserve the caller's
+                # cancellation even when the store failed at the same time.
+                try:
+                    task.result()
+                except BaseException:
+                    pass
+                raise cancelled
 
     @property
     def failed(self) -> bool:
@@ -132,13 +185,17 @@ class LiveCandleSnapshotRuntime:
         if self._manifest_worker is not None and not self._manifest_worker.done():
             return
         self._stopping = False
-        recovered = await asyncio.to_thread(
+        recovered = await self._run_store_call(
             self.store.recover_staging,
             int(time.time() * 1000),
             finalize_expired=True,
         )
-        pending = await asyncio.to_thread(self.store.pending_manifests)
+        pending = await self._run_store_call(self.store.pending_manifests)
         self._pending_snapshot_ids = {manifest.snapshot_id for manifest in pending}
+        await self._reconcile_collecting_manifests(
+            durable_snapshot_ids=set(self.store.active_snapshot_ids)
+            | self._pending_snapshot_ids
+        )
         self._manifest_worker = asyncio.create_task(
             self._manifest_worker_loop(), name="spike-snapshot-manifest-worker"
         )
@@ -147,11 +204,68 @@ class LiveCandleSnapshotRuntime:
         for manifest in recovered:
             await self._manifest_queue.put(manifest)
 
+    async def _reconcile_collecting_manifests(
+        self, *, durable_snapshot_ids: set[str]
+    ) -> None:
+        """Fail database rows that lost every local recovery record.
+
+        ``ensure_signal_snapshot`` commits PostgreSQL before creating the
+        local WAL, so a process crash in that narrow interval can leave a
+        collecting row with no local state.  Startup is the first point at
+        which both stores can be compared; fail closed there instead of
+        leaving an indefinitely collecting orphan visible to the API.
+        """
+
+        try:
+            newly_failed_ids: set[str] = set()
+            collecting = await self.db.list_collecting_campaign_snapshots(
+                account_id=self.account_id,
+                strategy_id=self.strategy_id,
+            )
+            for stored in collecting:
+                if stored.snapshot_id in durable_snapshot_ids:
+                    continue
+                await self.db.fail_campaign_snapshot(
+                    stored.snapshot_id,
+                    reason=ORPHAN_COLLECTING_SNAPSHOT_REASON,
+                )
+                newly_failed_ids.add(stored.snapshot_id)
+                await self._emit_failure(
+                    stored.snapshot_id,
+                    ORPHAN_COLLECTING_SNAPSHOT_REASON,
+                    durable=True,
+                )
+            # A process can crash after the manifest transaction commits but
+            # before the event journal append.  Re-emit every terminal failure
+            # at startup; the domain idempotency key makes this safe when the
+            # event was already persisted.
+            failed = await self.db.list_failed_campaign_snapshots_missing_event(
+                account_id=self.account_id,
+                strategy_id=self.strategy_id,
+            )
+            for stored in failed:
+                if stored.snapshot_id in newly_failed_ids:
+                    continue
+                await self._emit_failure(
+                    stored.snapshot_id,
+                    stored.failure_reason or "snapshot manifest is failed",
+                    durable=True,
+                )
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            reason = (
+                "snapshot startup reconciliation failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            self._fault_reason = reason
+            raise SnapshotRuntimeError(reason) from exc
+
     async def observe_bar(self, bar: Bar1s) -> tuple[SnapshotManifest, ...]:
         """Persist a finalized 1s bar into the rolling buffer and active WALs."""
 
         try:
-            manifests = await asyncio.to_thread(self.store.observe_bar, bar)
+            manifests = await self._run_store_call(self.store.observe_bar, bar)
             for manifest in manifests:
                 await self._manifest_queue.put(manifest)
             return manifests
@@ -206,11 +320,14 @@ class LiveCandleSnapshotRuntime:
             if status == "completed":
                 self._snapshot_ids[campaign_id] = snapshot_id
                 return snapshot_id
+            active_snapshot_ids = await self._run_store_call(
+                lambda: self.store.active_snapshot_ids
+            )
             if (
-                snapshot_id not in self.store.active_snapshot_ids
+                snapshot_id not in active_snapshot_ids
                 and snapshot_id not in self._pending_snapshot_ids
             ):
-                await asyncio.to_thread(
+                await self._run_store_call(
                     self.store.start_snapshot,
                     snapshot_id,
                     symbol,
@@ -222,11 +339,13 @@ class LiveCandleSnapshotRuntime:
             raise
         except BaseException as exc:
             reason = f"snapshot start failed: {type(exc).__name__}: {exc}"
+            failure_persisted = False
             try:
                 await self.db.fail_campaign_snapshot(
                     snapshot_id,
                     reason=reason,
                 )
+                failure_persisted = True
             except BaseException as fail_exc:
                 exc.add_note(
                     "snapshot failure manifest update failed: "
@@ -234,7 +353,11 @@ class LiveCandleSnapshotRuntime:
                 )
             self._fault_reason = reason
             try:
-                await self._emit_failure(snapshot_id, reason)
+                await self._emit_failure(
+                    snapshot_id,
+                    reason,
+                    durable=failure_persisted,
+                )
             except BaseException as emit_exc:
                 exc.add_note(
                     "snapshot failure event emission failed: "
@@ -264,7 +387,7 @@ class LiveCandleSnapshotRuntime:
         """Seal active windows; incomplete tails remain explicitly marked."""
 
         try:
-            manifests = await asyncio.to_thread(self.store.close, now_ms)
+            manifests = await self._run_store_call(self.store.close, now_ms)
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
@@ -330,11 +453,15 @@ class LiveCandleSnapshotRuntime:
             coverage=manifest.coverage,
             gaps=manifest.gaps,
         )
-        await asyncio.to_thread(self.store.ack_manifest, manifest)
-        self._pending_snapshot_ids.discard(manifest.snapshot_id)
+        # The outbox is the durable retry boundary.  Emit the completion fact
+        # before acknowledging it so a process crash or journal failure leaves
+        # the manifest available for replay after restart.  PostgreSQL
+        # completion is idempotent, and the event journal carries the durable
+        # completion fact that makes acknowledgement safe.
         await self._emit(
             "market.snapshot_completed",
             snapshot_id=snapshot_id,
+            idempotency_key=f"market.snapshot_completed:{snapshot_id}",
             campaign_id=manifest.campaign_id,
             symbol=manifest.symbol,
             event_time=manifest.end_time_ms,
@@ -347,11 +474,25 @@ class LiveCandleSnapshotRuntime:
                 "complete": manifest.complete,
             },
         )
+        await self._run_store_call(self.store.ack_manifest, manifest)
+        self._pending_snapshot_ids.discard(manifest.snapshot_id)
 
-    async def _emit_failure(self, snapshot_id: str | None, reason: str) -> None:
+    async def _emit_failure(
+        self,
+        snapshot_id: str | None,
+        reason: str,
+        *,
+        durable: bool = False,
+    ) -> None:
         await self._emit(
             "market.snapshot_failed",
             snapshot_id=snapshot_id,
+            severity="error",
+            idempotency_key=(
+                f"market.snapshot_failed:{snapshot_id}"
+                if durable and snapshot_id is not None
+                else None
+            ),
             details={"reason": reason},
         )
 
@@ -366,6 +507,7 @@ CandleSnapshotRuntime = LiveCandleSnapshotRuntime
 __all__ = [
     "CandleSnapshotRuntime",
     "LiveCandleSnapshotRuntime",
+    "ORPHAN_COLLECTING_SNAPSHOT_REASON",
     "SnapshotManifestDB",
     "SnapshotRuntimeError",
 ]

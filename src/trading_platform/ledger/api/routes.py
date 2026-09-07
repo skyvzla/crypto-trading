@@ -289,6 +289,7 @@ class ExecutionEventResponse(BaseModel):
     campaign_id: Optional[str] = None
     client_order_id: Optional[str] = None
     exchange_order_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
     details: dict[str, Any]
     payload_hash: str
     received_at: datetime

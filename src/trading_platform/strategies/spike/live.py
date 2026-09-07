@@ -274,6 +274,10 @@ class CandleSnapshotRuntime(Protocol):
     def failed(self) -> bool:
         ...
 
+    @property
+    def fault_reason(self) -> str | None:
+        ...
+
 
 class CampaignFundingSource(Protocol):
     async def sync_funding_fee_total(
@@ -349,6 +353,13 @@ class SpikeExecutionCoordinator:
         self._entry_pipeline_close_reason: str | None = None
         self._bar_event_counts: dict[str, int] = {}
         self._last_bar_checkpoint_time: dict[str, int] = {}
+        # Snapshot persistence is deliberately serialized, but it must not
+        # hold the strategy event loop while Parquet/WAL fsync is in flight.
+        self._snapshot_observation_tail: asyncio.Task[bool] | None = None
+        self._snapshot_observation_tasks: set[asyncio.Task[bool]] = set()
+        self._entry_snapshot_tasks: set[asyncio.Task[None]] = set()
+        self._entry_snapshot_lock = asyncio.Lock()
+        self._snapshot_pipeline_stopping = False
 
     def start_execution_worker(self) -> asyncio.Task[None]:
         """启动唯一账户执行 worker，并把任务交给进程监督。"""
@@ -730,6 +741,150 @@ class SpikeExecutionCoordinator:
                 )
             return False
 
+    def _schedule_snapshot_observation(self, bar: Bar1s) -> asyncio.Task[bool] | None:
+        """Queue one ordered snapshot write without blocking the bar loop.
+
+        ``LiveSnapshotStore`` is intentionally single-writer.  Chaining the
+        tasks preserves that contract while allowing strategy evaluation and
+        reduce-only queueing to continue while the worker thread performs WAL
+        fsync/Parquet work.
+        """
+
+        if self.snapshot_runtime is None or self._snapshot_pipeline_stopping:
+            return None
+        previous = self._snapshot_observation_tail
+
+        async def observe_after_previous() -> bool:
+            if previous is not None:
+                await previous
+            return await self._observe_snapshot_bar(bar)
+
+        task = asyncio.create_task(
+            observe_after_previous(),
+            name=f"spike-snapshot-observe:{bar.symbol}:{bar.timestamp}",
+        )
+        self._snapshot_observation_tail = task
+        self._snapshot_observation_tasks.add(task)
+
+        def discard(completed: asyncio.Task[bool]) -> None:
+            self._snapshot_observation_tasks.discard(completed)
+            if self._snapshot_observation_tail is completed:
+                self._snapshot_observation_tail = None
+
+        task.add_done_callback(discard)
+        return task
+
+    def _schedule_entry_snapshot_pipeline(
+        self,
+        intents: list[OrderIntent],
+        *,
+        event_time: int,
+        snapshot_observation: asyncio.Task[bool],
+        queued: bool,
+    ) -> None:
+        """Prepare fail-closed entries away from the strategy event loop."""
+
+        if self._snapshot_pipeline_stopping:
+            return
+        task = asyncio.create_task(
+            self._run_entry_snapshot_pipeline(
+                intents,
+                event_time=event_time,
+                snapshot_observation=snapshot_observation,
+                queued=queued,
+            ),
+            name=f"spike-entry-snapshot:{event_time}",
+        )
+        self._entry_snapshot_tasks.add(task)
+
+        def discard(completed: asyncio.Task[None]) -> None:
+            self._entry_snapshot_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                completed.result()
+            except BaseException as exc:
+                # The runner records/halts on failures.  Consume the result so
+                # asyncio does not emit an unobserved-task warning during stop.
+                logger.error("Spike entry snapshot pipeline failed", exc_info=exc)
+
+        task.add_done_callback(discard)
+
+    async def _run_entry_snapshot_pipeline(
+        self,
+        intents: list[OrderIntent],
+        *,
+        event_time: int,
+        snapshot_observation: asyncio.Task[bool],
+        queued: bool,
+    ) -> None:
+        try:
+            async with self._entry_snapshot_lock:
+                entries = [intent for intent in intents if not intent.reduce_only]
+                if not entries:
+                    return
+                snapshot_ok = await snapshot_observation
+                if not snapshot_ok:
+                    reason = (
+                        self.snapshot_runtime.fault_reason
+                        if self.snapshot_runtime is not None
+                        else "live 1s snapshot unavailable"
+                    )
+                    for intent in entries:
+                        await self._fail_snapshot_entry(
+                            intent,
+                            event_time=event_time,
+                            reason=reason or "live 1s snapshot unavailable",
+                        )
+                    return
+                prepared = await self._prepare_entry_snapshots(
+                    entries,
+                    event_time=event_time,
+                )
+                if prepared:
+                    # Snapshot I/O is outside the coordinator lock.  Re-enter
+                    # it only for the in-memory arbiter/queue transition so a
+                    # later bar cannot race this entry admission.
+                    async with self._lock:
+                        if self._snapshot_pipeline_stopping:
+                            return
+                        if queued:
+                            await self._enqueue_intents(
+                                prepared,
+                                event_time=event_time,
+                            )
+                        else:
+                            execution_complete = await self._execute(
+                                prepared,
+                                event_time=event_time,
+                                require_arbitrated=not queued,
+                            )
+                            if execution_complete:
+                                await self._persist_exit_state(prepared[0].symbol)
+                            await self._flush_cancellations()
+                            await self._publish_audit()
+                            await self.maybe_release_campaign(prepared[0].symbol)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            reason = f"entry snapshot pipeline failed: {type(exc).__name__}: {exc}"
+            self.gate.set_condition("snapshot", False)
+            self.risk_guard.halt(reason)
+            try:
+                await self._append_execution_event(
+                    "market.snapshot_failed",
+                    source="spike.market_snapshot",
+                    event_time=event_time,
+                    severity="error",
+                    trace_id=f"entry-snapshot:{event_time}",
+                    details={"reason": reason},
+                )
+            except BaseException as journal_exc:
+                exc.add_note(
+                    "entry snapshot failure event journal append failed: "
+                    f"{type(journal_exc).__name__}: {journal_exc}"
+                )
+
     async def _prepare_entry_snapshots(
         self, intents: list[OrderIntent], *, event_time: int
     ) -> list[OrderIntent]:
@@ -821,6 +976,17 @@ class SpikeExecutionCoordinator:
         reason: str,
         campaign_id: str | None = None,
     ) -> None:
+        if campaign_id is None:
+            try:
+                campaign_id = self._campaign_id(intent)
+            except BaseException:
+                campaign_id = None
+        if (
+            campaign_id is not None
+            and self._owned_campaign_id is None
+            and self._signal_arbiter.active_campaign_id == campaign_id
+        ):
+            self._signal_arbiter.release(campaign_id)
         self.gate.set_condition("snapshot", False)
         self.risk_guard.halt(reason)
         await self._append_execution_event(
@@ -904,7 +1070,10 @@ class SpikeExecutionCoordinator:
 
     async def on_bar1s(self, bar: Bar1s) -> None:
         async with self._lock:
-            snapshot_ok = await self._observe_snapshot_bar(bar)
+            if self._snapshot_pipeline_stopping:
+                return
+            snapshot_observation = self._schedule_snapshot_observation(bar)
+            snapshot_ok = True
             legacy_journal = self.snapshot_runtime is None
             trace_id = f"bar1s:{bar.symbol}:{bar.available_time}"
             received = None
@@ -919,9 +1088,6 @@ class SpikeExecutionCoordinator:
                 )
             checkpoint_due = self._bar_checkpoint_due(bar)
             intents = self.strategy.on_bar1s(bar)
-            intents = await self._prepare_entry_snapshots(
-                intents, event_time=bar.available_time
-            )
             if not legacy_journal and snapshot_ok:
                 received = await self._journal_bar_observation(
                     bar, intents, checkpoint_due=checkpoint_due
@@ -936,20 +1102,56 @@ class SpikeExecutionCoordinator:
                     symbol=bar.symbol,
                     details={"intent_count": len(intents)},
                 )
+            if snapshot_observation is None:
+                intents = await self._prepare_entry_snapshots(
+                    intents, event_time=bar.available_time
+                )
+                immediate = intents
+            else:
+                immediate = [intent for intent in intents if intent.reduce_only]
+                entries = [intent for intent in intents if not intent.reduce_only]
+                if entries:
+                    admitted_campaigns = await self._arbitrate_entry_campaigns(
+                        entries, event_time=bar.available_time
+                    )
+                else:
+                    admitted_campaigns = []
+                intents = [
+                    *immediate,
+                    *(
+                        intent
+                        for campaign_entries in admitted_campaigns
+                        for intent in campaign_entries
+                    ),
+                ]
             execution_complete = await self._execute(
-                intents, event_time=bar.available_time
+                immediate, event_time=bar.available_time
             )
             if execution_complete:
                 await self._persist_exit_state(bar.symbol)
             await self._flush_cancellations()
             await self._publish_audit()
             await self.maybe_release_campaign(bar.symbol)
+            if snapshot_observation is not None and any(
+                not intent.reduce_only for intent in intents
+            ):
+                self._schedule_entry_snapshot_pipeline(
+                    intents,
+                    event_time=bar.available_time,
+                    snapshot_observation=snapshot_observation,
+                    queued=False,
+                )
 
     async def on_bar1s_queued(self, bar: Bar1s) -> None:
         """只计算策略并排队执行，不在策略事件循环中等待交易所 REST。"""
 
         async with self._lock:
-            snapshot_ok = await self._observe_snapshot_bar(bar)
+            if self._snapshot_pipeline_stopping:
+                return
+            snapshot_observation = self._schedule_snapshot_observation(bar)
+            # The snapshot task is ordered and fail-closed for entries, but
+            # its disk/WAL work must not delay strategy evaluation or exits.
+            snapshot_ok = True
             legacy_journal = self.snapshot_runtime is None
             trace_id = f"bar1s:{bar.symbol}:{bar.available_time}"
             received = None
@@ -964,9 +1166,6 @@ class SpikeExecutionCoordinator:
                 )
             checkpoint_due = self._bar_checkpoint_due(bar)
             intents = self.strategy.on_bar1s(bar)
-            intents = await self._prepare_entry_snapshots(
-                intents, event_time=bar.available_time
-            )
             if not legacy_journal and snapshot_ok:
                 received = await self._journal_bar_observation(
                     bar, intents, checkpoint_due=checkpoint_due
@@ -981,9 +1180,29 @@ class SpikeExecutionCoordinator:
                     symbol=bar.symbol,
                     details={"intent_count": len(intents)},
                 )
-            queued = await self._enqueue_intents(
-                intents, event_time=bar.available_time
-            )
+            if snapshot_observation is None:
+                # Preserve the synchronous/fail-closed path for deployments
+                # that do not enable live campaign snapshots.
+                intents = await self._prepare_entry_snapshots(
+                    intents, event_time=bar.available_time
+                )
+                queued = await self._enqueue_intents(
+                    intents, event_time=bar.available_time
+                )
+            else:
+                # Reduce-only intents are independent of entry snapshot
+                # durability and must reach the priority queue immediately.
+                exits = [intent for intent in intents if intent.reduce_only]
+                queued = await self._enqueue_intents(
+                    exits, event_time=bar.available_time
+                )
+                if any(not intent.reduce_only for intent in intents):
+                    self._schedule_entry_snapshot_pipeline(
+                        intents,
+                        event_time=bar.available_time,
+                        snapshot_observation=snapshot_observation,
+                        queued=True,
+                    )
             audit_pending = await self._stage_strategy_audit_events()
             if not queued and (
                 audit_pending or self.account.has_pending_cancellations
@@ -1378,9 +1597,65 @@ class SpikeExecutionCoordinator:
                     "intent": self._intent_details(intent),
                 },
             )
+        campaigns = await self._arbitrate_entry_campaigns(
+            entries, event_time=event_time
+        )
+        for campaign_entries in campaigns:
+            campaign_id = self._campaign_id(campaign_entries[0])
+            for intent in campaign_entries:
+                try:
+                    self.execution_queue.put_nowait(
+                        "entry", intent=intent, event_time=event_time
+                    )
+                except asyncio.QueueFull:
+                    await self._append_execution_event(
+                        "execution.intent_rejected",
+                        source="spike.execution_queue",
+                        event_time=event_time,
+                        severity="warning",
+                        trace_id=intent.client_order_id,
+                        symbol=intent.symbol,
+                        campaign_id=campaign_id,
+                        client_order_id=intent.client_order_id,
+                        details={
+                            "reason": "entry_execution_queue_full",
+                            "intent": self._intent_details(intent),
+                        },
+                    )
+                    self.close_entry_pipeline(
+                        "entry execution queue full",
+                        symbol=intent.symbol,
+                        event_time=event_time,
+                    )
+                    continue
+                await self._append_execution_event(
+                    "execution.intent_queued",
+                    source="spike.execution_queue",
+                    event_time=event_time,
+                    trace_id=intent.client_order_id,
+                    symbol=intent.symbol,
+                    campaign_id=campaign_id,
+                    client_order_id=intent.client_order_id,
+                    details={"kind": "entry", "intent": self._intent_details(intent)},
+                )
+                queued += 1
+        return queued
+
+    async def _arbitrate_entry_campaigns(
+        self, entries: list[OrderIntent], *, event_time: int
+    ) -> list[list[OrderIntent]]:
+        """Admit entry Campaigns once, before or after snapshot I/O.
+
+        Direct execution has no execution-queue admission step, so it must
+        reserve the same local FIFO arbiter slot before its asynchronous
+        snapshot work begins.  The final ``_execute`` call rechecks that slot
+        and the signal TTL after the I/O completes.
+        """
+
         campaigns: dict[str, list[OrderIntent]] = {}
         for intent in entries:
             campaigns.setdefault(self._campaign_id(intent), []).append(intent)
+        admitted: list[list[OrderIntent]] = []
         for campaign_id, campaign_entries in campaigns.items():
             if not self.gate.enabled:
                 for intent in campaign_entries:
@@ -1447,44 +1722,8 @@ class SpikeExecutionCoordinator:
                     details={"arrival_sequence": candidate.arrival_sequence},
                 ),
             )
-            for intent in campaign_entries:
-                try:
-                    self.execution_queue.put_nowait(
-                        "entry", intent=intent, event_time=event_time
-                    )
-                except asyncio.QueueFull:
-                    await self._append_execution_event(
-                        "execution.intent_rejected",
-                        source="spike.execution_queue",
-                        event_time=event_time,
-                        severity="warning",
-                        trace_id=intent.client_order_id,
-                        symbol=intent.symbol,
-                        campaign_id=campaign_id,
-                        client_order_id=intent.client_order_id,
-                        details={
-                            "reason": "entry_execution_queue_full",
-                            "intent": self._intent_details(intent),
-                        },
-                    )
-                    self.close_entry_pipeline(
-                        "entry execution queue full",
-                        symbol=intent.symbol,
-                        event_time=event_time,
-                    )
-                    continue
-                await self._append_execution_event(
-                    "execution.intent_queued",
-                    source="spike.execution_queue",
-                    event_time=event_time,
-                    trace_id=intent.client_order_id,
-                    symbol=intent.symbol,
-                    campaign_id=campaign_id,
-                    client_order_id=intent.client_order_id,
-                    details={"kind": "entry", "intent": self._intent_details(intent)},
-                )
-                queued += 1
-        return queued
+            admitted.append(campaign_entries)
+        return admitted
 
     def _enqueue_maintenance(self, *, event_time: int) -> None:
         if self._maintenance_queued:
@@ -2080,6 +2319,20 @@ class SpikeExecutionCoordinator:
         await self._publish_audit()
 
     async def stop(self) -> None:
+        async with self._lock:
+            self._snapshot_pipeline_stopping = True
+        # Do not cancel snapshot tasks: an observation may be awaiting
+        # ``asyncio.to_thread``, whose worker keeps mutating the store after the
+        # asyncio task is cancelled.  Drain both pipelines before runtime.close
+        # seals the same store.
+        while self._snapshot_observation_tasks or self._entry_snapshot_tasks:
+            pending_snapshot_tasks = tuple(
+                self._snapshot_observation_tasks | self._entry_snapshot_tasks
+            )
+            await asyncio.gather(*pending_snapshot_tasks, return_exceptions=True)
+        self._snapshot_observation_tasks.clear()
+        self._entry_snapshot_tasks.clear()
+        self._snapshot_observation_tail = None
         await self.stop_execution_worker()
         for task in tuple(self._expiry_tasks.values()):
             task.cancel()

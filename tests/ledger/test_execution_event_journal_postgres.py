@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -77,6 +78,7 @@ def make_event(
     campaign_id: str | None = "campaign-1",
     client_order_id: str | None = "client-1",
     exchange_order_id: str | None = None,
+    idempotency_key: str | None = None,
     details: dict[str, Any] | None = None,
 ) -> ExecutionEvent:
     return ExecutionEvent(
@@ -96,6 +98,7 @@ def make_event(
         client_order_id=client_order_id,
         exchange_order_id=exchange_order_id,
         details={} if details is None else details,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -113,6 +116,8 @@ async def test_migration_creates_journal_indexes_trigger_and_constraints(ledger)
         "idx_execution_event_journal_client_order_time",
         "idx_execution_event_journal_exchange_order_time",
         "idx_execution_event_journal_event_time",
+        "idx_execution_event_journal_idempotency_key",
+        "execution_event_journal_snapshot_domain_key",
     }
     async with ledger.pool.connection() as connection:
         table = await (
@@ -281,6 +286,398 @@ async def test_conflicting_event_id_is_rejected_and_batch_is_atomic(ledger):
 
 
 @pytest.mark.asyncio
+async def test_snapshot_lifecycle_domain_key_replays_across_runs_and_rejects_conflicts(
+    ledger,
+):
+    suffix = uuid4().hex[:10]
+    first = make_event(
+        suffix,
+        1,
+        run_id="snapshot-run-1",
+        event_type="market.snapshot_completed",
+        source="spike.market_snapshot",
+        trace_id="snapshot-1",
+        campaign_id=f"campaign-{suffix}",
+        client_order_id=None,
+        details={"snapshot_id": f"snapshot-{suffix}", "sha256": "a" * 64},
+        idempotency_key=f"market.snapshot_completed:snapshot-{suffix}",
+    )
+    replay = make_event(
+        suffix,
+        1,
+        run_id="snapshot-run-2",
+        event_type=first.event_type,
+        source=first.source,
+        trace_id=first.trace_id,
+        campaign_id=first.campaign_id,
+        client_order_id=None,
+        details=first.details,
+        idempotency_key=first.idempotency_key,
+    )
+
+    assert await ledger.insert_execution_events([first]) == 1
+    assert await ledger.insert_execution_events([replay]) == 0
+    _, total = await ledger.list_execution_events(
+        event_type="market.snapshot_completed",
+        campaign_id=first.campaign_id,
+    )
+    assert total == 1
+
+    conflicting = make_event(
+        suffix,
+        1,
+        run_id="snapshot-run-3",
+        event_type=first.event_type,
+        source=first.source,
+        trace_id=first.trace_id,
+        campaign_id=first.campaign_id,
+        client_order_id=None,
+        details={"snapshot_id": f"snapshot-{suffix}", "sha256": "b" * 64},
+        idempotency_key=first.idempotency_key,
+    )
+    with pytest.raises(ValueError, match="idempotency key"):
+        await ledger.insert_execution_events([conflicting])
+
+
+@pytest.mark.asyncio
+async def test_snapshot_domain_row_rejects_same_event_id_with_changed_run_and_time(
+    ledger,
+):
+    suffix = uuid4().hex[:10]
+    snapshot_id = f"snapshot-{suffix}"
+    stored = make_event(
+        suffix,
+        1,
+        event_id=f"event-{suffix}",
+        run_id=f"snapshot-run-{suffix}",
+        event_time=100,
+        event_type="market.snapshot_completed",
+        source="spike.market_snapshot",
+        trace_id=snapshot_id,
+        client_order_id=None,
+        details={"snapshot_id": snapshot_id, "sha256": "a" * 64},
+        idempotency_key=f"market.snapshot_completed:{snapshot_id}",
+    )
+    changed = make_event(
+        suffix,
+        stored.sequence,
+        event_id=stored.event_id,
+        run_id=f"restarted-run-{suffix}",
+        event_time=200,
+        event_type=stored.event_type,
+        source=stored.source,
+        trace_id=stored.trace_id,
+        client_order_id=None,
+        details=stored.details,
+        idempotency_key=stored.idempotency_key,
+    )
+
+    assert await ledger.insert_execution_events([stored]) == 1
+    with pytest.raises(ValueError, match="conflicts with an existing payload"):
+        await ledger.insert_execution_events([changed])
+
+
+@pytest.mark.asyncio
+async def test_snapshot_domain_row_rejects_new_event_id_reusing_run_sequence(ledger):
+    suffix = uuid4().hex[:10]
+    snapshot_id = f"snapshot-{suffix}"
+    stored = make_event(
+        suffix,
+        1,
+        event_id=f"event-{suffix}-stored",
+        run_id=f"snapshot-run-{suffix}",
+        event_type="market.snapshot_completed",
+        source="spike.market_snapshot",
+        trace_id=snapshot_id,
+        client_order_id=None,
+        details={"snapshot_id": snapshot_id, "sha256": "a" * 64},
+        idempotency_key=f"market.snapshot_completed:{snapshot_id}",
+    )
+    changed = make_event(
+        suffix,
+        stored.sequence,
+        event_id=f"event-{suffix}-changed",
+        run_id=stored.run_id,
+        event_time=stored.event_time,
+        event_type=stored.event_type,
+        source=stored.source,
+        trace_id=stored.trace_id,
+        client_order_id=None,
+        details=stored.details,
+        idempotency_key=stored.idempotency_key,
+    )
+
+    assert await ledger.insert_execution_events([stored]) == 1
+    with pytest.raises(ValueError, match="existing run/sequence identity"):
+        await ledger.insert_execution_events([changed])
+
+
+@pytest.mark.asyncio
+async def test_snapshot_domain_row_accepts_complete_same_event_id_replay(ledger):
+    suffix = uuid4().hex[:10]
+    snapshot_id = f"snapshot-{suffix}"
+    event = make_event(
+        suffix,
+        1,
+        event_id=f"event-{suffix}",
+        run_id=f"snapshot-run-{suffix}",
+        event_type="market.snapshot_completed",
+        source="spike.market_snapshot",
+        trace_id=snapshot_id,
+        client_order_id=None,
+        details={"snapshot_id": snapshot_id, "sha256": "a" * 64},
+        idempotency_key=f"market.snapshot_completed:{snapshot_id}",
+    )
+
+    assert await ledger.insert_execution_events([event]) == 1
+    assert await ledger.insert_execution_events([event]) == 0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_domain_row_accepts_new_event_and_run_identity_replay(ledger):
+    suffix = uuid4().hex[:10]
+    snapshot_id = f"snapshot-{suffix}"
+    first = make_event(
+        suffix,
+        1,
+        event_id=f"event-{suffix}-first",
+        run_id=f"snapshot-run-{suffix}-first",
+        event_type="market.snapshot_completed",
+        source="spike.market_snapshot",
+        trace_id=snapshot_id,
+        client_order_id=None,
+        details={"snapshot_id": snapshot_id, "sha256": "a" * 64},
+        idempotency_key=f"market.snapshot_completed:{snapshot_id}",
+    )
+    replay = make_event(
+        suffix,
+        2,
+        event_id=f"event-{suffix}-replay",
+        run_id=f"snapshot-run-{suffix}-replay",
+        event_time=200,
+        event_type=first.event_type,
+        source=first.source,
+        trace_id=first.trace_id,
+        client_order_id=None,
+        details=first.details,
+        idempotency_key=first.idempotency_key,
+    )
+
+    assert await ledger.insert_execution_events([first]) == 1
+    assert await ledger.insert_execution_events([replay]) == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_snapshot_domain_replay_is_atomic_and_validates_payload(
+    ledger,
+):
+    """Two independent pool connections must converge on one domain row.
+
+    The trigger deliberately keeps the first INSERT in flight after taking a
+    transaction advisory lock.  The second INSERT therefore reaches the
+    partial unique index while the first transaction is still active, which
+    exercises PostgreSQL's conflict arbiter instead of relying on scheduler
+    luck to create overlap.
+    """
+
+    suffix = uuid4().hex[:10]
+    snapshot_id = f"snapshot-{suffix}"
+    key = f"market.snapshot_completed:{snapshot_id}"
+    first = make_event(
+        suffix,
+        1,
+        event_id=f"event-{suffix}-first",
+        run_id=f"snapshot-run-{suffix}-first",
+        event_type="market.snapshot_completed",
+        source="spike.market_snapshot",
+        trace_id=f"trace-{suffix}",
+        campaign_id=f"campaign-{suffix}",
+        client_order_id=None,
+        details={"snapshot_id": snapshot_id, "sha256": "a" * 64},
+        idempotency_key=key,
+    )
+    replay = make_event(
+        suffix,
+        1,
+        event_id=f"event-{suffix}-replay",
+        run_id=f"snapshot-run-{suffix}-replay",
+        event_type=first.event_type,
+        source=first.source,
+        trace_id=first.trace_id,
+        campaign_id=first.campaign_id,
+        client_order_id=None,
+        details=first.details,
+        idempotency_key=key,
+    )
+
+    async with ledger.pool.connection() as connection:
+        await connection.execute(
+            """
+            CREATE FUNCTION snapshot_domain_insert_gate()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $gate$
+            BEGIN
+                IF NEW.event_type IN (
+                    'market.snapshot_completed', 'market.snapshot_failed'
+                ) AND NEW.idempotency_key IS NOT NULL THEN
+                    PERFORM pg_advisory_xact_lock(
+                        hashtextextended(
+                            NEW.event_type || ':' || NEW.idempotency_key, 0
+                        )
+                    );
+                    PERFORM pg_sleep(0.2);
+                END IF;
+                RETURN NEW;
+            END;
+            $gate$
+            """
+        )
+        await connection.execute(
+            """
+            CREATE TRIGGER snapshot_domain_insert_gate
+            BEFORE INSERT ON execution_event_journal
+            FOR EACH ROW EXECUTE FUNCTION snapshot_domain_insert_gate()
+            """
+        )
+
+    try:
+        results = await asyncio.gather(
+            ledger.insert_execution_events([first]),
+            ledger.insert_execution_events([replay]),
+        )
+    finally:
+        async with ledger.pool.connection() as connection:
+            await connection.execute(
+                "DROP TRIGGER snapshot_domain_insert_gate "
+                "ON execution_event_journal"
+            )
+            await connection.execute("DROP FUNCTION snapshot_domain_insert_gate()")
+
+    assert sorted(results) == [0, 1]
+    _, total = await ledger.list_execution_events(
+        event_type="market.snapshot_completed",
+        campaign_id=first.campaign_id,
+    )
+    assert total == 1
+
+    conflicting = make_event(
+        suffix,
+        1,
+        event_id=f"event-{suffix}-conflicting",
+        run_id=f"snapshot-run-{suffix}-conflicting",
+        event_type=first.event_type,
+        source=first.source,
+        trace_id=first.trace_id,
+        campaign_id=first.campaign_id,
+        client_order_id=None,
+        details={"snapshot_id": snapshot_id, "sha256": "b" * 64},
+        idempotency_key=key,
+    )
+    with pytest.raises(ValueError, match="idempotency key"):
+        await ledger.insert_execution_events([conflicting])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("identity", "expected_message"),
+    (
+        ("event_id", "conflicts with an existing payload"),
+        ("run_sequence", "existing run/sequence identity"),
+    ),
+)
+async def test_snapshot_domain_replay_rejects_other_identity_collision(
+    ledger, identity, expected_message
+):
+    suffix = uuid4().hex[:10]
+    snapshot_id = f"snapshot-{suffix}"
+    key = f"market.snapshot_completed:{snapshot_id}"
+    stored = make_event(
+        suffix,
+        1,
+        event_id=f"event-{suffix}-stored",
+        run_id=f"snapshot-run-{suffix}-stored",
+        event_type="market.snapshot_completed",
+        source="spike.market_snapshot",
+        trace_id=f"trace-{suffix}",
+        campaign_id=f"campaign-{suffix}",
+        client_order_id=None,
+        details={"snapshot_id": snapshot_id, "sha256": "a" * 64},
+        idempotency_key=key,
+    )
+    proposed = make_event(
+        suffix,
+        2,
+        event_id=f"event-{suffix}-proposed",
+        run_id=f"snapshot-run-{suffix}-proposed",
+        event_type=stored.event_type,
+        source=stored.source,
+        trace_id=stored.trace_id,
+        campaign_id=stored.campaign_id,
+        client_order_id=None,
+        details=stored.details,
+        idempotency_key=key,
+    )
+    blocker = make_event(
+        suffix,
+        3 if identity == "event_id" else proposed.sequence,
+        event_id=(
+            proposed.event_id
+            if identity == "event_id"
+            else f"event-{suffix}-blocker"
+        ),
+        run_id=(
+            f"ordinary-run-{suffix}"
+            if identity == "event_id"
+            else proposed.run_id
+        ),
+        event_type="order.intent_recorded",
+    )
+
+    assert await ledger.insert_execution_events([stored, blocker]) == 2
+    with pytest.raises(ValueError, match=expected_message):
+        await ledger.insert_execution_events([proposed])
+
+    _, total = await ledger.list_execution_events(
+        event_type="market.snapshot_completed",
+        campaign_id=stored.campaign_id,
+    )
+    assert total == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_domain_replay_deduplicates_legacy_unkeyed_event(ledger):
+    suffix = uuid4().hex[:10]
+    snapshot_id = f"snapshot-{suffix}"
+    legacy = make_event(
+        suffix,
+        1,
+        event_type="market.snapshot_failed",
+        source="spike.market_snapshot",
+        trace_id=snapshot_id,
+        details={"snapshot_id": snapshot_id, "reason": "orphan"},
+    )
+    await ledger.insert_execution_events([legacy])
+
+    replay = make_event(
+        suffix,
+        1,
+        run_id="restarted-run",
+        event_type=legacy.event_type,
+        source=legacy.source,
+        trace_id=legacy.trace_id,
+        details=legacy.details,
+        idempotency_key=f"market.snapshot_failed:{snapshot_id}",
+    )
+    assert await ledger.insert_execution_events([replay]) == 0
+    _, total = await ledger.list_execution_events(
+        event_type="market.snapshot_failed",
+        campaign_id=legacy.campaign_id,
+    )
+    assert total == 1
+
+
+@pytest.mark.asyncio
 async def test_unique_run_sequence_failure_rolls_back_prior_batch_rows(ledger):
     suffix = uuid4().hex[:10]
     first = make_event(suffix, 1)
@@ -367,6 +764,9 @@ async def test_execution_events_api_exposes_filters_pagination_and_422(
             1,
             account_id=account,
             event_time=2_000,
+            event_type="market.snapshot_completed",
+            source="spike.market_snapshot",
+            idempotency_key=f"api-event:{suffix}",
             details={"decision": "first"},
         ),
         make_event(
@@ -410,6 +810,8 @@ async def test_execution_events_api_exposes_filters_pagination_and_422(
         events[1].event_id,
     ]
     assert [item["sequence"] for item in payload["items"]] == [1, 2]
+    assert payload["items"][0]["idempotency_key"] == f"api-event:{suffix}"
+    assert payload["items"][1]["idempotency_key"] is None
     assert payload["items"][0]["details"] == {"decision": "first"}
     assert query_token not in response.text
     assert invalid.status_code == 422

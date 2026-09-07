@@ -13,7 +13,10 @@ from psycopg.rows import class_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from trading_platform.shared.execution_event_journal import ExecutionEvent
+from trading_platform.shared.execution_event_journal import (
+    SNAPSHOT_LIFECYCLE_EVENT_TYPES,
+    ExecutionEvent,
+)
 from trading_platform.shared.events import StrategyAuditEvent
 from trading_platform.shared.symbol_universe_query import (
     EFFECTIVE_SYMBOL_UNIVERSE_SQL,
@@ -149,6 +152,7 @@ class ExecutionEventRecord:
     client_order_id: Optional[str] = None
     exchange_order_id: Optional[str] = None
     details: dict[str, Any] | None = None
+    idempotency_key: Optional[str] = None
     payload_hash: str = ""
     received_at: Optional[datetime] = None
 
@@ -527,16 +531,43 @@ class LedgerDB:
             event_id, run_id, sequence, event_time, event_type, source,
             severity, account_id, strategy_id, trace_id, causation_id,
             symbol, campaign_id, client_order_id, exchange_order_id,
-            details, payload_hash
+            details, idempotency_key, payload_hash
         ) VALUES (
             %(event_id)s, %(run_id)s, %(sequence)s, %(event_time)s,
             %(event_type)s, %(source)s, %(severity)s, %(account_id)s,
             %(strategy_id)s, %(trace_id)s, %(causation_id)s, %(symbol)s,
             %(campaign_id)s, %(client_order_id)s, %(exchange_order_id)s,
-            %(details)s, %(payload_hash)s
+            %(details)s, %(idempotency_key)s, %(payload_hash)s
         )
         ON CONFLICT (event_id) DO NOTHING
         RETURNING id
+    """
+    # Domain-keyed snapshot lifecycle records deliberately use an unqualified
+    # ``ON CONFLICT DO NOTHING``.  A domain replay can race any of the table's
+    # unique identities, so the follow-up query must classify every matching
+    # row before accepting it as an idempotent replay.
+    _EXECUTION_EVENT_DOMAIN_INSERT = """
+        INSERT INTO execution_event_journal (
+            event_id, run_id, sequence, event_time, event_type, source,
+            severity, account_id, strategy_id, trace_id, causation_id,
+            symbol, campaign_id, client_order_id, exchange_order_id,
+            details, idempotency_key, payload_hash
+        ) VALUES (
+            %(event_id)s, %(run_id)s, %(sequence)s, %(event_time)s,
+            %(event_type)s, %(source)s, %(severity)s, %(account_id)s,
+            %(strategy_id)s, %(trace_id)s, %(causation_id)s, %(symbol)s,
+            %(campaign_id)s, %(client_order_id)s, %(exchange_order_id)s,
+            %(details)s, %(idempotency_key)s, %(payload_hash)s
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING id
+    """
+    _EXECUTION_EVENT_SELECT = """
+        SELECT event_id, run_id, sequence, event_time, event_type,
+               source, severity, account_id, strategy_id, trace_id,
+               causation_id, symbol, campaign_id, client_order_id,
+               exchange_order_id, details, idempotency_key, payload_hash
+        FROM execution_event_journal
     """
 
     def __init__(self, pool: AsyncConnectionPool):
@@ -679,8 +710,234 @@ class LedgerDB:
         payload_hash = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
         params = payload.copy()
         params["details"] = Jsonb(payload["details"])
+        # The SQL column exists for all rows, while legacy event payload
+        # hashes intentionally omit a NULL domain key for compatibility.
+        params["idempotency_key"] = event.idempotency_key
         params["payload_hash"] = payload_hash
         return params, payload_hash
+
+    @staticmethod
+    def _execution_event_domain_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        """Normalize a snapshot lifecycle payload for domain-key replay.
+
+        A new process necessarily gets a new event ID, run ID, and sequence.
+        Failure emission may also happen at a different wall-clock time.  The
+        domain key identifies the one lifecycle fact; all other stable fields
+        and details remain part of the conflict check.
+        """
+
+        result = dict(payload)
+        if result.get("event_type") in SNAPSHOT_LIFECYCLE_EVENT_TYPES:
+            for field in (
+                "event_id",
+                "run_id",
+                "sequence",
+                "event_time",
+                "idempotency_key",
+                "payload_hash",
+            ):
+                result.pop(field, None)
+        return result
+
+    @classmethod
+    def _execution_event_row_payload(
+        cls, row: Sequence[Any]
+    ) -> dict[str, Any]:
+        fields = (
+            "event_id",
+            "run_id",
+            "sequence",
+            "event_time",
+            "event_type",
+            "source",
+            "severity",
+            "account_id",
+            "strategy_id",
+            "trace_id",
+            "causation_id",
+            "symbol",
+            "campaign_id",
+            "client_order_id",
+            "exchange_order_id",
+            "details",
+            "idempotency_key",
+            "payload_hash",
+        )
+        payload = dict(zip(fields, row, strict=True))
+        payload["details"] = payload["details"] or {}
+        if payload["idempotency_key"] is None:
+            # The optional column was added after the first journal schema;
+            # leave it out so old canonical payload hashes remain valid.
+            payload.pop("idempotency_key")
+        return payload
+
+    @classmethod
+    def _validate_existing_execution_event(
+        cls,
+        event: ExecutionEvent,
+        existing: Sequence[Any],
+        *,
+        payload_hash: str,
+    ) -> None:
+        existing_payload = cls._execution_event_row_payload(existing)
+        if (
+            existing_payload["payload_hash"] != payload_hash
+            or existing_payload["event_id"] != event.event_id
+        ):
+            raise ValueError(
+                f"execution event {event.event_id} conflicts with an existing payload"
+            )
+
+        # A hash collision is not a valid replay proof.  Compare the
+        # canonical payload as well so a manually corrupted row cannot be
+        # silently accepted.
+        expected_payload = cls._execution_event_payload(event)
+        stored_payload = {
+            key: existing_payload[key]
+            for key in expected_payload
+            if key in existing_payload
+        }
+        if stored_payload != expected_payload:
+            raise ValueError(
+                f"execution event {event.event_id} conflicts with an existing payload"
+            )
+
+    @classmethod
+    def _validate_snapshot_domain_event(
+        cls,
+        event: ExecutionEvent,
+        existing: Sequence[Any],
+    ) -> None:
+        stored_payload = cls._execution_event_domain_payload(
+            cls._execution_event_row_payload(existing)
+        )
+        expected_payload = cls._execution_event_domain_payload(
+            cls._execution_event_payload(event)
+        )
+        if stored_payload != expected_payload:
+            raise ValueError(
+                "snapshot lifecycle event conflicts with an existing "
+                f"idempotency key {event.idempotency_key}"
+            )
+
+    @classmethod
+    def _snapshot_domain_row_matches(
+        cls,
+        event: ExecutionEvent,
+        row: Sequence[Any],
+    ) -> bool:
+        if row[4] != event.event_type:
+            return False
+        if row[16] == event.idempotency_key:
+            return True
+        if row[16] is not None:
+            return False
+        snapshot_id = event.details.get("snapshot_id")
+        details = row[15] or {}
+        return snapshot_id is not None and str(details.get("snapshot_id")) == str(
+            snapshot_id
+        )
+
+    @classmethod
+    def _validate_snapshot_domain_identities(
+        cls,
+        event: ExecutionEvent,
+        existing_rows: Sequence[Sequence[Any]],
+        *,
+        payload_hash: str,
+    ) -> None:
+        """Accept one domain replay only when all table identities are safe.
+
+        The domain unique key is only one of three identities on this table.
+        Because the domain insert uses an unqualified conflict handler, a
+        conflict on ``event_id`` or ``(run_id, sequence)`` is visible here as
+        well.  Such a row must never be mistaken for a successful replay.
+        """
+
+        event_id_rows = [row for row in existing_rows if row[0] == event.event_id]
+        if len(event_id_rows) > 1:
+            raise ValueError(
+                "snapshot lifecycle event has multiple existing event_id rows"
+            )
+        if event_id_rows:
+            cls._validate_existing_execution_event(
+                event,
+                event_id_rows[0],
+                payload_hash=payload_hash,
+            )
+
+        run_sequence_rows = [
+            row
+            for row in existing_rows
+            if row[1] == event.run_id and row[2] == event.sequence
+        ]
+        if any(row[0] != event.event_id for row in run_sequence_rows):
+            raise ValueError(
+                "snapshot lifecycle event conflicts with an existing "
+                "run/sequence identity"
+            )
+
+        domain_rows = [
+            row for row in existing_rows if cls._snapshot_domain_row_matches(event, row)
+        ]
+        if len(domain_rows) > 1:
+            raise ValueError(
+                "snapshot lifecycle event has multiple existing domain rows"
+            )
+
+        # An exact event identity replay has already passed the complete
+        # canonical-payload check above.  Domain normalization is reserved for
+        # a genuinely new event/run identity emitted by a restarted process.
+        if event_id_rows:
+            return
+        if run_sequence_rows:
+            raise ValueError(
+                "snapshot lifecycle event conflicts with an existing "
+                "run/sequence identity"
+            )
+        if not domain_rows:
+            raise ValueError(
+                "snapshot lifecycle event conflicts with an existing event_id "
+                "or run/sequence identity"
+            )
+        cls._validate_snapshot_domain_event(event, domain_rows[0])
+
+    async def _select_execution_event_identities(
+        self,
+        conn: object,
+        event: ExecutionEvent,
+    ) -> list[Sequence[Any]]:
+        """Read all identities after a domain INSERT conflict.
+
+        Each ``SELECT`` is a fresh READ COMMITTED statement snapshot, so a
+        concurrent transaction which won the unique-index race is visible to
+        this classification query without leaving the transaction aborted.
+        """
+
+        clauses = [
+            "event_id = %s",
+            "(run_id = %s AND sequence = %s)",
+            "(event_type = %s AND idempotency_key = %s)",
+        ]
+        params: list[object] = [
+            event.event_id,
+            event.run_id,
+            event.sequence,
+            event.event_type,
+            event.idempotency_key,
+        ]
+        snapshot_id = event.details.get("snapshot_id")
+        if snapshot_id is not None:
+            clauses.append(
+                "(event_type = %s AND idempotency_key IS NULL "
+                "AND details ->> 'snapshot_id' = %s)"
+            )
+            params.extend((event.event_type, str(snapshot_id)))
+        cursor = await conn.execute(
+            f"{self._EXECUTION_EVENT_SELECT} WHERE {' OR '.join(clauses)}",
+            tuple(params),
+        )
+        return await cursor.fetchall()
 
     async def insert_execution_events(
         self,
@@ -700,95 +957,74 @@ class LedgerDB:
         inserted = 0
         async with self.transaction() as conn:
             for event, (params, payload_hash) in zip(events, records, strict=True):
+                domain_keyed = (
+                    event.event_type in SNAPSHOT_LIFECYCLE_EVENT_TYPES
+                    and event.idempotency_key is not None
+                )
+                insert_query = (
+                    self._EXECUTION_EVENT_DOMAIN_INSERT
+                    if domain_keyed
+                    else self._EXECUTION_EVENT_INSERT
+                )
+
+                # A legacy row predating the idempotency column is outside the
+                # domain unique index, so retain a compatibility lookup before
+                # INSERT.  The complete identity query also rejects an
+                # event_id/run-sequence collision hidden by this early return.
+                if domain_keyed:
+                    identities = await self._select_execution_event_identities(
+                        conn, event
+                    )
+                    if any(
+                        self._snapshot_domain_row_matches(event, row)
+                        for row in identities
+                    ):
+                        self._validate_snapshot_domain_identities(
+                            event,
+                            identities,
+                            payload_hash=payload_hash,
+                        )
+                        continue
+
                 row = await (
-                    await conn.execute(self._EXECUTION_EVENT_INSERT, params)
+                    await conn.execute(insert_query, params)
                 ).fetchone()
                 if row is not None:
                     inserted += 1
                     continue
 
+                if domain_keyed:
+                    identities = await self._select_execution_event_identities(
+                        conn, event
+                    )
+                    if identities:
+                        self._validate_snapshot_domain_identities(
+                            event,
+                            identities,
+                            payload_hash=payload_hash,
+                        )
+                        continue
+
+                    raise RuntimeError(
+                        "snapshot lifecycle insert was skipped without an "
+                        "identity conflict"
+                    )
+
                 existing = await (
                     await conn.execute(
-                        "SELECT event_id, run_id, sequence, event_time, event_type, "
-                        "source, severity, account_id, strategy_id, trace_id, "
-                        "causation_id, symbol, campaign_id, client_order_id, "
-                        "exchange_order_id, details, payload_hash "
-                        "FROM execution_event_journal WHERE event_id = %s",
+                        f"{self._EXECUTION_EVENT_SELECT} WHERE event_id = %s",
                         (event.event_id,),
                     )
                 ).fetchone()
                 if existing is None:
-                    # The insert can only have been skipped by another unique
-                    # constraint (normally run_id/sequence).  Let PostgreSQL
-                    # surface that invariant violation instead of treating it
-                    # as a successful replay.
                     raise RuntimeError(
                         "execution event insert was skipped without an event_id conflict"
                     )
-                existing_payload = dict(
-                    zip(
-                        (
-                            "event_id",
-                            "run_id",
-                            "sequence",
-                            "event_time",
-                            "event_type",
-                            "source",
-                            "severity",
-                            "account_id",
-                            "strategy_id",
-                            "trace_id",
-                            "causation_id",
-                            "symbol",
-                            "campaign_id",
-                            "client_order_id",
-                            "exchange_order_id",
-                            "details",
-                            "payload_hash",
-                        ),
-                        existing,
-                        strict=True,
-                    )
+                self._validate_existing_execution_event(
+                    event,
+                    existing,
+                    payload_hash=payload_hash,
                 )
-                if (
-                    existing_payload["payload_hash"] != payload_hash
-                    or existing_payload["event_id"] != event.event_id
-                ):
-                    raise ValueError(
-                        f"execution event {event.event_id} conflicts with an existing payload"
-                    )
-
-                # A hash collision is not a valid replay proof.  Compare the
-                # canonical payload as well so a manually corrupted row cannot
-                # be silently accepted.
-                existing_details = existing_payload["details"] or {}
-                existing_payload["details"] = existing_details
-                expected_payload = self._execution_event_payload(event)
-                stored_payload = {
-                    key: existing_payload[key]
-                    for key in (
-                        "event_id",
-                        "run_id",
-                        "sequence",
-                        "event_time",
-                        "event_type",
-                        "source",
-                        "severity",
-                        "account_id",
-                        "strategy_id",
-                        "trace_id",
-                        "causation_id",
-                        "symbol",
-                        "campaign_id",
-                        "client_order_id",
-                        "exchange_order_id",
-                        "details",
-                    )
-                }
-                if stored_payload != expected_payload:
-                    raise ValueError(
-                        f"execution event {event.event_id} conflicts with an existing payload"
-                    )
         return inserted
 
     async def list_execution_events(
@@ -1426,18 +1662,28 @@ class LedgerDB:
         if stored is None:
             raise RuntimeError("created snapshot manifest could not be read back")
         if inserted is None:
-            expected = {
-                key: params[key]
-                for key in (
-                    "account_id", "strategy_id", "campaign_id", "symbol", "run_id",
-                    "signal_time_ms", "window_start_ms", "window_end_ms",
-                    "schema_version", "aggregation_version", "release_hash",
-                )
-            }
+            expected = {"snapshot_id": manifest.snapshot_id}
+            expected.update(
+                {
+                    key: params[key]
+                    for key in (
+                        "account_id", "strategy_id", "campaign_id", "symbol", "run_id",
+                        "signal_time_ms", "window_start_ms", "window_end_ms",
+                        "schema_version", "aggregation_version", "release_hash",
+                    )
+                }
+            )
+            # ``coverage`` and ``gaps`` are part of the immutable initial
+            # snapshot identity.  Compare decoded JSON values rather than the
+            # psycopg ``Jsonb`` wrappers used for INSERT parameters.
+            expected["coverage"] = dict(manifest.coverage or {})
+            expected["gaps"] = list(manifest.gaps or [])
             actual = {
                 key: getattr(stored, key)
                 for key in expected
             }
+            actual["coverage"] = dict(stored.coverage or {})
+            actual["gaps"] = list(stored.gaps or [])
             if actual != expected:
                 raise ValueError(
                     f"snapshot manifest {manifest.snapshot_id} conflicts with an existing row"
@@ -1683,6 +1929,89 @@ class LedgerDB:
         async with self.pool.connection() as conn:
             cursor = conn.cursor(row_factory=class_row(CampaignCandleSnapshotManifest))
             await cursor.execute(query, params)
+            return await cursor.fetchall()
+
+    async def list_collecting_campaign_snapshots(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+    ) -> list[CampaignCandleSnapshotManifest]:
+        """List collecting snapshots for startup reconciliation.
+
+        A collecting row is only safe to keep across a process restart when
+        the local snapshot runtime can prove that its WAL or completion
+        outbox still exists.  This intentionally has no campaign filter so a
+        restarted strategy can reconcile snapshots created by its prior run.
+        """
+
+        query = """
+            SELECT snapshot_id, account_id, strategy_id, campaign_id, symbol,
+                   run_id, signal_time_ms, window_start_ms, window_end_ms,
+                   status, coverage, gaps, parquet_relative_path,
+                   parquet_sha256, row_count, schema_version,
+                   aggregation_version, release_hash, failure_reason,
+                   created_at, updated_at, completed_at, failed_at
+            FROM campaign_candle_snapshots
+            WHERE account_id = %(account_id)s
+              AND strategy_id = %(strategy_id)s
+              AND status = 'collecting'
+            ORDER BY created_at ASC, snapshot_id ASC
+        """
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(CampaignCandleSnapshotManifest))
+            await cursor.execute(
+                query,
+                {"account_id": account_id, "strategy_id": strategy_id},
+            )
+            return await cursor.fetchall()
+
+    async def list_failed_campaign_snapshots_missing_event(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+    ) -> list[CampaignCandleSnapshotManifest]:
+        """List terminal failures whose lifecycle event may need replay.
+
+        The manifest transaction and the event journal append are separate
+        durable boundaries.  Startup re-emits these rows and relies on the
+        snapshot domain key to collapse an already persisted event.
+        """
+
+        query = """
+            SELECT snapshot_id, account_id, strategy_id, campaign_id, symbol,
+                   run_id, signal_time_ms, window_start_ms, window_end_ms,
+                   status, coverage, gaps, parquet_relative_path,
+                   parquet_sha256, row_count, schema_version,
+                   aggregation_version, release_hash, failure_reason,
+                   created_at, updated_at, completed_at, failed_at
+            FROM campaign_candle_snapshots
+            WHERE account_id = %(account_id)s
+              AND strategy_id = %(strategy_id)s
+              AND status = 'failed'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM execution_event_journal AS event
+                  WHERE event.event_type = 'market.snapshot_failed'
+                    AND (
+                        event.idempotency_key =
+                            'market.snapshot_failed:' || campaign_candle_snapshots.snapshot_id
+                        OR (
+                            event.idempotency_key IS NULL
+                            AND event.details ->> 'snapshot_id' =
+                                campaign_candle_snapshots.snapshot_id
+                        )
+                    )
+              )
+            ORDER BY failed_at ASC NULLS FIRST, snapshot_id ASC
+        """
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(CampaignCandleSnapshotManifest))
+            await cursor.execute(
+                query,
+                {"account_id": account_id, "strategy_id": strategy_id},
+            )
             return await cursor.fetchall()
 
     async def get_campaign_snapshot(

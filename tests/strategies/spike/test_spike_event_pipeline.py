@@ -136,8 +136,40 @@ class ReleasingMemoryCampaignStore(MemoryCampaignStore):
         return True
 
 
+class BlockingSnapshotRuntime:
+    def __init__(self) -> None:
+        self.failed = False
+        self.fault_reason = None
+        self.observe_started = asyncio.Event()
+        self.release_first_observe = asyncio.Event()
+        self.started_timestamps = []
+        self.completed_timestamps = []
+        self.snapshot_campaigns = []
+
+    async def observe_bar(self, current):
+        self.started_timestamps.append(current.timestamp)
+        self.observe_started.set()
+        if len(self.started_timestamps) == 1:
+            await self.release_first_observe.wait()
+        self.completed_timestamps.append(current.timestamp)
+        return ()
+
+    async def ensure_signal_snapshot(
+        self, *, campaign_id, symbol, signal_time_ms, metadata=None
+    ):
+        assert signal_time_ms in self.completed_timestamps
+        self.snapshot_campaigns.append(campaign_id)
+        return f"snapshot:{campaign_id}"
+
+
 def coordinator_for(
-    strategy, executor, *, queue=None, account=None, event_journal=None
+    strategy,
+    executor,
+    *,
+    queue=None,
+    account=None,
+    event_journal=None,
+    snapshot_runtime=None,
 ):
     gate = CompositeEntryGate(strategy)
     for name in ("execution", "market", "campaign"):
@@ -160,8 +192,266 @@ def coordinator_for(
         account_id="spike-test",
         execution_queue=queue,
         event_journal=event_journal,
+        snapshot_runtime=snapshot_runtime,
     )
     return coordinator, gate
+
+
+def own_campaign(coordinator, campaign_id, symbol, started_at_ms):
+    lease = CampaignLease(
+        campaign_id, "spike_short", symbol, started_at_ms
+    )
+    coordinator._owned_campaign_id = campaign_id
+    coordinator._owned_campaign_lease = lease
+    coordinator.campaign_store.active = lease
+
+
+@pytest.mark.asyncio
+async def test_queued_exit_precedes_entry_while_snapshot_observe_is_blocked():
+    current_entry = entry("BTCUSDT", 1_000)
+    current_exit = exit_intent("BTCUSDT")
+    snapshot_runtime = BlockingSnapshotRuntime()
+    submitted = []
+    exit_submitted = asyncio.Event()
+
+    async def submit(intent, **_kwargs):
+        submitted.append(intent.client_order_id)
+        if intent.reduce_only:
+            exit_submitted.set()
+        return Mock(status="NEW")
+
+    coordinator, _ = coordinator_for(
+        IntentStrategy({"BTCUSDT": [current_entry, current_exit]}),
+        Mock(submit=AsyncMock(side_effect=submit)),
+        snapshot_runtime=snapshot_runtime,
+    )
+    own_campaign(
+        coordinator, "spike_short:BTCUSDT:1000", "BTCUSDT", 1_000
+    )
+    coordinator.start_execution_worker()
+
+    await asyncio.wait_for(coordinator.on_bar1s_queued(bar("BTCUSDT", 1)), 0.1)
+    await asyncio.wait_for(exit_submitted.wait(), 1)
+    assert submitted == [current_exit.client_order_id]
+    assert snapshot_runtime.snapshot_campaigns == []
+
+    snapshot_runtime.release_first_observe.set()
+    await asyncio.wait_for(
+        asyncio.gather(*tuple(coordinator._entry_snapshot_tasks)), 1
+    )
+    await asyncio.wait_for(coordinator.execution_queue.join(), 1)
+    assert submitted == [current_exit.client_order_id, current_entry.client_order_id]
+    assert snapshot_runtime.snapshot_campaigns == ["spike_short:BTCUSDT:1000"]
+    await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_direct_exit_precedes_entry_while_snapshot_observe_is_blocked():
+    current_entry = entry("BTCUSDT", 1_000)
+    current_exit = exit_intent("BTCUSDT")
+    snapshot_runtime = BlockingSnapshotRuntime()
+    submitted = []
+
+    async def submit(intent, **_kwargs):
+        submitted.append(intent.client_order_id)
+        return Mock(status="NEW")
+
+    coordinator, _ = coordinator_for(
+        IntentStrategy({"BTCUSDT": [current_entry, current_exit]}),
+        Mock(submit=AsyncMock(side_effect=submit)),
+        snapshot_runtime=snapshot_runtime,
+    )
+    own_campaign(
+        coordinator, "spike_short:BTCUSDT:1000", "BTCUSDT", 1_000
+    )
+
+    await asyncio.wait_for(coordinator.on_bar1s(bar("BTCUSDT", 1)), 0.1)
+    assert submitted == [current_exit.client_order_id]
+    assert snapshot_runtime.snapshot_campaigns == []
+
+    snapshot_runtime.release_first_observe.set()
+    await asyncio.wait_for(
+        asyncio.gather(*tuple(coordinator._entry_snapshot_tasks)), 1
+    )
+    assert submitted == [current_exit.client_order_id, current_entry.client_order_id]
+    assert snapshot_runtime.snapshot_campaigns == ["spike_short:BTCUSDT:1000"]
+    await coordinator.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expires_at", [2_500, None])
+async def test_direct_entry_is_rechecked_after_snapshot_delay(
+    expires_at,
+):
+    campaign_id = "spike_short:BTCUSDT:1000"
+    strategy = LiveSignalIntentStrategy(
+        {"BTCUSDT": [entry("BTCUSDT", 1_000)]},
+        {campaign_id: expires_at} if expires_at is not None else {},
+    )
+    snapshot_runtime = BlockingSnapshotRuntime()
+    executor = Mock(submit=AsyncMock(return_value=Mock(status="NEW")))
+    coordinator, _ = coordinator_for(
+        strategy,
+        executor,
+        snapshot_runtime=snapshot_runtime,
+    )
+    now_ms = [2_000]
+    coordinator._now_ms = lambda: now_ms[0]
+
+    await asyncio.wait_for(coordinator.on_bar1s(bar("BTCUSDT", 1)), 0.1)
+    await asyncio.wait_for(snapshot_runtime.observe_started.wait(), 1)
+    now_ms[0] = 3_000
+    snapshot_runtime.release_first_observe.set()
+    await asyncio.wait_for(
+        asyncio.gather(*tuple(coordinator._entry_snapshot_tasks)), 1
+    )
+
+    executor.submit.assert_not_awaited()
+    assert coordinator._signal_arbiter.active_campaign_id is None
+    assert coordinator._pending_audit_events[-1].event_type == (
+        "signal_skipped_stale" if expires_at is not None else "signal_skipped_invalid"
+    )
+    await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_direct_entry_with_delayed_snapshot_submits_when_still_valid():
+    campaign_id = "spike_short:BTCUSDT:1000"
+    strategy = LiveSignalIntentStrategy(
+        {"BTCUSDT": [entry("BTCUSDT", 1_000)]},
+        {campaign_id: 5_000},
+    )
+    snapshot_runtime = BlockingSnapshotRuntime()
+    executor = Mock(submit=AsyncMock(return_value=Mock(status="NEW")))
+    coordinator, _ = coordinator_for(
+        strategy,
+        executor,
+        snapshot_runtime=snapshot_runtime,
+    )
+    now_ms = [2_000]
+    coordinator._now_ms = lambda: now_ms[0]
+
+    await asyncio.wait_for(coordinator.on_bar1s(bar("BTCUSDT", 1)), 0.1)
+    assert coordinator._signal_arbiter.active_campaign_id == campaign_id
+    await asyncio.wait_for(snapshot_runtime.observe_started.wait(), 1)
+
+    now_ms[0] = 3_000
+    snapshot_runtime.release_first_observe.set()
+    await asyncio.wait_for(
+        asyncio.gather(*tuple(coordinator._entry_snapshot_tasks)), 1
+    )
+
+    executor.submit.assert_awaited_once()
+    assert executor.submit.await_args.args[0].client_order_id == (
+        "spike_short_BTCUSDT_1000_tier1"
+    )
+    assert snapshot_runtime.snapshot_campaigns == [campaign_id]
+    assert coordinator._signal_arbiter.active_campaign_id == campaign_id
+    await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_observations_and_entry_arbitration_preserve_bar_fifo():
+    snapshot_runtime = BlockingSnapshotRuntime()
+    coordinator, _ = coordinator_for(
+        IntentStrategy(
+            {
+                "BTCUSDT": [entry("BTCUSDT", 1_000)],
+                "ETHUSDT": [entry("ETHUSDT", 2_000)],
+            }
+        ),
+        Mock(submit=AsyncMock(return_value=Mock(status="NEW"))),
+        snapshot_runtime=snapshot_runtime,
+    )
+
+    await asyncio.wait_for(coordinator.on_bar1s_queued(bar("BTCUSDT", 1)), 0.1)
+    await asyncio.wait_for(snapshot_runtime.observe_started.wait(), 1)
+    await asyncio.wait_for(coordinator.on_bar1s_queued(bar("ETHUSDT", 2)), 0.1)
+    await asyncio.sleep(0)
+    assert snapshot_runtime.started_timestamps == [1_000]
+    assert coordinator.execution_queue.qsize == 0
+
+    snapshot_runtime.release_first_observe.set()
+    await asyncio.wait_for(
+        asyncio.gather(*tuple(coordinator._entry_snapshot_tasks)), 1
+    )
+    assert snapshot_runtime.started_timestamps == [1_000, 2_000]
+    assert snapshot_runtime.completed_timestamps == [1_000, 2_000]
+    assert snapshot_runtime.snapshot_campaigns == [
+        "spike_short:BTCUSDT:1000",
+        "spike_short:ETHUSDT:2000",
+    ]
+    fifo_events = [
+        event
+        for event in coordinator._pending_audit_events
+        if event.event_type.startswith("signal_")
+    ]
+    assert [event.event_type for event in fifo_events] == [
+        "signal_acquired",
+        "signal_skipped_overlap",
+    ]
+    assert [event.details["arrival_sequence"] for event in fifo_events] == [1, 2]
+    assert coordinator.execution_queue.qsize == 1
+    await coordinator.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_inflight_snapshot_observation():
+    snapshot_runtime = BlockingSnapshotRuntime()
+    coordinator, _ = coordinator_for(
+        IntentStrategy({"BTCUSDT": []}),
+        Mock(submit=AsyncMock()),
+        snapshot_runtime=snapshot_runtime,
+    )
+
+    await asyncio.wait_for(coordinator.on_bar1s_queued(bar("BTCUSDT", 1)), 0.1)
+    await asyncio.wait_for(snapshot_runtime.observe_started.wait(), 1)
+    stop_task = asyncio.create_task(coordinator.stop())
+    await asyncio.sleep(0.02)
+    assert not stop_task.done()
+
+    snapshot_runtime.release_first_observe.set()
+    await asyncio.wait_for(stop_task, 1)
+    await coordinator.on_bar1s_queued(bar("BTCUSDT", 2))
+    assert snapshot_runtime.started_timestamps == [1_000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler_name", ["on_bar1s", "on_bar1s_queued"])
+async def test_stop_wins_lock_race_and_rejects_later_entry_bar(handler_name):
+    snapshot_runtime = BlockingSnapshotRuntime()
+    strategy = IntentStrategy(
+        {
+            "BTCUSDT": [],
+            "ETHUSDT": [entry("ETHUSDT", 2_000)],
+        }
+    )
+    strategy.on_bar1s = Mock(wraps=strategy.on_bar1s)
+    coordinator, _ = coordinator_for(
+        strategy,
+        Mock(submit=AsyncMock(return_value=Mock(status="NEW"))),
+        snapshot_runtime=snapshot_runtime,
+    )
+    handler = getattr(coordinator, handler_name)
+
+    await asyncio.wait_for(handler(bar("BTCUSDT", 1)), 0.1)
+    await asyncio.wait_for(snapshot_runtime.observe_started.wait(), 1)
+    await coordinator._lock.acquire()
+    stop_task = asyncio.create_task(coordinator.stop())
+    await asyncio.sleep(0)
+    later_bar_task = asyncio.create_task(handler(bar("ETHUSDT", 2)))
+    await asyncio.sleep(0)
+    coordinator._lock.release()
+
+    await asyncio.wait_for(later_bar_task, 0.1)
+    assert strategy.on_bar1s.call_count == 1
+    assert snapshot_runtime.started_timestamps == [1_000]
+    assert snapshot_runtime.snapshot_campaigns == []
+    assert coordinator.execution_queue.qsize == 0
+    assert not stop_task.done()
+
+    snapshot_runtime.release_first_observe.set()
+    await asyncio.wait_for(stop_task, 1)
 
 
 @pytest.mark.asyncio

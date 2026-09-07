@@ -476,6 +476,9 @@ class SpikeLiveProcess:
         pool = await create_connection_pool(self.database.dsn)
         self._stack.push_async_callback(pool.close)
         self.execution_lease = PostgresExecutionLease(pool, self.settings.account_id)
+        # The account lease is acquired before the snapshot runtime is
+        # constructed or started, so a second process cannot begin live
+        # execution or snapshot capture for this account concurrently.
         await self.execution_lease.acquire()
         self._stack.push_async_callback(self.execution_lease.release)
         db = LedgerDB(pool)
@@ -766,6 +769,7 @@ class SpikeLiveProcess:
         campaign_id: str | None = None,
         client_order_id: str | None = None,
         exchange_order_id: str | None = None,
+        idempotency_key: str | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
         if self.event_journal is None:
@@ -780,19 +784,28 @@ class SpikeLiveProcess:
             campaign_id=campaign_id,
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
+            idempotency_key=idempotency_key,
             details=details,
         )
 
     async def _observe_snapshot_event(self, event_type: str, **kwargs: Any) -> None:
         details = dict(kwargs.pop("details", {}) or {})
         snapshot_id = kwargs.pop("snapshot_id", None)
+        severity = kwargs.pop("severity", "info")
+        idempotency_key = kwargs.pop("idempotency_key", None)
         await self._append_process_event(
             event_type,
             source="spike.market_snapshot",
             event_time=kwargs.pop("event_time", None),
+            severity=severity,
             trace_id=snapshot_id,
             symbol=kwargs.pop("symbol", None),
             campaign_id=kwargs.pop("campaign_id", None),
+            # Only the snapshot runtime can assert that a lifecycle event is
+            # backed by a durable manifest.  Failure notifications without a
+            # persisted manifest remain ordinary incident events and must not
+            # accidentally claim the terminal domain key.
+            idempotency_key=idempotency_key,
             details={"snapshot_id": snapshot_id, **details},
         )
 

@@ -16,6 +16,7 @@ def _bar(
     *,
     symbol: str = "BTCUSDT",
     aggregate_id: int | None = None,
+    last_aggregate_id: int | None = None,
     price: str = "100",
 ) -> Bar1s:
     value = Decimal(price)
@@ -45,7 +46,13 @@ def _bar(
         max_taker_sell_agg_trade_quantity=Decimal("0.75"),
         first_aggregate_trade_id=aggregate_id,
         last_aggregate_trade_id=(
-            None if aggregate_id is None else aggregate_id + 1
+            None
+            if aggregate_id is None
+            else (
+                aggregate_id
+                if last_aggregate_id is None
+                else last_aggregate_id
+            )
         ),
         first_trade_id=(None if aggregate_id is None else aggregate_id * 10),
         last_trade_id=(None if aggregate_id is None else aggregate_id * 10 + 2),
@@ -151,7 +158,10 @@ def test_no_trade_second_is_empty_not_a_stream_gap(tmp_path):
     store = LiveSnapshotStore(tmp_path)
     manifest = store.write_snapshot(
         "empty-second",
-        [_bar(1_000, aggregate_id=10), _bar(3_000, aggregate_id=12)],
+        [
+            _bar(1_000, aggregate_id=10, last_aggregate_id=11),
+            _bar(3_000, aggregate_id=12),
+        ],
         symbol="BTCUSDT",
         start_time_ms=1_000,
         end_time_ms=4_000,
@@ -172,7 +182,10 @@ def test_manifest_reports_second_and_aggregate_trade_gaps(tmp_path):
     store = LiveSnapshotStore(tmp_path)
     manifest = store.write_snapshot(
         "gaps",
-        [_bar(1_000, aggregate_id=10), _bar(3_000, aggregate_id=20)],
+        [
+            _bar(1_000, aggregate_id=10, last_aggregate_id=11),
+            _bar(3_000, aggregate_id=20),
+        ],
         symbol="BTCUSDT",
         start_time_ms=1_000,
         end_time_ms=4_000,
@@ -185,6 +198,73 @@ def test_manifest_reports_second_and_aggregate_trade_gaps(tmp_path):
     assert manifest.coverage_status == "gapped"
     assert manifest.first_aggregate_trade_id == 10
     assert manifest.last_aggregate_trade_id == 20
+
+
+@pytest.mark.parametrize(
+    ("previous_ids", "current_ids", "expected_ids"),
+    [
+        ((10, 11), (11, 12), (12, 11)),
+        ((10, 11), (8, 9), (12, 8)),
+        ((10, 11), (10, 11), (12, 10)),
+    ],
+    ids=("partial-overlap", "regression", "duplicate-range"),
+)
+def test_manifest_reports_aggregate_trade_id_integrity_gaps(
+    tmp_path, previous_ids, current_ids, expected_ids
+):
+    store = LiveSnapshotStore(tmp_path)
+    manifest = store.write_snapshot(
+        f"integrity-{previous_ids[0]}-{current_ids[0]}",
+        [
+            _bar(
+                1_000,
+                aggregate_id=previous_ids[0],
+                last_aggregate_id=previous_ids[1],
+            ),
+            _bar(
+                2_000,
+                aggregate_id=current_ids[0],
+                last_aggregate_id=current_ids[1],
+            ),
+        ],
+        symbol="BTCUSDT",
+        start_time_ms=1_000,
+        end_time_ms=3_000,
+    )
+
+    assert manifest.agg_trade_gaps == ()
+    assert manifest.agg_trade_non_monotonic == (expected_ids,)
+    assert manifest.gaps == [
+        {
+            "type": "aggregate_trade_non_monotonic",
+            "expected_first_id": expected_ids[0],
+            "actual_first_id": expected_ids[1],
+        }
+    ]
+    assert manifest.continuity_ok is False
+    assert manifest.coverage_status == "gapped"
+
+
+def test_manifest_non_monotonic_gaps_round_trip_and_old_outbox_is_compatible(
+    tmp_path,
+):
+    store = LiveSnapshotStore(tmp_path)
+    manifest = store.write_snapshot(
+        "non-monotonic-round-trip",
+        [
+            _bar(1_000, aggregate_id=10, last_aggregate_id=11),
+            _bar(2_000, aggregate_id=11, last_aggregate_id=12),
+        ],
+        symbol="BTCUSDT",
+    )
+
+    restored = type(manifest).from_dict(manifest.to_dict(), root=tmp_path)
+    assert restored.agg_trade_non_monotonic == ((12, 11),)
+    legacy = manifest.to_dict()
+    legacy.pop("agg_trade_non_monotonic")
+    assert type(manifest).from_dict(
+        legacy, root=tmp_path
+    ).agg_trade_non_monotonic == ()
 
 
 def test_decimal_precision_round_trips_without_float_storage(tmp_path):
@@ -243,6 +323,129 @@ def test_staging_wal_recovers_after_restart_and_is_removed_after_publish(tmp_pat
     [manifest] = second.observe_bar(_bar(8_000, aggregate_id=8), now_ms=8_000)
     assert manifest.row_count == 3
     assert not wal.exists()
+
+
+def test_restart_rebuilds_outbox_from_payload_published_before_outbox(
+    tmp_path, monkeypatch
+):
+    first = LiveSnapshotStore(tmp_path, pre_window_ms=0, post_window_ms=1_000)
+    first.observe_bar(_bar(1_000, aggregate_id=10))
+    first.start_snapshot("rename-crash", "BTCUSDT", 1_000)
+    wal = tmp_path / ".staging" / "rename-crash.jsonl"
+    payload = tmp_path / "BTCUSDT" / "rename-crash.parquet"
+
+    def fail_outbox(_manifest):
+        raise OSError("injected failure before outbox publication")
+
+    monkeypatch.setattr(first, "_write_outbox", fail_outbox)
+    with pytest.raises(OSError, match="injected failure"):
+        first.flush_due(now_ms=2_000)
+
+    assert payload.is_file()
+    assert wal.is_file()
+    assert first.active_snapshot_ids == ("rename-crash",)
+    original_payload = payload.read_bytes()
+
+    restarted = LiveSnapshotStore(tmp_path, pre_window_ms=0, post_window_ms=1_000)
+    [manifest] = restarted.recover_staging(2_000, finalize_expired=True)
+
+    assert payload.read_bytes() == original_payload
+    assert manifest.path == payload
+    assert manifest.complete is True
+    assert manifest.post_window_covered is True
+    assert [item.snapshot_id for item in restarted.pending_manifests()] == [
+        "rename-crash"
+    ]
+    assert not wal.exists()
+
+
+def test_finalize_retries_existing_payload_after_durable_outbox_callback_failure(
+    tmp_path,
+):
+    attempts = 0
+
+    def fail_once(_manifest):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("injected callback failure")
+
+    store = LiveSnapshotStore(
+        tmp_path,
+        pre_window_ms=0,
+        post_window_ms=1_000,
+        on_manifest=fail_once,
+    )
+    store.observe_bar(_bar(1_000, aggregate_id=10))
+    store.start_snapshot("callback-crash", "BTCUSDT", 1_000)
+    wal = tmp_path / ".staging" / "callback-crash.jsonl"
+
+    with pytest.raises(RuntimeError, match="injected callback failure"):
+        store.flush_due(now_ms=2_000)
+    assert wal.is_file()
+    assert [item.snapshot_id for item in store.pending_manifests()] == [
+        "callback-crash"
+    ]
+
+    [manifest] = store.flush_due(now_ms=2_000)
+    assert manifest.snapshot_id == "callback-crash"
+    assert attempts == 2
+    assert not wal.exists()
+
+
+def test_restart_immediately_resumes_early_finalize_with_original_state(
+    tmp_path, monkeypatch
+):
+    first = LiveSnapshotStore(tmp_path, pre_window_ms=0, post_window_ms=5_000)
+    first.observe_bar(_bar(1_000, aggregate_id=10))
+    first.start_snapshot("early-finalize", "BTCUSDT", 1_000)
+    wal = tmp_path / ".staging" / "early-finalize.jsonl"
+
+    def fail_outbox(_manifest):
+        raise OSError("injected failure before outbox publication")
+
+    monkeypatch.setattr(first, "_write_outbox", fail_outbox)
+    with pytest.raises(OSError, match="injected failure"):
+        first.close(now_ms=2_000)
+
+    restarted = LiveSnapshotStore(tmp_path, pre_window_ms=0, post_window_ms=5_000)
+    [manifest] = restarted.recover_staging(2_000, finalize_expired=True)
+
+    assert manifest.complete is False
+    assert manifest.end_time_ms == 2_000
+    assert manifest.post_window_covered is False
+    assert not wal.exists()
+
+
+def test_recovery_rejects_existing_payload_that_conflicts_with_wal(
+    tmp_path, monkeypatch
+):
+    first = LiveSnapshotStore(tmp_path, pre_window_ms=0, post_window_ms=1_000)
+    first.observe_bar(_bar(1_000, aggregate_id=10))
+    first.start_snapshot("payload-conflict", "BTCUSDT", 1_000)
+    wal = tmp_path / ".staging" / "payload-conflict.jsonl"
+    payload = tmp_path / "BTCUSDT" / "payload-conflict.parquet"
+
+    def fail_outbox(_manifest):
+        raise OSError("injected failure")
+
+    monkeypatch.setattr(first, "_write_outbox", fail_outbox)
+    with pytest.raises(OSError, match="injected failure"):
+        first.flush_due(now_ms=2_000)
+
+    table = pq.read_table(payload)
+    changed = table.set_column(
+        table.schema.get_field_index("close"),
+        "close",
+        pa.array([Decimal("999")], type=table.schema.field("close").type),
+    )
+    pq.write_table(changed, payload)
+
+    restarted = LiveSnapshotStore(tmp_path, pre_window_ms=0, post_window_ms=1_000)
+    with pytest.raises(ValueError, match="conflicts with recovered WAL"):
+        restarted.recover_staging(2_000, finalize_expired=True)
+    assert wal.is_file()
+    assert restarted.pending_manifests() == ()
 
 
 def test_campaign_reader_returns_extended_1s_api_rows(tmp_path):

@@ -1,6 +1,7 @@
 """PostgreSQL contract tests for campaign candle snapshot manifests."""
 
 import os
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -53,6 +54,15 @@ async def test_snapshot_manifest_lifecycle_is_idempotent_and_account_scoped(ledg
     assert created.status == "collecting"
     assert retried.snapshot_id == snapshot_id
     assert retried.symbol == "BTCUSDT"
+
+    with pytest.raises(ValueError, match="conflicts with an existing row"):
+        await ledger.create_campaign_snapshot(
+            replace(manifest, coverage={"expected_rows": 1})
+        )
+    with pytest.raises(ValueError, match="conflicts with an existing row"):
+        await ledger.create_campaign_snapshot(
+            replace(manifest, gaps=[{"type": "missing_second", "timestamp_ms": 1_000}])
+        )
 
     completed = await ledger.complete_campaign_snapshot(
         snapshot_id,

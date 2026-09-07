@@ -151,6 +151,35 @@ async def test_reconciliation_observer_maps_runtime_stages_to_spike_journal():
 
 
 @pytest.mark.asyncio
+async def test_snapshot_failure_observer_preserves_error_severity():
+    process = SpikeLiveProcess(
+        SpikeLiveSettings(
+            account_id="spike-test", symbols=["AKEUSDT"], total_notional="10"
+        ),
+        binance=Mock(),
+        database=Mock(),
+        redis_config=Mock(),
+        strategy_config=Mock(account_id="spike-test"),
+    )
+    journal = RecordingJournal()
+    process.event_journal = journal
+
+    await process._observe_snapshot_event(
+        "market.snapshot_failed",
+        snapshot_id="snapshot-1",
+        severity="error",
+        details={"reason": "parquet write failed"},
+    )
+
+    assert journal.events[0].event_type == "market.snapshot_failed"
+    assert journal.events[0].severity == "error"
+    assert journal.events[0].details == {
+        "snapshot_id": "snapshot-1",
+        "reason": "parquet write failed",
+    }
+
+
+@pytest.mark.asyncio
 async def test_startup_failure_before_database_keeps_local_journal_and_original_error(
     tmp_path,
 ):

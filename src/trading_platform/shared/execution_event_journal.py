@@ -28,8 +28,17 @@ from typing import Any
 __all__ = [
     "ExecutionEvent",
     "DurableExecutionEventJournal",
+    "SNAPSHOT_LIFECYCLE_EVENT_TYPES",
     "redact_event_details",
 ]
+
+
+# These lifecycle facts can be replayed by a new process after the local
+# snapshot outbox has survived a crash.  Their event_id/run_id/sequence are
+# process-local, so the database uses the explicit domain key instead.
+SNAPSHOT_LIFECYCLE_EVENT_TYPES = frozenset(
+    {"market.snapshot_completed", "market.snapshot_failed"}
+)
 
 
 _REDACTED = "[REDACTED]"
@@ -211,6 +220,7 @@ class ExecutionEvent:
     client_order_id: str | None
     exchange_order_id: str | None
     details: dict[str, Any]
+    idempotency_key: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -232,8 +242,16 @@ class ExecutionEvent:
             "campaign_id",
             "client_order_id",
             "exchange_order_id",
+            "idempotency_key",
         ):
             _require_optional_string(getattr(self, name), name)
+        if (
+            self.idempotency_key is not None
+            and self.event_type not in SNAPSHOT_LIFECYCLE_EVENT_TYPES
+        ):
+            raise ValueError(
+                "idempotency_key is only valid for snapshot lifecycle events"
+            )
         if not isinstance(self.details, Mapping):
             raise TypeError("details must be a mapping")
         object.__setattr__(self, "details", _normalise_details(self.details))
@@ -241,7 +259,7 @@ class ExecutionEvent:
     def to_dict(self) -> dict[str, Any]:
         """Return a fresh, strictly JSON-normalized representation."""
 
-        return {
+        payload = {
             "event_id": self.event_id,
             "run_id": self.run_id,
             "sequence": self.sequence,
@@ -259,6 +277,11 @@ class ExecutionEvent:
             "exchange_order_id": self.exchange_order_id,
             "details": _normalise_details(self.details),
         }
+        # Keep the canonical payload of legacy/unkeyed events byte-for-byte
+        # compatible with records written before domain idempotency existed.
+        if self.idempotency_key is not None:
+            payload["idempotency_key"] = self.idempotency_key
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ExecutionEvent":
@@ -284,9 +307,10 @@ class ExecutionEvent:
             "exchange_order_id",
             "details",
         }
+        optional = {"idempotency_key"}
         actual = set(data)
         missing = expected - actual
-        extra = actual - expected
+        extra = actual - expected - optional
         if missing:
             raise ValueError(f"event data is missing fields: {sorted(missing)!r}")
         if extra:
@@ -310,6 +334,7 @@ class ExecutionEvent:
             client_order_id=data["client_order_id"],
             exchange_order_id=data["exchange_order_id"],
             details=data["details"],
+            idempotency_key=data.get("idempotency_key"),
         )
 
     def to_json(self) -> str:
@@ -390,6 +415,7 @@ class DurableExecutionEventJournal:
         client_order_id: str | None = None,
         exchange_order_id: str | None = None,
         details: Mapping[str, Any] | None = None,
+        idempotency_key: str | None = None,
     ) -> ExecutionEvent:
         async with self._lock:
             await self._ensure_local_loaded_locked()
@@ -411,6 +437,7 @@ class DurableExecutionEventJournal:
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
                 details={} if details is None else details,
+                idempotency_key=idempotency_key,
             )
             return (await self._append_events_locked((event,)))[0]
 

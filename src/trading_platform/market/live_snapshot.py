@@ -228,6 +228,7 @@ class SnapshotManifest:
     empty_seconds: tuple[int, ...] = ()
     boundary_missing_seconds: tuple[int, ...] = ()
     agg_trade_gaps: tuple[tuple[int, int], ...] = ()
+    agg_trade_non_monotonic: tuple[tuple[int, int], ...] = ()
     pre_window_covered: bool = True
     post_window_covered: bool = True
     schema_version: int = SNAPSHOT_SCHEMA_VERSION
@@ -251,11 +252,19 @@ class SnapshotManifest:
     def continuity_ok(self) -> bool:
         # A window boundary can be outside the period observed by the feed;
         # that is coverage information, not evidence of an interrupted feed.
-        return not (self.missing_seconds or self.agg_trade_gaps)
+        return not (
+            self.missing_seconds
+            or self.agg_trade_gaps
+            or self.agg_trade_non_monotonic
+        )
 
     @property
     def coverage_status(self) -> str:
-        if self.missing_seconds or self.agg_trade_gaps:
+        if (
+            self.missing_seconds
+            or self.agg_trade_gaps
+            or self.agg_trade_non_monotonic
+        ):
             return "gapped"
         if (
             not self.complete
@@ -307,6 +316,13 @@ class SnapshotManifest:
                 "end_id": end_id,
             }
             for start_id, end_id in self.agg_trade_gaps
+        ] + [
+            {
+                "type": "aggregate_trade_non_monotonic",
+                "expected_first_id": expected_first_id,
+                "actual_first_id": actual_first_id,
+            }
+            for expected_first_id, actual_first_id in self.agg_trade_non_monotonic
         ]
 
     def to_dict(self) -> dict[str, Any]:
@@ -332,6 +348,9 @@ class SnapshotManifest:
             "empty_seconds": list(self.empty_seconds),
             "boundary_missing_seconds": list(self.boundary_missing_seconds),
             "agg_trade_gaps": [list(item) for item in self.agg_trade_gaps],
+            "agg_trade_non_monotonic": [
+                list(item) for item in self.agg_trade_non_monotonic
+            ],
             "pre_window_covered": self.pre_window_covered,
             "post_window_covered": self.post_window_covered,
             "schema_version": self.schema_version,
@@ -357,6 +376,7 @@ class SnapshotManifest:
         else:
             raise ValueError("snapshot manifest has no path")
         gaps = data.get("agg_trade_gaps") or []
+        non_monotonic = data.get("agg_trade_non_monotonic") or []
         return cls(
             snapshot_id=_validate_component(str(data["snapshot_id"]), "snapshot_id"),
             symbol=_normalise_symbol(str(data["symbol"])),
@@ -378,6 +398,9 @@ class SnapshotManifest:
             ),
             agg_trade_gaps=tuple(
                 (int(item[0]), int(item[1])) for item in gaps
+            ),
+            agg_trade_non_monotonic=tuple(
+                (int(item[0]), int(item[1])) for item in non_monotonic
             ),
             pre_window_covered=bool(data.get("pre_window_covered", True)),
             post_window_covered=bool(data.get("post_window_covered", True)),
@@ -405,6 +428,9 @@ class SnapshotCapture:
     pre_window_covered: bool = False
     post_window_covered: bool = False
     bars: dict[int, Bar1s] = field(default_factory=dict, repr=False)
+    finalizing_complete: bool | None = None
+    finalizing_end_time_ms: int | None = None
+    finalizing_post_window_covered: bool | None = None
 
     def add_bar(self, bar: Bar1s) -> None:
         timestamp = int(bar.timestamp)
@@ -507,6 +533,8 @@ class LiveSnapshotStore:
         )
         for capture in self._active.values():
             if capture.symbol != symbol:
+                continue
+            if capture.finalizing_complete is not None:
                 continue
             if capture.start_time_ms <= bar.timestamp < capture.due_time_ms:
                 was_present = int(bar.timestamp) in capture.bars
@@ -616,7 +644,10 @@ class LiveSnapshotStore:
         manifests = []
         for snapshot_id in sorted(tuple(self._active)):
             capture = self._active[snapshot_id]
-            if capture.due_time_ms <= now:
+            if (
+                capture.finalizing_complete is not None
+                or capture.due_time_ms <= now
+            ):
                 manifests.append(
                     self._finalize(
                         snapshot_id,
@@ -904,37 +935,48 @@ class LiveSnapshotStore:
         capture = self._active[snapshot_id]
         bars = self._validated_rows(list(capture.bars.values()), symbol=capture.symbol)
         path = self.path_for_snapshot(capture.snapshot_id, capture.symbol)
-        if path.exists():
-            raise FileExistsError(f"snapshot already exists: {path}")
         end_time = capture.due_time_ms if end_time_ms is None else int(end_time_ms)
         end_time = max(capture.start_time_ms, end_time)
-        try:
-            manifest = self._publish(
-                snapshot_id=capture.snapshot_id,
-                symbol=capture.symbol,
-                bars=bars,
-                path=path,
-                signal_time_ms=capture.signal_time_ms,
-                start_time_ms=capture.start_time_ms,
-                end_time_ms=end_time,
+        resolved_post_window_covered = (
+            capture.post_window_covered
+            if post_window_covered is None
+            else post_window_covered
+        )
+        if capture.finalizing_complete is None:
+            self._append_wal_finalize(
+                capture,
                 complete=complete,
-                campaign_id=capture.campaign_id,
-                metadata=capture.metadata,
-                pre_window_covered=capture.pre_window_covered,
-                post_window_covered=(
-                    capture.post_window_covered
-                    if post_window_covered is None
-                    else post_window_covered
-                ),
+                end_time_ms=end_time,
+                post_window_covered=resolved_post_window_covered,
             )
-        except BaseException:
-            # A callback failure happens after the immutable file is already
-            # published.  Do not leave a completed payload looking active or
-            # make the next restart attempt overwrite it.
-            if path.is_file():
-                self._remove_wal(snapshot_id)
-                self._active.pop(snapshot_id, None)
-            raise
+            capture.finalizing_complete = bool(complete)
+            capture.finalizing_end_time_ms = end_time
+            capture.finalizing_post_window_covered = bool(
+                resolved_post_window_covered
+            )
+        else:
+            complete = capture.finalizing_complete
+            assert capture.finalizing_end_time_ms is not None
+            assert capture.finalizing_post_window_covered is not None
+            end_time = capture.finalizing_end_time_ms
+            resolved_post_window_covered = (
+                capture.finalizing_post_window_covered
+            )
+        manifest = self._publish(
+            snapshot_id=capture.snapshot_id,
+            symbol=capture.symbol,
+            bars=bars,
+            path=path,
+            signal_time_ms=capture.signal_time_ms,
+            start_time_ms=capture.start_time_ms,
+            end_time_ms=end_time,
+            complete=complete,
+            campaign_id=capture.campaign_id,
+            metadata=capture.metadata,
+            pre_window_covered=capture.pre_window_covered,
+            post_window_covered=resolved_post_window_covered,
+            recover_existing=True,
+        )
         self._remove_wal(snapshot_id)
         self._active.pop(snapshot_id, None)
         return manifest
@@ -954,6 +996,7 @@ class LiveSnapshotStore:
         metadata: Mapping[str, Any],
         pre_window_covered: bool | None = None,
         post_window_covered: bool | None = None,
+        recover_existing: bool = False,
     ) -> SnapshotManifest:
         if (
             start_time_ms is not None
@@ -983,20 +1026,31 @@ class LiveSnapshotStore:
         table = table.replace_schema_metadata(parquet_metadata)
         path.parent.mkdir(parents=True, exist_ok=True)
         self._assert_inside_root(path)
-        temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-        try:
-            pq.write_table(table, temporary, compression="zstd")
-            self._fsync_file(temporary)
-            os.replace(temporary, path)
-            self._fsync_directory(path.parent)
-        except BaseException:
+        if path.exists():
+            if not recover_existing:
+                raise FileExistsError(f"snapshot already exists: {path}")
+            self._validate_existing_payload(path, table)
+        else:
+            temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
             try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
-            raise
+                pq.write_table(table, temporary, compression="zstd")
+                self._fsync_file(temporary)
+                os.replace(temporary, path)
+                self._fsync_directory(path.parent)
+            except BaseException:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+                raise
 
-        empty_seconds, missing_seconds, boundary_missing_seconds, agg_trade_gaps = _continuity(
+        (
+            empty_seconds,
+            missing_seconds,
+            boundary_missing_seconds,
+            agg_trade_gaps,
+            agg_trade_non_monotonic,
+        ) = _continuity(
             rows,
             start_time_ms=start_time_ms,
             end_time_ms=end_time_ms,
@@ -1026,6 +1080,7 @@ class LiveSnapshotStore:
             empty_seconds=empty_seconds,
             boundary_missing_seconds=boundary_missing_seconds,
             agg_trade_gaps=agg_trade_gaps,
+            agg_trade_non_monotonic=agg_trade_non_monotonic,
             pre_window_covered=bool(pre_window_covered),
             post_window_covered=bool(post_window_covered),
             aggregation_version=SNAPSHOT_AGGREGATION_VERSION,
@@ -1037,6 +1092,21 @@ class LiveSnapshotStore:
         if self.on_manifest is not None:
             self.on_manifest(manifest)
         return manifest
+
+    @staticmethod
+    def _validate_existing_payload(path: Path, expected: pa.Table) -> None:
+        """Accept only the exact payload published by an interrupted finalize."""
+
+        try:
+            published = pq.read_table(path)
+        except BaseException as error:
+            raise ValueError(
+                f"existing snapshot payload is unreadable: {path}"
+            ) from error
+        if not published.equals(expected, check_metadata=True):
+            raise ValueError(
+                f"existing snapshot payload conflicts with recovered WAL: {path}"
+            )
 
     def _wal_path(self, snapshot_id: str) -> Path:
         path = (self._staging_root / f"{_validate_component(snapshot_id, 'snapshot_id')}.jsonl").resolve()
@@ -1146,6 +1216,29 @@ class LiveSnapshotStore:
             target.flush()
             os.fsync(target.fileno())
 
+    def _append_wal_finalize(
+        self,
+        capture: SnapshotCapture,
+        *,
+        complete: bool,
+        end_time_ms: int,
+        post_window_covered: bool,
+    ) -> None:
+        """Persist the immutable finalization decision before publishing."""
+
+        path = self._wal_path(capture.snapshot_id)
+        record = {
+            "type": "finalize",
+            "complete": bool(complete),
+            "end_time_ms": int(end_time_ms),
+            "post_window_covered": bool(post_window_covered),
+        }
+        with path.open("a", encoding="utf-8") as target:
+            target.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+            target.write("\n")
+            target.flush()
+            os.fsync(target.fileno())
+
     def _remove_wal(self, snapshot_id: str) -> None:
         path = self._wal_path(snapshot_id)
         try:
@@ -1183,9 +1276,32 @@ class LiveSnapshotStore:
                     pre_window_covered=bool(start.get("pre_window_covered", False)),
                     post_window_covered=bool(start.get("post_window_covered", False)),
                 )
+                finalize_record: tuple[bool, int, bool] | None = None
                 for record in records[1:]:
                     if record.get("type") == "bar":
+                        if finalize_record is not None:
+                            raise ValueError("snapshot WAL contains a bar after finalize")
                         capture.add_bar(_bar_from_dict(record["bar"]))
+                    elif record.get("type") == "finalize":
+                        recovered_finalize = (
+                            bool(record["complete"]),
+                            int(record["end_time_ms"]),
+                            bool(record["post_window_covered"]),
+                        )
+                        if (
+                            finalize_record is not None
+                            and recovered_finalize != finalize_record
+                        ):
+                            raise ValueError(
+                                "snapshot WAL contains conflicting finalize records"
+                            )
+                        finalize_record = recovered_finalize
+                if finalize_record is not None:
+                    (
+                        capture.finalizing_complete,
+                        capture.finalizing_end_time_ms,
+                        capture.finalizing_post_window_covered,
+                    ) = finalize_record
                 if snapshot_id not in self._active:
                     self._active[snapshot_id] = capture
             except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
@@ -1311,6 +1427,7 @@ def _continuity(
     tuple[int, ...],
     tuple[int, ...],
     tuple[tuple[int, int], ...],
+    tuple[tuple[int, int], ...],
 ]:
     """Separate no-trade seconds, true gaps, and unobserved boundaries.
 
@@ -1330,7 +1447,7 @@ def _continuity(
         else ()
     )
     if not ordered:
-        return (), (), expected, ()
+        return (), (), expected, (), ()
 
     expected_set = set(expected)
     present = set(timestamps)
@@ -1357,6 +1474,7 @@ def _continuity(
     empty: list[int] = []
     missing: list[int] = []
     gaps: list[tuple[int, int]] = []
+    non_monotonic: list[tuple[int, int]] = []
     for previous, current in zip(ordered, ordered[1:]):
         previous_timestamp = int(previous["timestamp"])
         current_timestamp = int(current["timestamp"])
@@ -1379,6 +1497,13 @@ def _continuity(
             current_last_id = int(current_last)
             if current_first_id > previous_last_id + 1:
                 gaps.append((previous_last_id + 1, current_first_id - 1))
+            elif current_first_id <= previous_last_id:
+                # Aggregate trade IDs are globally monotonic for a symbol.  An
+                # overlap therefore proves duplicated, regressed or otherwise
+                # corrupted input even when no candle second is absent.
+                non_monotonic.append(
+                    (previous_last_id + 1, current_first_id)
+                )
             if current_first_id <= current_last_id and current_first_id == previous_last_id + 1:
                 empty.extend(between)
             else:
@@ -1403,6 +1528,7 @@ def _continuity(
         tuple(sorted(set(missing))),
         tuple(sorted(set(boundary))),
         tuple(gaps),
+        tuple(non_monotonic),
     )
 
 

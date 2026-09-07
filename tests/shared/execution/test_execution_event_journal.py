@@ -80,6 +80,20 @@ def test_execution_event_roundtrip_is_strict_and_json_canonical() -> None:
         make_event(details={"observed_at": datetime(2026, 9, 6)})
 
 
+def test_snapshot_domain_idempotency_key_roundtrips_without_changing_legacy_shape() -> None:
+    event = make_event(
+        event_type="market.snapshot_completed",
+        idempotency_key="market.snapshot_completed:snapshot-1",
+        details={"snapshot_id": "snapshot-1"},
+    )
+    restored = ExecutionEvent.from_dict(json.loads(event.to_json()))
+    assert restored == event
+    assert restored.to_dict()["idempotency_key"] == event.idempotency_key
+    assert "idempotency_key" not in make_event().to_dict()
+    with pytest.raises(ValueError, match="only valid"):
+        make_event(event_type="order.intent_recorded", idempotency_key="domain-key")
+
+
 def test_recursive_redaction_does_not_modify_input() -> None:
     details = {
         "headers": {"Authorization": "Bearer secret", "request_id": "request-1"},
