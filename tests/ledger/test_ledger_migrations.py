@@ -159,7 +159,7 @@ async def test_client_order_id_constraint_is_account_scoped_when_upgrading(
     upgraded = await apply_migrations(pool, schema=schema)
     repeated = await apply_migrations(pool, schema=schema)
 
-    assert upgraded.applied_versions == (15, 16, 17)
+    assert upgraded.applied_versions == (15, 16, 17, 18)
     assert repeated.applied_versions == ()
 
     async with pool.connection() as conn:
@@ -254,7 +254,7 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
 
     result = await apply_migrations(pool, schema=schema)
 
-    assert result.applied_versions == (12, 13, 14, 15, 16, 17)
+    assert result.applied_versions == (12, 13, 14, 15, 16, 17, 18)
     async with pool.connection() as conn:
         async with conn.transaction():
             await conn.execute(

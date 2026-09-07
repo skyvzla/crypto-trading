@@ -1,17 +1,21 @@
 """账本查询与 subcategory 交易池准入 API。"""
 
 import hmac
+import hashlib
 import os
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
+from functools import partial
+from pathlib import Path as FilePath
 from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-
+from starlette.concurrency import run_in_threadpool
 from trading_platform.ledger.db.models import (
     CampaignPnLFactsError,
+    CampaignCandleSnapshotManifest,
     ExecutionEventRecord,
     ExchangeCategory,
     ExchangeSymbol,
@@ -502,6 +506,23 @@ class CampaignPageResponse(BaseModel):
     limit: int
     offset: int
     unattributed_fills: int
+
+
+class CampaignCandleSnapshotResponse(BaseModel):
+    """One account-scoped, immutable 1s Campaign candle payload."""
+
+    snapshot: dict[str, Any]
+    symbol: str
+    interval: Literal["1s"]
+    source: Literal["campaign_snapshot"] = "campaign_snapshot"
+    candles: list[Any]
+    coverage_status: Literal["complete", "collecting", "incomplete", "gapped"] = (
+        "complete"
+    )
+    coverage_message: Optional[str] = None
+    gap_count: int = 0
+    expected_count: Optional[int] = None
+    received_count: Optional[int] = None
 
 
 router = APIRouter(prefix="/api/v1", tags=["ledger"])
@@ -1072,6 +1093,225 @@ async def get_campaign_pnl(
     if item is None:
         raise HTTPException(status_code=404, detail="Campaign trades not found")
     return CampaignPnLResponse.model_validate(item)
+
+
+def _campaign_snapshot_root() -> FilePath:
+    """Resolve the only filesystem root accepted by the snapshot API."""
+
+    configured = os.getenv(
+        "CAMPAIGN_SNAPSHOT_ROOT", "data/market/campaign_snapshots"
+    )
+    return FilePath(configured).expanduser().resolve()
+
+
+def _resolve_campaign_snapshot_path(relative_path: str) -> FilePath:
+    root = _campaign_snapshot_root()
+    candidate = (root / relative_path).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="campaign snapshot path escapes the configured root",
+        ) from exc
+    return candidate
+
+
+def _sha256_file(path: FilePath) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _snapshot_response_metadata(
+    snapshot: CampaignCandleSnapshotManifest,
+) -> dict[str, Any]:
+    return {
+        "snapshot_id": snapshot.snapshot_id,
+        "account_id": snapshot.account_id,
+        "strategy_id": snapshot.strategy_id,
+        "campaign_id": snapshot.campaign_id,
+        "symbol": snapshot.symbol,
+        "run_id": snapshot.run_id,
+        "signal_time_ms": snapshot.signal_time_ms,
+        "window_start_ms": snapshot.window_start_ms,
+        "window_end_ms": snapshot.window_end_ms,
+        "status": snapshot.status,
+        "coverage": snapshot.coverage or {},
+        "gaps": snapshot.gaps or [],
+        "parquet_relative_path": snapshot.parquet_relative_path,
+        "parquet_sha256": snapshot.parquet_sha256,
+        "row_count": snapshot.row_count,
+        "schema_version": snapshot.schema_version,
+        "aggregation_version": snapshot.aggregation_version,
+        "release_hash": snapshot.release_hash,
+        "failure_reason": snapshot.failure_reason,
+        "created_at": snapshot.created_at,
+        "updated_at": snapshot.updated_at,
+        "completed_at": snapshot.completed_at,
+        "failed_at": snapshot.failed_at,
+    }
+
+
+async def _read_campaign_snapshot_candles(
+    path: FilePath,
+    *,
+    symbol: str,
+    interval: Literal["1s"],
+    start_ms: int | None,
+    end_ms: int | None,
+) -> list[Any]:
+    """Read persisted 1s rows through the market snapshot store."""
+
+    try:
+        from trading_platform.market.snapshot_store import read_campaign_snapshot_candles
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="campaign snapshot reader is not available",
+        ) from exc
+    result = await run_in_threadpool(
+        partial(
+            read_campaign_snapshot_candles,
+            path,
+            symbol=symbol,
+            interval=interval,
+            start_ms=start_ms,
+            end_ms=end_ms,
+        )
+    )
+    return list(result)
+
+
+@router.get(
+    "/campaigns/{campaign_id}/candles",
+    response_model=CampaignCandleSnapshotResponse,
+)
+async def get_campaign_snapshot_candles(
+    campaign_id: str = Path(min_length=1, max_length=128),
+    account_id: str = Query(..., min_length=1, max_length=64),
+    strategy_id: str = Query(..., min_length=1, max_length=128),
+    symbol: str = Query(..., min_length=1, max_length=32),
+    interval: Literal["1s"] = Query("1s"),
+    start_ms: int | None = Query(None, ge=0),
+    end_ms: int | None = Query(None, ge=0),
+    db: LedgerDB = Depends(get_db),
+) -> CampaignCandleSnapshotResponse:
+    """Read the immutable extended 1s candles captured for a Campaign."""
+
+    if (start_ms is None) != (end_ms is None):
+        raise HTTPException(
+            status_code=422,
+            detail="start_ms and end_ms must be provided together",
+        )
+    if start_ms is not None and end_ms is not None and end_ms <= start_ms:
+        raise HTTPException(status_code=422, detail="end_ms must be greater than start_ms")
+
+    normalized_symbol = symbol.strip().upper()
+    snapshot = await db.get_campaign_snapshot(
+        account_id=account_id,
+        strategy_id=strategy_id,
+        symbol=normalized_symbol,
+        campaign_id=campaign_id,
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="campaign candle snapshot not found")
+    if snapshot.status == "collecting":
+        raise HTTPException(status_code=409, detail="campaign candle snapshot is not ready")
+    if snapshot.status == "failed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"campaign candle snapshot failed: {snapshot.failure_reason}",
+        )
+    if snapshot.status != "completed" or not snapshot.parquet_relative_path:
+        raise HTTPException(status_code=409, detail="campaign candle snapshot is unavailable")
+
+    path = _resolve_campaign_snapshot_path(snapshot.parquet_relative_path)
+    if not path.is_file():
+        raise HTTPException(status_code=503, detail="campaign snapshot payload is missing")
+    if not snapshot.parquet_sha256:
+        raise HTTPException(status_code=409, detail="campaign snapshot hash is missing")
+    payload_hash = await run_in_threadpool(_sha256_file, path)
+    if not hmac.compare_digest(payload_hash, snapshot.parquet_sha256.strip().lower()):
+        raise HTTPException(
+            status_code=503,
+            detail="campaign snapshot payload hash does not match its manifest",
+        )
+    candles = await _read_campaign_snapshot_candles(
+        path,
+        symbol=normalized_symbol,
+        interval=interval,
+        start_ms=start_ms,
+        end_ms=end_ms,
+    )
+    gaps = snapshot.gaps or []
+    coverage = snapshot.coverage or {}
+    # ``expected_rows``/``present_rows`` describe non-empty parquet rows.  A
+    # complete window may legitimately have fewer present rows because some
+    # seconds had no trades, so only explicit coverage counts participate in
+    # the count-based completeness check.
+    expected_count = next(
+        (
+            coverage[key]
+            for key in ("expected_count", "coverage_expected")
+            if coverage.get(key) is not None
+        ),
+        coverage.get("expected_rows"),
+    )
+    received_count = next(
+        (
+            coverage[key]
+            for key in ("received_count", "coverage_received")
+            if coverage.get(key) is not None
+        ),
+        coverage.get("present_rows"),
+    )
+    explicit_expected = any(
+        coverage.get(key) is not None
+        for key in ("expected_count", "coverage_expected")
+    )
+    explicit_received = any(
+        coverage.get(key) is not None
+        for key in ("received_count", "coverage_received")
+    )
+    declared_status = str(coverage.get("coverage_status") or "").lower()
+    complete_flag = coverage.get("complete")
+    continuity_ok = coverage.get("continuity_ok")
+    count_mismatch = (
+        explicit_expected
+        and explicit_received
+        and int(received_count) < int(expected_count)
+    )
+    if gaps or declared_status == "gapped":
+        coverage_status: Literal["complete", "collecting", "incomplete", "gapped"] = "gapped"
+    elif snapshot.status != "completed":
+        coverage_status = "incomplete"
+    elif complete_flag is False or continuity_ok is False:
+        coverage_status = "incomplete"
+    elif declared_status == "incomplete":
+        coverage_status = "incomplete"
+    elif count_mismatch:
+        coverage_status = "incomplete"
+    else:
+        coverage_status = "complete"
+    coverage_message = None
+    if gaps:
+        coverage_message = f"snapshot contains {len(gaps)} gap(s)"
+    elif coverage_status == "incomplete":
+        coverage_message = "snapshot window is incomplete"
+    return CampaignCandleSnapshotResponse(
+        snapshot=_snapshot_response_metadata(snapshot),
+        symbol=normalized_symbol,
+        interval=interval,
+        candles=candles,
+        coverage_status=coverage_status,
+        coverage_message=coverage_message,
+        gap_count=len(gaps),
+        expected_count=int(expected_count) if expected_count is not None else None,
+        received_count=int(received_count) if received_count is not None else None,
+    )
 
 
 @router.get("/exchange-symbols", response_model=Page)

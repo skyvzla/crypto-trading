@@ -63,6 +63,9 @@ from trading_platform.strategies.spike.live import (
     campaign_store_key,
     require_one_way_position_mode,
 )
+from trading_platform.strategies.spike.candle_snapshots import (
+    LiveCandleSnapshotRuntime,
+)
 from trading_platform.strategies.spike.capital import CapitalPolicy
 from trading_platform.strategies.spike.capital_store import CapitalSnapshot, CapitalStore
 from trading_platform.strategies.spike.short import (
@@ -190,6 +193,7 @@ class SpikeLiveProcess:
         self.db: LedgerDB | None = None
         self.execution_rest: BinanceRestClient | None = None
         self.event_journal: DurableExecutionEventJournal | None = None
+        self.snapshot_runtime: LiveCandleSnapshotRuntime | None = None
         self.capital_store: CapitalStore | None = None
         self.capital_snapshot: CapitalSnapshot | None = None
         self.exchange_symbol_snapshot: ExchangeSymbolSnapshot | None = None
@@ -209,6 +213,11 @@ class SpikeLiveProcess:
             assert self.coordinator is not None
             assert self.gate is not None
             assert self.admission is not None
+            if self.snapshot_runtime is not None:
+                await self.snapshot_runtime.start()
+                self.gate.set_condition(
+                    "snapshot", not self.snapshot_runtime.failed
+                )
 
             if self.execution_lease is not None:
                 self._tasks.append(
@@ -371,6 +380,7 @@ class SpikeLiveProcess:
             self.gate.set_condition("market", False)
             self.gate.set_condition("event_queue", False)
             self.gate.set_condition("metrics_5m", False)
+            self.gate.set_condition("snapshot", False)
         if self.runtime_callbacks is not None:
             self.runtime_callbacks.abort_startup_recovery()
         for task in self._tasks:
@@ -383,6 +393,11 @@ class SpikeLiveProcess:
         if self.coordinator is not None:
             try:
                 await self.coordinator.stop()
+            except BaseException as exc:
+                errors.append(exc)
+        if self.snapshot_runtime is not None:
+            try:
+                await self.snapshot_runtime.close(now_ms=int(time.time() * 1000))
             except BaseException as exc:
                 errors.append(exc)
         if self.runtime is not None:
@@ -599,12 +614,25 @@ class SpikeLiveProcess:
             "exchange_symbols",
             "event_queue",
             "capital",
+            "snapshot",
         ):
             self.gate.set_condition(condition, False)
+        self.gate.set_condition("snapshot", True)
         # Keep the metrics gate independent so missing/stale derivatives data
         # closes only new entries while existing campaigns can still exit.
         self.gate.set_condition("metrics_5m", not self._metrics_required)
         funding_source = self._build_funding_source(rest, pool)
+        self.snapshot_runtime = LiveCandleSnapshotRuntime(
+            root=self.settings.snapshot_root,
+            db=db,
+            account_id=self.settings.account_id,
+            strategy_id=STRATEGY_ID,
+            run_id=self.instance_id,
+            release_hash=self.strategy_release_hash,
+            pre_window_ms=self.settings.snapshot_pre_seconds * 1_000,
+            post_window_ms=self.settings.snapshot_post_seconds * 1_000,
+            event_sink=self._observe_snapshot_event,
+        )
         self.coordinator = SpikeExecutionCoordinator(
             strategy=strategy,
             account=account,
@@ -627,6 +655,7 @@ class SpikeLiveProcess:
                 recovery_allowed=True,
             ),
             event_journal=self.event_journal,
+            snapshot_runtime=self.snapshot_runtime,
         )
         self.admission = SubcategoryAdmissionService(
             source=db,
@@ -752,6 +781,19 @@ class SpikeLiveProcess:
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
             details=details,
+        )
+
+    async def _observe_snapshot_event(self, event_type: str, **kwargs: Any) -> None:
+        details = dict(kwargs.pop("details", {}) or {})
+        snapshot_id = kwargs.pop("snapshot_id", None)
+        await self._append_process_event(
+            event_type,
+            source="spike.market_snapshot",
+            event_time=kwargs.pop("event_time", None),
+            trace_id=snapshot_id,
+            symbol=kwargs.pop("symbol", None),
+            campaign_id=kwargs.pop("campaign_id", None),
+            details={"snapshot_id": snapshot_id, **details},
         )
 
     async def _observe_binance_rest(

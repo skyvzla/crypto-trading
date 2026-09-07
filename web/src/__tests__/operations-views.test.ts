@@ -540,7 +540,16 @@ describe('operations views', () => {
         stubs: {
           TradeReplayChartPanel: {
             name: 'TradeReplayChartPanel',
-            props: ['trade', 'mode', 'fillTimeSemantics', 'exitLabel', 'strategyLines'],
+            props: [
+              'trade',
+              'mode',
+              'campaignId',
+              'accountId',
+              'strategyId',
+              'fillTimeSemantics',
+              'exitLabel',
+              'strategyLines',
+            ],
             template: '<div class="trade-replay-chart-panel-stub" />',
           },
         },
@@ -561,6 +570,9 @@ describe('operations views', () => {
     const chart = wrapper.getComponent({ name: 'TradeReplayChartPanel' })
     expect(chart.props()).toMatchObject({
       mode: 'market',
+      campaignId: 'campaign/1',
+      accountId: 'acct',
+      strategyId: 'spike-short',
       fillTimeSemantics: 'exchange',
       exitLabel: '最后成交',
       strategyLines: false,

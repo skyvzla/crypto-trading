@@ -193,6 +193,29 @@ describe('operationsApi', () => {
     expect(requestedUrl().searchParams.get('campaign_id')).toBe('campaign/1')
   })
 
+  it('loads a campaign 1s candle snapshot with the complete account-scoped window', async () => {
+    mockJson({ snapshot: {}, symbol: 'BTCUSDT', interval: '1s', source: 'campaign_snapshot', candles: [] })
+
+    await operationsApi.campaignSnapshot('campaign/1', {
+      account_id: 'acct/1',
+      strategy_id: 'spike-short',
+      symbol: 'BTCUSDT',
+      interval: '1s',
+      start_ms: 1_750_000_000_000,
+      end_ms: 1_750_000_001_500,
+    })
+
+    expect(requestedUrl().pathname).toBe('/api/v1/campaigns/campaign%2F1/candles')
+    expect(Object.fromEntries(requestedUrl().searchParams)).toEqual({
+      account_id: 'acct/1',
+      strategy_id: 'spike-short',
+      symbol: 'BTCUSDT',
+      interval: '1s',
+      start_ms: '1750000000000',
+      end_ms: '1750000001500',
+    })
+  })
+
   it('encodes category keys and paginates server-side category symbols', async () => {
     mockJson({ items: [], total: 0, limit: 20, offset: 40 })
 

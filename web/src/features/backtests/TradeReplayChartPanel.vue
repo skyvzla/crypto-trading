@@ -15,7 +15,15 @@ import {
 } from 'lucide-vue-next'
 import { backtestApi } from '@/api/backtests'
 import { chartSettingsApi } from '@/api/chartSettings'
-import type { BacktestCandle, ChartIndicatorSettings, ChartOverlay } from '@/api/types'
+import { ApiError } from '@/api/client'
+import { operationsApi } from '@/api/operations'
+import type {
+  BacktestCandle,
+  CandleCoverageStatus,
+  CampaignCandleSnapshotResponse,
+  ChartIndicatorSettings,
+  ChartOverlay,
+} from '@/api/types'
 import ChartIndicatorSettingsModal from '@/features/backtests/ChartIndicatorSettingsModal.vue'
 import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import TradeCandlestickChart from '@/features/backtests/TradeCandlestickChart.vue'
@@ -49,6 +57,9 @@ const props = withDefaults(
     trade: TradeChartData
     mode?: 'backtest' | 'market'
     researchId?: string
+    campaignId?: string
+    accountId?: string
+    strategyId?: string
     overlays?: ChartOverlay[]
     fillTimeSemantics?: TradeChartFillTimeSemantics
     exitLabel?: string
@@ -103,18 +114,89 @@ const indicatorSettings = ref<ChartIndicatorSettings>(cloneChartIndicatorSetting
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
 
+interface CandleQueryResponse {
+  symbol: string
+  interval: string
+  source: 'binance' | 'archive' | 'campaign_snapshot'
+  candles: BacktestCandle[]
+  coverage_status?: CandleCoverageStatus
+  coverage_message?: string | null
+  gap_count?: number
+  expected_count?: number | null
+  received_count?: number | null
+}
+
+type SnapshotUiStatus = CandleCoverageStatus | 'failed' | 'missing' | 'integrity' | 'error' | 'stale'
+
+interface SnapshotErrorInfo {
+  status: Extract<SnapshotUiStatus, 'collecting' | 'failed' | 'missing' | 'integrity' | 'error'>
+  message: string
+}
+
+const hasCampaignSnapshotContext = computed(() =>
+  Boolean(props.mode === 'market' && props.campaignId && props.accountId && props.strategyId),
+)
 const availableIntervals = computed<ChartInterval[]>(() =>
-  props.mode === 'market' ? CHART_INTERVALS.filter((item) => item !== '1s') : [...CHART_INTERVALS],
+  props.mode === 'market' && !hasCampaignSnapshotContext.value
+    ? CHART_INTERVALS.filter((item) => item !== '1s')
+    : [...CHART_INTERVALS],
 )
-const source = computed<'binance' | 'archive'>(() =>
-  props.mode === 'market' || interval.value !== '1s' ? 'binance' : 'archive',
+const source = computed<'binance' | 'archive' | 'campaign_snapshot'>(() =>
+  props.mode === 'backtest' && interval.value === '1s'
+    ? 'archive'
+    : props.mode === 'market' && interval.value === '1s' && hasCampaignSnapshotContext.value
+      ? 'campaign_snapshot'
+      : 'binance',
 )
-const sourceLabel = computed(() => (source.value === 'archive' ? '本地归档' : 'Binance'))
+const sourceLabel = computed(() => {
+  if (source.value === 'archive') return '本地归档'
+  if (source.value === 'campaign_snapshot') return '实盘快照'
+  return 'Binance'
+})
 const isReady = computed(() =>
   Boolean(
-    props.trade.symbol && timestampMs(props.trade.entry_time) !== null && (props.mode === 'market' || props.researchId),
+    props.trade.symbol &&
+    timestampMs(props.trade.entry_time) !== null &&
+    (props.mode === 'backtest' ? props.researchId : true) &&
+    (source.value !== 'campaign_snapshot' || hasCampaignSnapshotContext.value),
   ),
 )
+
+function finiteCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function snapshotCoverageStatus(response: CampaignCandleSnapshotResponse): CandleCoverageStatus {
+  if (response.coverage_status) return response.coverage_status
+  if (response.snapshot.gaps.length > 0) return 'gapped'
+  const expected = finiteCount(
+    response.expected_count ?? response.snapshot.coverage.expected_count ?? response.snapshot.coverage.expected_rows,
+  )
+  const received = finiteCount(
+    response.received_count ?? response.snapshot.coverage.received_count ?? response.snapshot.coverage.present_rows,
+  )
+  if (expected !== null && received !== null && received < expected) return 'incomplete'
+  return response.snapshot.status === 'completed' ? 'complete' : 'collecting'
+}
+
+function normalizeSnapshotResponse(response: CampaignCandleSnapshotResponse): CandleQueryResponse {
+  const gaps = response.snapshot.gaps
+  const coverage = response.snapshot.coverage
+  return {
+    symbol: response.symbol,
+    interval: response.interval,
+    source: response.source,
+    candles: response.candles,
+    coverage_status: snapshotCoverageStatus(response),
+    coverage_message: response.coverage_message ?? response.snapshot.failure_reason,
+    gap_count: response.gap_count ?? gaps.length,
+    expected_count: response.expected_count ?? finiteCount(coverage.expected_count ?? coverage.expected_rows) ?? null,
+    received_count:
+      response.received_count ??
+      response.snapshot.row_count ??
+      finiteCount(coverage.received_count ?? coverage.present_rows),
+  }
+}
 function resolveDefaultInterval(preferred: string | undefined): ChartInterval {
   if (preferred && availableIntervals.value.includes(preferred as ChartInterval)) {
     return preferred as ChartInterval
@@ -151,18 +233,119 @@ const candleParams = computed(() => {
     source: source.value,
   }
 })
-const candlesQuery = useQuery({
+const candlesQuery = useQuery<CandleQueryResponse>({
   queryKey: computed(() => [
     'trade-replay-candles',
     props.mode,
     props.researchId,
+    props.campaignId,
+    props.accountId,
+    props.strategyId,
     props.trade.symbol,
     candleParams.value,
   ]),
-  queryFn: () => backtestApi.candles(candleParams.value!),
+  queryFn: async () => {
+    const params = candleParams.value!
+    if (source.value === 'campaign_snapshot') {
+      const response = await operationsApi.campaignSnapshot(props.campaignId!, {
+        account_id: props.accountId!,
+        strategy_id: props.strategyId!,
+        symbol: params.symbol,
+        interval: '1s',
+        start_ms: params.start_ms,
+        end_ms: params.end_ms,
+      })
+      return normalizeSnapshotResponse(response)
+    }
+    return await backtestApi.candles(params as Parameters<typeof backtestApi.candles>[0])
+  },
   enabled: computed(() => candleParams.value !== null),
   staleTime: 5 * 60_000,
   placeholderData: (previous) => previous,
+})
+
+function snapshotErrorInfo(error: unknown): SnapshotErrorInfo {
+  const detail = error instanceof Error ? error.message : ''
+  const normalized = detail.toLowerCase()
+  if (error instanceof ApiError && error.status === 404) {
+    return { status: 'missing', message: '没有找到该 Campaign 的 1s 快照' }
+  }
+  if (
+    (error instanceof ApiError && error.status === 503) ||
+    /hash|sha256|checksum|integrity|完整性|校验|payload.*missing|missing.*payload/.test(normalized)
+  ) {
+    return { status: 'integrity', message: '1s 快照完整性校验失败或数据文件不可用' }
+  }
+  if (error instanceof ApiError && error.status === 409) {
+    if (/not ready|collecting|采集|未就绪/.test(normalized)) {
+      return { status: 'collecting', message: '1s 快照仍在采集，暂时不可读取' }
+    }
+    return { status: 'failed', message: detail || '1s 快照读取失败' }
+  }
+  return { status: 'error', message: detail || '1s 快照读取失败' }
+}
+
+const snapshotError = computed<SnapshotErrorInfo | null>(() => {
+  if (source.value !== 'campaign_snapshot' || !candlesQuery.error.value) return null
+  return snapshotErrorInfo(candlesQuery.error.value)
+})
+const snapshotStatus = computed<SnapshotUiStatus | null>(() => {
+  if (source.value !== 'campaign_snapshot') return null
+  if (snapshotError.value) return loadedCandles.value.length ? 'stale' : snapshotError.value.status
+  return candlesQuery.data.value?.coverage_status ?? null
+})
+const snapshotStatusLabel = computed(() => {
+  switch (snapshotStatus.value) {
+    case 'complete':
+      return '1s完整'
+    case 'incomplete':
+      return '1s不完整'
+    case 'gapped':
+      return `1s有缺口${candlesQuery.data.value?.gap_count ? ` · ${candlesQuery.data.value.gap_count}` : ''}`
+    case 'collecting':
+      return '1s采集中'
+    case 'failed':
+      return '1s失败'
+    case 'missing':
+      return '无1s快照'
+    case 'integrity':
+      return '1s完整性错误'
+    case 'error':
+      return '1s读取失败'
+    case 'stale':
+      return '1s过期 · 读取失败'
+    default:
+      return ''
+  }
+})
+const snapshotStatusColor = computed(() => {
+  switch (snapshotStatus.value) {
+    case 'complete':
+      return 'green'
+    case 'gapped':
+      return 'red'
+    case 'incomplete':
+      return 'orange'
+    case 'missing':
+      return 'orange'
+    case 'failed':
+    case 'integrity':
+    case 'error':
+    case 'stale':
+      return 'red'
+    default:
+      return 'blue'
+  }
+})
+const snapshotStatusMessage = computed(() => {
+  if (snapshotError.value) return snapshotError.value.message
+  return candlesQuery.data.value?.coverage_message || undefined
+})
+const candleQueryError = computed<Error | null>(() => {
+  const error = candlesQuery.error.value
+  if (!error) return null
+  if (source.value === 'campaign_snapshot') return new Error(snapshotError.value?.message || '1s 快照读取失败')
+  return error instanceof Error ? error : new Error('K线读取失败')
 })
 const activeIndicatorNames = computed(() =>
   CHART_INDICATORS.filter((definition) => indicatorEnabled(indicatorSettings.value, definition)).map(
@@ -291,7 +474,18 @@ watch(
   { immediate: true },
 )
 watch(
-  () => [props.trade.symbol, props.trade.entry_time, props.trade.exit_time, interval.value, source.value],
+  () => [
+    props.mode,
+    props.researchId,
+    props.campaignId,
+    props.accountId,
+    props.strategyId,
+    props.trade.symbol,
+    props.trade.entry_time,
+    props.trade.exit_time,
+    interval.value,
+    source.value,
+  ],
   () => {
     loadedCandles.value = []
     windowCenterMs.value = null
@@ -316,11 +510,22 @@ watch(
         <a-radio-button v-for="item in availableIntervals" :key="item" :value="item">{{ item }}</a-radio-button>
       </a-radio-group>
       <div class="source-tools">
-        <a-tooltip :title="mode === 'market' ? 'Binance 公开 K 线；买卖点来自账本成交' : undefined">
+        <a-tooltip
+          :title="
+            mode === 'market'
+              ? source === 'campaign_snapshot'
+                ? '实盘 1s 快照；订单流来自 Market aggTrade 聚合'
+                : 'Binance 公开 K 线；买卖点来自账本成交'
+              : undefined
+          "
+        >
           <a-tag color="blue"
             ><Database v-if="source === 'archive'" :size="14" /> <Globe2 v-else :size="14" /> {{ sourceLabel }}</a-tag
           >
         </a-tooltip>
+        <a-tag v-if="snapshotStatus" :color="snapshotStatusColor" :title="snapshotStatusMessage">
+          {{ snapshotStatusLabel }}
+        </a-tag>
         <a-divider type="vertical" />
         <a-tooltip :title="`图表设置；已启用指标：${activeIndicatorNames.join('、') || '无'}`">
           <a-button
@@ -395,7 +600,7 @@ watch(
     </div>
     <QueryPanel
       v-else
-      :error="loadedCandles.length ? null : candlesQuery.error.value"
+      :error="loadedCandles.length ? null : candleQueryError"
       :empty="loadedCandles.length === 0"
       @retry="candlesQuery.refetch()"
     >
@@ -411,7 +616,7 @@ watch(
       />
     </QueryPanel>
     <div class="chart-legend">
-      <a-tag color="blue">{{ candlesQuery.data.value?.source === 'archive' ? '本地归档' : 'Binance' }}</a-tag>
+      <a-tag color="blue">{{ sourceLabel }}</a-tag>
       <span
         v-for="item in legendItems"
         :key="item.label"

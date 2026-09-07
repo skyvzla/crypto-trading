@@ -307,6 +307,35 @@ class CampaignPnLSummary:
 
 
 @dataclass
+class CampaignCandleSnapshotManifest:
+    """PostgreSQL manifest for one immutable Campaign candle snapshot."""
+
+    snapshot_id: str
+    account_id: str
+    strategy_id: str
+    campaign_id: str
+    symbol: str
+    run_id: str
+    signal_time_ms: int
+    window_start_ms: int
+    window_end_ms: int
+    status: str = "collecting"
+    coverage: dict[str, Any] | None = None
+    gaps: list[dict[str, Any]] | None = None
+    parquet_relative_path: Optional[str] = None
+    parquet_sha256: Optional[str] = None
+    row_count: Optional[int] = None
+    schema_version: int = 1
+    aggregation_version: int = 1
+    release_hash: str = ""
+    failure_reason: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    failed_at: Optional[datetime] = None
+
+
+@dataclass
 class PerformanceCampaignFact:
     """Raw, account-scoped campaign facts used by the Web performance API.
 
@@ -1312,6 +1341,368 @@ class LedgerDB:
                 "and nonnegative short quantity"
             )
         return summary
+
+    @staticmethod
+    def _validate_snapshot_relative_path(path: str) -> str:
+        """Reject paths that could escape the configured snapshot root."""
+
+        normalized = str(path).strip().replace("\\", "/")
+        parts = normalized.split("/")
+        if (
+            not normalized
+            or normalized.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+            or ":" in parts[0]
+        ):
+            raise ValueError("snapshot Parquet path must be a non-empty relative path")
+        return normalized
+
+    @staticmethod
+    def _snapshot_manifest_params(
+        manifest: CampaignCandleSnapshotManifest,
+    ) -> dict[str, object]:
+        if manifest.status != "collecting":
+            raise ValueError("new snapshot manifests must start in collecting state")
+        if not manifest.release_hash or len(manifest.release_hash) != 64:
+            raise ValueError("snapshot release_hash must be a 64-character SHA-256")
+        if manifest.window_start_ms > manifest.signal_time_ms:
+            raise ValueError("snapshot window starts after signal_time_ms")
+        if manifest.signal_time_ms >= manifest.window_end_ms:
+            raise ValueError("snapshot window ends at or before signal_time_ms")
+        return {
+            "snapshot_id": manifest.snapshot_id,
+            "account_id": manifest.account_id,
+            "strategy_id": manifest.strategy_id,
+            "campaign_id": manifest.campaign_id,
+            "symbol": manifest.symbol.strip().upper(),
+            "run_id": manifest.run_id,
+            "signal_time_ms": manifest.signal_time_ms,
+            "window_start_ms": manifest.window_start_ms,
+            "window_end_ms": manifest.window_end_ms,
+            "coverage": Jsonb(manifest.coverage or {}),
+            "gaps": Jsonb(manifest.gaps or []),
+            "schema_version": manifest.schema_version,
+            "aggregation_version": manifest.aggregation_version,
+            "release_hash": manifest.release_hash.lower(),
+        }
+
+    async def create_campaign_snapshot(
+        self, manifest: CampaignCandleSnapshotManifest
+    ) -> CampaignCandleSnapshotManifest:
+        """Create a collecting manifest, accepting an identical retry."""
+
+        params = self._snapshot_manifest_params(manifest)
+        query = """
+            INSERT INTO campaign_candle_snapshots (
+                snapshot_id, account_id, strategy_id, campaign_id, symbol,
+                run_id, signal_time_ms, window_start_ms, window_end_ms,
+                coverage, gaps, schema_version, aggregation_version, release_hash
+            ) VALUES (
+                %(snapshot_id)s, %(account_id)s, %(strategy_id)s, %(campaign_id)s,
+                %(symbol)s, %(run_id)s, %(signal_time_ms)s, %(window_start_ms)s,
+                %(window_end_ms)s, %(coverage)s, %(gaps)s, %(schema_version)s,
+                %(aggregation_version)s, %(release_hash)s
+            )
+            ON CONFLICT (snapshot_id) DO NOTHING
+            RETURNING snapshot_id
+        """
+        async with self.transaction() as conn:
+            inserted = await (await conn.execute(query, params)).fetchone()
+            cursor = conn.cursor(row_factory=class_row(CampaignCandleSnapshotManifest))
+            await cursor.execute(
+                """
+                SELECT snapshot_id, account_id, strategy_id, campaign_id, symbol,
+                       run_id, signal_time_ms, window_start_ms, window_end_ms,
+                       status, coverage, gaps, parquet_relative_path,
+                       parquet_sha256, row_count, schema_version,
+                       aggregation_version, release_hash, failure_reason,
+                       created_at, updated_at, completed_at, failed_at
+                FROM campaign_candle_snapshots
+                WHERE snapshot_id = %(snapshot_id)s
+                """,
+                {"snapshot_id": manifest.snapshot_id},
+            )
+            stored = await cursor.fetchone()
+        if stored is None:
+            raise RuntimeError("created snapshot manifest could not be read back")
+        if inserted is None:
+            expected = {
+                key: params[key]
+                for key in (
+                    "account_id", "strategy_id", "campaign_id", "symbol", "run_id",
+                    "signal_time_ms", "window_start_ms", "window_end_ms",
+                    "schema_version", "aggregation_version", "release_hash",
+                )
+            }
+            actual = {
+                key: getattr(stored, key)
+                for key in expected
+            }
+            if actual != expected:
+                raise ValueError(
+                    f"snapshot manifest {manifest.snapshot_id} conflicts with an existing row"
+                )
+        return stored
+
+    async def complete_campaign_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        parquet_relative_path: str,
+        parquet_sha256: str,
+        row_count: int,
+        coverage: dict[str, Any],
+        gaps: list[dict[str, Any]],
+    ) -> CampaignCandleSnapshotManifest:
+        """Atomically publish a Parquet payload with strict retry idempotency."""
+
+        relative_path = self._validate_snapshot_relative_path(parquet_relative_path)
+        digest = parquet_sha256.strip().lower()
+        if len(digest) != 64:
+            raise ValueError("snapshot Parquet hash must be a 64-character SHA-256")
+        if row_count < 0:
+            raise ValueError("snapshot row_count cannot be negative")
+        update_query = """
+            UPDATE campaign_candle_snapshots
+            SET status = 'completed',
+                coverage = %(coverage)s,
+                gaps = %(gaps)s,
+                parquet_relative_path = %(parquet_relative_path)s,
+                parquet_sha256 = %(parquet_sha256)s,
+                row_count = %(row_count)s,
+                failure_reason = NULL,
+                completed_at = NOW(),
+                failed_at = NULL,
+                updated_at = NOW()
+            WHERE snapshot_id = %(snapshot_id)s
+              AND status = 'collecting'
+            RETURNING snapshot_id
+        """
+        select_query = """
+            SELECT snapshot_id, account_id, strategy_id, campaign_id, symbol,
+                   run_id, signal_time_ms, window_start_ms, window_end_ms,
+                   status, coverage, gaps, parquet_relative_path,
+                   parquet_sha256, row_count, schema_version,
+                   aggregation_version, release_hash, failure_reason,
+                   created_at, updated_at, completed_at, failed_at
+            FROM campaign_candle_snapshots
+            WHERE snapshot_id = %(snapshot_id)s
+        """
+        params = {
+            "snapshot_id": snapshot_id,
+            "coverage": Jsonb(coverage),
+            "gaps": Jsonb(gaps),
+            "parquet_relative_path": relative_path,
+            "parquet_sha256": digest,
+            "row_count": row_count,
+        }
+
+        def matches_completed_payload(
+            stored_manifest: CampaignCandleSnapshotManifest,
+        ) -> bool:
+            return (
+                stored_manifest.parquet_relative_path == relative_path
+                and str(stored_manifest.parquet_sha256 or "").strip().lower()
+                == digest
+                and stored_manifest.row_count == row_count
+                and dict(stored_manifest.coverage or {}) == requested_coverage
+                and list(stored_manifest.gaps or []) == requested_gaps
+            )
+
+        requested_coverage = dict(coverage)
+        requested_gaps = list(gaps)
+        async with self.transaction() as conn:
+            cursor = conn.cursor(row_factory=class_row(CampaignCandleSnapshotManifest))
+            await cursor.execute(select_query, {"snapshot_id": snapshot_id})
+            stored = await cursor.fetchone()
+            if stored is None:
+                raise KeyError(f"snapshot manifest {snapshot_id} was not found")
+
+            if stored.status == "completed":
+                if matches_completed_payload(stored):
+                    return stored
+                raise ValueError(
+                    f"snapshot manifest {snapshot_id} completed payload conflicts"
+                )
+            if stored.status != "collecting":
+                raise ValueError(
+                    f"snapshot manifest {snapshot_id} cannot be completed from status {stored.status}"
+                )
+
+            updated = await (await conn.execute(update_query, params)).fetchone()
+            if updated is None:
+                # A concurrent publisher may have committed the same payload
+                # between the initial read and this conditional update.
+                await cursor.execute(select_query, {"snapshot_id": snapshot_id})
+                current = await cursor.fetchone()
+                if current is not None and current.status == "completed":
+                    if matches_completed_payload(current):
+                        return current
+                    raise ValueError(
+                        f"snapshot manifest {snapshot_id} completed payload conflicts"
+                    )
+                raise RuntimeError(f"snapshot manifest {snapshot_id} changed while completing")
+            await cursor.execute(select_query, {"snapshot_id": snapshot_id})
+            stored = await cursor.fetchone()
+            if stored is None:
+                raise RuntimeError(
+                    f"completed snapshot manifest {snapshot_id} could not be read back"
+                )
+        return stored
+
+    async def fail_campaign_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        reason: str,
+        coverage: dict[str, Any] | None = None,
+        gaps: list[dict[str, Any]] | None = None,
+    ) -> CampaignCandleSnapshotManifest:
+        """Mark a collecting snapshot failed with strict retry idempotency."""
+
+        normalized_reason = str(reason).strip()
+        if not normalized_reason:
+            raise ValueError("snapshot failure reason must not be empty")
+        update_query = """
+            UPDATE campaign_candle_snapshots
+            SET status = 'failed',
+                coverage = COALESCE(%(coverage)s, coverage),
+                gaps = COALESCE(%(gaps)s, gaps),
+                failure_reason = %(failure_reason)s,
+                failed_at = NOW(),
+                updated_at = NOW()
+            WHERE snapshot_id = %(snapshot_id)s
+              AND status = 'collecting'
+            RETURNING snapshot_id
+        """
+        select_query = """
+            SELECT snapshot_id, account_id, strategy_id, campaign_id, symbol,
+                   run_id, signal_time_ms, window_start_ms, window_end_ms,
+                   status, coverage, gaps, parquet_relative_path,
+                   parquet_sha256, row_count, schema_version,
+                   aggregation_version, release_hash, failure_reason,
+                   created_at, updated_at, completed_at, failed_at
+            FROM campaign_candle_snapshots
+            WHERE snapshot_id = %(snapshot_id)s
+        """
+        params = {
+            "snapshot_id": snapshot_id,
+            "coverage": Jsonb(coverage) if coverage is not None else None,
+            "gaps": Jsonb(gaps) if gaps is not None else None,
+            "failure_reason": normalized_reason,
+        }
+
+        def matches_failed_payload(
+            stored_manifest: CampaignCandleSnapshotManifest,
+        ) -> bool:
+            return (
+                stored_manifest.failure_reason == normalized_reason
+                and dict(stored_manifest.coverage or {}) == requested_coverage
+                and list(stored_manifest.gaps or []) == requested_gaps
+            )
+
+        async with self.transaction() as conn:
+            cursor = conn.cursor(row_factory=class_row(CampaignCandleSnapshotManifest))
+            await cursor.execute(select_query, {"snapshot_id": snapshot_id})
+            stored = await cursor.fetchone()
+            if stored is None:
+                raise KeyError(f"snapshot manifest {snapshot_id} was not found")
+
+            requested_coverage = (
+                dict(coverage) if coverage is not None else dict(stored.coverage or {})
+            )
+            requested_gaps = list(gaps) if gaps is not None else list(stored.gaps or [])
+            if stored.status == "failed":
+                if matches_failed_payload(stored):
+                    return stored
+                raise ValueError(
+                    f"snapshot manifest {snapshot_id} failed payload conflicts"
+                )
+            if stored.status != "collecting":
+                raise ValueError(
+                    f"snapshot manifest {snapshot_id} cannot be failed from status {stored.status}"
+                )
+
+            updated = await (await conn.execute(update_query, params)).fetchone()
+            if updated is None:
+                await cursor.execute(select_query, {"snapshot_id": snapshot_id})
+                current = await cursor.fetchone()
+                if current is not None and current.status == "failed":
+                    if matches_failed_payload(current):
+                        return current
+                    raise ValueError(
+                        f"snapshot manifest {snapshot_id} failed payload conflicts"
+                    )
+                raise RuntimeError(f"snapshot manifest {snapshot_id} changed while failing")
+            await cursor.execute(select_query, {"snapshot_id": snapshot_id})
+            stored = await cursor.fetchone()
+            if stored is None:
+                raise RuntimeError(
+                    f"failed snapshot manifest {snapshot_id} could not be read back"
+                )
+        return stored
+
+    async def list_campaign_snapshots(
+        self,
+        *,
+        campaign_id: str,
+        account_id: Optional[str] = None,
+        strategy_id: Optional[str] = None,
+        symbol: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[CampaignCandleSnapshotManifest]:
+        """List manifests for a Campaign, newest first."""
+
+        filters = ["campaign_id = %(campaign_id)s"]
+        params: dict[str, object] = {
+            "campaign_id": campaign_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        for field, value in (
+            ("account_id", account_id),
+            ("strategy_id", strategy_id),
+            ("symbol", symbol.strip().upper() if symbol else None),
+        ):
+            if value is not None:
+                filters.append(f"{field} = %({field})s")
+                params[field] = value
+        query = f"""
+            SELECT snapshot_id, account_id, strategy_id, campaign_id, symbol,
+                   run_id, signal_time_ms, window_start_ms, window_end_ms,
+                   status, coverage, gaps, parquet_relative_path,
+                   parquet_sha256, row_count, schema_version,
+                   aggregation_version, release_hash, failure_reason,
+                   created_at, updated_at, completed_at, failed_at
+            FROM campaign_candle_snapshots
+            WHERE {' AND '.join(filters)}
+            ORDER BY created_at DESC, snapshot_id DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+        async with self.pool.connection() as conn:
+            cursor = conn.cursor(row_factory=class_row(CampaignCandleSnapshotManifest))
+            await cursor.execute(query, params)
+            return await cursor.fetchall()
+
+    async def get_campaign_snapshot(
+        self,
+        *,
+        account_id: str,
+        strategy_id: str,
+        symbol: str,
+        campaign_id: str,
+    ) -> CampaignCandleSnapshotManifest | None:
+        """Return the newest manifest matching an account-scoped Campaign."""
+
+        items = await self.list_campaign_snapshots(
+            campaign_id=campaign_id,
+            account_id=account_id,
+            strategy_id=strategy_id,
+            symbol=symbol,
+            limit=1,
+        )
+        return items[0] if items else None
 
     async def upsert_position(self, position: Position) -> int:
         query = """

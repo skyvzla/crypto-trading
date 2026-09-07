@@ -831,13 +831,73 @@ export interface BacktestCandle {
   low: number
   close: number
   volume: number
+  /** Binance aggTrade-derived fields; absent for public REST K-lines. */
+  quote_volume?: number
+  trade_count?: number
+  raw_trade_count?: number
+  taker_buy_volume?: number
+  taker_sell_volume?: number
+  taker_buy_quote_volume?: number
+  taker_sell_quote_volume?: number
+  taker_buy_trade_count?: number
+  taker_sell_trade_count?: number
+  taker_buy_agg_trade_count?: number
+  taker_sell_agg_trade_count?: number
+  max_agg_trade_quantity?: number
+  max_taker_buy_agg_trade_quantity?: number
+  max_taker_sell_agg_trade_quantity?: number
+  first_aggregate_trade_id?: number
+  last_aggregate_trade_id?: number
+  first_trade_id?: number
+  last_trade_id?: number
 }
+
+export type CandleCoverageStatus = 'complete' | 'collecting' | 'incomplete' | 'gapped'
 
 export interface BacktestCandlesResponse {
   symbol: string
   interval: string
   source: 'binance' | 'archive'
   candles: BacktestCandle[]
+}
+
+export interface CampaignSnapshotMetadata {
+  snapshot_id: string
+  account_id: string
+  strategy_id: string
+  campaign_id: string
+  symbol: string
+  run_id: string
+  signal_time_ms: number
+  window_start_ms: number
+  window_end_ms: number
+  status: string
+  coverage: JsonObject
+  gaps: JsonObject[]
+  parquet_relative_path: string | null
+  parquet_sha256: string | null
+  row_count: number | null
+  schema_version: number
+  aggregation_version: number
+  release_hash: string
+  failure_reason: string | null
+  created_at: string | null
+  updated_at: string | null
+  completed_at: string | null
+  failed_at: string | null
+}
+
+export interface CampaignCandleSnapshotResponse {
+  snapshot: CampaignSnapshotMetadata
+  symbol: string
+  interval: '1s'
+  source: 'campaign_snapshot'
+  candles: BacktestCandle[]
+  coverage_status?: CandleCoverageStatus
+  coverage_message?: string | null
+  gap_count?: number
+  expected_count?: number | null
+  received_count?: number | null
 }
 
 export type ChartLineStyle = 'solid' | 'dashed' | 'dotted'

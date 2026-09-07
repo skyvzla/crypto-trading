@@ -8,7 +8,10 @@ import BacktestTradeListView from '@/views/backtests/BacktestTradeListView.vue'
 import BacktestTradeReplayView from '@/views/backtests/BacktestTradeReplayView.vue'
 import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
 import { backtestApi } from '@/api/backtests'
+import { ApiError } from '@/api/client'
 import { chartSettingsApi } from '@/api/chartSettings'
+import { operationsApi } from '@/api/operations'
+import type { CampaignCandleSnapshotResponse } from '@/api/types'
 import {
   cloneChartIndicatorSettings,
   DEFAULT_CHART_INDICATOR_SETTINGS,
@@ -46,6 +49,88 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(chartSettingsApi.get).mockResolvedValue(cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS))
 })
+
+function completeCampaignSnapshot(): CampaignCandleSnapshotResponse {
+  return {
+    snapshot: {
+      snapshot_id: 'snap-1',
+      account_id: 'acct',
+      strategy_id: 'spike-short',
+      campaign_id: 'campaign/1',
+      symbol: 'AKEUSDT',
+      run_id: 'run-1',
+      signal_time_ms: 1_750_000_000_000,
+      window_start_ms: 1_749_999_000_000,
+      window_end_ms: 1_750_001_000_000,
+      status: 'completed',
+      coverage: { expected_count: 1_500, received_count: 1_500 },
+      gaps: [],
+      parquet_relative_path: 'AKEUSDT/snap-1.parquet',
+      parquet_sha256: 'a'.repeat(64),
+      row_count: 1_500,
+      schema_version: 1,
+      aggregation_version: 1,
+      release_hash: 'release-1',
+      failure_reason: null,
+      created_at: null,
+      updated_at: null,
+      completed_at: null,
+      failed_at: null,
+    },
+    symbol: 'AKEUSDT',
+    interval: '1s',
+    source: 'campaign_snapshot',
+    coverage_status: 'complete',
+    coverage_message: null,
+    gap_count: 0,
+    expected_count: 1_500,
+    received_count: 1_500,
+    candles: [
+      {
+        time: 1_750_000_000,
+        open: 1,
+        high: 1.2,
+        low: 0.9,
+        close: 1.1,
+        volume: 10,
+        quote_volume: 11,
+        taker_buy_quote_volume: 7,
+        taker_sell_quote_volume: 4,
+      },
+    ],
+  }
+}
+
+function campaignMarketTrade() {
+  return {
+    id: 't-market-snapshot',
+    symbol: 'AKEUSDT',
+    strategy_id: 'spike-short',
+    entry_time: 1_750_000_000_000,
+    entry_price: 1.1,
+    net_pnl: 1,
+  }
+}
+
+function mountCampaignSnapshotChart() {
+  return mount(TradeReplayChartPanel, {
+    props: {
+      mode: 'market',
+      campaignId: 'campaign/1',
+      accountId: 'acct',
+      strategyId: 'spike-short',
+      trade: campaignMarketTrade(),
+    },
+    global: {
+      stubs: {
+        TradeCandlestickChart: {
+          name: 'TradeCandlestickChart',
+          template: '<div class="snapshot-chart-stub" />',
+        },
+      },
+    },
+  })
+}
 
 describe('回测关键视图', () => {
   it('图表续页以已加载K线边界为中心扩展窗口', async () => {
@@ -160,6 +245,68 @@ describe('回测关键视图', () => {
     await flushPromises()
 
     expect(backtestApi.candles).toHaveBeenCalledWith(expect.objectContaining({ interval: '1m', source: 'binance' }))
+  })
+
+  it('行情 Campaign 上下文使用实盘1s快照并展示覆盖状态', async () => {
+    const snapshotSpy = vi.spyOn(operationsApi, 'campaignSnapshot').mockResolvedValue(completeCampaignSnapshot())
+
+    const wrapper = mountCampaignSnapshotChart()
+    await flushPromises()
+
+    expect(snapshotSpy).toHaveBeenCalledOnce()
+    expect(snapshotSpy).toHaveBeenCalledWith(
+      'campaign/1',
+      expect.objectContaining({
+        account_id: 'acct',
+        strategy_id: 'spike-short',
+        interval: '1s',
+      }),
+    )
+    expect(backtestApi.candles).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('1s完整')
+    snapshotSpy.mockRestore()
+  })
+
+  it.each([
+    [new ApiError(409, 'campaign candle snapshot is not ready'), '1s采集中', '1s 快照仍在采集，暂时不可读取'],
+    [
+      new ApiError(409, 'campaign candle snapshot failed: capture stopped'),
+      '1s失败',
+      'campaign candle snapshot failed: capture stopped',
+    ],
+    [new ApiError(404, 'campaign candle snapshot not found'), '无1s快照', '没有找到该 Campaign 的 1s 快照'],
+    [
+      new ApiError(503, 'campaign snapshot payload hash does not match its manifest'),
+      '1s完整性错误',
+      '1s 快照完整性校验失败或数据文件不可用',
+    ],
+  ])('Campaign 1s 请求失败时明确展示状态：%s', async (error, label, description) => {
+    const snapshotSpy = vi.spyOn(operationsApi, 'campaignSnapshot').mockRejectedValue(error)
+    const wrapper = mountCampaignSnapshotChart()
+    await flushPromises()
+
+    expect(wrapper.findAll('.source-tools .ant-tag').some((tag) => tag.text() === label)).toBe(true)
+    expect(wrapper.text()).toContain(description)
+    snapshotSpy.mockRestore()
+  })
+
+  it('已有 Campaign 1s 图表刷新失败时保留图表并标记过期错误', async () => {
+    const snapshotSpy = vi
+      .spyOn(operationsApi, 'campaignSnapshot')
+      .mockResolvedValueOnce(completeCampaignSnapshot())
+      .mockRejectedValueOnce(new ApiError(503, 'campaign snapshot payload hash does not match its manifest'))
+    const wrapper = mountCampaignSnapshotChart()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('1s完整')
+    await wrapper.get('button[aria-label="刷新K线"]').trigger('click')
+    await vi.waitFor(() => expect(snapshotSpy).toHaveBeenCalledTimes(2))
+    await flushPromises()
+
+    expect(wrapper.find('.snapshot-chart-stub').exists()).toBe(true)
+    expect(wrapper.text()).toContain('1s过期 · 读取失败')
+    expect(wrapper.text()).not.toContain('1s完整')
+    snapshotSpy.mockRestore()
   })
 
   it('设置读取失败时使用本地1s默认周期', async () => {

@@ -822,6 +822,50 @@ function setupIndicators(instance: IChartApi, data: ChartCandle[], priceFormat: 
     dataUpdaters.push(update)
     indicatorGroups.push(group)
   }
+
+  const hasOrderFlow = data.some(
+    (bar) => finiteNumber(bar.taker_buy_quote_volume) !== null && finiteNumber(bar.taker_sell_quote_volume) !== null,
+  )
+  if (hasOrderFlow) {
+    const orderFlowPaneIndex = settings.sub.atr.enabled ? paneIndex + 1 : paneIndex
+    const orderFlow = instance.addSeries(
+      HistogramSeries,
+      {
+        ...hiddenLatestValue,
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'order-flow',
+      },
+      orderFlowPaneIndex,
+    )
+    const group: IndicatorGroup = {
+      key: 'order-flow',
+      paneIndex: orderFlowPaneIndex,
+      values: [{ label: '订单流净额', color: colors.volumeLabel, series: orderFlow, format: 'volume' }],
+    }
+    const update = (next: ChartCandle[]) => {
+      orderFlow.setData(
+        next.flatMap((bar) => {
+          const value = orderFlowDelta(bar)
+          return value === null
+            ? []
+            : [
+                {
+                  time: bar.time,
+                  value,
+                  color: value >= 0 ? colors.volumeUp : colors.volumeDown,
+                },
+              ]
+        }),
+      )
+      updateGroupLatestValues(group, [orderFlowDelta(next.at(-1) ?? {})])
+    }
+    update(data)
+    dataUpdaters.push(update)
+    indicatorGroups.push(group)
+    instance.priceScale('order-flow', orderFlowPaneIndex).applyOptions({
+      scaleMargins: { top: 0.1, bottom: 0.05 },
+    })
+  }
 }
 
 // ── 极值标签 ─────────────────────────────────────────────────────────────
@@ -950,6 +994,32 @@ function compactIndicatorValue(value: number): string {
   return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 }).format(value)
 }
 
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function orderFlowDelta(candle: Partial<BacktestCandle>): number | null {
+  const buy = finiteNumber(candle.taker_buy_quote_volume)
+  const sell = finiteNumber(candle.taker_sell_quote_volume)
+  return buy === null || sell === null ? null : buy - sell
+}
+
+function orderFlowHoverLines(candle: BacktestCandle | undefined): Array<{ label: string; value: string }> {
+  const buy = finiteNumber(candle?.taker_buy_quote_volume)
+  const sell = finiteNumber(candle?.taker_sell_quote_volume)
+  if (buy === null || sell === null) return []
+  const quote = finiteNumber(candle?.quote_volume)
+  const total = quote ?? buy + sell
+  const net = buy - sell
+  return [
+    { label: '总成交额', value: compactIndicatorValue(total) },
+    { label: '主动买额', value: compactIndicatorValue(buy) },
+    { label: '主动卖额', value: compactIndicatorValue(sell) },
+    { label: '订单流净额', value: compactIndicatorValue(net) },
+    { label: '主动买占比', value: total > 0 ? `${((buy / total) * 100).toFixed(2)}%` : '-' },
+  ]
+}
+
 function formatIndicatorValue(value: number, format?: 'volume' | 'percent'): string {
   if (format === 'volume') return compactIndicatorValue(value)
   if (format === 'percent') return Number(value).toFixed(2)
@@ -1070,6 +1140,7 @@ function createCrosshairHandler(context: {
       { label: '涨跌幅', value: `${changePercent.toFixed(2)}%` },
       { label: '振幅', value: `${amplitude.toFixed(2)}%` },
       { label: '成交量', value: sourceCandle == null ? '-' : compactIndicatorValue(sourceCandle.volume) },
+      ...orderFlowHoverLines(sourceCandle),
       ...events.map((event) => ({ label: event.label, value: formatPrice(event.price) })),
     ]
     hoverLabel.value = {

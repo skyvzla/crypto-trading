@@ -4,6 +4,7 @@ import type {
   AdmissionUpdate,
   CampaignPage,
   CampaignPnL,
+  CampaignCandleSnapshotResponse,
   CampaignQuery,
   DailyPnL,
   DailyPnLQuery,
@@ -96,6 +97,18 @@ export const operationsApi = {
 
   campaignPnl: (campaignId: string, query: { account_id: string; strategy_id: string }) =>
     api.get<CampaignPnL>(`/campaigns/${segment(campaignId)}/pnl`, query),
+
+  campaignSnapshot: (
+    campaignId: string,
+    query: {
+      account_id: string
+      strategy_id: string
+      symbol: string
+      interval: '1s'
+      start_ms: number
+      end_ms: number
+    },
+  ) => api.get<CampaignCandleSnapshotResponse>(`/campaigns/${segment(campaignId)}/candles`, query),
 
   exchangeSymbols: (query: ExchangeSymbolQuery = {}) =>
     api.get<Page<ExchangeSymbol>>('/exchange-symbols', { ...query }),

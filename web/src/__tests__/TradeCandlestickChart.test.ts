@@ -145,6 +145,55 @@ describe('TradeCandlestickChart', () => {
     expect(remove).toHaveBeenCalled()
   })
 
+  it('对带订单流字段的1秒快照绘制净主动成交额窗格', async () => {
+    const wrapper = mount(TradeCandlestickChart, {
+      props: {
+        candles: [
+          {
+            time: 1_754_000_000,
+            open: 1,
+            high: 1.2,
+            low: 0.9,
+            close: 1.1,
+            volume: 10,
+            quote_volume: 11,
+            taker_buy_quote_volume: 7,
+            taker_sell_quote_volume: 4,
+          },
+          {
+            time: 1_754_000_001,
+            open: 1.1,
+            high: 1.3,
+            low: 1,
+            close: 1.2,
+            volume: 12,
+            quote_volume: 10,
+            taker_buy_quote_volume: 3,
+            taker_sell_quote_volume: 7,
+          },
+        ],
+        trade: {
+          id: 't-order-flow',
+          symbol: 'AKEUSDT',
+          strategy_id: 'spike-short',
+          entry_time: 1_754_000_000_000,
+          entry_price: 1.1,
+          net_pnl: 1,
+        },
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(seriesOptions).toEqual(expect.arrayContaining([expect.objectContaining({ priceScaleId: 'order-flow' })]))
+    expect(setData).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ time: 1_754_000_000, value: 3 }),
+        expect.objectContaining({ time: 1_754_000_001, value: -4 }),
+      ]),
+    )
+    wrapper.unmount()
+  })
+
   it('按默认 K 线宽度响应式设置可见范围，并在切换宽度和跳转时保持中心', async () => {
     const start = 1_754_000_000
     const candles = Array.from({ length: 101 }, (_, index) => ({

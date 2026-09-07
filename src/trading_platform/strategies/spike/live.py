@@ -92,6 +92,9 @@ class SpikeLiveSettings(BaseSettings):
         "single-entry"
     )
     wal_path: str = "data/wal/spike_short.jsonl"
+    snapshot_root: str = "/app/data/market/campaign_snapshots"
+    snapshot_pre_seconds: int = 120
+    snapshot_post_seconds: int = 300
     subcategory: str = "spike"
     poll_interval_seconds: float = 5.0
     max_poll_attempts: int = 12
@@ -139,6 +142,8 @@ class SpikeLiveSettings(BaseSettings):
             raise ValueError("SUBMIT_UNKNOWN recovery is frozen at 5s x 12")
         if self.delisting_freeze_days < 0:
             raise ValueError("delisting_freeze_days must be non-negative")
+        if self.snapshot_pre_seconds < 0 or self.snapshot_post_seconds <= 0:
+            raise ValueError("snapshot windows must be pre >= 0 and post > 0")
         if self.mode == "live":
             if self.live_confirmation != LIVE_CONFIRMATION:
                 raise ValueError("live mode requires the exact live confirmation phrase")
@@ -249,6 +254,27 @@ class CapitalSettlementStore(Protocol):
         ...
 
 
+class CandleSnapshotRuntime(Protocol):
+    """Minimal live 1s snapshot contract used by the execution coordinator."""
+
+    async def observe_bar(self, bar: Bar1s) -> object:
+        ...
+
+    async def ensure_signal_snapshot(
+        self,
+        *,
+        campaign_id: str,
+        symbol: str,
+        signal_time_ms: int,
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
+        ...
+
+    @property
+    def failed(self) -> bool:
+        ...
+
+
 class CampaignFundingSource(Protocol):
     async def sync_funding_fee_total(
         self,
@@ -285,6 +311,7 @@ class SpikeExecutionCoordinator:
         ]
         | None = None,
         event_journal: DurableExecutionEventJournal | None = None,
+        snapshot_runtime: CandleSnapshotRuntime | None = None,
     ):
         self.strategy = strategy
         self.account = account
@@ -299,6 +326,7 @@ class SpikeExecutionCoordinator:
         self.funding_source = funding_source
         self.capital_admission_refresh = capital_admission_refresh
         self.event_journal = event_journal
+        self.snapshot_runtime = snapshot_runtime
         self._now_ms = now_ms or (lambda: int(time.time() * 1000))
         self._lock = asyncio.Lock()
         self._campaign_lock = asyncio.Lock()
@@ -319,6 +347,8 @@ class SpikeExecutionCoordinator:
         self._execution_worker_running = False
         self._maintenance_queued = False
         self._entry_pipeline_close_reason: str | None = None
+        self._bar_event_counts: dict[str, int] = {}
+        self._last_bar_checkpoint_time: dict[str, int] = {}
 
     def start_execution_worker(self) -> asyncio.Task[None]:
         """启动唯一账户执行 worker，并把任务交给进程监督。"""
@@ -620,6 +650,195 @@ class SpikeExecutionCoordinator:
             self.risk_guard.halt("execution event journal write failed")
             raise
 
+    def _bar_event_details(self, bar: Bar1s) -> dict[str, Any]:
+        """Keep the event journal small; full 1s rows live in Parquet snapshots."""
+
+        return {
+            "timestamp": bar.timestamp,
+            "available_time": bar.available_time,
+            "first_aggregate_trade_id": bar.first_aggregate_trade_id,
+            "last_aggregate_trade_id": bar.last_aggregate_trade_id,
+            "first_trade_id": bar.first_trade_id,
+            "last_trade_id": bar.last_trade_id,
+            "trade_count": bar.trade_count,
+        }
+
+    def _bar_checkpoint_due(self, bar: Bar1s) -> bool:
+        count = self._bar_event_counts.get(bar.symbol, 0) + 1
+        self._bar_event_counts[bar.symbol] = count
+        previous = self._last_bar_checkpoint_time.get(bar.symbol)
+        if previous is not None and bar.timestamp - previous < 60_000:
+            return False
+        self._last_bar_checkpoint_time[bar.symbol] = bar.timestamp
+        return previous is None or bar.timestamp - previous >= 60_000
+
+    async def _journal_bar_observation(
+        self,
+        bar: Bar1s,
+        intents: list[OrderIntent],
+        *,
+        checkpoint_due: bool,
+    ) -> ExecutionEvent | None:
+        """Persist only signal/exit observations and periodic continuity facts."""
+
+        has_intent = bool(intents)
+        if not has_intent and not checkpoint_due:
+            return None
+        event_type = "market.bar1s_received" if has_intent else "market.bar1s_checkpoint"
+        details = self._bar_event_details(bar)
+        details["intent_count"] = len(intents)
+        details["bar_count"] = self._bar_event_counts[bar.symbol]
+        return await self._append_execution_event(
+            event_type,
+            source="spike.market" if has_intent else "spike.market.continuity",
+            event_time=bar.available_time,
+            trace_id=f"bar1s:{bar.symbol}:{bar.available_time}",
+            symbol=bar.symbol,
+            details=details,
+        )
+
+    async def _observe_snapshot_bar(self, bar: Bar1s) -> bool:
+        if self.snapshot_runtime is None:
+            return True
+        try:
+            await self.snapshot_runtime.observe_bar(bar)
+            return True
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            reason = f"live 1s snapshot unavailable: {type(exc).__name__}: {exc}"
+            self.gate.set_condition("snapshot", False)
+            self.risk_guard.halt(reason)
+            try:
+                await self._append_execution_event(
+                    "market.snapshot_failed",
+                    source="spike.market_snapshot",
+                    event_time=bar.available_time,
+                    severity="error",
+                    trace_id=f"bar1s:{bar.symbol}:{bar.available_time}",
+                    symbol=bar.symbol,
+                    details={
+                        "reason": reason,
+                        "timestamp": bar.timestamp,
+                        "available_time": bar.available_time,
+                    },
+                )
+            except BaseException as journal_exc:
+                exc.add_note(
+                    "snapshot failure event journal append failed: "
+                    f"{type(journal_exc).__name__}: {journal_exc}"
+                )
+            return False
+
+    async def _prepare_entry_snapshots(
+        self, intents: list[OrderIntent], *, event_time: int
+    ) -> list[OrderIntent]:
+        """Create manifests before any entry can reach the execution queue."""
+
+        if self.snapshot_runtime is None:
+            return intents
+        entries = [intent for intent in intents if not intent.reduce_only]
+        if not entries:
+            return intents
+        allowed_campaigns: set[str] = set()
+        campaigns: dict[str, list[OrderIntent]] = {}
+        for intent in entries:
+            try:
+                campaign_id = self._campaign_id(intent)
+            except BaseException as exc:
+                reason = f"invalid entry signal for snapshot: {type(exc).__name__}: {exc}"
+                await self._fail_snapshot_entry(intent, event_time=event_time, reason=reason)
+                continue
+            campaigns.setdefault(campaign_id, []).append(intent)
+        for campaign_id, campaign_entries in campaigns.items():
+            first = campaign_entries[0]
+            parsed = parse_entry_client_order_id(
+                first.client_order_id, expected_symbol=first.symbol
+            )
+            if parsed is None:
+                reason = "entry signal client order id has no signal timestamp"
+                await self._fail_snapshot_entry(
+                    first, event_time=event_time, reason=reason, campaign_id=campaign_id
+                )
+                continue
+            symbol, signal_time = parsed
+            try:
+                snapshot_id = await self.snapshot_runtime.ensure_signal_snapshot(
+                    campaign_id=campaign_id,
+                    symbol=symbol,
+                    signal_time_ms=signal_time,
+                    metadata={
+                        "event_time": event_time,
+                        "trigger_reasons": sorted(
+                            {intent.trigger_reason for intent in campaign_entries}
+                        ),
+                    },
+                )
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:
+                reason = f"entry snapshot unavailable: {type(exc).__name__}: {exc}"
+                for intent in campaign_entries:
+                    await self._fail_snapshot_entry(
+                        intent,
+                        event_time=event_time,
+                        reason=reason,
+                        campaign_id=campaign_id,
+                    )
+                continue
+            allowed_campaigns.add(campaign_id)
+            for intent in campaign_entries:
+                # The snapshot ID is recorded on the execution event, while
+                # keeping the immutable OrderIntent contract unchanged.
+                await self._append_execution_event(
+                    "market.snapshot_linked",
+                    source="spike.market_snapshot",
+                    event_time=event_time,
+                    trace_id=intent.client_order_id,
+                    symbol=intent.symbol,
+                    campaign_id=campaign_id,
+                    client_order_id=intent.client_order_id,
+                    details={"snapshot_id": snapshot_id},
+                )
+        filtered: list[OrderIntent] = []
+        for intent in intents:
+            if intent.reduce_only:
+                filtered.append(intent)
+                continue
+            try:
+                campaign_id = self._campaign_id(intent)
+            except BaseException:
+                continue
+            if campaign_id in allowed_campaigns:
+                filtered.append(intent)
+        return filtered
+
+    async def _fail_snapshot_entry(
+        self,
+        intent: OrderIntent,
+        *,
+        event_time: int,
+        reason: str,
+        campaign_id: str | None = None,
+    ) -> None:
+        self.gate.set_condition("snapshot", False)
+        self.risk_guard.halt(reason)
+        await self._append_execution_event(
+            "execution.intent_rejected",
+            source="spike.market_snapshot",
+            event_time=event_time,
+            severity="error",
+            trace_id=intent.client_order_id,
+            symbol=intent.symbol,
+            campaign_id=campaign_id,
+            client_order_id=intent.client_order_id,
+            details={
+                "reason": "snapshot_unavailable",
+                "snapshot_failure": reason,
+                "intent": self._intent_details(intent),
+            },
+        )
+
     @staticmethod
     def _intent_details(intent: OrderIntent) -> dict[str, Any]:
         return {
@@ -685,25 +904,38 @@ class SpikeExecutionCoordinator:
 
     async def on_bar1s(self, bar: Bar1s) -> None:
         async with self._lock:
+            snapshot_ok = await self._observe_snapshot_bar(bar)
+            legacy_journal = self.snapshot_runtime is None
             trace_id = f"bar1s:{bar.symbol}:{bar.available_time}"
-            received = await self._append_execution_event(
-                "market.bar1s_received",
-                source="spike.market",
-                event_time=bar.available_time,
-                trace_id=trace_id,
-                symbol=bar.symbol,
-                details=bar.to_dict(),
-            )
+            received = None
+            if legacy_journal:
+                received = await self._append_execution_event(
+                    "market.bar1s_received",
+                    source="spike.market",
+                    event_time=bar.available_time,
+                    trace_id=trace_id,
+                    symbol=bar.symbol,
+                    details=bar.to_dict(),
+                )
+            checkpoint_due = self._bar_checkpoint_due(bar)
             intents = self.strategy.on_bar1s(bar)
-            await self._append_execution_event(
-                "market.bar1s_processed",
-                source="spike.strategy",
-                event_time=bar.available_time,
-                trace_id=trace_id,
-                causation_id=None if received is None else received.event_id,
-                symbol=bar.symbol,
-                details={"intent_count": len(intents)},
+            intents = await self._prepare_entry_snapshots(
+                intents, event_time=bar.available_time
             )
+            if not legacy_journal and snapshot_ok:
+                received = await self._journal_bar_observation(
+                    bar, intents, checkpoint_due=checkpoint_due
+                )
+            if received is not None:
+                await self._append_execution_event(
+                    "market.bar1s_processed",
+                    source="spike.strategy",
+                    event_time=bar.available_time,
+                    trace_id=trace_id,
+                    causation_id=received.event_id,
+                    symbol=bar.symbol,
+                    details={"intent_count": len(intents)},
+                )
             execution_complete = await self._execute(
                 intents, event_time=bar.available_time
             )
@@ -717,25 +949,38 @@ class SpikeExecutionCoordinator:
         """只计算策略并排队执行，不在策略事件循环中等待交易所 REST。"""
 
         async with self._lock:
+            snapshot_ok = await self._observe_snapshot_bar(bar)
+            legacy_journal = self.snapshot_runtime is None
             trace_id = f"bar1s:{bar.symbol}:{bar.available_time}"
-            received = await self._append_execution_event(
-                "market.bar1s_received",
-                source="spike.market",
-                event_time=bar.available_time,
-                trace_id=trace_id,
-                symbol=bar.symbol,
-                details=bar.to_dict(),
-            )
+            received = None
+            if legacy_journal:
+                received = await self._append_execution_event(
+                    "market.bar1s_received",
+                    source="spike.market",
+                    event_time=bar.available_time,
+                    trace_id=trace_id,
+                    symbol=bar.symbol,
+                    details=bar.to_dict(),
+                )
+            checkpoint_due = self._bar_checkpoint_due(bar)
             intents = self.strategy.on_bar1s(bar)
-            await self._append_execution_event(
-                "market.bar1s_processed",
-                source="spike.strategy",
-                event_time=bar.available_time,
-                trace_id=trace_id,
-                causation_id=None if received is None else received.event_id,
-                symbol=bar.symbol,
-                details={"intent_count": len(intents)},
+            intents = await self._prepare_entry_snapshots(
+                intents, event_time=bar.available_time
             )
+            if not legacy_journal and snapshot_ok:
+                received = await self._journal_bar_observation(
+                    bar, intents, checkpoint_due=checkpoint_due
+                )
+            if received is not None:
+                await self._append_execution_event(
+                    "market.bar1s_processed",
+                    source="spike.strategy",
+                    event_time=bar.available_time,
+                    trace_id=trace_id,
+                    causation_id=received.event_id,
+                    symbol=bar.symbol,
+                    details={"intent_count": len(intents)},
+                )
             queued = await self._enqueue_intents(
                 intents, event_time=bar.available_time
             )
