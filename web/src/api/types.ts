@@ -113,7 +113,11 @@ export interface NotificationOverview {
   enabled_endpoints: number
   groups: number
   policies: number
+  routable_policies: number
+  critical_routes_ready: boolean
+  critical_routes: Record<string, boolean>
   events: number
+  recent_events: number
   unrouted_events: number
   deliveries: Record<NotificationDeliveryStatus, number>
 }

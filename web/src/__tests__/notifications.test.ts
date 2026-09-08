@@ -12,7 +12,7 @@ function response(body: unknown) {
   return jsonResponse(body)
 }
 
-function notificationResponse(url: string) {
+function notificationResponse(url: string, criticalReady = false) {
   if (url.endsWith('/notifications/overview')) {
     return response({
       connectors: 1,
@@ -21,6 +21,12 @@ function notificationResponse(url: string) {
       enabled_endpoints: 1,
       groups: 1,
       policies: 1,
+      routable_policies: 0,
+      critical_routes_ready: criticalReady,
+      critical_routes: {
+        'risk.halted': criticalReady,
+        'system.strategy.unhealthy': criticalReady,
+      },
       events: 1,
       recent_events: 1,
       deliveries: { pending: 0, sending: 0, retry: 0, sent: 2, dead: 0 },
@@ -107,6 +113,11 @@ describe('notification route and view', () => {
 
     expect(wrapper.text()).toContain('通知中心')
     expect(wrapper.text()).toContain('投递状态')
+    expect(wrapper.text()).toContain('可路由策略')
+    expect(wrapper.text()).toContain('0/1')
+    expect(wrapper.text()).toContain('关键通知路由')
+    expect(wrapper.text()).toContain('0/2')
+    expect(wrapper.text()).toContain('risk.halted')
     await wrapper.findAll('[role="tab"]')[1].trigger('click')
     await flushPromises()
     expect(router.currentRoute.value.name).toBe('notifications-connectors')
@@ -117,6 +128,17 @@ describe('notification route and view', () => {
     await addConnector!.trigger('click')
     expect(document.body.textContent).toContain('新建连接器')
     expect(document.body.textContent).toContain('密钥引用')
+    wrapper.unmount()
+  })
+
+  it('shows both critical routes ready when the overview is complete', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input), true))
+    const wrapper = mount(NotificationsView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('关键通知路由')
+    expect(wrapper.text()).toContain('2/2')
+    expect(wrapper.text()).toContain('关键事件均已具备可路由策略')
     wrapper.unmount()
   })
 

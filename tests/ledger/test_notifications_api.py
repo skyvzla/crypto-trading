@@ -75,6 +75,26 @@ class FakeNotificationRepository:
         from trading_platform.notifications.domain import PublishResult
         return PublishResult(self.event, (self.delivery,), True)
 
+    async def overview(self):
+        return {
+            "connectors": 1,
+            "enabled_connectors": 1,
+            "endpoints": 1,
+            "enabled_endpoints": 1,
+            "groups": 1,
+            "policies": 1,
+            "routable_policies": 1,
+            "critical_routes_ready": True,
+            "critical_routes": {
+                "risk.halted": True,
+                "system.strategy.unhealthy": True,
+            },
+            "events": 1,
+            "recent_events": 1,
+            "unrouted_events": 0,
+            "deliveries": {"pending": 1},
+        }
+
 
 @pytest.fixture
 def api_app():
@@ -119,6 +139,23 @@ async def test_notification_connector_crud_and_publish_shape(api_app):
     assert published.status_code == 202
     assert published.json()["event"]["routing_status"] == "routed"
     assert len(published.json()["deliveries"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_notification_overview_exposes_routable_policy_count(api_app):
+    app, _ = api_app
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/notifications/overview")
+
+    assert response.status_code == 200
+    assert response.json()["routable_policies"] == 1
+    assert response.json()["critical_routes_ready"] is True
+    assert response.json()["critical_routes"] == {
+        "risk.halted": True,
+        "system.strategy.unhealthy": True,
+    }
+    assert response.json()["recent_events"] == 1
 
 
 @pytest.mark.asyncio

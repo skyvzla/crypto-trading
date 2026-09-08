@@ -291,3 +291,103 @@ async def test_claim_lease_and_manual_retry(notification_repository):
     retried = await repo.retry_delivery(claim.delivery.id)
     assert retried is not None and retried.status.value == "pending"
     assert retried.attempt_count == 0
+
+
+@pytest.mark.asyncio
+async def test_overview_counts_only_fully_routable_policies(notification_repository):
+    repo = notification_repository
+    connector = await repo.create_connector(
+        name="ops", type=ConnectorType.WEBHOOK, secret_ref=None,
+        config={}, enabled=True,
+    )
+    endpoint = await repo.create_endpoint(
+        connector_id=connector.id, name="ops", address="https://one.invalid",
+        config={}, enabled=True,
+    )
+    group = await repo.create_group(
+        name="ops", description=None, enabled=True, endpoint_ids=[endpoint.id]
+    )
+    policy = await repo.create_policy(
+        name="critical", event_pattern="risk.*", severity=Severity.CRITICAL,
+        priority=1, suppress=False, enabled=True, group_ids=[group.id]
+    )
+
+    async def routable_count() -> int:
+        return (await repo.overview())["routable_policies"]
+
+    assert await routable_count() == 1
+    async with repo.pool.connection() as conn:
+        await conn.execute("UPDATE notification_policies SET enabled = FALSE WHERE id = %s", (policy.id,))
+    assert await routable_count() == 0
+    async with repo.pool.connection() as conn:
+        await conn.execute("UPDATE notification_policies SET enabled = TRUE, suppress = TRUE WHERE id = %s", (policy.id,))
+    assert await routable_count() == 0
+    async with repo.pool.connection() as conn:
+        await conn.execute("UPDATE notification_policies SET suppress = FALSE WHERE id = %s", (policy.id,))
+        await conn.execute("UPDATE notification_groups SET enabled = FALSE WHERE id = %s", (group.id,))
+    assert await routable_count() == 0
+    async with repo.pool.connection() as conn:
+        await conn.execute("UPDATE notification_groups SET enabled = TRUE WHERE id = %s", (group.id,))
+        await conn.execute("UPDATE notification_endpoints SET enabled = FALSE WHERE id = %s", (endpoint.id,))
+    assert await routable_count() == 0
+    async with repo.pool.connection() as conn:
+        await conn.execute("UPDATE notification_endpoints SET enabled = TRUE WHERE id = %s", (endpoint.id,))
+        await conn.execute("UPDATE notification_connectors SET enabled = FALSE WHERE id = %s", (connector.id,))
+    assert await routable_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_overview_requires_each_critical_route_and_respects_selected_suppression(
+    notification_repository,
+):
+    repo = notification_repository
+    connector = await repo.create_connector(
+        name="critical-ops", type=ConnectorType.WEBHOOK, secret_ref=None,
+        config={}, enabled=True,
+    )
+    endpoint = await repo.create_endpoint(
+        connector_id=connector.id, name="critical-ops", address="https://critical.invalid",
+        config={}, enabled=True,
+    )
+    group = await repo.create_group(
+        name="critical-ops", description=None, enabled=True, endpoint_ids=[endpoint.id]
+    )
+    suppressing = await repo.create_policy(
+        name="risk-suppress", event_pattern="risk.halted", severity=Severity.CRITICAL,
+        priority=100, suppress=True, enabled=True, group_ids=[group.id]
+    )
+    await repo.create_policy(
+        name="risk-fallback", event_pattern="risk.halted", severity=Severity.CRITICAL,
+        priority=1, suppress=False, enabled=True, group_ids=[group.id]
+    )
+
+    overview = await repo.overview()
+    assert overview["critical_routes"] == {
+        "risk.halted": False,
+        "system.strategy.unhealthy": False,
+    }
+    assert overview["critical_routes_ready"] is False
+
+    async with repo.pool.connection() as conn:
+        await conn.execute(
+            "UPDATE notification_policies SET enabled = FALSE WHERE id = %s",
+            (suppressing.id,),
+        )
+    overview = await repo.overview()
+    assert overview["critical_routes"] == {
+        "risk.halted": True,
+        "system.strategy.unhealthy": False,
+    }
+    assert overview["critical_routes_ready"] is False
+
+    await repo.create_policy(
+        name="strategy-unhealthy", event_pattern="system.strategy.unhealthy",
+        severity=Severity.CRITICAL, priority=1, suppress=False, enabled=True,
+        group_ids=[group.id],
+    )
+    overview = await repo.overview()
+    assert overview["critical_routes"] == {
+        "risk.halted": True,
+        "system.strategy.unhealthy": True,
+    }
+    assert overview["critical_routes_ready"] is True

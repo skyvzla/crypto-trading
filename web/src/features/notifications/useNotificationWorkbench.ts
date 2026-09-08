@@ -30,7 +30,11 @@ const EMPTY_OVERVIEW: NotificationOverview = {
   enabled_endpoints: 0,
   groups: 0,
   policies: 0,
+  routable_policies: 0,
+  critical_routes_ready: false,
+  critical_routes: {},
   events: 0,
+  recent_events: 0,
   unrouted_events: 0,
   deliveries: { pending: 0, sending: 0, retry: 0, sent: 0, dead: 0 },
 }
@@ -43,6 +47,16 @@ function normalizeOverview(value: unknown): NotificationOverview {
   const source = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
   const deliveries = (source.deliveries ?? source.delivery_statuses ?? {}) as Record<string, unknown>
   const count = (input: unknown) => Number(input ?? 0)
+  const rawRoutes = source.critical_routes
+  const criticalRoutes = Object.fromEntries(
+    rawRoutes && typeof rawRoutes === 'object' && !Array.isArray(rawRoutes)
+      ? Object.entries(rawRoutes as Record<string, unknown>).map(([eventType, route]) => [eventType, route === true])
+      : [],
+  ) as Record<string, boolean>
+  const criticalRoutesReady =
+    source.critical_routes_ready === true &&
+    Object.keys(criticalRoutes).length > 0 &&
+    Object.values(criticalRoutes).every((route) => route)
   return {
     connectors: count(source.connectors),
     enabled_connectors: count(source.enabled_connectors),
@@ -50,7 +64,11 @@ function normalizeOverview(value: unknown): NotificationOverview {
     enabled_endpoints: count(source.enabled_endpoints),
     groups: count(source.groups),
     policies: count(source.policies),
+    routable_policies: count(source.routable_policies),
+    critical_routes_ready: criticalRoutesReady,
+    critical_routes: criticalRoutes,
     events: count(source.events),
+    recent_events: count(source.recent_events),
     unrouted_events: count(source.unrouted_events),
     deliveries: {
       pending: count(deliveries.pending),

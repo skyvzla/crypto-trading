@@ -368,6 +368,22 @@ class DeliveryResponse(BaseModel):
     sent_at: datetime | None
 
 
+class NotificationOverviewResponse(BaseModel):
+    connectors: int
+    enabled_connectors: int
+    endpoints: int
+    enabled_endpoints: int
+    groups: int
+    policies: int
+    routable_policies: int
+    critical_routes_ready: bool
+    critical_routes: dict[str, bool]
+    events: int
+    recent_events: int
+    unrouted_events: int
+    deliveries: dict[str, int]
+
+
 class ExpectedVersion(BaseModel):
     expected_version: int = Field(ge=1)
 
@@ -439,8 +455,8 @@ def _error(error: Exception) -> HTTPException:
 @router.get("/overview")
 async def notification_overview(
     repository: NotificationRepository = Depends(get_repository),
-) -> dict[str, Any]:
-    return await repository.overview()
+) -> NotificationOverviewResponse:
+    return _response(await repository.overview(), NotificationOverviewResponse)
 
 
 @router.get("/connectors")

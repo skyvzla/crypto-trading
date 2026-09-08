@@ -172,6 +172,8 @@ services:
 
   spike:
     profiles: ["spike"]
+    labels:
+      trading-platform.role: strategy
     build: *app_build
     command:
       - sh
@@ -244,6 +246,8 @@ services:
 
   strategy_kline:
     profiles: ["examples"]
+    labels:
+      trading-platform.role: strategy
     build: *app_build
     command: ["python", "-m", "trading_platform.strategies.kline.main"]
     init: true
@@ -275,6 +279,8 @@ services:
 
   strategy_tick:
     profiles: ["examples"]
+    labels:
+      trading-platform.role: strategy
     build: *app_build
     command: ["python", "-m", "trading_platform.strategies.tick.main"]
     init: true

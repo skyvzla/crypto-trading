@@ -1,17 +1,27 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { Activity, ArrowRight, CircleDot, Globe2, MessageCircle, Plus, SlidersHorizontal } from 'lucide-vue-next'
 import type { NotificationEvent, NotificationOverview, Page } from '@/api/types'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import { formatShortTime, statusBadge, statusLabel } from './presentation'
 import NotificationSectionHeader from './NotificationSectionHeader.vue'
 
-defineProps<{
+const props = defineProps<{
   overview: NotificationOverview
   enabledEndpointCount: number
   retryDeliveryCount: number
   deadDeliveryCount: number
   events: Page<NotificationEvent>
 }>()
+
+const criticalReadyCount = computed(
+  () => Object.values(props.overview.critical_routes).filter((route) => route === true).length,
+)
+const criticalRouteHint = computed(() => {
+  const routes = Object.entries(props.overview.critical_routes)
+  const missing = routes.filter(([, route]) => route !== true).map(([eventType]) => eventType)
+  return missing.length ? `缺少: ${missing.join(', ')}` : routes.length ? '关键事件均已具备可路由策略' : '未收到关键路由状态'
+})
 
 const emit = defineEmits<{
   'open-activity': [view: 'events' | 'deliveries']
@@ -36,7 +46,18 @@ const emit = defineEmits<{
         hint="Telegram / Webhook"
       />
       <MetricTile label="活跃端点" :value="`${enabledEndpointCount}/${overview.endpoints}`" hint="独立地址隔离" />
-      <MetricTile label="路由策略" :value="String(overview.policies)" :hint="`${overview.groups} 个职责组`" />
+      <MetricTile
+        label="可路由策略"
+        :value="`${overview.routable_policies}/${overview.policies}`"
+        :hint="`${overview.groups} 个职责组`"
+        :tone="overview.policies > 0 && overview.routable_policies === 0 ? 'warning' : 'neutral'"
+      />
+      <MetricTile
+        label="关键通知路由"
+        :value="`${criticalReadyCount}/${Object.keys(overview.critical_routes).length}`"
+        :hint="criticalRouteHint"
+        :tone="overview.critical_routes_ready ? 'neutral' : 'warning'"
+      />
       <MetricTile
         label="待处理投递"
         :value="String(retryDeliveryCount)"

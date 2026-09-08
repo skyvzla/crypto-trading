@@ -5,6 +5,7 @@
 当前文档入口：
 
 - `docs/README.md`：文档优先级和阅读入口
+- `docs/DEPLOYMENT.md`：部署、启动、停止和故障处理流程
 - `docs/ARCHITECTURE.md`：三层架构边界
 - `docs/PROJECT_IMPLEMENTATION_PLAN.md`：完整实施计划与验收条件
 - `docs/PROJECT_GAP_ANALYSIS.md`：已完成、缺失和 P0/P1 问题
@@ -24,7 +25,7 @@ Spike replay、testnet 进程和执行/账本闭环已经可运行；盈利持�
 
 ## Docker 工作流
 
-宿主机不需要安装 Python、uv 或项目依赖。测试、回测和正式服务都在容器内执行。
+运维脚本只需要宿主机提供 Bash、Docker Compose、Python 3 和 curl；测试、回测和服务都在容器内执行，宿主机不需要安装 uv 或项目依赖。
 
 ```bash
 # 构建应用镜像
@@ -33,8 +34,10 @@ docker compose -f compose.test.yaml build
 # 执行全量测试（13 个 pytest worker）
 docker compose -f compose.test.yaml run --rm test
 
-# 启动当前开发服务骨架（不得使用正式账户密钥）
+# 第一次部署前准备 .env（不得使用正式账户密钥）
 cp .env.example .env
+chmod 600 .env
+# 编辑 .env 后部署基础服务；不会启动策略
 scripts/deploy.sh
 ```
 
@@ -58,8 +61,10 @@ scripts/deploy.sh
 账本迁移 `0003` 增加策略运行状态：Spike 每 5 秒写入心跳，15 秒未更新显示为 `stale`；
 `/api/v1/strategy-runtime-status` 和 Web 将账本数据库健康与策略实例状态分开展示。
 当前 Compose 真实 PostgreSQL/Redis 全量回归为 `737 passed, 1 skipped, 1 warning`。
-外部告警通道、Web 身份权限、
-正式 live 阈值以及自然策略信号下的退出仍未完成，`candidate-v1` 继续冻结；
+通知系统已经实现 connector、endpoint、group、policy 配置和异步投递 worker；部署概览会严格检查关键事件路由是否
+就绪，`routable_policies` 仅作为结构指标，不证明 secret 有效或外部平台已送达。上线前必须在 WebUI 配置通知并
+执行 endpoint test，检查 delivery 状态和目标平台收件箱。
+Web 身份权限、正式 live 阈值以及自然策略信号下的退出仍未完成，`candidate-v1` 继续冻结；
 自然策略信号下的保护退出与盈利管理仍需依据具体数据评审，因此不要填入正式账户 API Key。
 
 公开 testnet 行情闭环验收（不需要 API Key，且会拒绝非 testnet 行情服务）：
@@ -92,8 +97,16 @@ uv run --extra dev python -m trading_platform.backtest.runner \
 当前固定结果只有一个 OPEN Campaign，期末未实现 PnL 仅用于核对末价计价，不作为
 策略绩效基线。
 
-常用停止命令：
+常用启动和停机命令：
 
 ```bash
-docker compose -f compose.yaml down
+scripts/start.sh                 # 默认启动 spike
+scripts/start.sh --build spike   # 重建镜像后启动
+scripts/start.sh strategy_kline  # 启动其他策略 service
+scripts/stop.sh                  # 默认停止 spike
+scripts/stop.sh strategy_kline
 ```
+
+部署脚本只启动基础服务；启动脚本在 PostgreSQL/Redis/Market/Ledger、迁移、通知 worker、运行目录和关键通知路由
+都通过门禁后才启动目标服务。停止脚本只执行 120 秒优雅停止，不执行平仓、撤单、准入切换或备份；详见
+`docs/DEPLOYMENT.md`。

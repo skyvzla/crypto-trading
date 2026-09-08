@@ -28,6 +28,12 @@ from trading_platform.notifications.domain import (
 )
 
 
+CRITICAL_READINESS_EVENT_TYPES = (
+    "risk.halted",
+    "system.strategy.unhealthy",
+)
+
+
 class NotificationConflictError(RuntimeError):
     """A unique name or idempotency identity conflicts with existing state."""
 
@@ -1062,6 +1068,18 @@ class NotificationRepository:
                 "AS enabled_endpoints, "
                 "(SELECT COUNT(*) FROM notification_groups) AS groups, "
                 "(SELECT COUNT(*) FROM notification_policies) AS policies, "
+                "(SELECT COUNT(DISTINCT p.id) "
+                "FROM notification_policies p "
+                "JOIN notification_policy_groups pg ON pg.policy_id = p.id "
+                "JOIN notification_groups g "
+                "ON g.id = pg.group_id AND g.enabled = TRUE "
+                "JOIN notification_group_members gm ON gm.group_id = g.id "
+                "JOIN notification_endpoints e "
+                "ON e.id = gm.endpoint_id AND e.enabled = TRUE "
+                "JOIN notification_connectors c "
+                "ON c.id = e.connector_id AND c.enabled = TRUE "
+                "WHERE p.enabled = TRUE AND p.suppress = FALSE) "
+                "AS routable_policies, "
                 "(SELECT COUNT(*) FROM notification_events) AS events, "
                 "(SELECT COUNT(*) FROM notification_events "
                 "WHERE created_at >= NOW() - INTERVAL '24 hours') AS recent_events, "
@@ -1073,9 +1091,20 @@ class NotificationRepository:
                 "SELECT status, COUNT(*) AS count FROM notification_deliveries "
                 "GROUP BY status",
             )
+            critical_policies = await self._routing_policies(conn, Severity.CRITICAL)
+            critical_routes: dict[str, bool] = {}
+            for event_type in CRITICAL_READINESS_EVENT_TYPES:
+                selected = choose_policy(critical_policies, event_type)
+                critical_routes[event_type] = bool(
+                    selected is not None
+                    and not selected.suppress
+                    and await self._policy_endpoints(conn, selected.id)
+                )
         assert row is not None
         return {
             **{key: int(value) for key, value in row.items()},
+            "critical_routes_ready": all(critical_routes.values()),
+            "critical_routes": critical_routes,
             "deliveries": {item["status"]: int(item["count"]) for item in statuses},
         }
 
