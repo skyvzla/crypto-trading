@@ -25,6 +25,7 @@ health_check() {
 }
 
 main() {
+  local migration_attempts migration_interval
   case "${1:-}" in
     "") ;;
     --help|-h) usage; return 0 ;;
@@ -38,10 +39,16 @@ main() {
 
   ops_compose build
   ops_compose up -d --wait postgres redis
-  # Compose's --wait handles the one-shot migration lifecycle; the explicit
-  # state/exit-code check below is the final gate used by later services.
-  ops_compose up -d --wait ledger-migrate
-  ops_require_state ledger-migrate exited
+  migration_attempts="${DEPLOY_MIGRATION_ATTEMPTS:-60}"
+  migration_interval="${DEPLOY_MIGRATION_INTERVAL:-0.5}"
+  # Do not let Compose's one-shot --wait own the timeout; the bounded helper
+  # below must cover the entire migration lifecycle.
+  if ! ops_compose up -d ledger-migrate; then
+    ops_die "ledger-migrate 启动失败"
+  fi
+  if ! ops_wait_for_state ledger-migrate exited "" "$migration_attempts" "$migration_interval"; then
+    ops_die "${OPS_WAIT_REASON:-ledger-migrate 状态等待失败}"
+  fi
   [[ "$OPS_EXIT_CODE" == 0 ]] || ops_die "ledger-migrate 退出码不是 0: ${OPS_EXIT_CODE:-unknown}"
   ops_compose up -d --wait market ledger notification-worker symbol-sync
 

@@ -134,6 +134,48 @@ ops_require_state() {
   fi
 }
 
+# Poll a single Compose service until its state (and optional health) matches.
+# The bounded attempt count makes one-shot services deterministic even when
+# Compose returns before the container's final state is visible to `ps`.
+# Query errors fail closed instead of being treated as a transient mismatch.
+ops_wait_for_state() {
+  local service="$1" expected="$2" health="${3:-}"
+  local attempts="${4:-60}" interval="${5:-0.5}"
+  local attempt
+  OPS_WAIT_REASON=""
+
+  if [[ ! "$attempts" =~ ^[1-9][0-9]*$ ]]; then
+    OPS_WAIT_REASON="$service 状态等待参数无效: attempts=$attempts"
+    return 1
+  fi
+  if [[ ! "$interval" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]]; then
+    OPS_WAIT_REASON="$service 状态等待参数无效: interval=$interval"
+    return 1
+  fi
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    # A just-created one-shot container may briefly have no `ps` row. Keep
+    # polling that case; Compose/query errors and duplicate rows still fail.
+    if ! ops_single_state "$service" true; then
+      OPS_WAIT_REASON="$service 状态查询失败，拒绝继续部署"
+      return 1
+    fi
+    if [[ "$OPS_STATE_FOUND" == 1 && "$OPS_STATE" == "$expected" && \
+      ( -z "$health" || "$OPS_HEALTH" == "$health" ) ]]; then
+      return 0
+    fi
+    if (( attempt < attempts )); then
+      if ! sleep "$interval"; then
+        OPS_WAIT_REASON="$service 状态等待休眠失败"
+        return 1
+      fi
+    fi
+  done
+
+  OPS_WAIT_REASON="$service 状态等待超时（当前 ${OPS_STATE:-unknown}，期望 $expected${health:+，健康状态期望 $health}）"
+  return 1
+}
+
 ops_prepare_paths() {
   mkdir -p "$OPS_PROJECT_ROOT/data/wal" \
     "$OPS_PROJECT_ROOT/data/market/campaign_snapshots" \

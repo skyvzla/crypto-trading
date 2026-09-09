@@ -119,9 +119,14 @@ if [[ "$args" == *" up -d --wait postgres redis"* ]]; then
   write_state redis running healthy
   exit 0
 fi
-if [[ "$args" == *" up -d --wait ledger-migrate"* ]]; then
+if [[ "$args" == *" up -d ledger-migrate"* ]]; then
+  if [[ "${FAKE_MIGRATION_UP_FAIL:-0}" == 1 ]]; then
+    exit 1
+  fi
   if [[ "${FAKE_MIGRATION_FAIL:-0}" == 1 ]]; then
     write_state ledger-migrate exited '' 1
+  elif [[ "${FAKE_MIGRATION_TRANSITION:-0}" == 1 || "${FAKE_MIGRATION_STAY_RUNNING:-0}" == 1 ]]; then
+    write_state ledger-migrate running ''
   else
     write_state ledger-migrate exited '' 0
   fi
@@ -162,6 +167,21 @@ if [[ "$args" == *" ps -a --format "* ]]; then
   fi
   if [[ -f "$state_dir/$service.removed" ]]; then
     exit 0
+  fi
+  if [[ "$service" == ledger-migrate && "${FAKE_MIGRATION_PS_FAIL:-0}" == 1 ]]; then
+    exit 1
+  fi
+  if [[ "$service" == ledger-migrate && "${FAKE_MIGRATION_TRANSITION:-0}" == 1 ]]; then
+    transition_file="$state_dir/ledger-migrate.polls"
+    polls=0
+    if [[ -f "$transition_file" ]]; then
+      polls="$(cat "$transition_file")"
+    fi
+    polls=$((polls + 1))
+    printf '%s\n' "$polls" > "$transition_file"
+    if (( polls >= ${FAKE_MIGRATION_TRANSITION_POLLS:-2} )); then
+      write_state ledger-migrate exited '' 0
+    fi
   fi
   case "$service" in
     spike) rows="${FAKE_SPIKE_ROWS:-1}" ;;
@@ -298,6 +318,60 @@ def test_deploy_creates_runtime_directories_and_warns_for_empty_notifications(tm
     assert any("config --services" in call for call in calls)
     assert any("build" in call for call in calls)
     assert not any(" up -d --wait spike" in call for call in calls)
+
+
+def test_deploy_waits_for_one_shot_migration_to_exit(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "deploy",
+        FAKE_MIGRATION_TRANSITION="1",
+        FAKE_MIGRATION_TRANSITION_POLLS="2",
+    )
+    assert result.returncode == 0, result.stderr
+    calls = docker_log(tmp_path)
+    assert any(call.endswith("up -d ledger-migrate") for call in calls)
+    assert not any("up -d --wait ledger-migrate" in call for call in calls)
+    assert sum(
+        "ps -a --format" in call and "ledger-migrate" in call
+        for call in calls
+    ) >= 2
+
+
+def test_deploy_fails_closed_when_migration_does_not_exit_before_timeout(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "deploy",
+        FAKE_MIGRATION_STAY_RUNNING="1",
+        DEPLOY_MIGRATION_ATTEMPTS="2",
+        DEPLOY_MIGRATION_INTERVAL="0",
+    )
+    assert result.returncode == 2
+    assert "状态等待超时" in result.stderr
+    calls = docker_log(tmp_path)
+    assert any(call.endswith("up -d ledger-migrate") for call in calls)
+    assert not any("up -d --wait ledger-migrate" in call for call in calls)
+    assert not any(" up -d --wait market ledger" in call for call in calls)
+
+
+def test_deploy_fails_closed_for_migration_state_query_error(tmp_path: Path) -> None:
+    result = invoke(tmp_path, "deploy", FAKE_MIGRATION_PS_FAIL="1")
+    assert result.returncode == 2
+    assert "状态查询失败" in result.stderr
+    assert not any(" up -d --wait market ledger" in call for call in docker_log(tmp_path))
+
+
+def test_deploy_fails_closed_when_migration_up_fails(tmp_path: Path) -> None:
+    result = invoke(tmp_path, "deploy", FAKE_MIGRATION_UP_FAIL="1")
+    assert result.returncode == 2
+    assert "启动失败" in result.stderr
+    assert not any(" up -d --wait market ledger" in call for call in docker_log(tmp_path))
+
+
+def test_deploy_rejects_nonzero_migration_exit_code(tmp_path: Path) -> None:
+    result = invoke(tmp_path, "deploy", FAKE_MIGRATION_FAIL="1")
+    assert result.returncode == 2
+    assert "退出码不是 0" in result.stderr
+    assert not any(" up -d --wait market ledger" in call for call in docker_log(tmp_path))
 
 
 def test_deploy_requires_private_env(tmp_path: Path) -> None:
