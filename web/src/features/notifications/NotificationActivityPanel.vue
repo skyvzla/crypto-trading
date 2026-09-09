@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { Activity, RefreshCw, RotateCcw, SlidersHorizontal } from 'lucide-vue-next'
+import { computed, ref } from 'vue'
+import { ChevronDown, RefreshCw, RotateCcw, Search, SlidersHorizontal } from 'lucide-vue-next'
 import type {
   NotificationConnector,
   NotificationDelivery,
@@ -16,8 +17,8 @@ const props = defineProps<{
   events: Page<NotificationEvent>
   deliveries: Page<NotificationDelivery>
   deadDeliveryCount: number
-  eventFilters: { event_type: string; severity: string; routing_status: string }
-  deliveryFilters: { status: string; endpoint_id: string; event_id: string }
+  eventFilters: { q: string; event_type: string; source: string; severity: string; routing_status: string }
+  deliveryFilters: { q: string; status: string; endpoint_id: string; event_id: string }
   activityLoading: boolean
   eventsLoading: boolean
   deliveriesLoading: boolean
@@ -26,6 +27,19 @@ const props = defineProps<{
 }>()
 
 const severityOptions = SEVERITY_OPTIONS
+const expandedEventId = ref<string | null>(null)
+const eventFiltersExpanded = ref(false)
+const deliveryFiltersExpanded = ref(false)
+const expandedEvent = computed(() => props.events.items.find((event) => event.id === expandedEventId.value) ?? null)
+const endpointOptions = computed(() =>
+  [...props.endpointById.values()].map((endpoint) => ({
+    value: endpoint.id,
+    label: `${endpoint.name} · ${props.connectorById.get(endpoint.connector_id)?.name ?? '未知连接器'}`,
+  })),
+)
+type FocusableInput = { focus: () => void }
+const eventSearchInput = ref<FocusableInput | null>(null)
+const deliverySearchInput = ref<FocusableInput | null>(null)
 
 const emit = defineEmits<{
   'update:activityView': [value: NotificationActivityKey]
@@ -40,6 +54,10 @@ const emit = defineEmits<{
 
 function changeActivityView(key: string | number) {
   emit('update:activityView', key as NotificationActivityKey)
+}
+
+function focusSearchInput(input: FocusableInput | null) {
+  input?.focus()
 }
 </script>
 
@@ -69,14 +87,19 @@ function changeActivityView(key: string | number) {
     </a-tabs>
 
     <section v-if="activityView === 'events'" class="activity-table data-card">
-      <div class="filter-row">
-        <a-input
-          v-model:value="eventFilters.event_type"
-          allow-clear
-          placeholder="事件类型，例如 risk.halted"
-          @press-enter="emit('apply-filters')"
-          ><template #prefix><Activity :size="14" /></template></a-input
-        ><a-select
+      <div class="filter-row event-filter-row">
+        <div class="filter-search-shell" @mousedown="focusSearchInput(eventSearchInput)">
+          <a-input
+            ref="eventSearchInput"
+            v-model:value="eventFilters.q"
+            allow-clear
+            class="filter-search"
+            placeholder="搜索事件标题、正文、类型或来源"
+            @press-enter="emit('apply-filters')"
+            ><template #prefix><Search :size="14" /></template
+          ></a-input>
+        </div>
+        <a-select
           v-model:value="eventFilters.severity"
           :options="severityOptions"
           style="width: 130px"
@@ -93,9 +116,27 @@ function changeActivityView(key: string | number) {
             { value: 'suppressed', label: '已抑制' },
             { value: 'targeted', label: '定向测试' },
           ]"
-        /><a-button aria-label="应用事件筛选" @click="emit('apply-filters')"
+        /><a-button type="text" class="more-filter-button" @click="eventFiltersExpanded = !eventFiltersExpanded">
+          {{ eventFiltersExpanded ? '收起更多' : '更多筛选' }} </a-button
+        ><a-button aria-label="应用事件筛选" @click="emit('apply-filters')"
           ><template #icon><SlidersHorizontal :size="14" /></template>筛选</a-button
         >
+      </div>
+      <div v-if="eventFiltersExpanded" class="filter-row advanced-filter-row">
+        <a-input
+          v-model:value="eventFilters.event_type"
+          allow-clear
+          class="filter-field"
+          placeholder="事件类型"
+          @press-enter="emit('apply-filters')"
+        />
+        <a-input
+          v-model:value="eventFilters.source"
+          allow-clear
+          class="filter-field"
+          placeholder="来源"
+          @press-enter="emit('apply-filters')"
+        />
       </div>
       <a-table
         :data-source="events.items"
@@ -104,11 +145,12 @@ function changeActivityView(key: string | number) {
         row-key="id"
         size="small"
         :loading="eventsLoading"
-        ><a-table-column key="event" title="事件"
+        ><a-table-column key="event" title="事件" :width="260"
           ><template #default="{ record }"
             ><div class="primary-cell">
               <strong>{{ record.title }}</strong
-              ><small>{{ record.event_type }} · {{ record.source }}</small>
+              ><small>{{ record.event_type }} · {{ record.source }}</small
+              ><small class="event-body">{{ record.body }}</small>
             </div></template
           ></a-table-column
         ><a-table-column key="severity" title="级别" :width="88"
@@ -125,8 +167,36 @@ function changeActivityView(key: string | number) {
           ><template #default="{ record }"
             ><time class="mono-value">{{ formatFullTime(record.occurred_at) }}</time></template
           ></a-table-column
+        ><a-table-column key="payload" title="详情" :width="78"
+          ><template #default="{ record }"
+            ><a-button
+              type="text"
+              size="small"
+              class="detail-trigger"
+              :aria-label="`查看事件 ${record.id} 详情`"
+              @click="expandedEventId = expandedEventId === record.id ? null : record.id"
+              ><template #icon><ChevronDown :size="14" :class="{ rotated: expandedEventId === record.id }" /></template
+              >查看</a-button
+            ></template
+          ></a-table-column
         ></a-table
       >
+      <div v-if="expandedEvent" class="event-detail" role="region" aria-label="事件详情">
+        <div class="event-detail-heading">
+          <strong>{{ expandedEvent.title }}</strong
+          ><span class="mono-value">{{ expandedEvent.event_type }} · {{ expandedEvent.source }}</span>
+        </div>
+        <p>{{ expandedEvent.body || '无正文' }}</p>
+        <div class="event-detail-meta">
+          <span><b>事件 ID</b>{{ expandedEvent.id }}</span>
+          <span><b>关联 ID</b>{{ expandedEvent.correlation_id || '—' }}</span>
+          <span><b>匹配策略</b>{{ expandedEvent.matched_policy_id || '—' }}</span>
+          <span><b>幂等键</b>{{ expandedEvent.idempotency_key }}</span>
+          <span><b>指纹</b>{{ expandedEvent.fingerprint || '—' }}</span>
+          <span><b>创建时间</b>{{ formatFullTime(expandedEvent.created_at) }}</span>
+        </div>
+        <pre>{{ JSON.stringify(expandedEvent.payload, null, 2) }}</pre>
+      </div>
       <div class="table-footer">
         <span>共 {{ events.total }} 条事件</span
         ><a-pagination
@@ -141,7 +211,18 @@ function changeActivityView(key: string | number) {
     </section>
 
     <section v-else class="activity-table data-card">
-      <div class="filter-row">
+      <div class="filter-row delivery-filter-row">
+        <div class="filter-search-shell" @mousedown="focusSearchInput(deliverySearchInput)">
+          <a-input
+            ref="deliverySearchInput"
+            v-model:value="deliveryFilters.q"
+            allow-clear
+            class="filter-search"
+            placeholder="搜索事件、端点或错误信息"
+            @press-enter="emit('apply-filters')"
+            ><template #prefix><Search :size="14" /></template
+          ></a-input>
+        </div>
         <a-select
           v-model:value="deliveryFilters.status"
           allow-clear
@@ -149,24 +230,38 @@ function changeActivityView(key: string | number) {
           style="width: 130px"
           :options="[
             { value: 'pending', label: '待发送' },
+            { value: 'sending', label: '发送中' },
             { value: 'retry', label: '待重试' },
             { value: 'sent', label: '已发送' },
             { value: 'dead', label: '死信' },
           ]"
           @change="emit('apply-filters')"
-        /><a-input
+        /><a-select
           v-model:value="deliveryFilters.endpoint_id"
           allow-clear
-          placeholder="端点 ID"
-          @press-enter="emit('apply-filters')"
-        /><a-input
-          v-model:value="deliveryFilters.event_id"
-          allow-clear
-          placeholder="事件 ID"
-          @press-enter="emit('apply-filters')"
-        /><a-button aria-label="应用投递筛选" @click="emit('apply-filters')"
+          show-search
+          :filter-option="
+            (input: string, option: { label?: string }) =>
+              (option.label ?? '').toLowerCase().includes(input.toLowerCase())
+          "
+          placeholder="选择端点"
+          class="endpoint-filter"
+          :options="endpointOptions"
+          @change="emit('apply-filters')"
+        /><a-button type="text" class="more-filter-button" @click="deliveryFiltersExpanded = !deliveryFiltersExpanded">
+          {{ deliveryFiltersExpanded ? '收起更多' : '更多筛选' }} </a-button
+        ><a-button aria-label="应用投递筛选" @click="emit('apply-filters')"
           ><template #icon><SlidersHorizontal :size="14" /></template>筛选</a-button
         >
+      </div>
+      <div v-if="deliveryFiltersExpanded" class="filter-row advanced-filter-row">
+        <a-input
+          v-model:value="deliveryFilters.event_id"
+          allow-clear
+          class="filter-field"
+          placeholder="事件 ID"
+          @press-enter="emit('apply-filters')"
+        />
       </div>
       <a-table
         :data-source="deliveries.items"
@@ -268,8 +363,27 @@ function changeActivityView(key: string | number) {
   padding: 11px 12px;
   border-bottom: 1px solid var(--line);
 }
+.filter-row :deep(.ant-input-affix-wrapper),
 .filter-row :deep(.ant-input) {
+  box-sizing: border-box;
+}
+.filter-row :deep(.ant-input-affix-wrapper) {
   width: min(290px, 100%);
+}
+.filter-search-shell {
+  width: min(290px, 100%);
+}
+.filter-search-shell :deep(.ant-input-affix-wrapper) {
+  width: 100%;
+}
+.filter-row :deep(.filter-field.ant-input) {
+  width: 155px;
+}
+.filter-row :deep(.ant-input-affix-wrapper.filter-field) {
+  width: 155px;
+}
+.filter-row :deep(.ant-input-affix-wrapper .ant-input) {
+  width: 100%;
 }
 .filter-row :deep(.ant-select) {
   min-width: 125px;
@@ -288,16 +402,96 @@ function changeActivityView(key: string | number) {
 .muted-dash {
   color: var(--muted);
 }
+.event-body {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.advanced-filter-row {
+  padding-top: 0;
+}
+.more-filter-button {
+  color: var(--muted);
+}
+.detail-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.detail-trigger :deep(.rotated) {
+  transform: rotate(180deg);
+}
+.event-detail {
+  margin: 0 12px 12px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-hover);
+}
+.event-detail-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.event-detail-heading > * {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.event-detail-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+  margin-bottom: 9px;
+  color: var(--muted);
+  font: var(--type-meta) var(--font-family-mono);
+  overflow-wrap: anywhere;
+}
+.event-detail-meta b {
+  margin-right: 7px;
+  color: var(--text);
+  font-family: var(--font-family-sans);
+  font-weight: 500;
+}
+.event-detail p {
+  margin: 8px 0;
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.event-detail pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text);
+  font: var(--type-meta) var(--font-family-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 @media (max-width: 600px) {
   .filter-row > :deep(.ant-input),
+  .filter-row > :deep(.ant-input-affix-wrapper),
   .filter-row > :deep(.ant-select),
   .filter-row > :deep(.ant-btn) {
     width: 100% !important;
   }
+  .filter-search-shell {
+    width: 100%;
+  }
   .table-footer {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .event-detail-meta {
+    grid-template-columns: 1fr;
+  }
+  .event-detail-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
   }
 }
 </style>

@@ -121,8 +121,8 @@ services:
     build: *app_build
     command: ["python", "-m", "trading_platform.notifications", "--poll-interval", "5"]
     init: true
-    # Connector secret_ref values resolve from this optional file or Docker
-    # secrets mounted at /run/secrets. The web UI never stores secret values.
+    # Web-managed connector credentials are loaded from PostgreSQL. This file
+    # and /run/secrets remain available for legacy secret_ref connectors.
     env_file:
       - path: .env
         required: false

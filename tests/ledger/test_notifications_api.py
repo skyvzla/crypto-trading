@@ -4,8 +4,14 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 
-from trading_platform.ledger.api.notifications import get_repository, router
+from trading_platform.ledger.api.notifications import (
+    ConnectorUpdate,
+    get_repository,
+    require_same_origin,
+    router,
+)
 from trading_platform.notifications.domain import (
     ConnectorType,
     DeliveryStatus,
@@ -30,7 +36,7 @@ class FakeNotificationRepository:
         self.connector = NotificationConnector(
             id=uuid4(), name="ops", type=ConnectorType.TELEGRAM,
             secret_ref="env:TG_OPS", config={"parse_mode": "HTML"}, enabled=True,
-            version=1, created_at=now, updated_at=now,
+            version=1, created_at=now, updated_at=now, has_secret=True,
         )
         self.endpoint = NotificationEndpoint(
             id=uuid4(), connector_id=self.connector.id, name="ops-chat",
@@ -61,8 +67,16 @@ class FakeNotificationRepository:
             last_error=None, provider_message_id=None, created_at=now, updated_at=now,
             sent_at=None,
         )
+        self.create_connector_calls = []
+        self.update_connector_calls = []
+        self.groups = [self.group]
 
     async def create_connector(self, **kwargs):
+        self.create_connector_calls.append(kwargs)
+        return self.connector
+
+    async def update_connector(self, _id, **kwargs):
+        self.update_connector_calls.append((_id, kwargs))
         return self.connector
 
     async def get_connector(self, _id):
@@ -70,6 +84,9 @@ class FakeNotificationRepository:
 
     async def list_connectors(self, *, limit, offset):
         return [self.connector], 1
+
+    async def list_groups(self, *, limit, offset):
+        return self.groups, len(self.groups)
 
     async def publish_event(self, **kwargs):
         from trading_platform.notifications.domain import PublishResult
@@ -134,11 +151,166 @@ async def test_notification_connector_crud_and_publish_shape(api_app):
         )
 
     assert listed.status_code == 200
-    assert listed.json()["items"][0]["secret_ref"] == "env:TG_OPS"
+    assert listed.json()["items"][0]["has_secret"] is True
+    assert "secret_ref" not in listed.json()["items"][0]
     assert created.status_code == 201
     assert published.status_code == 202
     assert published.json()["event"]["routing_status"] == "routed"
     assert len(published.json()["deliveries"]) == 1
+    assert "secret_ref" not in published.json()["deliveries"][0]["connector_snapshot"]
+
+
+@pytest.mark.asyncio
+async def test_connector_secret_is_write_only_and_blank_update_preserves_ref(api_app):
+    app, repository = api_app
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await client.post(
+            "/api/v1/notifications/connectors",
+            json={
+                "name": "direct-secret",
+                "type": "telegram",
+                "secret": "123:direct-secret",
+                "config": {},
+            },
+        )
+        updated = await client.put(
+            f"/api/v1/notifications/connectors/{repository.connector.id}",
+            json={
+                "name": repository.connector.name,
+                "type": "telegram",
+                "config": repository.connector.config,
+                "enabled": True,
+                "expected_version": 1,
+            },
+        )
+
+    assert created.status_code == 201
+    assert repository.create_connector_calls[-1]["secret"] == "123:direct-secret"
+    assert "secret" not in created.json()
+    assert updated.status_code == 200
+    update_values = repository.update_connector_calls[-1][1]
+    assert update_values["secret"] is None
+    assert update_values["secret_ref"] == "env:TG_OPS"
+    assert "secret" not in updated.json()
+
+
+@pytest.mark.asyncio
+async def test_connector_update_rejects_both_secret_and_secret_ref(api_app):
+    app, repository = api_app
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            f"/api/v1/notifications/connectors/{repository.connector.id}",
+            json={
+                "name": repository.connector.name,
+                "type": "telegram",
+                "secret": "123:new-secret",
+                "secret_ref": "env:TG_OPS",
+                "config": repository.connector.config,
+                "enabled": True,
+                "expected_version": 1,
+            },
+        )
+
+    assert response.status_code == 422
+    assert repository.update_connector_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("origin", "status_code"),
+    [
+        (None, 201),
+        ("http://test", 201),
+        ("http://test:80", 201),
+        ("http://other", 403),
+        ("http://test:81", 403),
+        ("https://test", 403),
+        ("null", 403),
+    ],
+)
+async def test_notification_writes_enforce_same_origin(api_app, origin, status_code):
+    app, _ = api_app
+    transport = httpx.ASGITransport(app=app)
+    headers = {} if origin is None else {"Origin": origin}
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/notifications/connectors",
+            headers=headers,
+            json={
+                "name": "origin-check",
+                "type": "telegram",
+                "secret_ref": "env:TG_OPS",
+                "config": {},
+            },
+        )
+    assert response.status_code == status_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["secret", "secret_ref"])
+async def test_connector_update_rejects_clear_secret_with_credential(api_app, field):
+    app, repository = api_app
+    transport = httpx.ASGITransport(app=app)
+    body = {
+        "name": repository.connector.name,
+        "type": "telegram",
+        "config": repository.connector.config,
+        "enabled": True,
+        "expected_version": 1,
+        "clear_secret": True,
+        field: "123:new-secret" if field == "secret" else "env:NEW_SECRET",
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.put(
+            f"/api/v1/notifications/connectors/{repository.connector.id}",
+            json=body,
+        )
+    assert response.status_code == 422
+    assert repository.update_connector_calls == []
+
+
+def test_all_notification_write_routes_have_same_origin_dependency():
+    write_paths = {
+        "/api/v1/notifications/connectors",
+        "/api/v1/notifications/connectors/{connector_id}",
+        "/api/v1/notifications/endpoints",
+        "/api/v1/notifications/endpoints/{endpoint_id}",
+        "/api/v1/notifications/endpoints/{endpoint_id}/test",
+        "/api/v1/notifications/groups",
+        "/api/v1/notifications/groups/{group_id}",
+        "/api/v1/notifications/policies",
+        "/api/v1/notifications/policies/{policy_id}",
+        "/api/v1/notifications/events",
+        "/api/v1/notifications/deliveries/{delivery_id}/retry",
+    }
+    routes = {
+        route.path: route
+        for route in router.routes
+        if isinstance(route, APIRoute)
+        and route.path in write_paths
+        and route.methods & {"POST", "PUT", "DELETE"}
+    }
+    assert set(routes) == write_paths
+    for route in routes.values():
+        assert any(
+            dependency.call is require_same_origin
+            for dependency in route.dependant.dependencies
+        )
+
+
+@pytest.mark.asyncio
+async def test_group_response_keeps_endpoint_ids_without_endpoint_details(api_app):
+    app, _ = api_app
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/v1/notifications/groups")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["endpoint_ids"] == [str(api_app[1].endpoint.id)]
+    assert "endpoint_details" not in item
 
 
 @pytest.mark.asyncio
@@ -221,4 +393,47 @@ def test_endpoint_write_rejects_credential_bearing_webhook_url():
             connector_id=uuid4(),
             name="unsafe",
             address="https://user:password@example.com/hook",
+        )
+
+
+def test_connector_update_allows_blank_secret_for_preserving_existing_credential():
+    update = ConnectorUpdate(
+        name="ops",
+        type="telegram",
+        secret_ref=None,
+        secret=None,
+        config={},
+        enabled=True,
+        expected_version=1,
+    )
+    assert update.secret is None
+    assert update.secret_ref is None
+
+
+@pytest.mark.parametrize(
+    "secret_ref",
+    ["123456:ABCDEF", "file:/tmp/token", "env:1TOKEN", "unsafe/name", "safe:name"],
+)
+def test_connector_secret_ref_rejects_unsafe_reference(secret_ref):
+    with pytest.raises(ValueError, match="secret_ref"):
+        ConnectorUpdate(
+            name="ops",
+            type="telegram",
+            secret_ref=secret_ref,
+            config={},
+            enabled=True,
+            expected_version=1,
+        )
+
+
+def test_connector_update_rejects_both_secret_and_secret_ref():
+    with pytest.raises(ValueError, match="either secret or secret_ref"):
+        ConnectorUpdate(
+            name="ops",
+            type="telegram",
+            secret="123:new-secret",
+            secret_ref="env:TG_OPS",
+            config={},
+            enabled=True,
+            expected_version=1,
         )

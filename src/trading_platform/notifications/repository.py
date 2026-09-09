@@ -54,9 +54,18 @@ class NotificationStateError(RuntimeError):
     """The requested state transition is not allowed."""
 
 
+_UNSET = object()
+
+
 def _connector(row: dict[str, Any]) -> NotificationConnector:
+    data = dict(row)
+    data["has_secret"] = bool(
+        data.pop("has_secret", False)
+        or str(data.get("secret_ref") or "").strip()
+        or str(data.get("legacy_secret_ref") or "").strip()
+    )
     return NotificationConnector(
-        **{**row, "type": ConnectorType(row["type"])}
+        **{**data, "type": ConnectorType(data["type"])}
     )
 
 
@@ -66,7 +75,10 @@ def _endpoint(row: dict[str, Any]) -> NotificationEndpoint:
 
 def _group(row: dict[str, Any]) -> NotificationGroup:
     return NotificationGroup(
-        **{**row, "endpoint_ids": tuple(row.get("endpoint_ids") or ())}
+        **{
+            **row,
+            "endpoint_ids": tuple(row.get("endpoint_ids") or ()),
+        }
     )
 
 
@@ -150,6 +162,20 @@ class NotificationRepository:
         return unique_ids
 
     @staticmethod
+    def _connector_select(where: str = "") -> str:
+        return (
+            "SELECT c.*, (NULLIF(btrim(c.secret_ref), '') IS NOT NULL OR "
+            "NULLIF(btrim(c.legacy_secret_ref), '') IS NOT NULL OR EXISTS ("
+            "SELECT 1 FROM notification_secrets s WHERE s.connector_id = c.id"
+            ")) AS has_secret FROM notification_connectors c " + where
+        )
+
+    @staticmethod
+    def _like_pattern(value: str) -> str:
+        escaped = value.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+        return f"%{escaped}%"
+
+    @staticmethod
     async def _raise_missing_or_version(
         conn: object, table: str, object_id: UUID
     ) -> None:
@@ -167,24 +193,34 @@ class NotificationRepository:
         secret_ref: str | None,
         config: dict[str, Any],
         enabled: bool,
+        secret: str | None = None,
     ) -> NotificationConnector:
         connector_id = uuid4()
         try:
             async with self.pool.connection() as conn:
-                row = await self._fetchone(
-                    conn,
-                    "INSERT INTO notification_connectors "
-                    "(id, name, type, secret_ref, config, enabled) "
-                    "VALUES (%s, %s, %s, %s, %s, %s) RETURNING *",
-                    (
-                        connector_id,
-                        name,
-                        type.value,
-                        secret_ref,
-                        Jsonb(config),
-                        enabled,
-                    ),
-                )
+                async with conn.transaction():
+                    await conn.execute(
+                        "INSERT INTO notification_connectors "
+                        "(id, name, type, secret_ref, config, enabled) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        (
+                            connector_id,
+                            name,
+                            type.value,
+                            secret_ref,
+                            Jsonb(config),
+                            enabled,
+                        ),
+                    )
+                    if secret:
+                        await conn.execute(
+                            "INSERT INTO notification_secrets (connector_id, secret_value) "
+                            "VALUES (%s, %s)",
+                            (connector_id, secret),
+                        )
+                    row = await self._fetchone(
+                        conn, self._connector_select("WHERE c.id = %s"), (connector_id,)
+                    )
         except UniqueViolation as error:
             raise NotificationConflictError("connector name already exists") from error
         assert row is not None
@@ -196,8 +232,8 @@ class NotificationRepository:
         async with self.pool.connection() as conn:
             rows = await self._fetchall(
                 conn,
-                "SELECT * FROM notification_connectors "
-                "ORDER BY name, id LIMIT %s OFFSET %s",
+                self._connector_select()
+                + " ORDER BY c.name, c.id LIMIT %s OFFSET %s",
                 (limit, offset),
             )
             total = await self._fetchone(
@@ -209,7 +245,7 @@ class NotificationRepository:
         self, connector_id: UUID
     ) -> NotificationConnector | None:
         row = await self._read_one(
-            "SELECT * FROM notification_connectors WHERE id = %s", (connector_id,)
+            self._connector_select("WHERE c.id = %s"), (connector_id,)
         )
         return _connector(row) if row is not None else None
 
@@ -223,25 +259,53 @@ class NotificationRepository:
         secret_ref: str | None,
         config: dict[str, Any],
         enabled: bool,
+        secret: str | None | object = _UNSET,
+        clear_secret: bool = False,
+        legacy_secret_ref: str | None | object = _UNSET,
     ) -> NotificationConnector | None:
         try:
             async with self.pool.connection() as conn:
-                row = await self._fetchone(
-                    conn,
-                    "UPDATE notification_connectors SET name = %s, type = %s, "
-                    "secret_ref = %s, config = %s, enabled = %s, "
-                    "version = version + 1, updated_at = NOW() "
-                    "WHERE id = %s AND version = %s RETURNING *",
-                    (
-                        name,
-                        type.value,
-                        secret_ref,
-                        Jsonb(config),
-                        enabled,
-                        connector_id,
-                        expected_version,
-                    ),
-                )
+                async with conn.transaction():
+                    updated = await conn.execute(
+                        "UPDATE notification_connectors SET name = %s, type = %s, "
+                        "secret_ref = %s, config = %s, enabled = %s, "
+                        "legacy_secret_ref = CASE WHEN %s THEN legacy_secret_ref ELSE %s END, "
+                        "version = version + 1, updated_at = NOW() "
+                        "WHERE id = %s AND version = %s",
+                        (
+                            name,
+                            type.value,
+                            secret_ref,
+                            Jsonb(config),
+                            enabled,
+                            legacy_secret_ref is _UNSET,
+                            None if legacy_secret_ref is _UNSET else legacy_secret_ref,
+                            connector_id,
+                            expected_version,
+                        ),
+                    )
+                    if updated.rowcount:
+                        if clear_secret:
+                            await conn.execute(
+                                "DELETE FROM notification_secrets WHERE connector_id = %s",
+                                (connector_id,),
+                            )
+                        elif (
+                            secret is not _UNSET
+                            and isinstance(secret, str)
+                            and secret.strip()
+                        ):
+                            await conn.execute(
+                                "INSERT INTO notification_secrets (connector_id, secret_value) "
+                                "VALUES (%s, %s) ON CONFLICT (connector_id) DO UPDATE SET "
+                                "secret_value = EXCLUDED.secret_value, updated_at = NOW()",
+                                (connector_id, secret),
+                            )
+                    row = await self._fetchone(
+                        conn,
+                        self._connector_select("WHERE c.id = %s"),
+                        (connector_id,),
+                    ) if updated.rowcount else None
                 if row is None:
                     await self._raise_missing_or_version(
                         conn, "notification_connectors", connector_id
@@ -712,7 +776,7 @@ class NotificationRepository:
             "SELECT DISTINCT e.id AS endpoint_id, e.name AS endpoint_name, "
             "e.address, e.config AS endpoint_config, e.version AS endpoint_version, "
             "c.id AS connector_id, c.name AS connector_name, c.type AS connector_type, "
-            "c.secret_ref, c.config AS connector_config, "
+            "c.secret_ref, c.legacy_secret_ref, c.config AS connector_config, "
             "c.version AS connector_version "
             "FROM notification_policy_groups pg "
             "JOIN notification_groups g ON g.id = pg.group_id AND g.enabled = TRUE "
@@ -732,6 +796,7 @@ class NotificationRepository:
             "name": row["connector_name"],
             "type": row["connector_type"],
             "secret_ref": row["secret_ref"],
+            "legacy_secret_ref": row.get("legacy_secret_ref"),
             "config": row["connector_config"],
             "version": row["connector_version"],
         }
@@ -905,7 +970,7 @@ class NotificationRepository:
                     "e.address, e.config AS endpoint_config, "
                     "e.version AS endpoint_version, e.enabled AS endpoint_enabled, "
                     "c.id AS connector_id, c.name AS connector_name, "
-                    "c.type AS connector_type, c.secret_ref, "
+                    "c.type AS connector_type, c.secret_ref, c.legacy_secret_ref, "
                     "c.config AS connector_config, c.version AS connector_version, "
                     "c.enabled AS connector_enabled "
                     "FROM notification_endpoints e "
@@ -947,6 +1012,7 @@ class NotificationRepository:
     async def list_events(
         self,
         *,
+        q: str | None = None,
         event_type: str | None,
         severity: Severity | None,
         source: str | None,
@@ -956,6 +1022,15 @@ class NotificationRepository:
     ) -> tuple[list[NotificationEvent], int]:
         filters: list[str] = []
         params: list[object] = []
+        if q:
+            filters.append(
+                "(event_type ILIKE %s ESCAPE '!' OR source ILIKE %s ESCAPE '!' "
+                "OR title ILIKE %s ESCAPE '!' OR body ILIKE %s ESCAPE '!' "
+                "OR correlation_id ILIKE %s ESCAPE '!' "
+                "OR idempotency_key ILIKE %s ESCAPE '!' OR id::text ILIKE %s ESCAPE '!')"
+            )
+            pattern = self._like_pattern(q)
+            params.extend([pattern] * 7)
         for column, value in (
             ("event_type", event_type),
             ("severity", severity.value if severity else None),
@@ -989,6 +1064,7 @@ class NotificationRepository:
     async def list_deliveries(
         self,
         *,
+        q: str | None = None,
         event_id: UUID | None,
         endpoint_id: UUID | None,
         status: DeliveryStatus | None,
@@ -997,10 +1073,22 @@ class NotificationRepository:
     ) -> tuple[list[NotificationDelivery], int]:
         filters: list[str] = []
         params: list[object] = []
+        if q:
+            filters.append(
+                "(d.id::text ILIKE %s ESCAPE '!' OR d.event_id::text ILIKE %s ESCAPE '!' "
+                "OR d.endpoint_id::text ILIKE %s ESCAPE '!' "
+                "OR e.event_type ILIKE %s ESCAPE '!' OR e.source ILIKE %s ESCAPE '!' "
+                "OR e.title ILIKE %s ESCAPE '!' "
+                "OR COALESCE(d.endpoint_snapshot ->> 'name', '') ILIKE %s ESCAPE '!' "
+                "OR COALESCE(d.connector_snapshot ->> 'name', '') ILIKE %s ESCAPE '!' "
+                "OR COALESCE(d.last_error, '') ILIKE %s ESCAPE '!')"
+            )
+            pattern = self._like_pattern(q)
+            params.extend([pattern] * 9)
         for column, value in (
-            ("event_id", event_id),
-            ("endpoint_id", endpoint_id),
-            ("status", status.value if status else None),
+            ("d.event_id", event_id),
+            ("d.endpoint_id", endpoint_id),
+            ("d.status", status.value if status else None),
         ):
             if value is not None:
                 filters.append(f"{column} = %s")
@@ -1009,13 +1097,16 @@ class NotificationRepository:
         async with self.pool.connection() as conn:
             rows = await self._fetchall(
                 conn,
-                "SELECT * FROM notification_deliveries"
-                f"{where} ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s",
+                "SELECT d.* FROM notification_deliveries d "
+                "JOIN notification_events e ON e.id = d.event_id"
+                f"{where} ORDER BY d.created_at DESC, d.id DESC LIMIT %s OFFSET %s",
                 (*params, limit, offset),
             )
             total = await self._fetchone(
                 conn,
-                f"SELECT COUNT(*) AS count FROM notification_deliveries{where}",
+                "SELECT COUNT(*) AS count FROM notification_deliveries d "
+                "JOIN notification_events e ON e.id = d.event_id"
+                f"{where}",
                 tuple(params),
             )
         return [_delivery(row) for row in rows], int(total["count"])
@@ -1181,8 +1272,11 @@ class NotificationRepository:
                     "e.occurred_at AS event__occurred_at, "
                     "e.expires_at AS event__expires_at, "
                     "e.created_at AS event__created_at "
+                    ", s.secret_value AS resolved_secret "
                     "FROM notification_deliveries d "
                     "JOIN notification_events e ON e.id = d.event_id "
+                    "LEFT JOIN notification_secrets s ON "
+                    "s.connector_id = (d.connector_snapshot ->> 'id')::uuid "
                     "WHERE d.id = ANY(%s)",
                     (ids,),
                 )
@@ -1198,11 +1292,15 @@ class NotificationRepository:
             delivery_row = {
                 key: value for key, value in row.items() if not key.startswith("event__")
             }
+            resolved_secret = delivery_row.pop("resolved_secret", None)
+            connector = dict(delivery_row["connector_snapshot"])
+            if resolved_secret:
+                connector["secret"] = resolved_secret
             claims.append(
                 DeliveryClaim(
                     delivery=_delivery(delivery_row),
                     event=_event(event_row),
-                    connector=delivery_row["connector_snapshot"],
+                    connector=connector,
                     endpoint=delivery_row["endpoint_snapshot"],
                 )
             )

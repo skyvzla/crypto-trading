@@ -25,6 +25,7 @@ from trading_platform.notifications.domain import (
     NotificationPolicy,
     RoutingStatus,
     Severity,
+    validate_secret_ref,
 )
 from trading_platform.notifications.repository import (
     NotificationConflictError,
@@ -53,6 +54,91 @@ _FORBIDDEN_CONFIG_KEYS = {
 }
 
 
+def _normalized_authority(value: str, scheme: str) -> tuple[str, int] | None:
+    """Parse an HTTP authority and normalize omitted/default ports."""
+    try:
+        parsed = urlsplit(f"//{value}", allow_fragments=False)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if (
+        not hostname
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    try:
+        normalized_host = hostname.rstrip(".").encode("idna").decode("ascii").lower()
+    except UnicodeError:
+        return None
+    default_port = 443 if scheme.lower() == "https" else 80
+    return normalized_host, port or default_port
+
+
+def require_same_origin(request: Request) -> None:
+    """Reject browser writes whose Origin is not the request's own authority.
+
+    Internal worker and CLI callers do not send Origin and remain compatible.
+    """
+    origin = request.headers.get("origin")
+    if origin is None:
+        return
+    try:
+        parsed_origin = urlsplit(origin, allow_fragments=False)
+    except ValueError:
+        parsed_origin = None
+    if parsed_origin is None or parsed_origin.scheme.lower() not in {"http", "https"}:
+        raise HTTPException(status_code=403, detail="cross-origin notification write rejected")
+    origin_authority = _normalized_authority(
+        parsed_origin.netloc,
+        parsed_origin.scheme,
+    )
+    request_authority = _normalized_authority(
+        request.headers.get("host", ""),
+        request.url.scheme,
+    )
+    if (
+        not parsed_origin.netloc
+        or parsed_origin.path
+        or parsed_origin.query
+        or parsed_origin.fragment
+        or origin_authority is None
+        or request_authority is None
+        or parsed_origin.scheme.lower() != request.url.scheme.lower()
+        or origin_authority != request_authority
+    ):
+        raise HTTPException(status_code=403, detail="cross-origin notification write rejected")
+
+
+def _validate_connector_credentials(
+    connector_type: ConnectorType,
+    config: dict[str, Any],
+    *,
+    secret_ref: str | None,
+    secret: str | None,
+    existing_has_secret: bool = False,
+) -> None:
+    available = bool(secret_ref or secret or existing_has_secret)
+    if connector_type is ConnectorType.TELEGRAM and not available:
+        raise ValueError("Telegram connector requires secret_ref or secret")
+    if connector_type is not ConnectorType.WEBHOOK:
+        return
+    auth = config.get("auth_type", config.get("auth", "none"))
+    if isinstance(auth, dict):
+        auth = auth.get("type", "none")
+    normalized = str(auth).lower().replace("-", "_")
+    if normalized in {"hmac", "sha256"}:
+        normalized = "hmac_sha256"
+    if normalized not in {"none", "bearer", "hmac_sha256"}:
+        raise ValueError("unsupported webhook authentication type")
+    if normalized != "none" and not available:
+        raise ValueError("authenticated webhook connector requires secret_ref or secret")
+
+
 def _validate_safe_config(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("config must be a JSON object")
@@ -75,7 +161,7 @@ def _validate_safe_config(value: Any) -> dict[str, Any]:
                     )
                 ):
                     raise ValueError(
-                        "config cannot contain credentials; use secret_ref instead"
+                        "config cannot contain credentials; use secret or secret_ref instead"
                     )
                 walk(child)
         elif isinstance(item, list):
@@ -96,6 +182,8 @@ class ConnectorWrite(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     type: ConnectorType
     secret_ref: str | None = Field(default=None, max_length=256)
+    # Write-only credential.  The response model deliberately does not expose it.
+    secret: str | None = Field(default=None, max_length=4096)
     config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
 
@@ -112,26 +200,37 @@ class ConnectorWrite(BaseModel):
     @field_validator("secret_ref")
     @classmethod
     def normalize_secret_ref(cls, value: str | None) -> str | None:
-        return value.strip() if value is not None else None
+        value = value.strip() if value is not None else None
+        value = value or None
+        try:
+            return validate_secret_ref(value)
+        except ValueError as error:
+            raise ValueError(str(error)) from error
+
+    @field_validator("secret")
+    @classmethod
+    def normalize_secret(cls, value: str | None) -> str | None:
+        value = value.strip() if value is not None else None
+        return value or None
     _nonblank_name = field_validator("name")(_require_nonblank)
 
-    @model_validator(mode="after")
     def validate_secret_reference(self) -> "ConnectorWrite":
         # Telegram always needs a bot token.  Webhook authentication can be
         # disabled explicitly; all other modes resolve their secret at send time.
-        if self.type is ConnectorType.TELEGRAM and not self.secret_ref:
-            raise ValueError("Telegram connector requires secret_ref")
-        if self.type is ConnectorType.WEBHOOK:
-            auth = self.config.get("auth_type", self.config.get("auth", "none"))
-            if isinstance(auth, dict):
-                auth = auth.get("type", "none")
-            normalized = str(auth).lower().replace("-", "_")
-            if normalized in {"hmac", "sha256"}:
-                normalized = "hmac_sha256"
-            if normalized not in {"none", "bearer", "hmac_sha256"}:
-                raise ValueError("unsupported webhook authentication type")
-            if normalized != "none" and not self.secret_ref:
-                raise ValueError("authenticated webhook connector requires secret_ref")
+        _validate_connector_credentials(
+            self.type, self.config, secret_ref=self.secret_ref, secret=self.secret
+        )
+        return self
+
+
+class ConnectorCreate(ConnectorWrite):
+    """Creation requires a resolvable credential for authenticated channels."""
+
+    @model_validator(mode="after")
+    def validate_create_secret(self) -> "ConnectorCreate":
+        if self.secret and self.secret_ref:
+            raise ValueError("provide either secret or secret_ref, not both")
+        self.validate_secret_reference()
         return self
 
 
@@ -141,7 +240,7 @@ class ConnectorResponse(BaseModel):
     id: UUID
     name: str
     type: ConnectorType
-    secret_ref: str | None
+    has_secret: bool = False
     config: dict[str, Any]
     enabled: bool
     version: int
@@ -367,6 +466,17 @@ class DeliveryResponse(BaseModel):
     updated_at: datetime
     sent_at: datetime | None
 
+    @field_validator("connector_snapshot", mode="before")
+    @classmethod
+    def redact_connector_snapshot(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        return {
+            key: item
+            for key, item in value.items()
+            if key not in {"secret", "secret_ref", "legacy_secret_ref"}
+        }
+
 
 class NotificationOverviewResponse(BaseModel):
     connectors: int
@@ -389,7 +499,15 @@ class ExpectedVersion(BaseModel):
 
 
 class ConnectorUpdate(ConnectorWrite, ExpectedVersion):
-    pass
+    clear_secret: bool = False
+
+    @model_validator(mode="after")
+    def reject_ambiguous_secret_inputs(self) -> "ConnectorUpdate":
+        if self.secret and self.secret_ref:
+            raise ValueError("provide either secret or secret_ref, not both")
+        if self.clear_secret and {"secret", "secret_ref"} & self.model_fields_set:
+            raise ValueError("clear_secret cannot be combined with secret or secret_ref")
+        return self
 
 
 class EndpointUpdate(EndpointWrite, ExpectedVersion):
@@ -469,9 +587,9 @@ async def list_connectors(
     return _page([_response(item, ConnectorResponse) for item in items], total, limit, offset)
 
 
-@router.post("/connectors", status_code=201)
+@router.post("/connectors", status_code=201, dependencies=[Depends(require_same_origin)])
 async def create_connector(
-    request: ConnectorWrite,
+    request: ConnectorCreate,
     repository: NotificationRepository = Depends(get_repository),
 ) -> ConnectorResponse:
     try:
@@ -494,7 +612,9 @@ async def get_connector(
     return _response(item, ConnectorResponse)
 
 
-@router.put("/connectors/{connector_id}")
+@router.put(
+    "/connectors/{connector_id}", dependencies=[Depends(require_same_origin)]
+)
 async def update_connector(
     connector_id: UUID,
     request: ConnectorUpdate,
@@ -502,6 +622,52 @@ async def update_connector(
 ) -> ConnectorResponse:
     try:
         values = request.model_dump()
+        existing = await repository.get_connector(connector_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="notification connector not found")
+        if request.clear_secret and request.type is ConnectorType.TELEGRAM:
+            if not request.secret_ref and not request.secret:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Telegram connector requires secret_ref or secret",
+                )
+        if (
+            request.type is ConnectorType.TELEGRAM
+            and not request.secret_ref
+            and not request.secret
+            and not (existing.has_secret or existing.secret_ref)
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail="Telegram connector requires secret_ref or secret",
+            )
+        if request.clear_secret:
+            values["secret_ref"] = None
+            values["legacy_secret_ref"] = None
+        elif request.secret:
+            # A newly entered direct secret supersedes the legacy resolver ref.
+            values["secret_ref"] = None
+            values["legacy_secret_ref"] = None
+        elif request.secret_ref:
+            # Switching back to an external reference must not keep using a
+            # previously stored direct credential.
+            values["clear_secret"] = True
+            values["legacy_secret_ref"] = None
+        elif request.secret_ref is None:
+            # Empty edit fields are intentionally non-destructive.
+            values["secret_ref"] = existing.secret_ref
+        if request.clear_secret and request.secret:
+            raise HTTPException(status_code=422, detail="clear_secret cannot include a new secret")
+        try:
+            _validate_connector_credentials(
+                request.type,
+                request.config,
+                secret_ref=values["secret_ref"],
+                secret=request.secret,
+                existing_has_secret=existing.has_secret and not request.clear_secret,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
         item = await repository.update_connector(connector_id, **values)
     except (NotificationConflictError, NotificationReferenceError, NotificationVersionConflictError) as error:
         raise _error(error) from error
@@ -510,7 +676,11 @@ async def update_connector(
     return _response(item, ConnectorResponse)
 
 
-@router.delete("/connectors/{connector_id}", status_code=204)
+@router.delete(
+    "/connectors/{connector_id}",
+    status_code=204,
+    dependencies=[Depends(require_same_origin)],
+)
 async def delete_connector(
     connector_id: UUID,
     expected_version: int = Query(..., ge=1),
@@ -539,7 +709,7 @@ async def list_endpoints(
     return _page([_response(item, EndpointResponse) for item in items], total, limit, offset)
 
 
-@router.post("/endpoints", status_code=201)
+@router.post("/endpoints", status_code=201, dependencies=[Depends(require_same_origin)])
 async def create_endpoint(
     request: EndpointWrite,
     repository: NotificationRepository = Depends(get_repository),
@@ -562,7 +732,9 @@ async def get_endpoint(
     return _response(item, EndpointResponse)
 
 
-@router.put("/endpoints/{endpoint_id}")
+@router.put(
+    "/endpoints/{endpoint_id}", dependencies=[Depends(require_same_origin)]
+)
 async def update_endpoint(
     endpoint_id: UUID,
     request: EndpointUpdate,
@@ -577,7 +749,11 @@ async def update_endpoint(
     return _response(item, EndpointResponse)
 
 
-@router.delete("/endpoints/{endpoint_id}", status_code=204)
+@router.delete(
+    "/endpoints/{endpoint_id}",
+    status_code=204,
+    dependencies=[Depends(require_same_origin)],
+)
 async def delete_endpoint(
     endpoint_id: UUID,
     expected_version: int = Query(..., ge=1),
@@ -593,7 +769,11 @@ async def delete_endpoint(
         raise HTTPException(status_code=404, detail="notification endpoint not found")
 
 
-@router.post("/endpoints/{endpoint_id}/test", status_code=201)
+@router.post(
+    "/endpoints/{endpoint_id}/test",
+    status_code=201,
+    dependencies=[Depends(require_same_origin)],
+)
 async def test_endpoint(
     endpoint_id: UUID,
     request: EndpointTestWrite | None = None,
@@ -628,7 +808,7 @@ async def list_groups(
     return _page([_response(item, GroupResponse) for item in items], total, limit, offset)
 
 
-@router.post("/groups", status_code=201)
+@router.post("/groups", status_code=201, dependencies=[Depends(require_same_origin)])
 async def create_group(
     request: GroupWrite,
     repository: NotificationRepository = Depends(get_repository),
@@ -651,7 +831,7 @@ async def get_group(
     return _response(item, GroupResponse)
 
 
-@router.put("/groups/{group_id}")
+@router.put("/groups/{group_id}", dependencies=[Depends(require_same_origin)])
 async def update_group(
     group_id: UUID,
     request: GroupUpdate,
@@ -666,7 +846,11 @@ async def update_group(
     return _response(item, GroupResponse)
 
 
-@router.delete("/groups/{group_id}", status_code=204)
+@router.delete(
+    "/groups/{group_id}",
+    status_code=204,
+    dependencies=[Depends(require_same_origin)],
+)
 async def delete_group(
     group_id: UUID,
     expected_version: int = Query(..., ge=1),
@@ -690,7 +874,7 @@ async def list_policies(
     return _page([_response(item, PolicyResponse) for item in items], total, limit, offset)
 
 
-@router.post("/policies", status_code=201)
+@router.post("/policies", status_code=201, dependencies=[Depends(require_same_origin)])
 async def create_policy(
     request: PolicyWrite,
     repository: NotificationRepository = Depends(get_repository),
@@ -713,7 +897,7 @@ async def get_policy(
     return _response(item, PolicyResponse)
 
 
-@router.put("/policies/{policy_id}")
+@router.put("/policies/{policy_id}", dependencies=[Depends(require_same_origin)])
 async def update_policy(
     policy_id: UUID,
     request: PolicyUpdate,
@@ -728,7 +912,11 @@ async def update_policy(
     return _response(item, PolicyResponse)
 
 
-@router.delete("/policies/{policy_id}", status_code=204)
+@router.delete(
+    "/policies/{policy_id}",
+    status_code=204,
+    dependencies=[Depends(require_same_origin)],
+)
 async def delete_policy(
     policy_id: UUID,
     expected_version: int = Query(..., ge=1),
@@ -742,7 +930,7 @@ async def delete_policy(
         raise HTTPException(status_code=404, detail="notification policy not found")
 
 
-@router.post("/events", status_code=202)
+@router.post("/events", status_code=202, dependencies=[Depends(require_same_origin)])
 async def publish_event(
     request: EventPublish,
     idempotency_header: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -778,6 +966,7 @@ async def publish_event(
 
 @router.get("/events")
 async def list_events(
+    q: str | None = Query(default=None, max_length=256),
     event_type: str | None = None,
     severity: Severity | None = None,
     source: str | None = None,
@@ -787,6 +976,7 @@ async def list_events(
     repository: NotificationRepository = Depends(get_repository),
 ) -> dict[str, Any]:
     items, total = await repository.list_events(
+        q=q.strip() if q else None,
         event_type=event_type,
         severity=severity,
         source=source,
@@ -810,6 +1000,7 @@ async def get_event(
 
 @router.get("/deliveries")
 async def list_deliveries(
+    q: str | None = Query(default=None, max_length=256),
     event_id: UUID | None = None,
     endpoint_id: UUID | None = None,
     status: DeliveryStatus | None = None,
@@ -818,6 +1009,7 @@ async def list_deliveries(
     repository: NotificationRepository = Depends(get_repository),
 ) -> dict[str, Any]:
     items, total = await repository.list_deliveries(
+        q=q.strip() if q else None,
         event_id=event_id,
         endpoint_id=endpoint_id,
         status=status,
@@ -838,7 +1030,9 @@ async def get_delivery(
     return _response(item, DeliveryResponse)
 
 
-@router.post("/deliveries/{delivery_id}/retry")
+@router.post(
+    "/deliveries/{delivery_id}/retry", dependencies=[Depends(require_same_origin)]
+)
 async def retry_delivery(
     delivery_id: UUID,
     repository: NotificationRepository = Depends(get_repository),
@@ -856,6 +1050,7 @@ __all__ = [
     "router",
     "get_repository",
     "ConnectorWrite",
+    "ConnectorCreate",
     "EndpointWrite",
     "GroupWrite",
     "PolicyWrite",

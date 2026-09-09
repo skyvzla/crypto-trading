@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from fnmatch import fnmatchcase
+import re
 from typing import Any
 from uuid import UUID
 
@@ -37,6 +38,34 @@ class DeliveryStatus(StrEnum):
     DEAD = "dead"
 
 
+_ENV_SECRET_REF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*\Z")
+_FILE_SECRET_REF = re.compile(r"file:/run/secrets/[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+_DOCKER_SECRET_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*\Z")
+
+
+def validate_secret_ref(value: str | None) -> str | None:
+    """Validate a legacy environment or Docker secret reference."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(
+            "secret_ref must be a valid environment or Docker secret reference; "
+            "use secret for direct credentials"
+        )
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ValueError("secret_ref must not contain control characters")
+    if (
+        _ENV_SECRET_REF.fullmatch(value)
+        or _FILE_SECRET_REF.fullmatch(value)
+        or _DOCKER_SECRET_REF.fullmatch(value)
+    ):
+        return value
+    raise ValueError(
+        "secret_ref must be env:NAME, file:/run/secrets/NAME, or a safe secret name; "
+        "use secret for direct credentials"
+    )
+
+
 @dataclass(frozen=True)
 class NotificationConnector:
     id: UUID
@@ -48,6 +77,10 @@ class NotificationConnector:
     version: int
     created_at: datetime
     updated_at: datetime
+    has_secret: bool = False
+    # Pre-0020 absolute file references are retained only for worker migration
+    # compatibility and are never part of public connector responses.
+    legacy_secret_ref: str | None = None
 
 
 @dataclass(frozen=True)

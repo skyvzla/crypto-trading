@@ -4,7 +4,7 @@
 
 ## 配置模型
 
-- **Connector**：发送身份和共享协议配置。类型为 `telegram` 或 `webhook`，密钥只保存 `secret_ref`，不保存明文 token/secret。
+- **Connector**：发送身份和共享协议配置。类型为 `telegram` 或 `webhook`，密钥可以通过受限的 `secret_ref` 引用，也可以由 WebUI/API 直接提交一次性写入的 `secret`。
 - **Endpoint**：Connector 下的一个具体接收目标。Telegram 的 `address` 是 Chat ID，Webhook 的 `address` 是 URL。
 - **职责组**：一组 Endpoint，例如 `risk-oncall`、`strategy-signal`。
 - **路由策略**：事件模式、重要级别、优先级、抑制开关和一个或多个职责组。
@@ -22,6 +22,8 @@ webhook connector: ops-webhook
 每个 URL 是独立投递目标；某个 URL 失败只重试该 URL，不会阻塞同一事件的其他目标。相同 Endpoint 被多个职责组引用时，事件仍只创建一条投递。
 
 Telegram 多账户使用多个 Connector，每个 Bot 的 token 通过不同的 `secret_ref` 注入；一个 Telegram Connector 也可以配置多个 Chat/Topic Endpoint。这样可以分别承担值班、信号、风控等职责。
+
+直接提交的 `secret` 只用于写入，保存在独立的 `notification_secrets` 表中；读取响应、投递快照和日志都不会回显明文，也不会返回 `secret_ref`。编辑时省略密钥字段会保留原值；要清除现有密钥请单独提交 `clear_secret: true`，不能与 `secret` 或 `secret_ref` 同时提交。旧版本留下的 `file:/绝对路径` 引用仅由迁移后的 worker 兼容读取，不应在新配置中继续使用。
 
 ## 单渠道与多渠道
 
@@ -45,6 +47,28 @@ Content-Type: application/json
 }
 ```
 
+也可以直接提交 write-only 密钥：
+
+```json
+{
+  "name": "ops-telegram",
+  "type": "telegram",
+  "secret": "123456:replace-with-bot-token",
+  "config": {},
+  "enabled": true
+}
+```
+
+```json
+{
+  "name": "ops-webhook",
+  "type": "webhook",
+  "secret": "replace-with-webhook-secret",
+  "config": {"auth_type": "hmac_sha256"},
+  "enabled": true
+}
+```
+
 ```http
 POST /api/v1/notifications/endpoints
 Content-Type: application/json
@@ -59,5 +83,7 @@ Content-Type: application/json
 ```
 
 Webhook 默认要求 HTTPS，并在发送前进行基础 SSRF 地址校验。网络错误、408、429、5xx 会指数退避重试；明确的 4xx 会进入死信。投递语义是至少一次，接收方应按 `Idempotency-Key` 或事件/投递 ID 去重。
+
+通知写接口对浏览器请求执行同源校验：带 `Origin` 的请求必须与请求 `Host` 使用相同 scheme、hostname 和有效端口；不带 `Origin` 的内部 worker/CLI 请求保持兼容。部署仍应依赖内网网络边界，不能把该校验当作身份认证或公网访问控制。
 
 生产迁移序列中 `0008_web_performance_indexes.sql` 是既有 Web 索引，通知表位于 `0009_notifications.sql`，不要重写已应用迁移。

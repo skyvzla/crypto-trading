@@ -56,9 +56,14 @@ PostgreSQL/Redis、运行 `ledger-migrate`、再启动 Market、Ledger、notific
 
 ## 3. 配置并验证通知
 
-在 WebUI 的通知页面配置并启用至少一个 connector、endpoint 和 policy。connector 的
-敏感值放在 `.env` 或 Docker secret，通过 `secret_ref` 引用；不要把 token/password 放进
-WebUI 的普通 config JSON。
+在 WebUI 的通知页面配置并启用至少一个 connector、endpoint 和 policy。Telegram Bot
+token 和 Webhook 认证密钥直接在连接器表单中填写，由通知系统单独持久化；读取接口、
+投递快照和日志不会回显明文。编辑连接器时密钥留空表示保留现有值，无需修改容器环境或
+重启 worker。已有 `secret_ref` 连接器仍可从 `.env` 或 Docker secret 解析，供平滑迁移；
+不要把 token/password 放进普通 config JSON。
+
+浏览器写通知配置时，带 `Origin` 的请求必须与 Ledger 的 `Host` 同源；内部 worker/CLI 不带
+`Origin` 仍可调用。该校验只提供同源 CSRF 防护，不是登录或权限系统，Ledger 仍应部署在受控的内网边界内。
 
 `deploy.sh` 和 `start.sh` 的 overview 检查会按真实 policy 选择规则确认每个关键事件类型都有非 suppress、且至少
 一个启用 endpoint/connector；这不证明 secret 可解析，也不证明外部平台能收到消息。配置完成后，必须在 WebUI 对目标 endpoint 执行

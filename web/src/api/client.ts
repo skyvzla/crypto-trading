@@ -10,6 +10,8 @@ import type {
   NotificationPolicy,
   NotificationPolicyInput,
   NotificationDelivery,
+  NotificationDeliveryQuery,
+  NotificationEventQuery,
   NotificationPublishResponse,
   Page,
   PageParams,
@@ -134,15 +136,10 @@ export const notificationApi = {
     api.put<NotificationPolicy>(`${NOTIFICATIONS}/policies/${encodeURIComponent(id)}`, body),
   deletePolicy: (id: string, expectedVersion: number) =>
     api.delete<void>(`${NOTIFICATIONS}/policies/${encodeURIComponent(id)}`, { expected_version: expectedVersion }),
-  events: (query?: {
-    limit?: number
-    offset?: number
-    event_type?: string
-    severity?: string
-    routing_status?: string
-  }) => api.get<Page<NotificationEvent>>(`${NOTIFICATIONS}/events`, query),
-  deliveries: (query?: { limit?: number; offset?: number; status?: string; event_id?: string; endpoint_id?: string }) =>
-    api.get<Page<NotificationDelivery>>(`${NOTIFICATIONS}/deliveries`, query),
+  events: (query?: NotificationEventQuery) =>
+    api.get<Page<NotificationEvent>>(`${NOTIFICATIONS}/events`, query ? { ...query } : undefined),
+  deliveries: (query?: NotificationDeliveryQuery) =>
+    api.get<Page<NotificationDelivery>>(`${NOTIFICATIONS}/deliveries`, query ? { ...query } : undefined),
   retryDelivery: (id: string) =>
     api.post<NotificationDelivery>(`${NOTIFICATIONS}/deliveries/${encodeURIComponent(id)}/retry`),
 }

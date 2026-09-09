@@ -6,7 +6,9 @@ export type NotificationActivityKey = 'events' | 'deliveries'
 export type ConnectorForm = {
   name: string
   type: 'telegram' | 'webhook'
-  secret_ref: string
+  secret: string
+  has_secret: boolean
+  clear_secret: boolean
   parse_mode: string
   timeout_seconds: number
   auth_type: 'none' | 'bearer' | 'hmac_sha256'

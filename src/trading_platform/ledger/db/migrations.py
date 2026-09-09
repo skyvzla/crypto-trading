@@ -20,6 +20,10 @@ from trading_platform.shared.config import DatabaseConfig
 MIGRATIONS_DIR = Path(__file__).with_name("migrations")
 _FILENAME = re.compile(r"^(?P<version>[0-9]{4})_(?P<name>[a-z0-9_]+)\.sql$")
 _LOCK_NAMESPACE = "trading_platform:ledger_schema_migrations"
+_NOTIFICATION_SECRETS_V20_CHECKSUM = (
+    "9991f70e7ce17af00bef4b2d6a69a262a6f8b375ca8bbafa8e3e21c2aecb14f9"
+)
+_LEGACY_SECRET_REF_V20_MARKER = "file:/run/secrets/legacy-ref-v20"
 
 
 class MigrationError(RuntimeError):
@@ -71,6 +75,55 @@ async def _set_search_path(conn: object, schema: str) -> None:
         sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
             sql.Identifier(schema)
         )
+    )
+
+
+async def _prepare_notification_secret_refs_before_0020(conn: object) -> None:
+    """Make pre-0020 connector refs consumable by the immutable 0020 SQL.
+
+    Version 0020 only migrates arbitrary ``file:/...`` refs before adding its
+    allowlist check. Keep other non-empty legacy values in a version-specific
+    compatibility table and replace them with an allowed file marker; 0021
+    restores the original values and drops the table. The table must survive
+    a caller that intentionally applies only through version 0020 first.
+    """
+    relation = await (
+        await conn.execute("SELECT to_regclass('notification_connectors')")
+    ).fetchone()
+    if relation is None or relation[0] is None:
+        return
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notification_legacy_secret_refs_v20 (
+            connector_id UUID PRIMARY KEY
+                REFERENCES notification_connectors(id) ON DELETE CASCADE,
+            secret_ref TEXT NOT NULL
+        )
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO notification_legacy_secret_refs_v20 (connector_id, secret_ref)
+        SELECT id, secret_ref
+        FROM notification_connectors
+        WHERE secret_ref IS NOT NULL
+          AND btrim(secret_ref) <> ''
+          AND secret_ref !~ '^file:/'
+          AND secret_ref !~ '^env:[A-Za-z_][A-Za-z0-9_]*$'
+          AND secret_ref !~ '^[A-Za-z0-9][A-Za-z0-9_.-]*$'
+        ON CONFLICT (connector_id) DO NOTHING
+        """
+    )
+    await conn.execute(
+        """
+        UPDATE notification_connectors
+        SET secret_ref = %s
+        WHERE id IN (
+            SELECT connector_id
+            FROM notification_legacy_secret_refs_v20
+        )
+        """,
+        (_LEGACY_SECRET_REF_V20_MARKER,),
     )
 
 
@@ -136,6 +189,12 @@ async def apply_migrations(
             )
             current = _validate_applied(await _read_applied(conn), migrations)
             for migration in migrations[current:]:
+                if (
+                    migration.version == 20
+                    and migration.filename == "0020_notification_secrets.sql"
+                    and migration.checksum == _NOTIFICATION_SECRETS_V20_CHECKSUM
+                ):
+                    await _prepare_notification_secret_refs_before_0020(conn)
                 await conn.execute(migration.sql)
                 await conn.execute(
                     "INSERT INTO ledger_schema_migrations "

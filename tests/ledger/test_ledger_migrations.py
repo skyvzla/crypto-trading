@@ -8,7 +8,8 @@ from uuid import uuid4
 
 import pytest
 from psycopg import sql
-from psycopg.errors import UndefinedColumn
+from psycopg.errors import CheckViolation, UndefinedColumn
+from psycopg.types.json import Jsonb
 
 from trading_platform.ledger.db.migrations import (
     MIGRATIONS_DIR,
@@ -57,6 +58,13 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
     current_version = len(load_migrations())
     assert first.current_version == current_version
     assert first.applied_versions == tuple(range(1, current_version + 1))
+    assert first.applied_versions[-2:] == (20, 21)
+    migrations = load_migrations()
+    assert migrations[-2].filename == "0020_notification_secrets.sql"
+    assert migrations[-2].checksum == (
+        "9991f70e7ce17af00bef4b2d6a69a262a6f8b375ca8bbafa8e3e21c2aecb14f9"
+    )
+    assert migrations[-1].filename == "0021_notification_secret_legacy_cleanup.sql"
     assert second.current_version == current_version
     assert second.applied_versions == ()
     assert await verify_current(pool, schema=schema) == current_version
@@ -159,7 +167,7 @@ async def test_client_order_id_constraint_is_account_scoped_when_upgrading(
     upgraded = await apply_migrations(pool, schema=schema)
     repeated = await apply_migrations(pool, schema=schema)
 
-    assert upgraded.applied_versions == (15, 16, 17, 18, 19)
+    assert upgraded.applied_versions == (15, 16, 17, 18, 19, 20, 21)
     assert repeated.applied_versions == ()
 
     async with pool.connection() as conn:
@@ -197,6 +205,270 @@ async def test_client_order_id_constraint_is_account_scoped_when_upgrading(
             )
 
 
+
+
+@pytest.mark.asyncio
+async def test_notification_secret_migration_preserves_legacy_references(
+    migration_db, tmp_path: Path
+):
+    pool, schema = migration_db
+    old_migrations = tmp_path / "migrations-before-20"
+    old_migrations.mkdir()
+    for source in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if int(source.stem.split("_", 1)[0]) > 19:
+            continue
+        shutil.copy(source, old_migrations / source.name)
+
+    await apply_migrations(pool, schema=schema, directory=old_migrations)
+    connector_references = {
+        "legacy-file": f"file:{tmp_path / 'legacy-token'}",
+        "legacy-env": "env:TG-OPS",
+        "legacy-relative-file": "file:relative-token",
+        "legacy-docker-name": ".docker-secret",
+        "legacy-token": "123456:ABCDEF",
+        "whitespace": "   ",
+        "valid-env": "env:TG_OPS",
+        "valid-file": "file:/run/secrets/token",
+        "valid-name": "docker-secret",
+    }
+    connector_ids = {name: uuid4() for name in connector_references}
+    snapshot_connector_id = uuid4()
+    event_id = uuid4()
+    snapshot_references = {
+        "legacy-absolute-file": f"file:{tmp_path / 'legacy-token'}",
+        "legacy-env": "env:TG-OPS",
+        "legacy-relative-file": "file:relative-token",
+        "legacy-docker-name": ".docker-secret",
+        "legacy-token": "123456:ABCDEF",
+        "whitespace-ref": "   ",
+        "valid-env": "env:TG_OPS",
+        "valid-file": "file:/run/secrets/token",
+        "valid-name": "docker-secret",
+    }
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            for name, secret_ref in connector_references.items():
+                await conn.execute(
+                    "INSERT INTO notification_connectors "
+                    "(id, name, type, secret_ref, config, enabled) "
+                    "VALUES (%s, %s, 'telegram', %s, '{}'::jsonb, TRUE)",
+                    (connector_ids[name], name, secret_ref),
+                )
+            await conn.execute(
+                "INSERT INTO notification_connectors "
+                "(id, name, type, secret_ref, config, enabled) "
+                "VALUES (%s, 'snapshot-source', 'telegram', NULL, '{}'::jsonb, TRUE)",
+                (snapshot_connector_id,),
+            )
+            await conn.execute(
+                "INSERT INTO notification_events "
+                "(id, event_type, severity, source, title, body, payload, "
+                "idempotency_key, routing_status, occurred_at) "
+                "VALUES (%s, 'migration.test', 'info', 'migration', 'title', "
+                "'body', '{}'::jsonb, 'migration-secret-test', 'targeted', NOW())",
+                (event_id,),
+            )
+            for index, (name, secret_ref) in enumerate(snapshot_references.items()):
+                endpoint_id = uuid4()
+                await conn.execute(
+                    "INSERT INTO notification_endpoints "
+                    "(id, connector_id, name, address, config, enabled) "
+                    "VALUES (%s, %s, %s, %s, '{}'::jsonb, TRUE)",
+                    (
+                        endpoint_id,
+                        snapshot_connector_id,
+                        f"{name}-endpoint",
+                        str(index),
+                    ),
+                )
+                await conn.execute(
+                    "INSERT INTO notification_deliveries "
+                    "(id, event_id, endpoint_id, connector_snapshot, endpoint_snapshot) "
+                    "VALUES (%s, %s, %s, %s, %s)",
+                    (
+                        uuid4(),
+                        event_id,
+                        endpoint_id,
+                        Jsonb(
+                            {
+                                "id": str(snapshot_connector_id),
+                                "type": "telegram",
+                                "case": name,
+                                "secret_ref": secret_ref,
+                            }
+                        ),
+                        Jsonb({"id": str(endpoint_id), "address": str(index)}),
+                    ),
+                )
+
+    migrations_through_20 = tmp_path / "migrations-through-20"
+    migrations_through_20.mkdir()
+    for source in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if int(source.stem.split("_", 1)[0]) > 20:
+            continue
+        shutil.copy(source, migrations_through_20 / source.name)
+
+    result = await apply_migrations(pool, schema=schema, directory=migrations_through_20)
+    assert result.applied_versions == (20,)
+
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            rows = await (
+                await conn.execute(
+                    "SELECT name, secret_ref, legacy_secret_ref "
+                    "FROM notification_connectors ORDER BY name"
+                )
+            ).fetchall()
+            snapshots = await (
+                await conn.execute(
+                    "SELECT d.connector_snapshot ->> 'case', d.connector_snapshot "
+                    "FROM notification_deliveries d "
+                    "JOIN notification_endpoints e ON e.id = d.endpoint_id "
+                    "WHERE e.connector_id = %s "
+                    "ORDER BY d.connector_snapshot ->> 'case'",
+                    (snapshot_connector_id,),
+                )
+            ).fetchall()
+            legacy_refs = await (
+                await conn.execute(
+                    "SELECT c.name, refs.secret_ref "
+                    "FROM notification_legacy_secret_refs_v20 AS refs "
+                    "JOIN notification_connectors AS c ON c.id = refs.connector_id "
+                    "ORDER BY c.name"
+                )
+            ).fetchall()
+    mid_connectors = {
+        name: (secret_ref, legacy_secret_ref)
+        for name, secret_ref, legacy_secret_ref in rows
+    }
+    assert mid_connectors == {
+        "legacy-file": (None, f"file:{tmp_path / 'legacy-token'}"),
+        "legacy-env": ("file:/run/secrets/legacy-ref-v20", None),
+        "legacy-relative-file": ("file:/run/secrets/legacy-ref-v20", None),
+        "legacy-docker-name": ("file:/run/secrets/legacy-ref-v20", None),
+        "legacy-token": ("file:/run/secrets/legacy-ref-v20", None),
+        "snapshot-source": (None, None),
+        "valid-env": ("env:TG_OPS", None),
+        "valid-file": ("file:/run/secrets/token", None),
+        "valid-name": ("docker-secret", None),
+        "whitespace": (None, None),
+    }
+    assert dict(legacy_refs) == {
+        "legacy-docker-name": ".docker-secret",
+        "legacy-env": "env:TG-OPS",
+        "legacy-relative-file": "file:relative-token",
+        "legacy-token": "123456:ABCDEF",
+    }
+    mid_snapshots = {
+        name: (snapshot["secret_ref"], snapshot.get("legacy_secret_ref"))
+        for name, snapshot in snapshots
+    }
+    assert mid_snapshots["legacy-absolute-file"] == (
+        None,
+        f"file:{tmp_path / 'legacy-token'}",
+    )
+    assert mid_snapshots["legacy-env"] == ("env:TG-OPS", None)
+    assert mid_snapshots["whitespace-ref"] == ("   ", None)
+
+    result = await apply_migrations(pool, schema=schema)
+    assert result.applied_versions == (21,)
+    assert (await apply_migrations(pool, schema=schema)).applied_versions == ()
+
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            rows = await (
+                await conn.execute(
+                    "SELECT name, secret_ref, legacy_secret_ref "
+                    "FROM notification_connectors ORDER BY name"
+                )
+            ).fetchall()
+            snapshots = await (
+                await conn.execute(
+                    "SELECT d.connector_snapshot ->> 'case', d.connector_snapshot "
+                    "FROM notification_deliveries d "
+                    "JOIN notification_endpoints e ON e.id = d.endpoint_id "
+                    "WHERE e.connector_id = %s "
+                    "ORDER BY d.connector_snapshot ->> 'case'",
+                    (snapshot_connector_id,),
+                )
+            ).fetchall()
+            compatibility_table = await (
+                await conn.execute(
+                    "SELECT to_regclass('notification_legacy_secret_refs_v20')"
+                )
+            ).fetchone()
+    final_connectors = {
+        name: (secret_ref, legacy_secret_ref)
+        for name, secret_ref, legacy_secret_ref in rows
+    }
+    assert final_connectors == {
+        "legacy-file": (None, f"file:{tmp_path / 'legacy-token'}"),
+        "legacy-env": (None, "env:TG-OPS"),
+        "legacy-relative-file": (None, "file:relative-token"),
+        "legacy-docker-name": (None, ".docker-secret"),
+        "legacy-token": (None, "123456:ABCDEF"),
+        "snapshot-source": (None, None),
+        "valid-env": ("env:TG_OPS", None),
+        "valid-file": ("file:/run/secrets/token", None),
+        "valid-name": ("docker-secret", None),
+        "whitespace": (None, None),
+    }
+    final_snapshots = {
+        name: (snapshot["secret_ref"], snapshot.get("legacy_secret_ref"))
+        for name, snapshot in snapshots
+    }
+    assert final_snapshots == {
+        "legacy-absolute-file": (
+            None,
+            f"file:{tmp_path / 'legacy-token'}",
+        ),
+        "legacy-env": (None, "env:TG-OPS"),
+        "legacy-relative-file": (None, "file:relative-token"),
+        "legacy-docker-name": (None, ".docker-secret"),
+        "legacy-token": (None, "123456:ABCDEF"),
+        "whitespace-ref": (None, None),
+        "valid-env": ("env:TG_OPS", None),
+        "valid-file": ("file:/run/secrets/token", None),
+        "valid-name": ("docker-secret", None),
+    }
+    assert compatibility_table == (None,)
+
+    for invalid_ref in (
+        "env:TG-OPS",
+        "file:relative-token",
+        ".docker-secret",
+        "123456:ABCDEF",
+        "file:/custom/path",
+    ):
+        with pytest.raises(CheckViolation):
+            async with pool.connection() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                            sql.Identifier(schema)
+                        )
+                    )
+                    await conn.execute(
+                        "INSERT INTO notification_connectors "
+                        "(id, name, type, secret_ref, config, enabled) "
+                        "VALUES (%s, %s, 'telegram', %s, '{}'::jsonb, TRUE)",
+                        (uuid4(), f"invalid-{uuid4().hex}", invalid_ref),
+                    )
 
 
 @pytest.mark.asyncio
@@ -254,7 +526,7 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
 
     result = await apply_migrations(pool, schema=schema)
 
-    assert result.applied_versions == (12, 13, 14, 15, 16, 17, 18, 19)
+    assert result.applied_versions == (12, 13, 14, 15, 16, 17, 18, 19, 20, 21)
     async with pool.connection() as conn:
         async with conn.transaction():
             await conn.execute(

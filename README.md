@@ -61,8 +61,9 @@ scripts/deploy.sh
 账本迁移 `0003` 增加策略运行状态：Spike 每 5 秒写入心跳，15 秒未更新显示为 `stale`；
 `/api/v1/strategy-runtime-status` 和 Web 将账本数据库健康与策略实例状态分开展示。
 当前 Compose 真实 PostgreSQL/Redis 全量回归为 `737 passed, 1 skipped, 1 warning`。
-通知系统已经实现 connector、endpoint、group、policy 配置和异步投递 worker；部署概览会严格检查关键事件路由是否
-就绪，`routable_policies` 仅作为结构指标，不证明 secret 有效或外部平台已送达。上线前必须在 WebUI 配置通知并
+通知系统已经实现 connector、endpoint、group、policy 配置和异步投递 worker；连接器密钥可直接在 WebUI 配置并由
+PostgreSQL 私密记录持久化，无需修改 worker 环境或重启服务。部署概览会严格检查关键事件路由是否就绪，
+`routable_policies` 仅作为结构指标，不证明密钥有效或外部平台已送达。上线前必须在 WebUI 配置通知并
 执行 endpoint test，检查 delivery 状态和目标平台收件箱。
 Web 身份权限、正式 live 阈值以及自然策略信号下的退出仍未完成，`candidate-v1` 继续冻结；
 自然策略信号下的保护退出与盈利管理仍需依据具体数据评审，因此不要填入正式账户 API Key。

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { Globe2, MessageCircle } from 'lucide-vue-next'
 import type { NotificationFormProps } from './types'
 
@@ -12,6 +13,33 @@ const props = defineProps<
     severityOptions: Array<{ value: string; label: string }>
   }
 >()
+
+const endpointGroups = computed(() => {
+  const groups = new Map<string, { id: string; label: string; endpoints: NotificationFormProps['endpoints'] }>()
+  for (const endpoint of props.endpoints) {
+    const connector = props.connectorById.get(endpoint.connector_id)
+    const group = groups.get(endpoint.connector_id) ?? {
+      id: endpoint.connector_id,
+      label: connector
+        ? `${connector.name} · ${connector.type === 'telegram' ? 'Telegram Bot' : 'Webhook'}`
+        : '未知连接器',
+      endpoints: [],
+    }
+    group.endpoints.push(endpoint)
+    groups.set(endpoint.connector_id, group)
+  }
+  return [...groups.values()]
+})
+
+function updateConnectorSecret(value: string) {
+  props.connectorForm.secret = value
+  if (value.trim()) props.connectorForm.clear_secret = false
+}
+
+function updateClearSecret(value: boolean) {
+  props.connectorForm.clear_secret = value
+  if (value) props.connectorForm.secret = ''
+}
 
 const emit = defineEmits<{
   'update:connectorOpen': [value: boolean]
@@ -46,12 +74,27 @@ const emit = defineEmits<{
         ></a-form-item
       >
       <a-form-item
-        :label="props.connectorForm.type === 'telegram' ? '密钥引用' : '密钥引用（可选）'"
-        :required="props.connectorForm.type === 'telegram'"
-        ><a-input
-          v-model:value="props.connectorForm.secret_ref"
-          placeholder="Docker Secret / 环境变量名称，不直接填写密钥"
+        :label="props.connectorForm.type === 'telegram' ? 'Telegram Bot token' : '密钥（可选）'"
+        :required="props.connectorForm.type === 'telegram' && !props.connectorEditingId"
+        ><a-input-password
+          :value="props.connectorForm.secret"
+          :disabled="props.connectorForm.clear_secret"
+          autocomplete="new-password"
+          @update:value="updateConnectorSecret"
+          :placeholder="
+            props.connectorEditingId
+              ? '留空以保留现有 token'
+              : props.connectorForm.type === 'telegram'
+                ? '粘贴 BotFather 提供的 token'
+                : '填写发送所需的密钥'
+          "
       /></a-form-item>
+      <a-checkbox
+        v-if="props.connectorEditingId && props.connectorForm.type === 'webhook' && props.connectorForm.has_secret"
+        :checked="props.connectorForm.clear_secret"
+        @update:checked="updateClearSecret"
+        >清除已保存密钥</a-checkbox
+      >
       <div v-if="props.connectorForm.type === 'telegram'" class="form-grid">
         <a-form-item label="消息格式"
           ><a-select
@@ -79,7 +122,7 @@ const emit = defineEmits<{
         v-if="props.connectorForm.type === 'webhook' && props.connectorForm.auth_type !== 'none'"
         type="info"
         show-icon
-        message="签名密钥通过 secret_ref 注入；请求会携带版本化事件封装。"
+        message="签名密钥通过安全配置保存；请求会携带版本化事件封装。"
       />
       <a-checkbox v-if="props.connectorForm.type === 'webhook'" v-model:checked="props.connectorForm.allow_http"
         >允许 HTTP（仅内网调试）</a-checkbox
@@ -156,14 +199,17 @@ const emit = defineEmits<{
         ><a-select
           v-model:value="props.groupForm.endpoint_ids"
           mode="multiple"
-          :options="
-            props.endpoints.map((item) => ({
-              value: item.id,
-              label: `${item.name} · ${props.connectorById.get(item.connector_id)?.name ?? '未知连接器'}`,
-            }))
-          "
+          :disabled="!props.endpoints.length"
           placeholder="选择一个或多个接收端点"
-      /></a-form-item>
+        >
+          <a-select-opt-group v-for="group in endpointGroups" :key="group.id" :label="group.label">
+            <a-select-option v-for="item in group.endpoints" :key="item.id" :value="item.id">
+              {{ item.name }} · {{ item.address }}
+            </a-select-option>
+          </a-select-opt-group>
+        </a-select>
+        <small v-if="!props.endpoints.length" class="field-hint">请关闭此弹窗并先添加连接器和端点。</small>
+      </a-form-item>
       <div class="form-meta">
         <span>配置版本 v{{ props.groupForm.version }}</span
         ><a-switch v-model:checked="props.groupForm.enabled" checked-children="启用" un-checked-children="停用" />
@@ -232,6 +278,12 @@ const emit = defineEmits<{
 .modal-form :deep(.ant-input-number),
 .modal-form :deep(.ant-select) {
   width: 100%;
+}
+.field-hint {
+  display: block;
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: var(--type-meta);
 }
 .form-grid {
   display: grid;

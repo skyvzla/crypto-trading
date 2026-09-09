@@ -21,8 +21,8 @@ export function useNotificationActivity(deps: ActivityDeps) {
   const emptyPage = <T>(): Page<T> => ({ items: [], total: 0, limit: ACTIVITY_PAGE_SIZE, offset: 0 })
   const events = ref<Page<NotificationEvent>>(emptyPage<NotificationEvent>())
   const deliveries = ref<Page<NotificationDelivery>>(emptyPage<NotificationDelivery>())
-  const eventFilters = reactive({ event_type: '', severity: '', routing_status: '' })
-  const deliveryFilters = reactive({ status: '', endpoint_id: '', event_id: '' })
+  const eventFilters = reactive({ q: '', event_type: '', source: '', severity: '', routing_status: '' })
+  const deliveryFilters = reactive({ q: '', status: '', endpoint_id: '', event_id: '' })
   const eventsLoading = ref(false)
   const deliveriesLoading = ref(false)
   /** 任一张表在加载都算活动区在加载，供顶部刷新按钮显示。 */

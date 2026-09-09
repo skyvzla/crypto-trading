@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+import contextvars
 import hashlib
 import hmac
 import html
 import inspect
 import ipaddress
 import json
+import logging
 import os
 import socket
 from collections.abc import Awaitable, Callable, Mapping
@@ -21,9 +24,60 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from trading_platform.notifications.domain import validate_secret_ref
+
 
 _MISSING = object()
 _TELEGRAM_MESSAGE_LIMIT = 4096
+_SUPPRESS_TELEGRAM_HTTP_LOGS: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "suppress_telegram_http_logs", default=False
+)
+
+
+class _HttpLogSecretFilter(logging.Filter):
+    """Drop httpx/httpcore records while a Telegram request is in flight."""
+
+    _installed_marker = "_trading_platform_telegram_secret_filter"
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not _SUPPRESS_TELEGRAM_HTTP_LOGS.get()
+
+
+def _install_http_log_filters() -> None:
+    # httpx and httpcore use fixed module logger names.  The filter has no
+    # process-wide secret state; it reads only the current request context.
+    logger_names = (
+        "httpx",
+        "httpcore",
+        "httpcore.connection",
+        "httpcore.http11",
+        "httpcore.http2",
+        "httpcore.proxy",
+        "httpcore.socks",
+        # Keep the older name covered for environments with a custom transport.
+        "httpcore.socks5",
+    )
+    for name in logger_names:
+        logger = logging.getLogger(name)
+        if not any(
+            getattr(item, _HttpLogSecretFilter._installed_marker, False)
+            for item in logger.filters
+        ):
+            redactor = _HttpLogSecretFilter()
+            setattr(redactor, _HttpLogSecretFilter._installed_marker, True)
+            logger.addFilter(redactor)
+
+
+@contextmanager
+def _suppress_telegram_http_logs():
+    marker = _SUPPRESS_TELEGRAM_HTTP_LOGS.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_TELEGRAM_HTTP_LOGS.reset(marker)
+
+
+_install_http_log_filters()
 
 
 class DeliveryError(RuntimeError):
@@ -83,6 +137,39 @@ class EnvironmentSecretResolver:
         self._docker_secrets_dir = docker_secrets_dir
 
     def resolve(self, secret_ref: str) -> str:
+        try:
+            secret_ref = validate_secret_ref(secret_ref)
+        except ValueError as exc:
+            raise PermanentDeliveryError(str(exc)) from exc
+        assert secret_ref is not None
+        if secret_ref.startswith("env:"):
+            name = secret_ref.removeprefix("env:")
+            value = os.environ.get(name)
+        elif secret_ref.startswith("file:"):
+            name = secret_ref.removeprefix("file:/run/secrets/")
+            path = self._docker_secrets_dir / name
+            try:
+                value = path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise PermanentDeliveryError("connector secret file is unavailable") from exc
+        else:
+            if "/" in secret_ref or "\\" in secret_ref:
+                raise PermanentDeliveryError(
+                    "secret_ref must be an environment or Docker secret name"
+                )
+            value = os.environ.get(secret_ref)
+            if value is None:
+                path = self._docker_secrets_dir / secret_ref
+                try:
+                    value = path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    value = None
+        if not value:
+            raise PermanentDeliveryError("connector secret is unavailable")
+        return value
+
+    def resolve_legacy(self, secret_ref: str) -> str:
+        """Resolve references using the pre-0020 resolver semantics."""
         if not secret_ref:
             raise PermanentDeliveryError("connector secret_ref is required")
         if secret_ref.startswith("env:"):
@@ -170,8 +257,9 @@ class TelegramAdapter:
         request = _coerce_request(request)
         connector_config = _config(request.connector)
         endpoint_config = _config(request.endpoint)
-        secret_ref = str(_field(request.connector, "secret_ref", default=""))
-        token = await _resolve_secret(self._secret_resolver, secret_ref)
+        token = await _resolve_connector_secret(
+            request.connector, self._secret_resolver
+        )
         chat_id = _field(
             request.endpoint,
             "address",
@@ -210,14 +298,17 @@ class TelegramAdapter:
         ).rstrip("/")
         url = f"{api_base_url}/bot{token}/sendMessage"
         try:
-            response = await self._client.post(
-                url,
-                json=payload,
-                timeout=timeout,
-                follow_redirects=False,
-            )
-        except httpx.RequestError as exc:
-            raise RetryableDeliveryError("Telegram network request failed") from exc
+            with _suppress_telegram_http_logs():
+                response = await self._client.post(
+                    url,
+                    json=payload,
+                    timeout=timeout,
+                    follow_redirects=False,
+                )
+        except httpx.RequestError:
+            response = None
+        if response is None:
+            raise RetryableDeliveryError("Telegram network request failed") from None
 
         data = _response_json(response)
         status_code = response.status_code
@@ -331,8 +422,9 @@ class WebhookAdapter:
         )
         auth_type = _webhook_auth_type(connector_config)
         if auth_type != "none":
-            secret_ref = str(_field(request.connector, "secret_ref", default=""))
-            secret = await _resolve_secret(self._secret_resolver, secret_ref)
+            secret = await _resolve_connector_secret(
+                request.connector, self._secret_resolver
+            )
             if auth_type == "bearer":
                 headers["Authorization"] = f"Bearer {secret}"
             elif auth_type == "hmac_sha256":
@@ -354,8 +446,10 @@ class WebhookAdapter:
                 timeout=timeout,
                 follow_redirects=False,
             )
-        except httpx.RequestError as exc:
-            raise RetryableDeliveryError("webhook network request failed") from exc
+        except httpx.RequestError:
+            response = None
+        if response is None:
+            raise RetryableDeliveryError("webhook network request failed") from None
 
         status_code = response.status_code
         if 200 <= status_code < 300:
@@ -598,9 +692,15 @@ def _field(value: Any, *names: str, default: Any = _MISSING) -> Any:
 async def _resolve_secret(
     resolver: SecretResolver | Callable[[str], str | Awaitable[str]],
     secret_ref: str,
+    *,
+    legacy: bool = False,
 ) -> str:
     try:
-        method = getattr(resolver, "resolve", resolver)
+        method = getattr(
+            resolver,
+            "resolve_legacy" if legacy and hasattr(resolver, "resolve_legacy") else "resolve",
+            resolver,
+        )
         value = method(secret_ref)
         if inspect.isawaitable(value):
             value = await value
@@ -611,6 +711,30 @@ async def _resolve_secret(
     if not isinstance(value, str) or not value:
         raise PermanentDeliveryError("connector secret is unavailable")
     return value
+
+
+async def _resolve_connector_secret(
+    connector: Any,
+    resolver: SecretResolver | Callable[[str], str | Awaitable[str]],
+) -> str:
+    """Resolve a claim's in-memory secret before falling back to legacy refs."""
+    direct = _field(connector, "secret", default=None)
+    if isinstance(direct, str) and direct:
+        return direct
+    secret_ref = str(_field(connector, "secret_ref", default=""))
+    legacy_ref = _field(connector, "legacy_secret_ref", default=None)
+    legacy = False
+    if isinstance(legacy_ref, str) and legacy_ref:
+        secret_ref = legacy_ref
+        legacy = True
+    elif legacy_ref:
+        # Accept a boolean marker in claims produced by older worker code.
+        legacy = True
+    return await _resolve_secret(
+        resolver,
+        secret_ref,
+        legacy=legacy,
+    )
 
 
 def _response_json(response: httpx.Response) -> Mapping[str, Any] | None:

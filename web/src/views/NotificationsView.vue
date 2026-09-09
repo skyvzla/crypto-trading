@@ -104,8 +104,12 @@ function changeActivityView(key: NotificationViewKey | 'events' | 'deliveries') 
       <NotificationGroupsPanel
         v-else-if="workbench.view.value === 'groups'"
         :groups="workbench.groups.value"
+        :endpoints="workbench.endpoints.value"
         :endpoint-by-id="workbench.endpointById.value"
+        :connector-by-id="workbench.connectorById.value"
         @new="workbench.resetGroupForm()"
+        @new-endpoint="workbench.resetEndpointForm(undefined, $event)"
+        @new-connector="workbench.resetConnectorForm()"
         @edit="workbench.resetGroupForm"
         @toggle="workbench.toggleGroup"
         @delete="workbench.deleteGroup"

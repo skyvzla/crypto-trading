@@ -85,7 +85,7 @@ export function formatFullTime(value: string | null | undefined): string {
 
 export function connectorConfigSummary(connector: NotificationConnector): string {
   if (connector.type === 'telegram') {
-    return connector.secret_ref ? `密钥：${connector.secret_ref}` : '未绑定密钥引用'
+    return connector.has_secret || Boolean(connector.secret_ref) ? 'Bot token 已配置' : '未配置 Bot token'
   }
   const timeout = connector.config?.timeout_seconds
   return timeout ? `超时 ${timeout}s` : '标准 HTTP webhook'

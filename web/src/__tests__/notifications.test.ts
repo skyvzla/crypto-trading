@@ -1,10 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent } from 'vue'
 import { notificationApi } from '@/api/client'
 import type { NotificationDelivery, NotificationEvent, Page } from '@/api/types'
 import App from '@/App.vue'
 import NotificationsView from '@/views/NotificationsView.vue'
 import { useNotificationActivity } from '@/features/notifications/useNotificationActivity'
+import { useNotificationWorkbench } from '@/features/notifications/useNotificationWorkbench'
 import { router } from '@/router'
 import { jsonResponse } from './httpMocks'
 
@@ -35,7 +37,7 @@ function notificationResponse(url: string, criticalReady = false) {
   if (url.includes('/notifications/connectors')) {
     return response({
       items: [
-        { id: 'c-1', name: 'ops-bot', type: 'telegram', secret_ref: 'TG_TOKEN', config: {}, enabled: true, version: 1 },
+        { id: 'c-1', name: 'ops-bot', type: 'telegram', has_secret: true, config: {}, enabled: true, version: 1 },
       ],
       total: 1,
       limit: 1000,
@@ -68,13 +70,61 @@ beforeEach(async () => {
 describe('notification API', () => {
   it('posts connector configuration to the versioned endpoint', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({ id: 'c-1' }))
-    await notificationApi.createConnector({ name: 'ops', type: 'telegram', secret_ref: 'TG_TOKEN', enabled: true })
+    await notificationApi.createConnector({ name: 'ops', type: 'telegram', secret: '123:bot-token', enabled: true })
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/notifications/connectors',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ name: 'ops', type: 'telegram', secret_ref: 'TG_TOKEN', enabled: true }),
+        body: JSON.stringify({ name: 'ops', type: 'telegram', secret: '123:bot-token', enabled: true }),
       }),
+    )
+  })
+
+  it('sends an explicit clear_secret flag when removing a saved connector secret', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(response({ id: 'c-1' }))
+    await notificationApi.updateConnector('c-1', {
+      name: 'ops-webhook',
+      type: 'webhook',
+      config: { auth_type: 'none' },
+      enabled: true,
+      clear_secret: true,
+      expected_version: 3,
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/notifications/connectors/c-1',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          name: 'ops-webhook',
+          type: 'webhook',
+          config: { auth_type: 'none' },
+          enabled: true,
+          clear_secret: true,
+          expected_version: 3,
+        }),
+      }),
+    )
+  })
+
+  it('passes event and delivery keyword filters to the notification API', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(response({ items: [], total: 0, limit: 8, offset: 0 }))
+
+    await notificationApi.events({
+      q: 'heartbeat',
+      event_type: 'system.strategy.unhealthy',
+      source: 'strategy.alpha',
+      severity: 'critical',
+      routing_status: 'unrouted',
+    })
+    await notificationApi.deliveries({ q: 'room', status: 'dead', event_id: 'event-1', endpoint_id: 'endpoint-1' })
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      '/api/v1/notifications/events?q=heartbeat&event_type=system.strategy.unhealthy&source=strategy.alpha&severity=critical&routing_status=unrouted',
+    )
+    expect(fetchMock.mock.calls[1][0]).toBe(
+      '/api/v1/notifications/deliveries?q=room&status=dead&event_id=event-1&endpoint_id=endpoint-1',
     )
   })
 
@@ -127,7 +177,71 @@ describe('notification route and view', () => {
     expect(addConnector).toBeDefined()
     await addConnector!.trigger('click')
     expect(document.body.textContent).toContain('新建连接器')
-    expect(document.body.textContent).toContain('密钥引用')
+    expect(document.body.textContent).toContain('Telegram Bot token')
+    expect(document.querySelector('input[type="password"]')).not.toBeNull()
+    wrapper.unmount()
+  })
+
+  it('focuses the real search input when the affix wrapper blank area is clicked', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input)))
+    await router.push('/notifications/activity')
+    const wrapper = mount(NotificationsView, { attachTo: document.body })
+    await flushPromises()
+
+    const eventSearch = wrapper.get('.event-filter-row .ant-input-affix-wrapper')
+    const eventInput = wrapper.get('.event-filter-row input')
+    await eventSearch.trigger('mousedown')
+    expect(document.activeElement).toBe(eventInput.element)
+
+    await wrapper.findAll('.activity-switcher .ant-tabs-tab-btn')[1].trigger('click')
+    await flushPromises()
+    const deliverySearch = wrapper.get('.delivery-filter-row .ant-input-affix-wrapper')
+    const deliveryInput = wrapper.get('.delivery-filter-row input')
+    await deliverySearch.trigger('mousedown')
+    expect(document.activeElement).toBe(deliveryInput.element)
+    wrapper.unmount()
+  })
+
+  it('renders one localized empty state for responsibility groups', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input)))
+    await router.push('/notifications/groups')
+    const wrapper = mount(NotificationsView)
+    await flushPromises()
+
+    expect(wrapper.text().match(/暂无职责组/g)).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('No Data')
+    wrapper.unmount()
+  })
+
+  it('keeps activity filters when the global workbench refresh runs', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input)))
+    const events = vi.spyOn(notificationApi, 'events').mockResolvedValue({ items: [], total: 0, limit: 8, offset: 0 })
+    const deliveries = vi
+      .spyOn(notificationApi, 'deliveries')
+      .mockResolvedValue({ items: [], total: 0, limit: 8, offset: 0 })
+    const Harness = defineComponent({
+      setup() {
+        return useNotificationWorkbench()
+      },
+      template: '<div />',
+    })
+    const wrapper = mount(Harness)
+    await flushPromises()
+    events.mockClear()
+    deliveries.mockClear()
+
+    const vm = wrapper.vm as unknown as {
+      eventFilters: { q: string }
+      deliveryFilters: { q: string; status: string }
+      loadAll: () => Promise<void>
+    }
+    vm.eventFilters.q = 'heartbeat'
+    vm.deliveryFilters.q = 'room'
+    vm.deliveryFilters.status = 'dead'
+    await vm.loadAll()
+
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ q: 'heartbeat' }))
+    expect(deliveries).toHaveBeenCalledWith(expect.objectContaining({ q: 'room', status: 'dead' }))
     wrapper.unmount()
   })
 
@@ -244,9 +358,20 @@ describe('notification activity channels', () => {
 
     // 新条件下的结果集通常更短，留在第 3 页会直接落到空白上。
     activity.eventFilters.severity = 'critical'
+    activity.eventFilters.q = 'heartbeat'
+    activity.eventFilters.event_type = 'system.strategy.unhealthy'
+    activity.eventFilters.source = 'strategy.alpha'
+    activity.eventFilters.routing_status = 'unrouted'
     await activity.loadEvents(0)
 
-    expect(events.mock.calls[1][0]).toMatchObject({ offset: 0, severity: 'critical' })
+    expect(events.mock.calls[1][0]).toMatchObject({
+      offset: 0,
+      q: 'heartbeat',
+      event_type: 'system.strategy.unhealthy',
+      source: 'strategy.alpha',
+      severity: 'critical',
+      routing_status: 'unrouted',
+    })
     expect(activity.events.value.offset).toBe(0)
     expect(messages.at(-1)).toBe('')
   })

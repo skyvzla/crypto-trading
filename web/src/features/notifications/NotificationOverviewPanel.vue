@@ -20,7 +20,11 @@ const criticalReadyCount = computed(
 const criticalRouteHint = computed(() => {
   const routes = Object.entries(props.overview.critical_routes)
   const missing = routes.filter(([, route]) => route !== true).map(([eventType]) => eventType)
-  return missing.length ? `缺少: ${missing.join(', ')}` : routes.length ? '关键事件均已具备可路由策略' : '未收到关键路由状态'
+  return missing.length
+    ? `缺少: ${missing.join(', ')}`
+    : routes.length
+      ? '关键事件均已具备可路由策略'
+      : '未收到关键路由状态'
 })
 
 const emit = defineEmits<{
@@ -77,16 +81,20 @@ const emit = defineEmits<{
         </div>
         <div class="health-list">
           <div>
-            <a-badge status="success" text="已发送" /><strong>{{ overview.deliveries.sent }}</strong>
+            <span class="health-status"><a-badge status="success" /><span>已发送</span></span
+            ><strong>{{ overview.deliveries.sent }}</strong>
           </div>
           <div>
-            <a-badge status="processing" text="待发送" /><strong>{{ overview.deliveries.pending }}</strong>
+            <span class="health-status"><a-badge status="processing" /><span>待发送</span></span
+            ><strong>{{ overview.deliveries.pending }}</strong>
           </div>
           <div>
-            <a-badge status="warning" text="重试中" /><strong>{{ overview.deliveries.retry }}</strong>
+            <span class="health-status"><a-badge status="warning" /><span>重试中</span></span
+            ><strong>{{ overview.deliveries.retry }}</strong>
           </div>
           <div>
-            <a-badge status="error" text="死信" /><strong>{{ overview.deliveries.dead }}</strong>
+            <span class="health-status"><a-badge status="error" /><span>死信</span></span
+            ><strong>{{ overview.deliveries.dead }}</strong>
           </div>
         </div>
         <a-button type="link" class="panel-link" @click="emit('open-activity', 'deliveries')"
@@ -180,6 +188,8 @@ const emit = defineEmits<{
 .health-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 26px;
+  row-gap: 4px;
   padding: 4px 13px 7px;
 }
 .health-list > div {
@@ -199,10 +209,16 @@ const emit = defineEmits<{
   color: var(--text);
   font: var(--type-secondary) var(--font-family-mono);
 }
-.health-list span {
+.health-status {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 9px;
+}
+.health-status :deep(.ant-badge-status-dot) {
+  margin-inline-end: 0;
+}
+.health-status :deep(.ant-badge-status-text) {
+  margin-inline-start: 0;
 }
 .panel-link {
   display: inline-flex;

@@ -157,7 +157,9 @@ export function useNotificationWorkbench() {
   const connectorForm = reactive({
     name: '',
     type: 'telegram' as 'telegram' | 'webhook',
-    secret_ref: '',
+    secret: '',
+    has_secret: false,
+    clear_secret: false,
     parse_mode: 'HTML',
     timeout_seconds: DEFAULT_TIMEOUT_SECONDS,
     auth_type: 'hmac_sha256' as 'none' | 'bearer' | 'hmac_sha256',
@@ -196,7 +198,6 @@ export function useNotificationWorkbench() {
       notificationApi.updateConnector(item.id, {
         name: item.name,
         type: item.type,
-        secret_ref: item.secret_ref,
         config: item.config,
         enabled,
         expected_version: item.version,
@@ -285,8 +286,16 @@ export function useNotificationWorkbench() {
       collectPageItems((params) => notificationApi.endpoints(params)),
       collectPageItems((params) => notificationApi.groups(params)),
       collectPageItems((params) => notificationApi.policies(params)),
-      notificationApi.events({ limit: activity.pageSize, offset: 0 }),
-      notificationApi.deliveries({ limit: activity.pageSize, offset: 0 }),
+      notificationApi.events({
+        limit: activity.pageSize,
+        offset: activity.events.value.offset,
+        ...activity.eventFilters,
+      }),
+      notificationApi.deliveries({
+        limit: activity.pageSize,
+        offset: activity.deliveries.value.offset,
+        ...activity.deliveryFilters,
+      }),
     ])
     const [
       overviewResult,
@@ -334,7 +343,11 @@ export function useNotificationWorkbench() {
     Object.assign(connectorForm, {
       name: item?.name ?? '',
       type: item?.type ?? initialType ?? 'telegram',
-      secret_ref: item?.secret_ref ?? '',
+      // Token is intentionally never returned by the API. An empty value on
+      // edit means "keep the configured token" and is omitted from the write.
+      secret: '',
+      has_secret: Boolean(item?.has_secret || item?.secret_ref),
+      clear_secret: false,
       parse_mode: String(item?.config?.parse_mode ?? 'HTML'),
       timeout_seconds: Number(item?.config?.timeout_seconds ?? DEFAULT_TIMEOUT_SECONDS),
       auth_type: String(item?.config?.auth_type ?? 'hmac_sha256') as 'none' | 'bearer' | 'hmac_sha256',
@@ -416,13 +429,16 @@ export function useNotificationWorkbench() {
 
   async function submitConnector() {
     if (!connectorForm.name.trim()) return message.error('请输入连接器名称')
-    if ((connectorForm.type === 'telegram' || connectorForm.auth_type !== 'none') && !connectorForm.secret_ref.trim()) {
-      return message.error('当前认证模式需要密钥引用')
+    if (
+      !connectorEditingId.value &&
+      (connectorForm.type === 'telegram' || connectorForm.auth_type !== 'none') &&
+      !connectorForm.secret.trim()
+    ) {
+      return message.error(connectorForm.type === 'telegram' ? '请输入 Telegram Bot token' : '当前认证模式需要密钥')
     }
     const body: NotificationConnectorInput = {
       name: connectorForm.name.trim(),
       type: connectorForm.type,
-      secret_ref: connectorForm.secret_ref.trim(),
       enabled: connectorForm.enabled,
       config:
         connectorForm.type === 'telegram'
@@ -432,6 +448,16 @@ export function useNotificationWorkbench() {
               auth_type: connectorForm.auth_type,
               allow_http: connectorForm.allow_http,
             },
+    }
+    const secret = connectorForm.secret.trim()
+    if (secret) body.secret = secret
+    else if (connectorForm.clear_secret) {
+      if (connectorForm.type !== 'webhook' || connectorForm.auth_type !== 'none') {
+        return message.error('清除密钥后请将 Webhook 认证模式设为无认证')
+      }
+      body.clear_secret = true
+    } else if (!connectorEditingId.value && connectorForm.type !== 'telegram' && connectorForm.auth_type === 'none') {
+      body.secret = null
     }
     await submitResource({
       editingId: connectorEditingId.value,

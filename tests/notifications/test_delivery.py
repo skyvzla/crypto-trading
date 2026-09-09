@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
+import logging
 from datetime import UTC, datetime
 
 import httpx
@@ -10,10 +12,12 @@ import pytest
 from trading_platform.notifications.adapters import (
     AdapterRegistry,
     AdapterRequest,
+    EnvironmentSecretResolver,
     PermanentDeliveryError,
     RetryableDeliveryError,
     TelegramAdapter,
     WebhookAdapter,
+    _suppress_telegram_http_logs,
     validate_webhook_url,
 )
 
@@ -73,6 +77,248 @@ async def test_telegram_escapes_html_and_supports_topic() -> None:
     assert "&lt;signal&gt;" in payload["text"]
     assert "body &amp; details" in payload["text"]
     assert payload["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_telegram_prefers_transient_claim_secret_over_legacy_resolver() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return httpx.Response(200, json={"ok": True}, request=http_request)
+
+    async def fail_resolver(_name: str) -> str:
+        raise AssertionError("legacy resolver must not be called")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = TelegramAdapter(
+            fail_resolver, client=client, api_base_url="https://telegram.test"
+        )
+        await adapter.send(
+            request(
+                connector={
+                    "type": "telegram",
+                    "secret_ref": "legacy-ref",
+                    "secret": "987:new",
+                    "config": {},
+                },
+                endpoint={"address": "1", "config": {}},
+            )
+        )
+
+    assert seen[0].url.path == "/bot987:new/sendMessage"
+
+
+@pytest.mark.asyncio
+async def test_telegram_uses_legacy_resolver_for_migrated_claim() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        seen.append(http_request)
+        return httpx.Response(200, json={"ok": True}, request=http_request)
+
+    class LegacySecrets:
+        def resolve(self, _name: str) -> str:
+            raise AssertionError("strict resolver must not be called")
+
+        def resolve_legacy(self, name: str) -> str:
+            assert name == "env:TG-OPS"
+            return "987:legacy"
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = TelegramAdapter(
+            LegacySecrets(), client=client, api_base_url="https://telegram.test"
+        )
+        await adapter.send(
+            request(
+                connector={
+                    "type": "telegram",
+                    "secret_ref": None,
+                    "legacy_secret_ref": "env:TG-OPS",
+                    "config": {},
+                },
+                endpoint={"address": "1", "config": {}},
+            )
+        )
+
+    assert seen[0].url.path == "/bot987:legacy/sendMessage"
+
+
+@pytest.mark.asyncio
+async def test_telegram_httpx_logs_are_suppressed_during_request(caplog) -> None:
+    token = "987:log-token"
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        logging.getLogger("httpx").info("request URL=%s", http_request.url)
+        return httpx.Response(200, json={"ok": True}, request=http_request)
+
+    async def resolve(_name: str) -> str:
+        return token
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = TelegramAdapter(
+            resolve, client=client, api_base_url="https://telegram.test"
+        )
+        with caplog.at_level(logging.INFO, logger="httpx"):
+            await adapter.send(
+                request(
+                    connector={"type": "telegram", "secret_ref": "safe-ref", "config": {}},
+                    endpoint={"address": "1", "config": {}},
+                )
+            )
+
+    assert token not in caplog.text
+    assert "request URL=" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_telegram_httpcore_logs_are_suppressed_only_during_request(caplog) -> None:
+    token = "987:httpcore-log-token"
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        logging.getLogger("httpcore.http11").debug(
+            "request URL=%s", http_request.url
+        )
+        return httpx.Response(200, json={"ok": True}, request=http_request)
+
+    async def resolve(_name: str) -> str:
+        return token
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = TelegramAdapter(
+            resolve, client=client, api_base_url="https://telegram.test"
+        )
+        with caplog.at_level(logging.DEBUG, logger="httpcore.http11"):
+            await adapter.send(
+                request(
+                    connector={"type": "telegram", "secret_ref": "safe-ref", "config": {}},
+                    endpoint={"address": "1", "config": {}},
+                )
+            )
+            logging.getLogger("httpcore.http11").debug("outside URL=%s", token)
+
+    assert not any("request URL=" in record.getMessage() for record in caplog.records)
+    assert token in caplog.text
+
+
+def test_active_telegram_log_context_drops_exception_traceback(caplog) -> None:
+    token = "987:traceback-token"
+    logger = logging.getLogger("httpcore.http11")
+
+    with caplog.at_level(logging.DEBUG, logger="httpcore.http11"):
+        try:
+            raise RuntimeError(f"request failed with {token}")
+        except RuntimeError:
+            with _suppress_telegram_http_logs():
+                logger.exception("Telegram request failed")
+
+    assert token not in caplog.text
+    assert "Telegram request failed" not in caplog.text
+
+
+def test_http_logs_outside_telegram_context_keep_short_token_text(caplog) -> None:
+    token = "abc"
+    with caplog.at_level(logging.INFO):
+        logging.getLogger("httpcore.http11").info("outside HTTP token=%s", token)
+        logging.getLogger("notification.other").info("outside other token=%s", token)
+
+    assert "outside HTTP token=abc" in caplog.text
+    assert "outside other token=abc" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_non_telegram_http_context_is_not_suppressed(caplog) -> None:
+    token = "987:concurrent-token"
+    logger = logging.getLogger("httpcore.http11")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def telegram_request_context() -> None:
+        with _suppress_telegram_http_logs():
+            started.set()
+            await release.wait()
+            logger.info("telegram request token=%s", token)
+
+    async def non_telegram_request_context() -> None:
+        await started.wait()
+        logger.info("non-telegram request token=%s", token)
+        release.set()
+
+    with caplog.at_level(logging.INFO, logger="httpcore.http11"):
+        await asyncio.gather(
+            telegram_request_context(), non_telegram_request_context()
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any(message.startswith("telegram request token=") for message in messages)
+    assert f"non-telegram request token={token}" in messages
+
+
+@pytest.mark.asyncio
+async def test_telegram_network_error_does_not_chain_secret_bearing_exception() -> None:
+    token = "987:network-token"
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError(f"failed {http_request.url}", request=http_request)
+
+    async def resolve(_name: str) -> str:
+        return token
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = TelegramAdapter(
+            resolve, client=client, api_base_url="https://telegram.test"
+        )
+        with pytest.raises(RetryableDeliveryError) as raised:
+            await adapter.send(
+                request(
+                    connector={"type": "telegram", "secret_ref": "safe-ref", "config": {}},
+                    endpoint={"address": "1", "config": {}},
+                )
+            )
+
+    assert token not in str(raised.value)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+
+
+def test_environment_secret_resolver_preserves_legacy_reference_semantics(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "legacy-token"
+    path.write_text("legacy-value\n", encoding="utf-8")
+    relative_path = tmp_path / "relative-token"
+    relative_path.write_text("relative-value\n", encoding="utf-8")
+    docker_secret_dir = tmp_path / "docker-secrets"
+    docker_secret_dir.mkdir()
+    (docker_secret_dir / ".docker-secret").write_text(
+        "docker-value\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TG-OPS", "env-value")
+    resolver = EnvironmentSecretResolver(docker_secrets_dir=docker_secret_dir)
+
+    assert resolver.resolve_legacy(f"file:{path}") == "legacy-value"
+    assert resolver.resolve_legacy("file:relative-token") == "relative-value"
+    assert resolver.resolve_legacy("env:TG-OPS") == "env-value"
+    assert resolver.resolve_legacy(".docker-secret") == "docker-value"
+
+
+@pytest.mark.parametrize(
+    "secret_ref",
+    [
+        "123456:ABCDEF",
+        "file:/tmp/token",
+        "file:/run/secrets/../token",
+        "env:",
+        "env:1TOKEN",
+        "safe:name",
+        "unsafe/name",
+        "unsafe\\name",
+    ],
+)
+def test_environment_secret_resolver_rejects_unsafe_references(secret_ref: str) -> None:
+    with pytest.raises(PermanentDeliveryError, match="secret_ref"):
+        EnvironmentSecretResolver().resolve(secret_ref)
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,10 @@ export interface NotificationConnector {
   id: string
   name: string
   type: NotificationConnectorType
-  secret_ref: string | null
+  /** Preferred response flag; the API never returns the secret value itself. */
+  has_secret?: boolean
+  /** @deprecated Legacy deployments may return a secret reference here. */
+  secret_ref?: string | null
   config: JsonObject
   enabled: boolean
   version: number
@@ -125,6 +128,11 @@ export interface NotificationOverview {
 export interface NotificationConnectorInput {
   name: string
   type: NotificationConnectorType
+  /** Plain token/secret is accepted only on writes and is never echoed back. */
+  secret?: string | null
+  /** Explicitly remove a previously stored direct secret on update. */
+  clear_secret?: boolean
+  /** @deprecated Use secret. Kept so API callers can roll forward independently. */
   secret_ref?: string | null
   config?: JsonObject
   enabled: boolean
@@ -170,6 +178,21 @@ export interface LedgerFilters {
 export interface PageParams {
   limit?: number
   offset?: number
+}
+
+export interface NotificationEventQuery extends PageParams {
+  q?: string
+  event_type?: string
+  source?: string
+  severity?: string
+  routing_status?: string
+}
+
+export interface NotificationDeliveryQuery extends PageParams {
+  q?: string
+  status?: string
+  event_id?: string
+  endpoint_id?: string
 }
 
 export interface ExchangeSymbolQuery extends PageParams {

@@ -226,6 +226,177 @@ async def test_telegram_connectors_route_by_responsibility(notification_reposito
 
 
 @pytest.mark.asyncio
+async def test_direct_secret_is_only_in_memory_during_delivery_claim(notification_repository):
+    repo = notification_repository
+    connector = await repo.create_connector(
+        name="stored-token", type=ConnectorType.TELEGRAM, secret_ref=None,
+        secret="123:stored-token", config={}, enabled=True,
+    )
+    assert connector.has_secret is True
+    endpoint = await repo.create_endpoint(
+        connector_id=connector.id, name="room", address="-1001",
+        config={}, enabled=True,
+    )
+    group = await repo.create_group(
+        name="stored-token-group", description=None, enabled=True,
+        endpoint_ids=[endpoint.id],
+    )
+    await repo.create_policy(
+        name="stored-token-policy", event_pattern="secret.test", severity=Severity.INFO,
+        priority=1, suppress=False, enabled=True, group_ids=[group.id],
+    )
+    published = await repo.publish_event(
+        event_type="secret.test", severity=Severity.INFO, source="test",
+        title="secret", body="body", payload={}, idempotency_key="secret-1",
+    )
+    assert "secret" not in published.deliveries[0].connector_snapshot
+
+    claim = (await repo.claim_deliveries("secret-worker", limit=1, lease_seconds=60))[0]
+    assert claim.connector["secret"] == "123:stored-token"
+    assert "secret" not in claim.delivery.connector_snapshot
+
+
+@pytest.mark.asyncio
+async def test_legacy_secret_ref_is_available_only_to_delivery_claim(
+    notification_repository, tmp_path
+):
+    repo = notification_repository
+    connector = await repo.create_connector(
+        name="legacy-file", type=ConnectorType.TELEGRAM, secret_ref=None,
+        config={}, enabled=True,
+    )
+    legacy_ref = f"file:{tmp_path / 'legacy-token'}"
+    async with repo.pool.connection() as conn:
+        await conn.execute(
+            "UPDATE notification_connectors SET legacy_secret_ref = %s WHERE id = %s",
+            (legacy_ref, connector.id),
+        )
+    endpoint = await repo.create_endpoint(
+        connector_id=connector.id, name="room", address="-1001",
+        config={}, enabled=True,
+    )
+    group = await repo.create_group(
+        name="legacy-file-group", description=None, enabled=True,
+        endpoint_ids=[endpoint.id],
+    )
+    await repo.create_policy(
+        name="legacy-file-policy", event_pattern="legacy.test", severity=Severity.INFO,
+        priority=1, suppress=False, enabled=True, group_ids=[group.id],
+    )
+    published = await repo.publish_event(
+        event_type="legacy.test", severity=Severity.INFO, source="test",
+        title="legacy", body="body", payload={}, idempotency_key="legacy-1",
+    )
+    snapshot = published.deliveries[0].connector_snapshot
+    assert snapshot["secret_ref"] is None
+    assert snapshot["legacy_secret_ref"] == legacy_ref
+
+    claim = (await repo.claim_deliveries("legacy-worker", limit=1, lease_seconds=60))[0]
+    assert claim.connector["legacy_secret_ref"] == legacy_ref
+    assert "legacy_secret_ref" in claim.delivery.connector_snapshot
+
+
+@pytest.mark.asyncio
+async def test_activity_search_matches_event_and_delivery_context(notification_repository):
+    repo = notification_repository
+    connector = await repo.create_connector(
+        name="search-connector", type=ConnectorType.WEBHOOK, secret_ref=None,
+        config={}, enabled=True,
+    )
+    endpoint = await repo.create_endpoint(
+        connector_id=connector.id, name="search-endpoint",
+        address="https://search.invalid", config={}, enabled=True,
+    )
+    group = await repo.create_group(
+        name="search-group", description=None, enabled=True,
+        endpoint_ids=[endpoint.id],
+    )
+    await repo.create_policy(
+        name="search-policy", event_pattern="search.*", severity=Severity.WARNING,
+        priority=1, suppress=False, enabled=True, group_ids=[group.id],
+    )
+    result = await repo.publish_event(
+        event_type="search.match", severity=Severity.WARNING, source="search-source",
+        title="distinctive title", body="distinctive body", payload={},
+        idempotency_key="search-key",
+    )
+
+    events, event_total = await repo.list_events(
+        q="distinctive title", event_type=None, severity=None, source=None,
+        routing_status=None, limit=10, offset=0,
+    )
+    deliveries, delivery_total = await repo.list_deliveries(
+        q="search-endpoint", event_id=None, endpoint_id=None, status=None,
+        limit=10, offset=0,
+    )
+    assert event_total == len(events) == 1
+    assert delivery_total == len(deliveries) == 1
+    assert deliveries[0].event_id == result.event.id
+
+
+@pytest.mark.asyncio
+async def test_activity_search_treats_like_wildcards_as_literals(notification_repository):
+    repo = notification_repository
+    connector = await repo.create_connector(
+        name="literal-search-connector", type=ConnectorType.WEBHOOK,
+        secret_ref=None, config={}, enabled=True,
+    )
+    endpoint = await repo.create_endpoint(
+        connector_id=connector.id, name="literal-search-endpoint",
+        address="https://literal-search.invalid", config={}, enabled=True,
+    )
+    group = await repo.create_group(
+        name="literal-search-group", description=None, enabled=True,
+        endpoint_ids=[endpoint.id],
+    )
+    await repo.create_policy(
+        name="literal-search-policy", event_pattern="literal.*",
+        severity=Severity.INFO, priority=1, suppress=False, enabled=True,
+        group_ids=[group.id],
+    )
+    percent = await repo.publish_event(
+        event_type="literal.percent", severity=Severity.INFO, source="literal",
+        title="contains % marker", body="body", payload={},
+        idempotency_key="literal-percent",
+    )
+    underscore = await repo.publish_event(
+        event_type="literal.underscore", severity=Severity.INFO, source="literal",
+        title="contains _ marker", body="body", payload={},
+        idempotency_key="literal-underscore",
+    )
+    plain = await repo.publish_event(
+        event_type="literal.plain", severity=Severity.INFO, source="literal",
+        title="contains marker", body="body", payload={},
+        idempotency_key="literal-plain",
+    )
+
+    percent_events, percent_total = await repo.list_events(
+        q="%", event_type=None, severity=None, source=None,
+        routing_status=None, limit=10, offset=0,
+    )
+    underscore_events, underscore_total = await repo.list_events(
+        q="_", event_type=None, severity=None, source=None,
+        routing_status=None, limit=10, offset=0,
+    )
+    percent_deliveries, percent_delivery_total = await repo.list_deliveries(
+        q="%", event_id=None, endpoint_id=None, status=None, limit=10, offset=0,
+    )
+    underscore_deliveries, underscore_delivery_total = await repo.list_deliveries(
+        q="_", event_id=None, endpoint_id=None, status=None, limit=10, offset=0,
+    )
+
+    assert percent_total == len(percent_events) == 1
+    assert percent_events[0].id == percent.event.id
+    assert underscore_total == len(underscore_events) == 1
+    assert underscore_events[0].id == underscore.event.id
+    assert plain.event.id not in {item.id for item in percent_events + underscore_events}
+    assert percent_delivery_total == len(percent_deliveries) == 1
+    assert percent_deliveries[0].event_id == percent.event.id
+    assert underscore_delivery_total == len(underscore_deliveries) == 1
+    assert underscore_deliveries[0].event_id == underscore.event.id
+
+
+@pytest.mark.asyncio
 async def test_duplicate_endpoint_membership_is_one_delivery(notification_repository):
     repo = notification_repository
     connector = await repo.create_connector(
