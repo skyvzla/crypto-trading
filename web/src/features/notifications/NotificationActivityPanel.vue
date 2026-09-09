@@ -56,7 +56,12 @@ function changeActivityView(key: string | number) {
   emit('update:activityView', key as NotificationActivityKey)
 }
 
-function focusSearchInput(input: FocusableInput | null) {
+function focusSearchInput(input: FocusableInput | null, event: MouseEvent) {
+  const shell = event.currentTarget
+  if (shell instanceof HTMLElement) {
+    shell.querySelector<HTMLInputElement>('input')?.focus()
+    return
+  }
   input?.focus()
 }
 </script>
@@ -88,7 +93,7 @@ function focusSearchInput(input: FocusableInput | null) {
 
     <section v-if="activityView === 'events'" class="activity-table data-card">
       <div class="filter-row event-filter-row">
-        <div class="filter-search-shell" @mousedown="focusSearchInput(eventSearchInput)">
+        <div class="filter-search-shell" @click="focusSearchInput(eventSearchInput, $event)">
           <a-input
             ref="eventSearchInput"
             v-model:value="eventFilters.q"
@@ -212,7 +217,7 @@ function focusSearchInput(input: FocusableInput | null) {
 
     <section v-else class="activity-table data-card">
       <div class="filter-row delivery-filter-row">
-        <div class="filter-search-shell" @mousedown="focusSearchInput(deliverySearchInput)">
+        <div class="filter-search-shell" @click="focusSearchInput(deliverySearchInput, $event)">
           <a-input
             ref="deliverySearchInput"
             v-model:value="deliveryFilters.q"

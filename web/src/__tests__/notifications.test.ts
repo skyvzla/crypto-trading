@@ -190,14 +190,14 @@ describe('notification route and view', () => {
 
     const eventSearch = wrapper.get('.event-filter-row .ant-input-affix-wrapper')
     const eventInput = wrapper.get('.event-filter-row input')
-    await eventSearch.trigger('mousedown')
+    await eventSearch.trigger('click')
     expect(document.activeElement).toBe(eventInput.element)
 
     await wrapper.findAll('.activity-switcher .ant-tabs-tab-btn')[1].trigger('click')
     await flushPromises()
     const deliverySearch = wrapper.get('.delivery-filter-row .ant-input-affix-wrapper')
     const deliveryInput = wrapper.get('.delivery-filter-row input')
-    await deliverySearch.trigger('mousedown')
+    await deliverySearch.trigger('click')
     expect(document.activeElement).toBe(deliveryInput.element)
     wrapper.unmount()
   })
