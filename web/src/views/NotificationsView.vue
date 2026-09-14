@@ -81,7 +81,7 @@ function changeActivityView(key: NotificationViewKey | 'events' | 'deliveries') 
         :enabled-endpoint-count="workbench.enabledEndpointCount.value"
         :retry-delivery-count="workbench.retryDeliveryCount.value"
         :dead-delivery-count="workbench.deadDeliveryCount.value"
-        :events="workbench.events.value"
+        :recent-events="workbench.recentEvents.value"
         @open-activity="workbench.openActivity"
         @new-connector="workbench.resetConnectorForm(undefined, $event)"
         @new-policy="workbench.resetPolicyForm()"

@@ -8,12 +8,14 @@ import type {
   NotificationDelivery,
   NotificationEndpoint,
   NotificationEndpointInput,
+  NotificationEvent,
   NotificationGroup,
   NotificationGroupInput,
   NotificationOverview,
   NotificationPolicy,
   NotificationPolicyInput,
   NotificationSeverity,
+  Page,
 } from '@/api/types'
 import { useNotificationActivity } from './useNotificationActivity'
 import { useNotificationNavigation } from './useNotificationNavigation'
@@ -134,6 +136,13 @@ export function useNotificationWorkbench() {
       loadError.value = text
     },
   })
+  /** 概览专用的最近事件窗口，不受活动表筛选和分页影响。 */
+  const recentEvents = ref<Page<NotificationEvent>>({
+    items: [],
+    total: 0,
+    limit: activity.pageSize,
+    offset: 0,
+  })
 
   const connectorById = computed(() => new Map(connectors.value.map((item) => [item.id, item])))
   const endpointById = computed(() => new Map(endpoints.value.map((item) => [item.id, item])))
@@ -189,6 +198,7 @@ export function useNotificationWorkbench() {
   })
 
   const selectedConnector = computed(() => connectorById.value.get(endpointForm.connector_id) ?? null)
+  let loadAllSequence = 0
 
   // ── 集合写操作 ─────────────────────────────────────────────────────────
   const connectorCollection = useVersionedCollection({
@@ -276,6 +286,7 @@ export function useNotificationWorkbench() {
 
   // ── 加载 ───────────────────────────────────────────────────────────────
   async function loadAll() {
+    const current = ++loadAllSequence
     loading.value = true
     loadError.value = ''
     // 配置类列表逐页取全（数量小但必须完整：职责组要能列出所有端点）；
@@ -286,33 +297,23 @@ export function useNotificationWorkbench() {
       collectPageItems((params) => notificationApi.endpoints(params)),
       collectPageItems((params) => notificationApi.groups(params)),
       collectPageItems((params) => notificationApi.policies(params)),
-      notificationApi.events({
-        limit: activity.pageSize,
-        offset: activity.events.value.offset,
-        ...activity.eventFilters,
+      notificationApi.events({ limit: activity.pageSize, offset: 0 }),
+      activity.loadEvents().then((loaded) => {
+        if (!loaded) throw new Error('notification events unavailable')
       }),
-      notificationApi.deliveries({
-        limit: activity.pageSize,
-        offset: activity.deliveries.value.offset,
-        ...activity.deliveryFilters,
+      activity.loadDeliveries().then((loaded) => {
+        if (!loaded) throw new Error('notification deliveries unavailable')
       }),
     ])
-    const [
-      overviewResult,
-      connectorsResult,
-      endpointsResult,
-      groupsResult,
-      policiesResult,
-      eventsResult,
-      deliveriesResult,
-    ] = results
+    if (current !== loadAllSequence) return
+    const [overviewResult, connectorsResult, endpointsResult, groupsResult, policiesResult, recentEventsResult] =
+      results
     if (overviewResult.status === 'fulfilled') overview.value = normalizeOverview(overviewResult.value)
     if (connectorsResult.status === 'fulfilled') connectors.value = connectorsResult.value.items
     if (endpointsResult.status === 'fulfilled') endpoints.value = endpointsResult.value.items
     if (groupsResult.status === 'fulfilled') groups.value = groupsResult.value.items
     if (policiesResult.status === 'fulfilled') policies.value = policiesResult.value.items
-    if (eventsResult.status === 'fulfilled') activity.events.value = eventsResult.value
-    if (deliveriesResult.status === 'fulfilled') activity.deliveries.value = deliveriesResult.value
+    if (recentEventsResult.status === 'fulfilled') recentEvents.value = recentEventsResult.value
     if (results.some((item) => item.status === 'rejected')) {
       loadError.value = '部分通知数据暂时不可用，请刷新重试。'
     }
@@ -566,6 +567,19 @@ export function useNotificationWorkbench() {
   async function testEndpoint(item: NotificationEndpoint) {
     try {
       const result = await notificationApi.testEndpoint(item.id)
+      if (result.event) {
+        const event = result.event
+        const alreadyPresent = recentEvents.value.items.some((item) => item.id === event.id)
+        recentEvents.value = {
+          ...recentEvents.value,
+          items: [event, ...recentEvents.value.items.filter((item) => item.id !== event.id)].slice(
+            0,
+            recentEvents.value.limit,
+          ),
+          total: recentEvents.value.total + (result.created && !alreadyPresent ? 1 : 0),
+          offset: 0,
+        }
+      }
       activity.prependTestResult(result.event ?? null, result.deliveries ?? [])
       message.success(`测试通知已进入队列：${item.name}`)
       await refreshOverview()
@@ -616,6 +630,7 @@ export function useNotificationWorkbench() {
     groups,
     policies,
     overview,
+    recentEvents,
     connectorById,
     endpointById,
     groupById,

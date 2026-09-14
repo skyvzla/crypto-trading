@@ -12,6 +12,10 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from trading_platform.notifications.domain import (
@@ -37,7 +41,45 @@ from trading_platform.notifications.repository import (
 )
 
 
-router = APIRouter(prefix="/api/v1/notifications", tags=["notifications"])
+def _redact_validation_errors(error: RequestValidationError) -> list[dict[str, Any]]:
+    """Keep validation metadata without echoing submitted values or context."""
+    return [
+        {
+            key: value
+            for key, value in validation_error.items()
+            if key not in {"input", "ctx"}
+        }
+        for validation_error in error.errors()
+    ]
+
+
+class _NotificationAPIRoute(APIRoute):
+    """Prevent FastAPI's default validation response from echoing credentials."""
+
+    def get_route_handler(self):
+        route_handler = super().get_route_handler()
+
+        async def handle(request: Request):
+            try:
+                return await route_handler(request)
+            except RequestValidationError as error:
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": jsonable_encoder(
+                            _redact_validation_errors(error)
+                        )
+                    },
+                )
+
+        return handle
+
+
+router = APIRouter(
+    prefix="/api/v1/notifications",
+    tags=["notifications"],
+    route_class=_NotificationAPIRoute,
+)
 
 
 _FORBIDDEN_CONFIG_KEYS = {

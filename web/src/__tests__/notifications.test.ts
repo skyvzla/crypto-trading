@@ -2,7 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent } from 'vue'
 import { notificationApi } from '@/api/client'
-import type { NotificationDelivery, NotificationEvent, Page } from '@/api/types'
+import type { NotificationDelivery, NotificationEndpoint, NotificationEvent, Page } from '@/api/types'
 import App from '@/App.vue'
 import NotificationsView from '@/views/NotificationsView.vue'
 import { useNotificationActivity } from '@/features/notifications/useNotificationActivity'
@@ -242,6 +242,89 @@ describe('notification route and view', () => {
 
     expect(events).toHaveBeenCalledWith(expect.objectContaining({ q: 'heartbeat' }))
     expect(deliveries).toHaveBeenCalledWith(expect.objectContaining({ q: 'room', status: 'dead' }))
+    wrapper.unmount()
+  })
+
+  it('keeps overview recent events independent from activity filters', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input)))
+    const recentEvent: NotificationEvent = {
+      id: 'recent-event',
+      event_type: 'recent.test',
+      severity: 'info',
+      source: 'test',
+      title: '真正最近的事件',
+      body: '',
+      payload: {},
+      idempotency_key: 'recent-event',
+      correlation_id: null,
+      fingerprint: null,
+      matched_policy_id: null,
+      routing_status: 'routed',
+      occurred_at: '2026-09-14T12:00:00Z',
+      expires_at: null,
+      created_at: '2026-09-14T12:00:00Z',
+    }
+    const filteredEvent = { ...recentEvent, id: 'filtered-event', title: '筛选后的事件' }
+    const events = vi.spyOn(notificationApi, 'events').mockImplementation(async (query = {}) => ({
+      items: [query.q ? filteredEvent : recentEvent],
+      total: 1,
+      limit: 8,
+      offset: query.offset ?? 0,
+    }))
+    const wrapper = mount(NotificationsView)
+    await flushPromises()
+
+    await router.push('/notifications/activity')
+    await flushPromises()
+    await wrapper.get('.event-filter-row input').setValue('filtered')
+    await wrapper.get('button[aria-label="应用事件筛选"]').trigger('click')
+    await flushPromises()
+
+    expect(events).toHaveBeenCalledWith(expect.objectContaining({ q: 'filtered' }))
+    await router.push('/notifications')
+    await flushPromises()
+    expect(wrapper.get('.recent-panel').text()).toContain('真正最近的事件')
+    expect(wrapper.get('.recent-panel').text()).not.toContain('筛选后的事件')
+    wrapper.unmount()
+  })
+
+  it('adds a successful endpoint test to the independent recent event window', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => notificationResponse(String(input)))
+    const event = {
+      id: 'new-test-event',
+      event_type: 'notification.test',
+      severity: 'info',
+      source: 'notification.endpoint.test',
+      title: '刚创建的测试通知',
+      body: '',
+      payload: {},
+      idempotency_key: 'new-test-event',
+      correlation_id: null,
+      fingerprint: null,
+      matched_policy_id: null,
+      routing_status: 'routed',
+      occurred_at: '2026-09-14T12:00:00Z',
+      expires_at: null,
+      created_at: '2026-09-14T12:00:00Z',
+    } satisfies NotificationEvent
+    vi.spyOn(notificationApi, 'testEndpoint').mockResolvedValue({ event, deliveries: [], created: true })
+    const Harness = defineComponent({
+      setup() {
+        return useNotificationWorkbench()
+      },
+      template: '<div />',
+    })
+    const wrapper = mount(Harness)
+    await flushPromises()
+    const vm = wrapper.vm as unknown as {
+      recentEvents: Page<NotificationEvent>
+      testEndpoint: (item: NotificationEndpoint) => Promise<void>
+    }
+
+    await vm.testEndpoint({ id: 'endpoint-1', name: 'ops-room' } as NotificationEndpoint)
+
+    expect(vm.recentEvents.items[0]?.id).toBe(event.id)
+    expect(vm.recentEvents.total).toBe(1)
     wrapper.unmount()
   })
 

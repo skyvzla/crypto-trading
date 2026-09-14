@@ -11,7 +11,7 @@ const props = defineProps<{
   enabledEndpointCount: number
   retryDeliveryCount: number
   deadDeliveryCount: number
-  events: Page<NotificationEvent>
+  recentEvents: Page<NotificationEvent>
 }>()
 
 const criticalReadyCount = computed(
@@ -137,8 +137,8 @@ const emit = defineEmits<{
           >全部事件 <ArrowRight :size="14"
         /></a-button>
       </div>
-      <div v-if="events.items.length" class="event-list">
-        <div v-for="event in events.items.slice(0, 5)" :key="event.id" class="event-row">
+      <div v-if="recentEvents.items.length" class="event-list">
+        <div v-for="event in recentEvents.items.slice(0, 5)" :key="event.id" class="event-row">
           <span class="event-severity"><a-badge :status="statusBadge(event.severity)" /></span>
           <div class="event-copy">
             <strong>{{ event.title }}</strong

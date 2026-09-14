@@ -219,6 +219,79 @@ async def test_connector_update_rejects_both_secret_and_secret_ref(api_app):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    ("method", "path", "body", "sensitive_values"),
+    [
+        (
+            "POST",
+            "/api/v1/notifications/connectors",
+            {
+                "name": "create-both",
+                "type": "telegram",
+                "secret": "create-secret",
+                "secret_ref": "env:CREATE_SECRET",
+                "config": {},
+            },
+            ["create-secret", "env:CREATE_SECRET"],
+        ),
+        (
+            "PUT",
+            "/api/v1/notifications/connectors/{connector_id}",
+            {
+                "name": "ops",
+                "type": "telegram",
+                "secret": "update-secret",
+                "secret_ref": "env:UPDATE_SECRET",
+                "config": {},
+                "expected_version": 1,
+            },
+            ["update-secret", "env:UPDATE_SECRET"],
+        ),
+        (
+            "POST",
+            "/api/v1/notifications/connectors",
+            {
+                "name": "config-secret",
+                "type": "telegram",
+                "secret": "config-secret-value",
+                "config": {"nested": [{"authorization": "config-secret-value"}]},
+            },
+            ["config-secret-value"],
+        ),
+        (
+            "POST",
+            "/api/v1/notifications/events",
+            {
+                "event_type": "risk.halted",
+                "severity": "critical",
+                "source": "risk",
+                "title": "halt",
+                "body": "stopped",
+                "payload": {"nested": {"token": "payload-secret-value"}},
+            },
+            ["payload-secret-value"],
+        ),
+    ],
+)
+async def test_notification_validation_does_not_echo_sensitive_inputs(
+    api_app, method, path, body, sensitive_values
+):
+    app, repository = api_app
+    if "{connector_id}" in path:
+        path = path.format(connector_id=repository.connector.id)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.request(method, path, json=body)
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert all("input" not in error and "ctx" not in error for error in detail)
+    encoded = response.text
+    for value in sensitive_values:
+        assert value not in encoded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
     ("origin", "status_code"),
     [
         (None, 201),

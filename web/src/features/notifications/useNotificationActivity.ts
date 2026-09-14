@@ -44,19 +44,21 @@ export function useNotificationActivity(deps: ActivityDeps) {
     fallbackMessage: string,
   ) {
     let sequence = 0
-    return async function load(offset = target.value.offset): Promise<void> {
+    return async function load(offset = target.value.offset): Promise<boolean> {
       const current = ++sequence
       // 乐观推进 offset，分页器立刻跟手；权威值由响应写回。
       if (offset !== target.value.offset) target.value = { ...target.value, offset }
       loading.value = true
       try {
         const page = await fetch({ limit: target.value.limit, offset })
-        if (current !== sequence) return
+        if (current !== sequence) return true
         target.value = page
         deps.setError('')
+        return true
       } catch (error) {
-        if (current !== sequence) return
+        if (current !== sequence) return true
         deps.setError(errorMessage(error, fallbackMessage))
+        return false
       } finally {
         if (current === sequence) loading.value = false
       }
