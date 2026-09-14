@@ -37,7 +37,7 @@ import { getChartTheme } from '@/features/backtests/chartTheme'
 import { CHART_INTERVALS, DEFAULT_CHART_INTERVAL, isChartInterval, type ChartInterval } from '@/shared/chartIntervals'
 import { timestampMs } from '@/shared/time'
 import { IS_DARK_THEME } from '@/shared/theme'
-import type { TradeChartData, TradeChartFillTimeSemantics } from './tradeChart'
+import { mergeCandleWindow, type TradeChartData, type TradeChartFillTimeSemantics } from './tradeChart'
 
 const intervalMs: Record<ChartInterval, number> = {
   '1s': 1_000,
@@ -113,6 +113,7 @@ const indicatorSettingsSaving = ref(false)
 const indicatorSettings = ref<ChartIndicatorSettings>(cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS))
 const focusTimeMs = ref<number | null>(null)
 const loadedCandles = ref<BacktestCandle[]>([])
+const expansionDirection = ref<'before' | 'after' | null>(null)
 
 interface CandleQueryResponse {
   symbol: string
@@ -384,6 +385,7 @@ function requestMore(direction: 'before' | 'after') {
   const boundary =
     direction === 'before' ? loadedCandles.value[0]?.time : loadedCandles.value[loadedCandles.value.length - 1]?.time
   if (boundary === undefined) return
+  expansionDirection.value = direction
   windowCenterMs.value = boundary * 1_000
 }
 
@@ -452,9 +454,8 @@ watch(
   () => candlesQuery.data.value,
   (response) => {
     if (!response || response.interval !== interval.value || response.source !== source.value) return
-    const byTime = new Map(loadedCandles.value.map((candle) => [candle.time, candle]))
-    response.candles.forEach((candle) => byTime.set(candle.time, candle))
-    loadedCandles.value = [...byTime.values()].sort((left, right) => left.time - right.time)
+    loadedCandles.value = mergeCandleWindow(loadedCandles.value, response.candles, expansionDirection.value)
+    expansionDirection.value = null
   },
   { immediate: true },
 )
@@ -488,6 +489,7 @@ watch(
   ],
   () => {
     loadedCandles.value = []
+    expansionDirection.value = null
     windowCenterMs.value = null
   },
 )

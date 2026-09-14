@@ -983,10 +983,12 @@ a {
   color: var(--muted);
 }
 .calendar-cell.value-positive {
-  background: rgba(47, 157, 114, var(--cell-alpha, 0.12));
+  background: color-mix(in srgb, var(--color-success) var(--cell-mix, 6%), var(--surface-raised));
+  color: var(--text);
 }
 .calendar-cell.value-negative {
-  background: rgba(189, 98, 91, var(--cell-alpha, 0.12));
+  background: color-mix(in srgb, var(--color-danger) var(--cell-mix, 6%), var(--surface-raised));
+  color: var(--text);
 }
 .calendar-cell.net-unavailable {
   border-color: var(--color-warning);

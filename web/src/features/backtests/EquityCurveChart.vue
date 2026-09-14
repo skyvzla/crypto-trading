@@ -9,7 +9,7 @@ import {
   type Time,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import type { EquityPoint, EquityReplayRow } from './equityReplay'
+import { deduplicateEquityPoints, type EquityPoint, type EquityReplayRow } from './equityReplay'
 import { formatDateTime, formatNumber, formatPercent } from '@/shared/format'
 import { IS_DARK_THEME } from '@/shared/theme'
 import { getChartTheme } from './chartTheme'
@@ -25,8 +25,10 @@ let chart: IChartApi | null = null
 let series: ISeriesApi<'Area'> | null = null
 let observer: ResizeObserver | null = null
 
+const chartPoints = computed(() => deduplicateEquityPoints(props.points))
 const pointRows = computed(
-  () => new Map(props.points.filter((point) => point.row).map((point) => [Math.floor(point.time / 1000), point.row!])),
+  () =>
+    new Map(chartPoints.value.filter((point) => point.row).map((point) => [Math.floor(point.time / 1000), point.row!])),
 )
 
 function render() {
@@ -52,7 +54,7 @@ function render() {
     priceLineVisible: false,
   })
   series.setData(
-    props.points.map((point) => ({ time: Math.floor(point.time / 1000) as UTCTimestamp, value: point.value })),
+    chartPoints.value.map((point) => ({ time: Math.floor(point.time / 1000) as UTCTimestamp, value: point.value })),
   )
   chart.subscribeCrosshairMove((param) => {
     if (!param.time) {
@@ -67,7 +69,6 @@ function render() {
 watch(
   () => props.points,
   () => nextTick(render),
-  { deep: true },
 )
 watch(isDarkTheme, () => nextTick(render))
 onMounted(() => {

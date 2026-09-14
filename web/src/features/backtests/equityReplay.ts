@@ -34,6 +34,13 @@ export interface EquityPoint {
   row?: EquityReplayRow
 }
 
+/** lightweight-charts 要求时间严格递增；同一秒内的结算只保留最后一个点。 */
+export function deduplicateEquityPoints(points: EquityPoint[]): EquityPoint[] {
+  const bySecond = new Map<number, EquityPoint>()
+  points.forEach((point) => bySecond.set(Math.floor(point.time / 1000), point))
+  return [...bySecond.entries()].sort(([left], [right]) => left - right).map(([, point]) => point)
+}
+
 export interface EquityReplayResult {
   rows: EquityReplayRow[]
   points: EquityPoint[]
@@ -84,8 +91,10 @@ export function replayEquity(trades: BacktestEquityTrade[], settings: EquityRepl
   let maxDrawdown = 0
   let minimumObservedBalance = initialBalance
   let activeUntil = -Infinity
-  let liquidated = tradingCapital <= minimumBalance
-  let liquidationTime: number | null = liquidated ? (timestamp(ordered[0]?.entry_time) ?? null) : null
+  // 初始资金池只是回放输入，不代表已经发生过停止线事件；停止线只在
+  // 实际成交造成资金池变化后判定，避免零仓位回放被误报为已清算。
+  let liquidated = false
+  let liquidationTime: number | null = null
 
   const firstTime = timestamp(ordered[0]?.entry_time)
   if (firstTime !== null) points.push({ time: firstTime - 1, value: initialBalance })
@@ -167,7 +176,7 @@ export function replayEquity(trades: BacktestEquityTrade[], settings: EquityRepl
     rows.push(row)
     points.push({ time: exitTime, value: balance, row })
 
-    if (tradingCapital <= minimumBalance) {
+    if (minimumBalance > 0 && tradingCapital <= minimumBalance) {
       liquidated = true
       liquidationTime = exitTime
     }

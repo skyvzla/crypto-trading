@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
-import { collectPageItems } from '@/shared/pagination'
+import { collectPageItems, positiveInt } from '@/shared/pagination'
 
 describe('operations pagination', () => {
+  it('normalizes invalid and oversized page sizes before they reach the API', () => {
+    expect(positiveInt('5000', 25, 500)).toBe(500)
+    expect(positiveInt('0', 25, 500)).toBe(25)
+    expect(positiveInt('not-a-number', 25, 500)).toBe(25)
+  })
   it('continues loading until the server total is complete', async () => {
     const fetchPage = vi.fn(async ({ limit, offset }: { limit: number; offset: number }) => ({
       items: offset === 0 ? ['A', 'B'] : ['C'],

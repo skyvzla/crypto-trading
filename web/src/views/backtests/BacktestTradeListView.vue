@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from 'vue'
+import { computed, h, nextTick, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { CandlestickChart } from 'lucide-vue-next'
 import { Button, Tag, Tooltip, type TableColumnsType } from 'ant-design-vue'
@@ -15,7 +15,7 @@ const route = useRoute()
 const router = useRouter()
 const researchId = computed(() => (typeof route.params.researchId === 'string' ? route.params.researchId : ''))
 const symbol = computed(() => (typeof route.params.symbol === 'string' ? route.params.symbol : ''))
-const { page, pageSize, preservedQuery } = useBacktestPagination(25, 'trade')
+const { page, pageSize, preservedQuery, paginationQuery, restore } = useBacktestPagination(25, 'trade', 500)
 const backTo = computed(() => ({
   path: `/backtests/${encodeURIComponent(researchId.value)}/symbols`,
   query: preservedQuery.value,
@@ -35,6 +35,7 @@ const maxPnl = ref<number | null>(
 )
 const sortBy = ref(typeof route.query.trade_sort_by === 'string' ? route.query.trade_sort_by : 'entry_time')
 const sortOrder = ref<'asc' | 'desc'>(route.query.trade_sort_order === 'asc' ? 'asc' : 'desc')
+let restoringRoute = false
 const tradeFilters = computed(() => ({
   ...(resultFilter.value === 'all' ? {} : { winner: resultFilter.value === 'win' }),
   ...(exitReason.value.trim() ? { exit_reason: exitReason.value.trim() } : {}),
@@ -63,10 +64,15 @@ const query = useQuery({
   enabled: computed(() => Boolean(researchId.value && symbol.value)),
 })
 watch([resultFilter, exitReason, minPnl, maxPnl, sortBy, sortOrder], () => {
+  if (restoringRoute) return
   page.value = 1
+})
+watch([page, pageSize, resultFilter, exitReason, minPnl, maxPnl, sortBy, sortOrder], () => {
+  if (restoringRoute) return
   void router.replace({
     query: {
       ...route.query,
+      ...paginationQuery.value,
       result: resultFilter.value === 'all' ? undefined : resultFilter.value,
       exit_reason: exitReason.value || undefined,
       min_pnl: minPnl.value === null ? undefined : String(minPnl.value),
@@ -76,6 +82,31 @@ watch([resultFilter, exitReason, minPnl, maxPnl, sortBy, sortOrder], () => {
     },
   })
 })
+watch(
+  () => [
+    route.query.trade_page,
+    route.query.trade_page_size,
+    route.query.result,
+    route.query.exit_reason,
+    route.query.min_pnl,
+    route.query.max_pnl,
+    route.query.trade_sort_by,
+    route.query.trade_sort_order,
+  ],
+  ([_nextPage, _nextPageSize, nextResult, nextExitReason, nextMinPnl, nextMaxPnl, nextSortBy, nextSortOrder]) => {
+    restoringRoute = true
+    restore()
+    resultFilter.value = nextResult === 'win' || nextResult === 'loss' ? nextResult : 'all'
+    exitReason.value = typeof nextExitReason === 'string' ? nextExitReason : ''
+    minPnl.value = typeof nextMinPnl === 'string' && Number.isFinite(Number(nextMinPnl)) ? Number(nextMinPnl) : null
+    maxPnl.value = typeof nextMaxPnl === 'string' && Number.isFinite(Number(nextMaxPnl)) ? Number(nextMaxPnl) : null
+    sortBy.value = typeof nextSortBy === 'string' ? nextSortBy : 'entry_time'
+    sortOrder.value = nextSortOrder === 'asc' ? 'asc' : 'desc'
+    void nextTick(() => {
+      restoringRoute = false
+    })
+  },
+)
 function onTableChange(
   _: unknown,
   __: unknown,

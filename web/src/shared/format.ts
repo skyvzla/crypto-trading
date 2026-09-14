@@ -6,16 +6,24 @@ export const EMPTY_VALUE = '—'
 
 type NumericLike = number | string | null | undefined
 
+export type PnlTone = 'positive' | 'negative' | 'warning' | 'neutral'
+
 /** 数值或 null。后端 NUMERIC 字段常以字符串返回，这里统一收口。 */
 export function toNumberOrNull(value: NumericLike): number | null {
   if (value === null || value === undefined || value === '') return null
   const numeric = typeof value === 'number' ? value : Number(value)
-  return Number.isFinite(numeric) ? numeric : null
+  if (!Number.isFinite(numeric)) return null
+  return Object.is(numeric, -0) ? 0 : numeric
 }
 
 /** 数值，缺失或非法时按 0 计。仅用于求和、比较等聚合场景。 */
 export function asNumber(value: NumericLike): number {
   return toNumberOrNull(value) ?? 0
+}
+
+function roundedNumber(value: number, digits: number): number {
+  const rounded = Number(value.toFixed(digits))
+  return Object.is(rounded, -0) ? 0 : rounded
 }
 
 /**
@@ -25,7 +33,7 @@ export function asNumber(value: NumericLike): number {
 export function formatMoney(value: NumericLike, digits = 2): string {
   const numeric = toNumberOrNull(value)
   if (numeric === null) return EMPTY_VALUE
-  return numeric.toLocaleString('zh-CN', {
+  return roundedNumber(numeric, digits).toLocaleString('zh-CN', {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   })
@@ -38,14 +46,14 @@ export function formatMoney(value: NumericLike, digits = 2): string {
 export function formatNumber(value: NumericLike, digits = 2): string {
   const numeric = toNumberOrNull(value)
   if (numeric === null) return EMPTY_VALUE
-  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(numeric)
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits: digits }).format(roundedNumber(numeric, digits))
 }
 
 /** 定点比值，例如盈亏比。总是保留 `digits` 位小数。 */
 export function formatRatio(value: NumericLike, digits = 2): string {
   const numeric = toNumberOrNull(value)
   if (numeric === null) return EMPTY_VALUE
-  return numeric.toFixed(digits)
+  return roundedNumber(numeric, digits).toFixed(digits)
 }
 
 /**
@@ -57,7 +65,7 @@ export function formatPercent(value: NumericLike, digits?: number): string {
   const numeric = toNumberOrNull(value)
   if (numeric === null) return EMPTY_VALUE
   const percent = numeric * 100
-  return digits === undefined ? `${formatNumber(percent, 2)}%` : `${percent.toFixed(digits)}%`
+  return digits === undefined ? `${formatNumber(percent, 2)}%` : `${roundedNumber(percent, digits).toFixed(digits)}%`
 }
 
 /** 秒数转人类可读时长。 */
@@ -91,6 +99,14 @@ export function pnlClass(value: NumericLike): string {
   const numeric = toNumberOrNull(value)
   if (numeric === null || numeric === 0) return 'value-neutral'
   return numeric > 0 ? 'value-positive' : 'value-negative'
+}
+
+/** PnL 磁贴的语义色：缺失是警告，不把空值当成盈利零。 */
+export function pnlTone(value: NumericLike): PnlTone {
+  const numeric = toNumberOrNull(value)
+  if (numeric === null) return 'warning'
+  if (numeric === 0) return 'neutral'
+  return numeric > 0 ? 'positive' : 'negative'
 }
 
 /** 把交易方向与持仓方向统一显示成买卖。 */

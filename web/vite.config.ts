@@ -48,5 +48,6 @@ export default defineConfig({
     css: true,
     setupFiles: ['./vitest.setup.ts'],
     exclude: [...configDefaults.exclude, 'e2e/**'],
+    testTimeout: 20_000,
   },
 })

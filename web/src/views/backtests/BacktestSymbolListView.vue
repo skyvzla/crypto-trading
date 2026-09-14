@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from 'vue'
+import { computed, h, nextTick, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { ArrowRight } from 'lucide-vue-next'
 import { Button, Tooltip, type TableColumnsType } from 'ant-design-vue'
@@ -14,13 +14,14 @@ import { useBacktestPagination } from '@/features/backtests/useBacktestPaginatio
 const route = useRoute()
 const router = useRouter()
 const researchId = computed(() => (typeof route.params.researchId === 'string' ? route.params.researchId : ''))
-const { page, pageSize, preservedQuery } = useBacktestPagination(25, 'symbol')
+const { page, pageSize, preservedQuery, paginationQuery, restore } = useBacktestPagination(25, 'symbol', 500)
 const rootTo = computed(() => ({ path: '/backtests', query: preservedQuery.value }))
 const initialSymbolFilter = typeof route.query.symbol_filter === 'string' ? route.query.symbol_filter : ''
 const symbolInput = ref(initialSymbolFilter)
 const symbolFilter = ref(initialSymbolFilter)
 const sortBy = ref(typeof route.query.sort_by === 'string' ? route.query.sort_by : 'net_pnl')
 const sortOrder = ref<'asc' | 'desc'>(route.query.sort_order === 'asc' ? 'asc' : 'desc')
+let restoringRoute = false
 const query = useQuery({
   queryKey: computed(() => [
     'backtest-symbols',
@@ -60,10 +61,43 @@ function onTableChange(
   sortOrder.value = item?.order === 'ascend' ? 'asc' : 'desc'
   page.value = 1
 }
-watch([symbolFilter, sortBy, sortOrder], ([nextSymbol, nextSort, nextOrder]) => {
-  const nextQuery = { ...route.query, symbol_filter: nextSymbol || undefined, sort_by: nextSort, sort_order: nextOrder }
-  void router.replace({ query: nextQuery })
+watch([page, pageSize, symbolFilter, sortBy, sortOrder], ([, , nextSymbol, nextSort, nextOrder]) => {
+  if (restoringRoute) return
+  void router.replace({
+    query: {
+      ...route.query,
+      ...paginationQuery.value,
+      symbol_filter: nextSymbol || undefined,
+      sort_by: nextSort,
+      sort_order: nextOrder,
+    },
+  })
 })
+watch(
+  () => [
+    route.query.symbol_page,
+    route.query.symbol_page_size,
+    route.query.symbol_filter,
+    route.query.sort_by,
+    route.query.sort_order,
+  ],
+  ([, , nextSymbol, nextSort, nextOrder]) => {
+    restoringRoute = true
+    restore()
+    if (typeof nextSymbol === 'string') {
+      symbolInput.value = nextSymbol
+      symbolFilter.value = nextSymbol
+    } else {
+      symbolInput.value = ''
+      symbolFilter.value = ''
+    }
+    sortBy.value = typeof nextSort === 'string' ? nextSort : 'net_pnl'
+    sortOrder.value = nextOrder === 'asc' ? 'asc' : 'desc'
+    void nextTick(() => {
+      restoringRoute = false
+    })
+  },
+)
 const columns: TableColumnsType<BacktestSymbolSummary> = [
   {
     title: '交易对',

@@ -53,14 +53,26 @@ async function readBody(response: Response): Promise<string> {
   return response.text().catch(() => '')
 }
 
-/** FastAPI 的错误体统一是 `{detail: string}`；取不到时返回 null 交给调用方退回状态码。 */
+/**
+ * 兼容 FastAPI 的业务错误字符串和 RequestValidationError 数组。
+ *
+ * 校验错误里的 loc 可能包含 query/path/body 等位置；保留第一条具体错误，
+ * 页面就能告诉用户是哪个参数无效，而不是只显示 HTTP 422。
+ */
 function parseErrorDetail(body: string): string | null {
   if (!body) return null
   try {
     const parsed: unknown = JSON.parse(body)
-    return parsed && typeof parsed === 'object' && typeof (parsed as { detail?: unknown }).detail === 'string'
-      ? (parsed as { detail: string }).detail
-      : null
+    if (!parsed || typeof parsed !== 'object') return null
+    const detail = (parsed as { detail?: unknown }).detail
+    if (typeof detail === 'string') return detail
+    if (!Array.isArray(detail) || !detail.length) return null
+    const first = detail[0]
+    if (!first || typeof first !== 'object' || typeof (first as { msg?: unknown }).msg !== 'string') return null
+    const location = (first as { loc?: unknown }).loc
+    const path = Array.isArray(location) ? location.map(String).join('.') : ''
+    const message = (first as { msg: string }).msg
+    return path ? `${path}: ${message}` : message
   } catch {
     return null
   }

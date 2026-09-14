@@ -14,7 +14,7 @@ import {
   useOperationFilters,
   useQuerySync,
 } from '@/features/operations/useOperationsView'
-import { asNumber, formatMoney, formatPercent, formatRatio, pnlClass } from '@/shared/format'
+import { asNumber, formatMoney, formatPercent, formatRatio, pnlClass, pnlTone } from '@/shared/format'
 import { LEDGER_TIMEZONE, ledgerDate, shiftLedgerDate } from '@/shared/time'
 
 /** 默认统计窗口：含今天在内的最近 30 个自然日。 */
@@ -57,6 +57,12 @@ const sampleSize = computed(
   () => (summary.value?.win_count ?? 0) + (summary.value?.loss_count ?? 0) + (summary.value?.flat_count ?? 0),
 )
 const maxDailyAbs = computed(() => Math.max(1, ...daily.value.map((item) => Math.abs(asNumber(item.net_pnl)))))
+function dailyBarStyle(value: string | number | null): Record<string, string> {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric) || numeric === 0) return { display: 'none' }
+  const height = `${(Math.abs(numeric) / maxDailyAbs.value) * 50}%`
+  return numeric > 0 ? { height, bottom: '50%' } : { height, top: '50%' }
+}
 const scopeText = computed(() => summary.value?.metric_scope || '完整且已结束的 Campaign / 交易轮次')
 
 /** 本页放进地址栏的内容。写回与「URL 是否被外部改动」共用这一处声明。 */
@@ -215,7 +221,7 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
               <MetricTile
                 label="净 PnL"
                 :value="formatMoney(summary.net_pnl)"
-                :tone="asNumber(summary.net_pnl) >= 0 ? 'positive' : 'negative'"
+                :tone="pnlTone(summary.net_pnl)"
                 hint="已实现净额"
               />
               <MetricTile label="总已实现 PnL" :value="formatMoney(summary.total_realized_pnl)" hint="扣费前已实现" />
@@ -259,10 +265,7 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
                   :title="`${point.date}: ${formatMoney(point.net_pnl)}`"
                 >
                   <div class="bar-track">
-                    <i
-                      :class="pnlClass(point.net_pnl)"
-                      :style="{ height: `${Math.max(3, (Math.abs(asNumber(point.net_pnl)) / maxDailyAbs) * 100)}%` }"
-                    />
+                    <i :class="pnlClass(point.net_pnl)" :style="dailyBarStyle(point.net_pnl)" />
                   </div>
                   <span>{{ point.date.slice(5) }}</span>
                 </div>
@@ -299,7 +302,7 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
               <MetricTile
                 label="单轮期望值"
                 :value="formatMoney(summary.expectancy)"
-                :tone="asNumber(summary.expectancy) >= 0 ? 'positive' : 'negative'"
+                :tone="pnlTone(summary.expectancy)"
                 hint="胜率 × 平均盈利 − 败率 × 平均亏损"
               />
               <MetricTile
@@ -452,17 +455,20 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
   gap: 7px;
 }
 .bar-track {
+  position: relative;
   display: flex;
-  align-items: flex-end;
   width: 100%;
   height: 180px;
   border-bottom: 1px solid var(--line);
-  background: linear-gradient(to top, transparent 49.7%, var(--line) 50%, transparent 50.3%);
+  background: linear-gradient(to bottom, transparent 49.7%, var(--line) 50%, transparent 50.3%);
 }
 .bar-track i {
   display: block;
+  position: absolute;
+  right: 0;
+  left: 0;
   width: 100%;
-  min-height: 3px;
+  min-height: 2px;
   background: var(--muted);
   opacity: 0.84;
 }

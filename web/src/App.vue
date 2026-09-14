@@ -17,7 +17,7 @@ import {
 import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { theme as antdTheme, type MenuProps } from 'ant-design-vue'
 import { useHealthStore } from '@/stores/health'
-import { IS_DARK_THEME } from '@/shared/theme'
+import { DARK_UI_COLORS, IS_DARK_THEME, LIGHT_UI_COLORS } from '@/shared/theme'
 import { STORAGE_KEYS, readStored, writeStored } from '@/shared/storage'
 import { formatLedgerClock } from '@/shared/time'
 
@@ -28,14 +28,16 @@ const route = useRoute()
 const health = useHealthStore()
 const themeMode = ref<'light' | 'dark'>('light')
 const isDarkTheme = computed(() => themeMode.value === 'dark')
+const uiColors = computed(() => (isDarkTheme.value ? DARK_UI_COLORS : LIGHT_UI_COLORS))
 const providerTheme = computed(() => ({
   algorithm: isDarkTheme.value ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
   token: {
-    colorPrimary: '#3b82f6',
-    colorInfo: '#2563eb',
-    colorSuccess: '#059669',
-    colorWarning: '#d97706',
-    colorError: '#dc2626',
+    colorPrimary: uiColors.value.primary,
+    colorInfo: uiColors.value.info,
+    colorSuccess: uiColors.value.success,
+    colorWarning: uiColors.value.warning,
+    colorError: uiColors.value.error,
+    colorTextLightSolid: uiColors.value.solidText,
     borderRadius: 6,
     fontSize: 16,
     fontFamily: 'var(--font-family-sans)',

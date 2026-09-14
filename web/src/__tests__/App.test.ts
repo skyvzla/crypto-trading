@@ -26,6 +26,9 @@ describe('App navigation', () => {
     await wrapper.get('button[aria-label="切换深色模式"]').trigger('click')
     expect(document.documentElement.dataset.theme).toBe('dark')
     expect(localStorage.getItem('trade-ledger-theme')).toBe('dark')
+    expect(wrapper.getComponent({ name: 'AConfigProvider' }).props('theme')).toMatchObject({
+      token: { colorPrimary: '#60a5fa', colorTextLightSolid: '#0b1220' },
+    })
     expect(wrapper.find('button[aria-label="切换浅色模式"]').exists()).toBe(true)
     expect(wrapper.find('.app-sider.ant-layout-sider-dark').exists()).toBe(true)
     expect(wrapper.find('.side-menu.ant-menu-dark').exists()).toBe(true)

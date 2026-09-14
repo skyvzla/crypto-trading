@@ -7,6 +7,7 @@ import BacktestSymbolListView from '@/views/backtests/BacktestSymbolListView.vue
 import BacktestTradeListView from '@/views/backtests/BacktestTradeListView.vue'
 import BacktestTradeReplayView from '@/views/backtests/BacktestTradeReplayView.vue'
 import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
+import { chartPricePrecision, mergeCandleWindow, MAX_LOADED_CANDLES } from '@/features/backtests/tradeChart'
 import { backtestApi } from '@/api/backtests'
 import { ApiError } from '@/api/client'
 import { chartSettingsApi } from '@/api/chartSettings'
@@ -133,6 +134,35 @@ function mountCampaignSnapshotChart() {
 }
 
 describe('回测关键视图', () => {
+  it('续取 K 线时限制缓冲上限并保留请求方向的新边界', () => {
+    const current = Array.from({ length: MAX_LOADED_CANDLES }, (_, index) => ({
+      time: index + 1_000,
+      open: 1,
+      high: 1,
+      low: 1,
+      close: 1,
+      volume: 1,
+    }))
+    const before = mergeCandleWindow(current, [{ ...current[0], time: 999 }], 'before')
+    const after = mergeCandleWindow(current, [{ ...current.at(-1)!, time: 21_001 }], 'after')
+    expect(before).toHaveLength(MAX_LOADED_CANDLES)
+    expect(before[0].time).toBe(999)
+    expect(after).toHaveLength(MAX_LOADED_CANDLES)
+    expect(after.at(-1)?.time).toBe(21_001)
+  })
+
+  it('计算超大 K 线集合的价格精度时不展开函数参数', () => {
+    const candles = Array.from({ length: 40_000 }, (_, index) => ({
+      time: index,
+      open: 1.000001,
+      high: 1.000001,
+      low: 0.999999,
+      close: 1.000001,
+      volume: 1,
+    }))
+    expect(chartPricePrecision(candles)).toBe(6)
+  })
+
   it('图表续页以已加载K线边界为中心扩展窗口', async () => {
     const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     settings.default_interval = '5m'
@@ -627,6 +657,26 @@ describe('回测关键视图', () => {
     expect(wrapper.text()).toContain('AKEUSDT')
   })
 
+  it('外部路由恢复交易对筛选时保留目标页码', async () => {
+    vi.mocked(backtestApi.symbols).mockImplementation(async (_researchId, limit, offset, filter) => ({
+      items: [],
+      total: 100,
+      limit,
+      offset,
+      filter,
+    }))
+    await atRoute('/backtests/r-1/symbols?symbol_filter=OLD&symbol_page=3')
+    const wrapper = mount(BacktestSymbolListView)
+    await flushPromises()
+
+    await router.push('/backtests/r-1/symbols?symbol_filter=NEW&symbol_page=2')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toMatchObject({ symbol_filter: 'NEW', symbol_page: '2' })
+    expect((wrapper.get('input').element as HTMLInputElement).value).toBe('NEW')
+    expect(backtestApi.symbols).toHaveBeenLastCalledWith('r-1', 25, 25, 'NEW', 'net_pnl', 'desc')
+  })
+
   it('交易明细从 URL 恢复筛选并提供主要字段排序', async () => {
     vi.mocked(backtestApi.trades).mockResolvedValue({
       items: [
@@ -668,6 +718,30 @@ describe('回测关键视图', () => {
     expect(wrapper.findAll('.ant-table-column-sorters').length).toBeGreaterThanOrEqual(10)
     expect(wrapper.text()).toContain('入场成交笔数')
     expect(wrapper.text()).toContain('2')
+  })
+
+  it('外部路由恢复交易筛选时保留目标页码', async () => {
+    vi.mocked(backtestApi.trades).mockImplementation(async (_researchId, _symbol, limit, offset) => ({
+      items: [],
+      total: 100,
+      limit,
+      offset,
+    }))
+    await atRoute('/backtests/r-1/symbols/AKEUSDT/trades?result=win&trade_page=3')
+    mount(BacktestTradeListView)
+    await flushPromises()
+
+    await router.push('/backtests/r-1/symbols/AKEUSDT/trades?result=loss&trade_page=2')
+    await flushPromises()
+
+    expect(router.currentRoute.value.query).toMatchObject({ result: 'loss', trade_page: '2' })
+    expect(backtestApi.trades).toHaveBeenLastCalledWith(
+      'r-1',
+      'AKEUSDT',
+      25,
+      25,
+      expect.objectContaining({ winner: false }),
+    )
   })
 
   it('收益曲线默认以500U资金池、500U储备和50%盈利复投回放', async () => {
@@ -836,6 +910,7 @@ describe('回测关键视图', () => {
           id: 1,
           time: 1_750_000_000_000,
           type: 'entry_plan_created',
+          symbol: 'AKEUSDT',
           title: 'entry_plan_created',
           description: null,
           price: null,
@@ -950,6 +1025,7 @@ describe('回测关键视图', () => {
         {
           id: 1,
           type: 'signal_triggered',
+          symbol: 'AKEUSDT',
           title: 'signal_triggered',
           time: 1_750_000_000_000,
           price: 1.1,

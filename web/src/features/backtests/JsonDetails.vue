@@ -15,6 +15,9 @@ const fieldGroups = computed<StrategyGroup[]>(() => {
   const rawFields: StrategyField[] = Object.keys(props.value ?? {}).map((key) => ({ key, label: key }))
   return rawFields.length ? [{ key: 'raw', label: '原始参数', fields: rawFields }] : []
 })
+const visibleFields = computed(
+  () => new Map(fieldGroups.value.map((group) => [group.key, group.fields.filter((item) => item.visible !== false)])),
+)
 </script>
 
 <template>
@@ -24,7 +27,7 @@ const fieldGroups = computed<StrategyGroup[]>(() => {
       <h3>{{ group.label || group.key }}</h3>
       <a-descriptions :column="3" layout="vertical" bordered>
         <a-descriptions-item
-          v-for="field in group.fields.filter((item) => item.visible !== false)"
+          v-for="field in visibleFields.get(group.key) || []"
           :key="field.key"
           :label="field.label || field.key"
         >

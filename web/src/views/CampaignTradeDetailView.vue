@@ -37,6 +37,14 @@ const sortedFills = computed(() =>
     (left, right) => (timestampMs(left.exchange_time) ?? 0) - (timestampMs(right.exchange_time) ?? 0),
   ),
 )
+const timelineEvents = computed(() =>
+  [...events.value]
+    .sort((left, right) => left.event_time - right.event_time)
+    .map((event) => ({
+      event,
+      detailsJson: Object.keys(event.details).length ? JSON.stringify(event.details, null, 2) : null,
+    })),
+)
 
 const campaignChartTrade = computed<TradeChartData | null>(() => {
   const [firstFill] = sortedFills.value
@@ -310,14 +318,14 @@ watch(
       <section class="detail-section campaign-events">
         <h3>策略事件时间线</h3>
         <a-alert v-if="eventError" type="warning" show-icon :message="eventError" class="section-alert" />
-        <a-timeline v-else-if="events.length">
-          <a-timeline-item v-for="event in [...events].sort((a, b) => a.event_time - b.event_time)" :key="event.id">
+        <a-timeline v-else-if="timelineEvents.length">
+          <a-timeline-item v-for="item in timelineEvents" :key="item.event.id">
             <div class="event-title">
-              <strong>{{ event.event_type }}</strong
-              ><time>{{ formatDateTime(event.event_time) }}</time>
+              <strong>{{ item.event.event_type }}</strong
+              ><time>{{ formatDateTime(item.event.event_time) }}</time>
             </div>
-            <p>{{ event.symbol }} · {{ event.event_key }}</p>
-            <pre v-if="Object.keys(event.details).length">{{ JSON.stringify(event.details, null, 2) }}</pre>
+            <p>{{ item.event.symbol }} · {{ item.event.event_key }}</p>
+            <pre v-if="item.detailsJson">{{ item.detailsJson }}</pre>
           </a-timeline-item>
         </a-timeline>
         <div v-else class="timeline-empty"><CircleDotDashed :size="16" /> 当前 Campaign 没有可查询的策略审计事件</div>

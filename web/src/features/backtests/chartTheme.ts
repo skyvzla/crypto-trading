@@ -55,7 +55,24 @@ export interface ChartTheme {
   indicators: IndicatorPalette
 }
 
-const SHARED_INDICATORS: IndicatorPalette = {
+const LIGHT_INDICATORS: IndicatorPalette = {
+  ema9: '#b8860b',
+  ema21: '#1d6fb8',
+  volume: '#2ebd85',
+  volumeLabel: '#2f9d72',
+  volumeUp: '#2ebd8566',
+  volumeDown: '#f0525266',
+  macdDif: '#1d6fb8',
+  macdDea: '#b8860b',
+  macdHistogram: '#2ebd85',
+  macdHistogramUp: '#2ebd8566',
+  macdHistogramDown: '#f0525266',
+  kdjK: '#1d6fb8',
+  kdjD: '#b8860b',
+  kdjJ: '#7c3aed',
+}
+
+const DARK_INDICATORS: IndicatorPalette = {
   ema9: '#f5c451',
   ema21: '#66b3ff',
   volume: '#2ebd85',
@@ -95,7 +112,7 @@ const LIGHT_THEME: ChartTheme = {
   areaLine: '#16a34a',
   areaTop: 'rgba(22, 163, 74, .28)',
   areaBottom: 'rgba(22, 163, 74, .02)',
-  indicators: SHARED_INDICATORS,
+  indicators: LIGHT_INDICATORS,
 }
 
 const DARK_THEME: ChartTheme = {
@@ -114,6 +131,7 @@ const DARK_THEME: ChartTheme = {
   invalid: '#f87171',
   up: '#34d399',
   down: '#fb7185',
+  indicators: DARK_INDICATORS,
 }
 
 export function getChartTheme(dark: boolean): ChartTheme {

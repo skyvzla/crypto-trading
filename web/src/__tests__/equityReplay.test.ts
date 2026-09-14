@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { replayEquity } from '@/features/backtests/equityReplay'
+import { deduplicateEquityPoints, replayEquity } from '@/features/backtests/equityReplay'
 import type { BacktestEquityTrade } from '@/api/types'
 
 function trade(overrides: Partial<BacktestEquityTrade>): BacktestEquityTrade {
@@ -18,6 +18,18 @@ function trade(overrides: Partial<BacktestEquityTrade>): BacktestEquityTrade {
 }
 
 describe('账户收益回放', () => {
+  it('把同一秒内的多个结算点收敛为最后一个点并保持时间升序', () => {
+    expect(
+      deduplicateEquityPoints([
+        { time: 2_000, value: 10 },
+        { time: 1_000, value: 9 },
+        { time: 2_500, value: 11 },
+      ]),
+    ).toEqual([
+      { time: 1_000, value: 9 },
+      { time: 2_500, value: 11 },
+    ])
+  })
   it('盈利按比例复投，亏损只从交易资金池扣减，并扣除双边费用', () => {
     const result = replayEquity(
       [
@@ -90,5 +102,21 @@ describe('账户收益回放', () => {
     expect(result.rows.map((row) => row.status)).toEqual(['executed', 'skipped', 'executed'])
     expect(result.rows[1].skipReason).toBe('overlap')
     expect(result.finalBalance).toBeCloseTo(1_210)
+  })
+
+  it('初始仓位在最低资金池以下时仍从首笔成交开始回放', () => {
+    const result = replayEquity([trade({ id: 'initial-zero' })], {
+      initialBalance: 1_000,
+      initialPosition: 0,
+      reinvestRatio: 0.5,
+      minimumBalance: 0,
+      feeRate: 0,
+      slippageRate: 0,
+    })
+
+    expect(result.liquidated).toBe(false)
+    expect(result.liquidationTime).toBeNull()
+    expect(result.executedCount).toBe(1)
+    expect(result.rows[0]).toMatchObject({ status: 'executed', positionAmount: 0 })
   })
 })

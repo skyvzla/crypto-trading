@@ -44,6 +44,12 @@ describe('图表设置 API', () => {
     expect(settings.sub.atr.line).toEqual({ style: 'solid', width: 1 })
   })
 
+  it.each([{}, { main: {} }])('缺少设置分组时仍回退到完整默认文档: %j', async (response) => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse(response))
+
+    await expect(chartSettingsApi.get()).resolves.toEqual(DEFAULT_CHART_INDICATOR_SETTINGS)
+  })
+
   it('整体更新全局指标设置', async () => {
     const settings = cloneChartIndicatorSettings(DEFAULT_CHART_INDICATOR_SETTINGS)
     settings.default_interval = '15m'

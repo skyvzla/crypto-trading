@@ -24,7 +24,7 @@ import {
   useOperationFilters,
   useQuerySync,
 } from '@/features/operations/useOperationsView'
-import { asNumber, formatDateTime, formatMoney, formatPercent, pnlClass } from '@/shared/format'
+import { asNumber, formatDateTime, formatMoney, formatPercent, pnlClass, pnlTone } from '@/shared/format'
 import { LEDGER_TIMEZONE, ledgerDate, ledgerMonthRange } from '@/shared/time'
 
 const route = useRoute()
@@ -52,10 +52,15 @@ const closedPnlScope = computed(() => {
   const accountId = filters.value.account_id.trim()
   return accountId ? `账户 ${accountId}` : '全部账户'
 })
-const monthNetAvailable = computed(() => daily.value.every((item) => item.net_pnl != null))
+const monthNetAvailable = computed(() => daily.value.length > 0 && daily.value.every((item) => item.net_pnl != null))
 const monthNet = computed(() =>
   monthNetAvailable.value ? daily.value.reduce((sum, item) => sum + asNumber(item.net_pnl), 0) : null,
 )
+const monthNetHint = computed(() => {
+  if (unavailableSources.value.includes('当月已实现收益')) return '当月已实现收益读取失败'
+  if (!daily.value.length) return '本月没有已实现收益记录'
+  return monthNet.value === null ? '存在无法统一计价的日期' : `${winningDays.value} 盈利日 / ${losingDays.value} 亏损日`
+})
 const winningDays = computed(() => daily.value.filter((item) => asNumber(item.net_pnl) > 0).length)
 const losingDays = computed(() => daily.value.filter((item) => asNumber(item.net_pnl) < 0).length)
 const runtimeModes = computed(() => [...new Set(runtimes.value.map((item) => item.mode))])
@@ -248,27 +253,21 @@ function openRecentTrade(trade: LedgerTrade) {
           label="今日闭合净 PnL"
           :value="formatMoney(todayPnl?.net_pnl)"
           :hint="`Campaign closed_at 上海日界线 · ${closedPnlScope}`"
-          :tone="todayPnl?.net_pnl == null ? 'neutral' : asNumber(todayPnl.net_pnl) >= 0 ? 'positive' : 'negative'"
+          :tone="pnlTone(todayPnl?.net_pnl)"
           :to="{ path: '/calendar', query }"
         />
         <MetricTile
           label="当前浮动 PnL"
           :value="filters.account_id.trim() ? formatMoney(pnl?.total_unrealized_pnl) : '—'"
           :hint="filters.account_id.trim() ? '来自当前筛选账户' : '选择账户后查看当前浮动收益'"
-          :tone="
-            pnl?.total_unrealized_pnl == null
-              ? 'neutral'
-              : asNumber(pnl.total_unrealized_pnl) >= 0
-                ? 'positive'
-                : 'negative'
-          "
+          :tone="pnlTone(filters.account_id.trim() ? pnl?.total_unrealized_pnl : null)"
           :to="{ path: '/positions', query: { ...query, tab: 'positions' } }"
         />
         <MetricTile
           label="当月闭合净 PnL"
           :value="formatMoney(monthNet)"
-          :hint="monthNet == null ? '存在无法统一计价的日期' : `${winningDays} 盈利日 / ${losingDays} 亏损日`"
-          :tone="monthNet == null ? 'warning' : monthNet >= 0 ? 'positive' : 'negative'"
+          :hint="monthNetHint"
+          :tone="pnlTone(monthNet)"
           :to="{ path: filters.account_id.trim() ? '/performance' : '/calendar', query }"
         />
         <MetricTile

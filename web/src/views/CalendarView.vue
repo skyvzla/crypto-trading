@@ -15,7 +15,7 @@ import {
   useOperationFilters,
   useQuerySync,
 } from '@/features/operations/useOperationsView'
-import { asNumber, formatMoney } from '@/shared/format'
+import { asNumber, formatMoney, pnlTone } from '@/shared/format'
 import { LEDGER_TIMEZONE, ledgerMonth, ledgerMonthRange, shiftLedgerMonth } from '@/shared/time'
 
 const route = useRoute()
@@ -37,10 +37,14 @@ const monthRange = computed(() => ledgerMonthRange(year.value, month.value))
 const startDate = computed(() => monthRange.value.startDate)
 const endDate = computed(() => monthRange.value.endDate)
 const monthKey = computed(() => `${year.value}-${String(month.value).padStart(2, '0')}`)
-const monthNetAvailable = computed(() => rows.value.every((item) => item.net_pnl != null))
+const monthNetAvailable = computed(() => rows.value.length > 0 && rows.value.every((item) => item.net_pnl != null))
 const monthNet = computed(() =>
   monthNetAvailable.value ? rows.value.reduce((sum, item) => sum + asNumber(item.net_pnl), 0) : null,
 )
+const monthNetHint = computed(() => {
+  if (!rows.value.length) return '本月没有已实现收益记录'
+  return monthNet.value === null ? '存在无法统一计价的日期' : '按闭合 Campaign 日净额求和'
+})
 const wins = computed(() => rows.value.filter((item) => asNumber(item.net_pnl) > 0).length)
 const losses = computed(() => rows.value.filter((item) => asNumber(item.net_pnl) < 0).length)
 const campaignCount = computed(() => rows.value.reduce((sum, item) => sum + item.campaign_count, 0))
@@ -135,8 +139,8 @@ function openDay(date: string) {
       <MetricTile
         label="本月累计净 PnL"
         :value="formatMoney(monthNet)"
-        :tone="monthNet == null ? 'warning' : monthNet >= 0 ? 'positive' : 'negative'"
-        :hint="monthNet == null ? '存在无法统一计价的日期' : '按闭合 Campaign 日净额求和'"
+        :tone="pnlTone(monthNet)"
+        :hint="monthNetHint"
       />
       <MetricTile label="盈利日" :value="String(wins)" tone="positive" hint="净 PnL > 0" />
       <MetricTile label="亏损日" :value="String(losses)" tone="negative" hint="净 PnL < 0" />

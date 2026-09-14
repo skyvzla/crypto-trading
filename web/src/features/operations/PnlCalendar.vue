@@ -50,9 +50,10 @@ const maxAbsolutePnl = computed(() =>
   Math.max(1, ...props.rows.filter((item) => item.net_pnl != null).map((item) => Math.abs(asNumber(item.net_pnl)))),
 )
 
-function intensity(row?: DailyPnlRow): number {
-  if (!row || row.net_pnl == null) return 0
-  return Math.max(0.12, Math.min(0.58, (Math.abs(asNumber(row.net_pnl)) / maxAbsolutePnl.value) * 0.58))
+function intensity(row?: DailyPnlRow): string {
+  if (!row || row.net_pnl == null) return '0%'
+  const ratio = Math.max(0.06, Math.min(0.18, (Math.abs(asNumber(row.net_pnl)) / maxAbsolutePnl.value) * 0.18))
+  return `${ratio * 100}%`
 }
 </script>
 
@@ -66,7 +67,7 @@ function intensity(row?: DailyPnlRow): number {
         type="button"
         class="calendar-cell"
         :class="cell.row ? (cell.row.net_pnl == null ? 'net-unavailable' : pnlClass(cell.row.net_pnl)) : 'no-data'"
-        :style="cell.row?.net_pnl != null ? { '--cell-alpha': intensity(cell.row) } : undefined"
+        :style="cell.row?.net_pnl != null ? { '--cell-mix': intensity(cell.row) } : undefined"
         :aria-label="`${cell.date}${cell.row ? (cell.row.net_pnl == null ? ' 净收益不可用' : ` 净收益 ${formatMoney(cell.row.net_pnl)}`) : ' 无数据'}`"
         @click="emit('day', cell.date)"
       >

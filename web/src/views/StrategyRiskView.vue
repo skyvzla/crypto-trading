@@ -272,7 +272,7 @@ function reasons(item: UniversePreviewItem): string {
       description="策略选择器只使用账本运行状态中的真实 strategy_id，不提供容易输错的自由文本输入。"
     />
 
-    <DataState v-if="strategyId" :loading="loading" :error="error" @retry="reload">
+    <DataState v-if="strategyId || loading" :loading="loading" :error="error" @retry="reload">
       <section v-if="preview" class="metric-grid preview-metrics">
         <MetricTile
           label="候选交易对"

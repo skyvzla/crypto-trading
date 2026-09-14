@@ -100,6 +100,24 @@ describe('api client', () => {
     await expect(api.get('/health')).rejects.toMatchObject({ message: 'HTTP 502' })
   })
 
+  it('renders FastAPI validation detail arrays with their parameter path', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      jsonResponse(
+        {
+          detail: [
+            { loc: ['query', 'limit'], msg: 'Input should be less than or equal to 500', type: 'less_than_equal' },
+          ],
+        },
+        { ok: false, status: 422 },
+      ),
+    )
+
+    await expect(api.get('/backtest-researches', { limit: 5000 })).rejects.toMatchObject({
+      status: 422,
+      message: 'query.limit: Input should be less than or equal to 500',
+    })
+  })
+
   it('falls back to HTTP status when an error response has no body at all', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(emptyResponse(500))
 

@@ -226,7 +226,8 @@ async function assertChartIsVisibleAndSettled(page: Page, minimumLabels = 1) {
   await expect.poll(async () => chart.locator('.indicator-hover-label').count()).toBeGreaterThanOrEqual(minimumLabels)
 
   const canvasState = await chart.locator('canvas').evaluateAll((canvases) =>
-    canvases.map((canvas) => {
+    canvases.map((element) => {
+      const canvas = element as HTMLCanvasElement
       const context = canvas.getContext('2d')
       if (!context || canvas.width === 0 || canvas.height === 0) return false
       const sampleWidth = Math.min(canvas.width, 320)
@@ -270,7 +271,8 @@ async function assertChartIsVisibleAndSettled(page: Page, minimumLabels = 1) {
 
 async function bollingerFillPixelCount(page: Page) {
   return page.locator('.candlestick-host canvas').evaluateAll((canvases) =>
-    canvases.reduce((total, canvas) => {
+    canvases.reduce((total, element) => {
+      const canvas = element as HTMLCanvasElement
       const context = canvas.getContext('2d')
       if (!context) return total
       const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data

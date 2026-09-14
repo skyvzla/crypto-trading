@@ -122,7 +122,7 @@ export interface NotificationOverview {
   events: number
   recent_events: number
   unrouted_events: number
-  deliveries: Record<NotificationDeliveryStatus, number>
+  deliveries: Partial<Record<NotificationDeliveryStatus, number>>
 }
 
 export interface NotificationConnectorInput {
@@ -364,8 +364,8 @@ export interface PerformanceSummary {
   account_id: string
   strategy_id: string | null
   symbol: string | null
-  start_date: string | null
-  end_date: string | null
+  start_date: string
+  end_date: string
   timezone: string
   total_trades: number
   total_fills: number
@@ -845,6 +845,7 @@ export interface BacktestEvent {
   id: number
   time: string | number
   type: string
+  symbol: string
   title?: string | null
   description?: string | null
   price?: number | null

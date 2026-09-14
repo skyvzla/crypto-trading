@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, h } from 'vue'
+import { computed, h, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { BarChart3, CandlestickChart, ChartSpline } from 'lucide-vue-next'
 import { Button, Space, Tag, Tooltip, type TableColumnsType } from 'ant-design-vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import type { BacktestResearch } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
@@ -11,11 +11,21 @@ import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import { formatDateTime, formatNumber, formatPercent, pnlClass } from '@/shared/format'
 import { useBacktestPagination } from '@/features/backtests/useBacktestPagination'
 
-const { page, pageSize, preservedQuery } = useBacktestPagination(25, 'research')
+const route = useRoute()
+const router = useRouter()
+const { page, pageSize, preservedQuery, paginationQuery, restore } = useBacktestPagination(25, 'research', 200)
 const query = useQuery({
   queryKey: computed(() => ['backtest-researches', page.value, pageSize.value]),
   queryFn: () => backtestApi.researches(pageSize.value, (page.value - 1) * pageSize.value),
 })
+
+watch([page, pageSize], () => {
+  void router.replace({ query: { ...route.query, ...paginationQuery.value } })
+})
+watch(
+  () => [route.query.research_page, route.query.research_page_size],
+  () => restore(),
+)
 
 const columns: TableColumnsType<BacktestResearch> = [
   {

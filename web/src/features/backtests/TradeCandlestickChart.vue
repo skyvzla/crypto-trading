@@ -34,7 +34,7 @@ import { getChartTheme, type ChartTheme } from './chartTheme'
 import { cloneChartIndicatorSettings, DEFAULT_CHART_INDICATOR_SETTINGS } from './chartIndicatorSettings'
 import { BollingerBandPrimitive, colorWithOpacity } from './bollingerBandPrimitive'
 import { atr, bollinger, emaOfClose, kdj, maOfClose, macd, rsiOfClose, volumeMa } from './indicators'
-import type { TradeChartData, TradeChartFillTimeSemantics } from './tradeChart'
+import { chartPricePrecision, type TradeChartData, type TradeChartFillTimeSemantics } from './tradeChart'
 
 const props = defineProps<{
   candles: BacktestCandle[]
@@ -211,19 +211,6 @@ function normalizeCandles(candles: BacktestCandle[]): ChartCandle[] {
       time: (bar.time > 10_000_000_000 ? Math.floor(bar.time / 1000) : bar.time) as UTCTimestamp,
     }))
     .sort((a, b) => Number(a.time) - Number(b.time))
-}
-
-/** 价格轴精度取行情实际小数位，低价币才不会被压成 0.00。 */
-function chartPricePrecision(data: ChartCandle[]): number {
-  const decimalPlaces = (value: number) => {
-    const fixed = Math.abs(value).toFixed(12).replace(/0+$/, '')
-    const separator = fixed.indexOf('.')
-    return separator === -1 ? 0 : fixed.length - separator - 1
-  }
-  return Math.min(
-    12,
-    Math.max(2, ...data.flatMap((bar) => [bar.open, bar.high, bar.low, bar.close].map(decimalPlaces))),
-  )
 }
 
 function lineData(data: ChartCandle[], values: Array<number | null>) {
@@ -1500,7 +1487,6 @@ async function updateChartData() {
 watch(
   () => props.candles,
   () => void requestDataUpdate(),
-  { deep: true },
 )
 
 // 换了一笔交易或一套 schema 标注 = 换了内容，重新以事件为中心渲染。

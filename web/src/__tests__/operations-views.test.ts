@@ -57,6 +57,10 @@ describe('operations views', () => {
 
     expect(wrapper.text()).not.toContain('填写账户后显示收益')
     expect(wrapper.text()).toContain('本月没有已实现收益记录')
+    const monthlyPnl = wrapper.findAll('.metric-tile').find((item) => item.text().includes('当月闭合净 PnL'))
+    expect(monthlyPnl?.classes()).toContain('metric-warning')
+    expect(monthlyPnl?.text()).toContain('本月没有已实现收益记录')
+    expect(monthlyPnl?.text()).not.toContain('存在无法统一计价的日期')
     expect(dailyPnl.mock.calls[0][0]).not.toHaveProperty('account_id')
     expect(operationsApi.pnl).not.toHaveBeenCalled()
   })
@@ -65,6 +69,83 @@ describe('operations views', () => {
     const wrapper = mount(PerformanceView)
     expect(wrapper.text()).toContain('请选择账户 ID')
     expect(wrapper.text()).toContain('绩效分析按账户归属')
+  })
+
+  it('日收益柱围绕零轴分别显示盈利和亏损方向', async () => {
+    await router.push('/performance?account_id=acct')
+    vi.spyOn(operationsApi, 'performance').mockResolvedValue({
+      account_id: 'acct',
+      strategy_id: null,
+      symbol: null,
+      start_date: '2026-08-01',
+      end_date: '2026-08-30',
+      timezone: 'Asia/Shanghai',
+      total_trades: 2,
+      total_fills: 4,
+      win_count: 1,
+      loss_count: 1,
+      flat_count: 0,
+      win_rate: 0.5,
+      avg_win: '250',
+      avg_loss: '500',
+      payoff_ratio: '0.5',
+      expectancy: '-125',
+      profit_factor: '0.5',
+      total_commission: '0',
+      total_realized_pnl: '-250',
+      net_pnl: '-250',
+      max_drawdown: '-500',
+      candidate_campaigns: 2,
+      excluded_campaigns: 0,
+      unattributed_fills: 0,
+      metric_scope: 'closed campaigns',
+    })
+    vi.spyOn(operationsApi, 'dailyPnl').mockResolvedValue([
+      {
+        date: '2026-08-01',
+        account_id: 'acct',
+        strategy_id: null,
+        symbol: null,
+        timezone: 'Asia/Shanghai',
+        campaign_count: 1,
+        fill_count: 2,
+        trade_count: 2,
+        realized_trade_count: 1,
+        gross_realized_pnl: '250',
+        total_commission: '0',
+        commission_asset: 'USDT',
+        net_pnl: '250',
+        funding_fee: null,
+        net_pnl_scope: 'closed campaigns',
+      },
+      {
+        date: '2026-08-02',
+        account_id: 'acct',
+        strategy_id: null,
+        symbol: null,
+        timezone: 'Asia/Shanghai',
+        campaign_count: 1,
+        fill_count: 2,
+        trade_count: 2,
+        realized_trade_count: 1,
+        gross_realized_pnl: '-500',
+        total_commission: '0',
+        commission_asset: 'USDT',
+        net_pnl: '-500',
+        funding_fee: null,
+        net_pnl_scope: 'closed campaigns',
+      },
+    ])
+
+    const wrapper = mount(PerformanceView)
+    await flushPromises()
+
+    const bars = wrapper.findAll('.bar-track i')
+    expect(bars).toHaveLength(2)
+    expect(bars[0].attributes('style')).toContain('bottom: 50%')
+    expect(bars[1].attributes('style')).toContain('top: 50%')
+    expect(bars[0].attributes('style')).toContain('height: 25%')
+    expect(bars[1].attributes('style')).toContain('height: 50%')
   })
 
   it('keeps current floating PnL and selected daily PnL scoped to the chosen account', async () => {
@@ -616,7 +697,18 @@ describe('operations views', () => {
     expect(wrapper.text()).toContain('闭合 Campaign')
     expect(wrapper.text()).toContain('2 Campaign · 5 fills')
     expect(wrapper.text()).toContain('closed_at 上海自然日')
+    expect(wrapper.find('.calendar-cell.value-positive').attributes('style')).toContain('--cell-mix: 18%')
     expect(dailyPnl.mock.calls[0][0]).not.toHaveProperty('account_id')
+  })
+
+  it('策略风控在策略列表加载期间显示加载态', async () => {
+    vi.spyOn(operationsApi, 'runtimeStatus').mockImplementation(() => new Promise(() => {}))
+
+    const wrapper = mount(StrategyRiskView)
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.text()).toContain('正在读取账本数据')
+    wrapper.unmount()
   })
 
   it('loads unclassified symbols from the backend and marks a failed sync', async () => {

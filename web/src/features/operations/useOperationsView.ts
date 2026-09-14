@@ -2,6 +2,9 @@ import { computed, onActivated, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { LocationQuery } from 'vue-router'
 import { formatLedgerClock } from '@/shared/time'
+import { useUrlPagination, type UrlPaginationOptions } from '@/shared/pagination'
+
+export { positiveInt } from '@/shared/pagination'
 
 export interface OperationFilters {
   account_id: string
@@ -122,39 +125,13 @@ export function useLedgerLoader(load: (context: LedgerLoaderContext) => Promise<
   return { loading, error, refreshedAt, reload: run }
 }
 
-/** 把不可信的 URL 数值收敛成正整数。 */
-export function positiveInt(value: unknown, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
-  const parsed = Number(value)
-  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, max) : fallback
-}
-
-export interface PageParamsOptions {
-  defaultSize: number
-  maxSize?: number
-}
+export type PageParamsOptions = UrlPaginationOptions
 
 /**
  * 分页状态。页码与每页条数都从 URL 读，越界值一律收敛而不是原样透传给后端。
  */
 export function usePageParams({ defaultSize, maxSize = 1000 }: PageParamsOptions) {
-  const route = useRoute()
-  const page = ref(positiveInt(route.query.page, 1))
-  const pageSize = ref(positiveInt(route.query.page_size, defaultSize, maxSize))
-  const offset = computed(() => (page.value - 1) * pageSize.value)
-
-  function restore() {
-    page.value = positiveInt(route.query.page, 1)
-    pageSize.value = positiveInt(route.query.page_size, defaultSize, maxSize)
-  }
-
-  /** 表格分页变化：换每页条数时回到第一页，否则跳到目标页。 */
-  function apply(next: { current?: number; pageSize?: number }) {
-    const nextSize = positiveInt(next.pageSize, pageSize.value, maxSize)
-    page.value = nextSize === pageSize.value ? positiveInt(next.current, page.value) : 1
-    pageSize.value = nextSize
-  }
-
-  return { page, pageSize, offset, restore, apply }
+  return useUrlPagination({ defaultSize, maxSize })
 }
 
 /** 写回地址栏的归一化：空串与 undefined 都不进 URL。 */

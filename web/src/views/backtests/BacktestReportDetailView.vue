@@ -15,7 +15,7 @@ const route = useRoute()
 const router = useRouter()
 const researchId = computed(() => (typeof route.params.researchId === 'string' ? route.params.researchId : ''))
 const reportType = computed(() => (typeof route.params.reportType === 'string' ? route.params.reportType : ''))
-const { page, pageSize } = useBacktestPagination(50, 'report')
+const { page, pageSize, paginationQuery, restore } = useBacktestPagination(50, 'report', 500)
 const backTo = computed(() => ({
   path: `/backtests/${encodeURIComponent(researchId.value)}/reports`,
   query: route.query,
@@ -26,15 +26,29 @@ const sortOrder = ref(route.query.report_sort_order === 'asc' ? 'ascend' : 'desc
 watch(reportType, () => {
   page.value = 1
 })
-watch([sortBy, sortOrder], ([nextSort, nextOrder]) => {
+watch([page, pageSize, sortBy, sortOrder], ([, , nextSort, nextOrder]) => {
   void router.replace({
     query: {
       ...route.query,
+      ...paginationQuery.value,
       report_sort_by: nextSort || undefined,
       report_sort_order: nextOrder === 'ascend' ? 'asc' : 'desc',
     },
   })
 })
+watch(
+  () => [
+    route.query.report_page,
+    route.query.report_page_size,
+    route.query.report_sort_by,
+    route.query.report_sort_order,
+  ],
+  ([, , nextSort, nextOrder]) => {
+    restore()
+    sortBy.value = typeof nextSort === 'string' ? nextSort : ''
+    sortOrder.value = nextOrder === 'asc' ? 'ascend' : 'descend'
+  },
+)
 const query = useQuery({
   queryKey: computed(() => [
     'backtest-report',
