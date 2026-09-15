@@ -7,7 +7,7 @@ import { RouterLink, useRoute } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import EquityCurveChart from '@/features/backtests/EquityCurveChart.vue'
-import QueryPanel from '@/features/backtests/QueryPanel.vue'
+import DataState from '@/features/operations/DataState.vue'
 import { replayEquity, type EquityReplayRow } from '@/features/backtests/equityReplay'
 import { formatDateTime, formatNumber, formatPercent, pnlClass } from '@/shared/format'
 
@@ -202,7 +202,8 @@ const columns: TableColumnsType<EquityReplayRow> = [
     :back-to="{ path: '/backtests' }"
     :crumbs="[{ label: '回测复盘', to: '/backtests' }, { label: '收益曲线' }]"
   >
-    <QueryPanel
+    <DataState
+      variant="inline"
       :pending="parameterSetsQuery.isPending.value"
       :error="parameterSetsQuery.error.value"
       :empty="parameterSetsQuery.data.value?.items.length === 0"
@@ -250,7 +251,8 @@ const columns: TableColumnsType<EquityReplayRow> = [
         </div>
       </section>
 
-      <QueryPanel
+      <DataState
+        variant="inline"
         :pending="tradesQuery.isPending.value"
         :error="tradesQuery.error.value"
         :empty="tradesQuery.data.value?.items.length === 0"
@@ -310,7 +312,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
             :pagination="{ pageSize: 50, showSizeChanger: true, pageSizeOptions: ['25', '50', '100'] }"
           />
         </section>
-      </QueryPanel>
-    </QueryPanel>
+      </DataState>
+    </DataState>
   </BacktestPage>
 </template>

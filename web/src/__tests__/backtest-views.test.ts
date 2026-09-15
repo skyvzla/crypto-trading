@@ -7,6 +7,7 @@ import BacktestSymbolListView from '@/views/backtests/BacktestSymbolListView.vue
 import BacktestTradeListView from '@/views/backtests/BacktestTradeListView.vue'
 import BacktestTradeReplayView from '@/views/backtests/BacktestTradeReplayView.vue'
 import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
+import DataState from '@/features/operations/DataState.vue'
 import { chartPricePrecision, mergeCandleWindow, MAX_LOADED_CANDLES } from '@/features/backtests/tradeChart'
 import { backtestApi } from '@/api/backtests'
 import { ApiError } from '@/api/client'
@@ -1187,5 +1188,76 @@ describe('回测关键视图', () => {
     expect(wrapper.find('.fills-table').text()).toContain('Maker')
     expect(wrapper.find('.fills-table').text()).toContain('Taker')
     expect(wrapper.find('.fills-table').text()).toContain('0.001 USDT')
+  })
+})
+
+/**
+ * DataState 是运营页面与回测页面共用的读取状态门面，原回测查询面板已合并进来。
+ * 这里锁定合并后的契约：两种外观、每种外观的默认文案，以及 string / Error / 其他
+ * 负载都能格式化——上游错误类型正在并行改动，回归时先盯这一层。
+ */
+describe('DataState 合并后的读取状态契约', () => {
+  it('inline 变体保留内联错误条样式并读到 Error 负载的 message', () => {
+    const wrapper = mount(DataState, {
+      props: { variant: 'inline', error: new ApiError(503, '行情服务不可用') },
+    })
+
+    expect(wrapper.find('.query-state.error-state').exists()).toBe(true)
+    expect(wrapper.text()).toContain('行情服务不可用')
+    expect(wrapper.text()).not.toContain('请求失败')
+  })
+
+  it('inline 变体同样接受纯字符串错误，并在无法解析时回退默认文案', () => {
+    const asText = mount(DataState, { props: { variant: 'inline', error: '账本读取超时' } })
+    expect(asText.text()).toContain('账本读取超时')
+
+    const unreadable = mount(DataState, { props: { variant: 'inline', error: { code: 500 } } })
+    expect(unreadable.text()).toContain('请求失败')
+  })
+
+  it('错误分支点击后仍然只抛出 retry 事件', async () => {
+    const wrapper = mount(DataState, { props: { variant: 'inline', error: new Error('boom') } })
+
+    await wrapper.get('button').trigger('click')
+    expect(wrapper.emitted('retry')).toHaveLength(1)
+  })
+
+  it('page 变体默认渲染 a-result 错误页与整页文案', () => {
+    const wrapper = mount(DataState, { props: { error: new Error('后端 502') } })
+
+    expect(wrapper.find('.operation-result').exists()).toBe(true)
+    expect(wrapper.text()).toContain('数据读取失败')
+    expect(wrapper.text()).toContain('后端 502')
+    expect(wrapper.text()).toContain('重新读取')
+  })
+
+  it('loading 与 pending 都能驱动加载分支，且各自保留默认加载文案', () => {
+    const page = mount(DataState, { props: { loading: true } })
+    expect(page.find('.operation-state').exists()).toBe(true)
+    expect(page.text()).toContain('正在读取账本数据')
+
+    const inline = mount(DataState, { props: { variant: 'inline', pending: true } })
+    expect(inline.find('.query-state').exists()).toBe(true)
+    expect(inline.text()).toContain('正在加载')
+
+    const customised = mount(DataState, {
+      props: { variant: 'inline', loading: true, loadingText: '正在读取通知配置…' },
+    })
+    expect(customised.text()).toContain('正在读取通知配置…')
+  })
+
+  it('两种外观各自保留原有的空数据默认文案', () => {
+    const page = mount(DataState, { props: { empty: true } })
+    expect(page.find('.operation-empty').exists()).toBe(true)
+    expect(page.text()).toContain('当前筛选条件下没有数据')
+
+    const inline = mount(DataState, { props: { variant: 'inline', empty: true } })
+    expect(inline.find('.query-empty').exists()).toBe(true)
+    expect(inline.text()).toContain('暂无数据')
+  })
+
+  it('emptyText 显式传入时覆盖两种外观的默认文案', () => {
+    const wrapper = mount(DataState, { props: { variant: 'inline', empty: true, emptyText: '本次研究没有产生交易' } })
+    expect(wrapper.text()).toContain('本次研究没有产生交易')
   })
 })

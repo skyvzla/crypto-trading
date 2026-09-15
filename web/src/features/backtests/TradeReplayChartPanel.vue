@@ -25,8 +25,8 @@ import type {
   ChartOverlay,
 } from '@/api/types'
 import ChartIndicatorSettingsModal from '@/features/backtests/ChartIndicatorSettingsModal.vue'
-import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import TradeCandlestickChart from '@/features/backtests/TradeCandlestickChart.vue'
+import DataState from '@/features/operations/DataState.vue'
 import {
   CHART_INDICATORS,
   cloneChartIndicatorSettings,
@@ -600,8 +600,9 @@ watch(
       <a-spin />
       <span>{{ chartLoadingLabel }}</span>
     </div>
-    <QueryPanel
+    <DataState
       v-else
+      variant="inline"
       :error="loadedCandles.length ? null : candleQueryError"
       :empty="loadedCandles.length === 0"
       @retry="candlesQuery.refetch()"
@@ -616,7 +617,7 @@ watch(
         :fill-time-semantics="fillTimeSemantics"
         @request-more="requestMore"
       />
-    </QueryPanel>
+    </DataState>
     <div class="chart-legend">
       <a-tag color="blue">{{ sourceLabel }}</a-tag>
       <span

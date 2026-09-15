@@ -8,8 +8,8 @@ import type { BacktestFill, BacktestOrder } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
 import BacktestEventDetails from './components/BacktestEventDetails.vue'
 import JsonDetails from '@/features/backtests/JsonDetails.vue'
-import QueryPanel from '@/features/backtests/QueryPanel.vue'
 import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vue'
+import DataState from '@/features/operations/DataState.vue'
 import { formatDateTime, formatNumber, formatPercent, pnlClass } from '@/shared/format'
 import { eventDisplayName, resolvePricePrecision } from './components/eventPresentation'
 
@@ -244,7 +244,12 @@ const crumbs = computed(() =>
     :back-to="backTo"
     :crumbs="crumbs"
   >
-    <QueryPanel :pending="tradeQuery.isPending.value" :error="tradeQuery.error.value" @retry="tradeQuery.refetch()">
+    <DataState
+      variant="inline"
+      :pending="tradeQuery.isPending.value"
+      :error="tradeQuery.error.value"
+      @retry="tradeQuery.refetch()"
+    >
       <template v-if="tradeQuery.data.value">
         <div class="trade-summary-strip">
           <div>
@@ -347,7 +352,8 @@ const crumbs = computed(() =>
         <section class="detail-section timeline-section">
           <h3>事件时间线</h3>
           <div class="timeline-panel">
-            <QueryPanel
+            <DataState
+              variant="inline"
               :pending="eventsQuery.isPending.value"
               :error="eventsQuery.error.value"
               :empty="eventsQuery.data.value?.items.length === 0"
@@ -375,7 +381,7 @@ const crumbs = computed(() =>
                   />
                 </a-timeline-item>
               </a-timeline>
-            </QueryPanel>
+            </DataState>
           </div>
         </section>
         <section class="detail-section">
@@ -390,6 +396,6 @@ const crumbs = computed(() =>
           />
         </section>
       </template>
-    </QueryPanel>
+    </DataState>
   </BacktestPage>
 </template>

@@ -6,7 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import type { JsonObject, JsonValue, ReportColumn } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
-import QueryPanel from '@/features/backtests/QueryPanel.vue'
+import DataState from '@/features/operations/DataState.vue'
 import { displayValue } from '@/shared/format'
 import { useBacktestPagination } from '@/features/backtests/useBacktestPagination'
 import { reportLabel } from '@/features/backtests/reportLabels'
@@ -115,7 +115,8 @@ function onTableChange(
     <p v-if="query.data.value?.descriptor.description" class="page-description">
       {{ query.data.value.descriptor.description }}
     </p>
-    <QueryPanel
+    <DataState
+      variant="inline"
       :pending="query.isPending.value"
       :error="query.error.value"
       :empty="query.data.value?.rows.length === 0"
@@ -142,6 +143,6 @@ function onTableChange(
           />
         </div>
       </div>
-    </QueryPanel>
+    </DataState>
   </BacktestPage>
 </template>

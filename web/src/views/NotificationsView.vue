@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Activity, Bell, Settings2, SlidersHorizontal, UsersRound } from 'lucide-vue-next'
 import PageHeader from '@/features/operations/PageHeader.vue'
+import DataState from '@/features/operations/DataState.vue'
 import NotificationActivityPanel from '@/features/notifications/NotificationActivityPanel.vue'
 import NotificationConnectorsPanel from '@/features/notifications/NotificationConnectorsPanel.vue'
 import NotificationDialogs from '@/features/notifications/NotificationDialogs.vue'
@@ -71,10 +72,7 @@ function changeActivityView(key: NotificationViewKey | 'events' | 'deliveries') 
     >
       <template #action><a-button type="link" size="small" @click="workbench.loadAll">重试</a-button></template>
     </a-alert>
-    <div v-if="workbench.loading.value" class="query-state notification-loading">
-      <a-spin size="small" /><span>正在读取通知配置…</span>
-    </div>
-    <template v-else>
+    <DataState variant="inline" :loading="workbench.loading.value" loading-text="正在读取通知配置…">
       <NotificationOverviewPanel
         v-if="workbench.view.value === 'overview'"
         :overview="workbench.overview.value"
@@ -143,7 +141,7 @@ function changeActivityView(key: NotificationViewKey | 'events' | 'deliveries') 
         @event-page="workbench.changeEventPage"
         @delivery-page="workbench.changeDeliveryPage"
       />
-    </template>
+    </DataState>
 
     <NotificationDialogs
       :connector-open="workbench.connectorModalOpen.value"

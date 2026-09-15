@@ -7,7 +7,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import type { BacktestTradeSummary } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
-import QueryPanel from '@/features/backtests/QueryPanel.vue'
+import DataState from '@/features/operations/DataState.vue'
 import { formatDateTime, formatDuration, formatNumber, formatPercent, pnlClass } from '@/shared/format'
 import { useBacktestPagination } from '@/features/backtests/useBacktestPagination'
 
@@ -224,7 +224,8 @@ const columns: TableColumnsType<BacktestTradeSummary> = [
     :back-to="backTo"
     :crumbs="[{ label: '回测复盘', to: rootTo }, { label: '交易对数据', to: backTo }, { label: symbol }]"
   >
-    <QueryPanel
+    <DataState
+      variant="inline"
       :pending="query.isPending.value"
       :error="query.error.value"
       :empty="query.data.value?.items.length === 0"
@@ -265,6 +266,6 @@ const columns: TableColumnsType<BacktestTradeSummary> = [
           />
         </div>
       </div>
-    </QueryPanel>
+    </DataState>
   </BacktestPage>
 </template>

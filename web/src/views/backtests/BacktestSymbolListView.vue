@@ -7,7 +7,7 @@ import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import type { BacktestSymbolSummary } from '@/api/types'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
-import QueryPanel from '@/features/backtests/QueryPanel.vue'
+import DataState from '@/features/operations/DataState.vue'
 import { formatDuration, formatNumber, formatPercent, pnlClass } from '@/shared/format'
 import { useBacktestPagination } from '@/features/backtests/useBacktestPagination'
 
@@ -199,7 +199,8 @@ const columns: TableColumnsType<BacktestSymbolSummary> = [
       />
       <a-button v-if="symbolFilter" type="link" @click="clearSymbolFilter">清除筛选</a-button>
     </div>
-    <QueryPanel
+    <DataState
+      variant="inline"
       :pending="query.isPending.value"
       :error="query.error.value"
       :empty="query.data.value?.items.length === 0"
@@ -227,6 +228,6 @@ const columns: TableColumnsType<BacktestSymbolSummary> = [
           />
         </div>
       </div>
-    </QueryPanel>
+    </DataState>
   </BacktestPage>
 </template>

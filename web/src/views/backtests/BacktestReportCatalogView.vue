@@ -5,7 +5,7 @@ import { FileChartColumn, ArrowRight } from 'lucide-vue-next'
 import { useRoute, RouterLink } from 'vue-router'
 import { backtestApi } from '@/api/backtests'
 import BacktestPage from '@/features/backtests/BacktestPage.vue'
-import QueryPanel from '@/features/backtests/QueryPanel.vue'
+import DataState from '@/features/operations/DataState.vue'
 
 const route = useRoute()
 const researchId = computed(() => (typeof route.params.researchId === 'string' ? route.params.researchId : ''))
@@ -24,7 +24,8 @@ const query = useQuery({
     :back-to="rootTo"
     :crumbs="[{ label: '回测复盘', to: rootTo }, { label: '分析报表' }]"
   >
-    <QueryPanel
+    <DataState
+      variant="inline"
       :pending="query.isPending.value"
       :error="query.error.value"
       :empty="query.data.value?.items.length === 0"
@@ -53,6 +54,6 @@ const query = useQuery({
           </RouterLink>
         </article>
       </div>
-    </QueryPanel>
+    </DataState>
   </BacktestPage>
 </template>
