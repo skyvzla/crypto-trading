@@ -321,6 +321,74 @@ async def test_live_executor_transport_failure_stays_unknown_and_does_not_resubm
 
 
 @pytest.mark.asyncio
+async def test_live_executor_cancelled_submit_is_persisted_as_unknown(tmp_path):
+    submit_started = asyncio.Event()
+
+    async def post_order(**_kwargs):
+        submit_started.set()
+        await asyncio.Event().wait()
+
+    rest = Mock(post_order=post_order, query_order=AsyncMock())
+    guard = RiskGuard("account-1", RiskConfig())
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    executor = BinanceOrderExecutor(
+        rest,
+        wal,
+        account_id="account-1",
+        now_ms=iter([1000, 1001]).__next__,
+        risk_guard=guard,
+    )
+    task = asyncio.create_task(executor.submit(make_intent()))
+    await submit_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    record = wal.recover_latest()["cid-1"]
+    assert record.status == "SUBMIT_UNKNOWN"
+    assert record.payload["error"] == "submit_cancelled"
+    assert "BTCUSDT" in guard.blocked_symbols
+
+
+@pytest.mark.asyncio
+async def test_cancelled_submit_does_not_overwrite_newer_stream_fact(tmp_path):
+    submit_started = asyncio.Event()
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+
+    async def post_order(**_kwargs):
+        submit_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            intent = wal.recover_latest()["cid-1"]
+            wal.record_exchange_status(
+                intent,
+                {"orderId": 42, "status": "FILLED"},
+                recorded_at=1001,
+            )
+            raise
+
+    executor = BinanceOrderExecutor(
+        Mock(post_order=post_order, query_order=AsyncMock()),
+        wal,
+        account_id="account-1",
+        now_ms=lambda: 1000,
+    )
+    task = asyncio.create_task(executor.submit(make_intent()))
+    await submit_started.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    latest = wal.recover_latest()["cid-1"]
+    assert latest.status == "FILLED"
+    assert latest.exchange_order_id == "42"
+    assert len((tmp_path / "orders.jsonl").read_text().splitlines()) == 2
+
+
+@pytest.mark.asyncio
 async def test_live_executor_records_definite_api_rejection_without_unknown_risk(tmp_path):
     rest = Mock(
         post_order=AsyncMock(

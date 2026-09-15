@@ -346,7 +346,9 @@ class SpikeExecutionCoordinator:
         self._audit_lock = asyncio.Lock()
         self.execution_queue = execution_queue or ExecutionQueue()
         self._execution_worker = ExecutionWorker(
-            self.execution_queue, self._handle_execution_job
+            self.execution_queue,
+            self._handle_execution_job,
+            task_name="spike-execution-worker",
         )
         self._execution_worker_running = False
         self._maintenance_queued = False

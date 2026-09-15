@@ -9,6 +9,7 @@ import os
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 STRATEGY_ID = "spike_short"
@@ -35,6 +36,10 @@ def _strict_bool(value: str, *, name: str) -> bool:
     raise ValueError(f"{name} must be a boolean")
 
 
+def _resolved_path(value: str | Path) -> Path:
+    return Path(value).expanduser().resolve(strict=False)
+
+
 def validate_preflight(environ: Mapping[str, str] | None = None) -> None:
     """Validate the complete process configuration without opening resources."""
 
@@ -52,6 +57,14 @@ def validate_preflight(environ: Mapping[str, str] | None = None) -> None:
     account_id = env.get("STRATEGY_ACCOUNT_ID", "").strip()
     if not account_id:
         raise ValueError("STRATEGY_ACCOUNT_ID is required")
+    long_account_id = env.get("LONG_BREAKOUT_ACCOUNT_ID", "").strip()
+    if long_account_id and long_account_id == settings.account_id:
+        raise ValueError("Spike and long_breakout must use different account IDs")
+    long_wal_path = env.get("LONG_BREAKOUT_WAL_PATH", "").strip()
+    if long_wal_path and _resolved_path(long_wal_path) == _resolved_path(
+        settings.wal_path
+    ):
+        raise ValueError("Spike and long_breakout must use different WAL paths")
 
     testnet_raw = env.get("BINANCE_TESTNET")
     if testnet_raw is None:

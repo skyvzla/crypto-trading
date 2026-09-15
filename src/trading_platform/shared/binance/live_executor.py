@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from decimal import Decimal
@@ -133,6 +134,14 @@ class BinanceOrderExecutor:
                 new_client_order_id=intent.client_order_id,
                 reduce_only=intent.reduce_only,
             )
+        except asyncio.CancelledError:
+            latest = self.wal.recover_latest().get(intent.client_order_id)
+            if latest is None or latest.record_type == "intent":
+                self._record_unknown(
+                    latest or intent_record,
+                    error="submit_cancelled",
+                )
+            raise
         except BinanceAPIException as exc:
             if exc.code in _DEFINITE_ORDER_REJECTION_CODES:
                 rejected = self.wal.record_exchange_status(

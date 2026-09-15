@@ -26,6 +26,9 @@ def _environment(**overrides: str) -> dict[str, str]:
         "SPIKE_MINIMUM_TRADING_CAPITAL": "10",
         "SPIKE_ENTRY_TIER_MODE": "single-entry",
         "SPIKE_STRATEGY_PATH": "trading_platform.strategies.spike.v2:V2",
+        "SPIKE_WAL_PATH": "/app/data/wal/spike_short.jsonl",
+        "LONG_BREAKOUT_ACCOUNT_ID": "long_breakout_testnet",
+        "LONG_BREAKOUT_WAL_PATH": "/app/data/wal/long_breakout.jsonl",
         "STRATEGY_ACCOUNT_ID": "spike_testnet",
         "BINANCE_TESTNET": "true",
         "BINANCE_API_KEY": "test-key",
@@ -45,6 +48,14 @@ def test_preflight_accepts_compose_compatible_testnet_configuration():
         ({"STRATEGY_ACCOUNT_ID": "other"}, "must match"),
         ({"BINANCE_TESTNET": "false"}, "same environment"),
         ({"BINANCE_API_SECRET": ""}, "credentials"),
+        ({"LONG_BREAKOUT_ACCOUNT_ID": "spike_testnet"}, "different account IDs"),
+        (
+            {
+                "SPIKE_WAL_PATH": "/app/data/wal/shared.jsonl",
+                "LONG_BREAKOUT_WAL_PATH": "/app/data/wal/../wal/shared.jsonl",
+            },
+            "different WAL paths",
+        ),
     ],
 )
 def test_preflight_rejects_incompatible_configuration(override, message):

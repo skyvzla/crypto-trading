@@ -81,9 +81,15 @@ scripts/start.sh
 
 ```bash
 scripts/start.sh --build spike
+scripts/start.sh --build long_breakout
 scripts/start.sh strategy_kline
 scripts/start.sh strategy_tick
 ```
+
+`spike` 和 `long_breakout` 可以分别启动并同时运行，但必须使用不同的逻辑账户、
+Binance testnet 子账户凭证和 WAL。long_breakout 默认 `ENTRY_ENABLED=false`；运行健康
+不等于允许开仓，只有环境开关、Ledger 的 `long_breakout` subcategory、资金、杠杆、
+全仓模式、行情、执行流和 worker 门禁同时通过时才会产生 BUY 入场。
 
 启动脚本先用 `--profile '*' config --services` 校验服务名，再拒绝基础服务和已有
 `running`、`restarting`、`paused`、`created`、`removing` 或无法判断状态的重复容器。
@@ -134,6 +140,7 @@ docker compose --profile '*' stop --timeout 120 SERVICE
 docker compose --profile '*' ps -a
 docker compose --profile '*' logs --tail 100 ledger
 docker compose --profile '*' logs --tail 100 spike
+docker compose --profile '*' logs --tail 100 long_breakout
 ```
 
 不要通过裸 `docker compose up` 绕过脚本，也不要删除数据库/Redis volume。若启动失败，

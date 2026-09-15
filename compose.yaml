@@ -209,6 +209,8 @@ services:
       SPIKE_MINIMUM_TRADING_CAPITAL: ${SPIKE_MINIMUM_TRADING_CAPITAL:-10}
       SPIKE_ENTRY_TIER_MODE: ${SPIKE_ENTRY_TIER_MODE:-single-entry}
       SPIKE_WAL_PATH: ${SPIKE_WAL_PATH:-/app/data/wal/spike_short.jsonl}
+      LONG_BREAKOUT_ACCOUNT_ID: ${LONG_BREAKOUT_ACCOUNT_ID:-long_breakout_testnet}
+      LONG_BREAKOUT_WAL_PATH: ${LONG_BREAKOUT_WAL_PATH:-/app/data/wal/long_breakout.jsonl}
       SPIKE_SNAPSHOT_ROOT: ${CAMPAIGN_SNAPSHOT_ROOT:-/app/data/market/campaign_snapshots}
       SPIKE_SNAPSHOT_PRE_SECONDS: ${SPIKE_SNAPSHOT_PRE_SECONDS:-120}
       SPIKE_SNAPSHOT_POST_SECONDS: ${SPIKE_SNAPSHOT_POST_SECONDS:-300}
@@ -238,6 +240,76 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "scripts/spike_runtime_guard.py", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+
+  long_breakout:
+    profiles: ["long_breakout"]
+    labels:
+      trading-platform.role: strategy
+    build: *app_build
+    command:
+      - sh
+      - -ceu
+      - >-
+        python scripts/long_breakout_runtime_guard.py preflight &&
+        exec python -m trading_platform.strategies.long_breakout.main
+    init: true
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_DATABASE: ${DB_DATABASE:-trading_platform}
+      STRATEGY_ACCOUNT_ID: ${LONG_BREAKOUT_ACCOUNT_ID:-long_breakout_testnet}
+      STRATEGY_MARKET_API_URL: http://market:8000
+      STRATEGY_LEDGER_API_URL: http://ledger:8001
+      STRATEGY_RISK_MAX_POSITION_VALUE_USDT: ${LONG_BREAKOUT_RISK_MAX_POSITION_VALUE_USDT:-50}
+      STRATEGY_RISK_MAX_SYMBOLS: ${LONG_BREAKOUT_RISK_MAX_SYMBOLS:-1}
+      LONG_BREAKOUT_MODE: testnet
+      LONG_BREAKOUT_ACCOUNT_ID: ${LONG_BREAKOUT_ACCOUNT_ID:-long_breakout_testnet}
+      LONG_BREAKOUT_SYMBOLS: ${LONG_BREAKOUT_SYMBOLS:-BTCUSDT}
+      LONG_BREAKOUT_TIMEFRAME: ${LONG_BREAKOUT_TIMEFRAME:-4h}
+      LONG_BREAKOUT_LOOKBACK_BARS: ${LONG_BREAKOUT_LOOKBACK_BARS:-}
+      LONG_BREAKOUT_ENTRY_NOTIONAL_USDT: ${LONG_BREAKOUT_ENTRY_NOTIONAL_USDT:-10}
+      LONG_BREAKOUT_LEVERAGE: ${LONG_BREAKOUT_LEVERAGE:-1}
+      LONG_BREAKOUT_BREAKOUT_BUFFER_PCT: ${LONG_BREAKOUT_BREAKOUT_BUFFER_PCT:-0}
+      LONG_BREAKOUT_TAKE_PROFIT_PCT: ${LONG_BREAKOUT_TAKE_PROFIT_PCT:-0.02}
+      LONG_BREAKOUT_STOP_LOSS_PCT: ${LONG_BREAKOUT_STOP_LOSS_PCT:-0.01}
+      LONG_BREAKOUT_ENTRY_ENABLED: ${LONG_BREAKOUT_ENTRY_ENABLED:-false}
+      LONG_BREAKOUT_SUBCATEGORY: ${LONG_BREAKOUT_SUBCATEGORY:-long_breakout}
+      LONG_BREAKOUT_WAL_PATH: ${LONG_BREAKOUT_WAL_PATH:-/app/data/wal/long_breakout.jsonl}
+      SPIKE_ACCOUNT_ID: ${SPIKE_ACCOUNT_ID:-spike_testnet}
+      SPIKE_WAL_PATH: ${SPIKE_WAL_PATH:-/app/data/wal/spike_short.jsonl}
+      LONG_BREAKOUT_DEDICATED_STRATEGY_ACCOUNT: "true"
+      LONG_BREAKOUT_MARKET_POLL_SECONDS: ${LONG_BREAKOUT_MARKET_POLL_SECONDS:-30}
+      LONG_BREAKOUT_HEARTBEAT_SECONDS: "10"
+      LONG_BREAKOUT_POLL_INTERVAL_SECONDS: "5"
+      LONG_BREAKOUT_MAX_POLL_ATTEMPTS: "12"
+      BINANCE_API_KEY: ${LONG_BREAKOUT_BINANCE_API_KEY:-}
+      BINANCE_API_SECRET: ${LONG_BREAKOUT_BINANCE_API_SECRET:-}
+      BINANCE_BASE_URL: https://demo-fapi.binance.com
+      BINANCE_WS_BASE_URL: wss://stream.binancefuture.com
+      BINANCE_TESTNET: "true"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    networks:
+      - trading_net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ledger-migrate:
+        condition: service_completed_successfully
+      market:
+        condition: service_healthy
+      ledger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "scripts/long_breakout_runtime_guard.py", "health"]
       interval: 10s
       timeout: 3s
       retries: 3
