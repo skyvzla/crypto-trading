@@ -26,6 +26,16 @@ export default defineConfig({
       },
     },
     {
+      // 1024×768：antd Sider 200px + 工作区左右各 24px 之后内容列约 776px，
+      // 是横向溢出最容易出现的一段（AGENTS.md 要求检查 1024px）。
+      name: 'laptop',
+      use: {
+        browserName: 'chromium',
+        channel: 'chrome',
+        viewport: { width: 1024, height: 768 },
+      },
+    },
+    {
       name: 'mobile',
       use: {
         browserName: 'chromium',

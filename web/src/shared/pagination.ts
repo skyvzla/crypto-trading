@@ -66,20 +66,63 @@ export function useUrlPagination({
   return { page, pageSize, offset, paginationQuery, restore, apply }
 }
 
+export interface CollectPageItemsOptions {
+  /** 逐页累加的条数上限；越界即抛错，避免把整张长表一次性读进内存。 */
+  maxItems?: number
+  /** 请求页数上限；正常情况下先被 maxItems 拦住，这里只作为兜底。 */
+  maxPages?: number
+}
+
+/**
+ * 默认条数上限。
+ *
+ * 配置类列表（账户、交易对、通知目标）远小于这个量级；持续增长的事实表
+ * （成交、事件）必须走服务端分页，不该靠逐页取全。
+ */
+export const DEFAULT_MAX_ITEMS = 50_000
+
+/** 默认页数上限。 */
+export const DEFAULT_MAX_PAGES = 200
+
+/** 越界文案要点名上限、可用总数和已读条数，否则页面只能显示一句无从下手的报错。 */
+function overflowMessage(maxItems: number, loaded: number, total: number): string {
+  return `分页读取超过上限 ${maxItems} 条，已读取 ${loaded} 条（本次可用 ${total} 条）；请改用服务端分页，或显式调大 maxItems。`
+}
+
+/**
+ * 逐页取全一个列表。
+ *
+ * 只适用于天然有界、且必须整份载入才能完成本地筛选的配置类列表；
+ * 有增长可能的事实表请改用服务端分页（limit / offset + a-pagination）。
+ */
 export async function collectPageItems<T>(
   fetchPage: (params: Required<PageParams>) => Promise<Page<T>>,
   pageSize = 1000,
+  { maxItems = DEFAULT_MAX_ITEMS, maxPages = DEFAULT_MAX_PAGES }: CollectPageItemsOptions = {},
 ): Promise<Page<T>> {
   const items: T[] = []
   let total = 0
+  let pages = 0
 
   do {
+    if (items.length >= maxItems) {
+      throw new Error(overflowMessage(maxItems, items.length, total))
+    }
+    if (pages >= maxPages) {
+      throw new Error(
+        `分页读取超过上限 ${maxPages} 页，已读取 ${items.length} 条（本次可用 ${total} 条）；请改用服务端分页。`,
+      )
+    }
     const page = await fetchPage({ limit: pageSize, offset: items.length })
+    pages += 1
     total = page.total
     if (!page.items.length && items.length < total) {
       throw new Error(`分页读取在 ${items.length}/${total} 条时未继续返回数据`)
     }
     items.push(...page.items)
+    if (items.length > maxItems) {
+      throw new Error(overflowMessage(maxItems, items.length, total))
+    }
   } while (items.length < total)
 
   return { items, total, limit: pageSize, offset: 0 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import type { LocationQuery } from 'vue-router'
 import { type TableColumnsType } from 'ant-design-vue'
 import { ArrowLeft, CircleDotDashed } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
@@ -9,13 +10,34 @@ import TradeReplayChartPanel from '@/features/backtests/TradeReplayChartPanel.vu
 import type { TradeChartData } from '@/features/backtests/tradeChart'
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
-import { collectPageItems } from '@/shared/pagination'
+import { collectPageItems, useUrlPagination } from '@/shared/pagination'
 import { useLedgerLoader } from '@/features/operations/useOperationsView'
 import { formatDateTime, formatDurationMs, formatMoney, pnlClass, sideLabel, toNumberOrNull } from '@/shared/format'
 import { timestampMs } from '@/shared/time'
 
 /** 策略审计事件展示上限。 */
 const EVENT_LIMIT = 200
+
+/**
+ * 成交表每页条数。
+ *
+ * 这张表随 Campaign 存续时间增长，且 antd 表格不做虚拟滚动，所以只能一页一页
+ * 从服务端取，不能先取全再渲染。
+ */
+const FILL_PAGE_SIZE = 50
+const FILL_PAGE_SIZE_MAX = 250
+const FILL_PAGE_SIZE_OPTIONS = ['25', '50', '100', '250']
+
+/**
+ * K 线买卖点定位所需的成交条数上限。
+ *
+ * 图上要标出整段 Campaign 的首末成交，所以这一份仍是整段读取。这个上限只是
+ * 防止异常 campaign 把内存吃穿的保险丝，不是常规截断 —— 超过它买卖点会整段消失，
+ * 那比多占一点内存更糟。取值依据：现有回测数据里每个 (research, symbol) 分组
+ * 成交数为 max 116 / p99 96 / median 8，无一超过 500；留约 40 倍余量。
+ * 实盘账本目前为空，长期运行的 campaign 会持续累积，届时按实际分布重新评估。
+ */
+const CHART_FILL_LIMIT = 5_000
 
 const route = useRoute()
 const router = useRouter()
@@ -28,15 +50,31 @@ const routeKey = computed(() => `${accountId.value}:${strategyId.value}:${symbol
 const campaignPnl = ref<CampaignPnL | null>(null)
 const campaignPnlError = ref<string | null>(null)
 const fills = ref<LedgerTrade[]>([])
+const fillTotal = ref(0)
 const fillError = ref<string | null>(null)
+const fillsLoading = ref(false)
+const chartFills = ref<LedgerTrade[]>([])
+const chartFillError = ref<string | null>(null)
 const events = ref<StrategyAuditEvent[]>([])
 const eventError = ref<string | null>(null)
 
-const sortedFills = computed(() =>
-  [...fills.value].sort(
-    (left, right) => (timestampMs(left.exchange_time) ?? 0) - (timestampMs(right.exchange_time) ?? 0),
-  ),
-)
+const {
+  page: fillPage,
+  pageSize: fillPageSize,
+  offset: fillOffset,
+  paginationQuery: fillPaginationQuery,
+  apply: applyFillPagination,
+  restore: restoreFillPagination,
+} = useUrlPagination({ defaultSize: FILL_PAGE_SIZE, maxSize: FILL_PAGE_SIZE_MAX })
+
+function byExchangeTime(left: LedgerTrade, right: LedgerTrade): number {
+  return (timestampMs(left.exchange_time) ?? 0) - (timestampMs(right.exchange_time) ?? 0)
+}
+
+/** 表格当前页按成交时间正序展示；服务端按写入时间返回，页内顺序不依赖它。 */
+const sortedFills = computed(() => [...fills.value].sort(byExchangeTime))
+/** 画点用的是整段 Campaign 成交，因此与表格当前页无关。 */
+const sortedChartFills = computed(() => [...chartFills.value].sort(byExchangeTime))
 const timelineEvents = computed(() =>
   [...events.value]
     .sort((left, right) => left.event_time - right.event_time)
@@ -47,8 +85,8 @@ const timelineEvents = computed(() =>
 )
 
 const campaignChartTrade = computed<TradeChartData | null>(() => {
-  const [firstFill] = sortedFills.value
-  const lastFill = sortedFills.value.at(-1)
+  const [firstFill] = sortedChartFills.value
+  const lastFill = sortedChartFills.value.at(-1)
   if (!firstFill || !lastFill) return null
   const firstSide = String(firstFill.side).toUpperCase()
   const firstPrice = toNumberOrNull(firstFill.price)
@@ -67,7 +105,7 @@ const campaignChartTrade = computed<TradeChartData | null>(() => {
     exit_time: lastFill.exchange_time,
     exit_price: lastPrice,
     net_pnl: toNumberOrNull(campaignPnl.value?.net_realized_pnl) ?? 0,
-    fills: sortedFills.value.flatMap((fill) => {
+    fills: sortedChartFills.value.flatMap((fill) => {
       const price = toNumberOrNull(fill.price)
       return price === null
         ? []
@@ -127,19 +165,88 @@ function failureMessage(reason: unknown, fallback: string): string {
   return reason instanceof Error ? reason.message : fallback
 }
 
+/** Campaign 身份筛选，四个数据来源共用。 */
+function campaignTradeFilter() {
+  return {
+    account_id: accountId.value,
+    strategy_id: strategyId.value,
+    symbol: symbol.value,
+    campaign_id: campaignId.value,
+  }
+}
+
+/** 表格数据源：只取当前页，条数由每页条数决定，与 Campaign 长短无关。 */
+async function fetchFillPage(): Promise<{ items: LedgerTrade[]; total: number }> {
+  const page = await operationsApi.trades({
+    ...campaignTradeFilter(),
+    limit: fillPageSize.value,
+    offset: fillOffset.value,
+  })
+  return { items: page.items, total: page.total }
+}
+
+/** 画点数据源：整段 Campaign 成交，受 CHART_FILL_LIMIT 约束，越界即报错降级。 */
+function fetchChartFills(): Promise<LedgerTrade[]> {
+  return collectPageItems((params) => operationsApi.trades({ ...campaignTradeFilter(), ...params }), CHART_FILL_LIMIT, {
+    maxItems: CHART_FILL_LIMIT,
+  }).then((page) => page.items)
+}
+
+// 翻页只重取当前页：用序号丢弃过期响应，避免连点页码时旧结果覆盖新结果。
+let fillSequence = 0
+
+async function loadFillPage(): Promise<void> {
+  if (!routeReady.value) return
+  const current = ++fillSequence
+  fillsLoading.value = true
+  fillError.value = null
+  try {
+    const result = await fetchFillPage()
+    if (current !== fillSequence) return
+    fills.value = result.items
+    fillTotal.value = result.total
+  } catch (caught) {
+    if (current !== fillSequence) return
+    fills.value = []
+    fillTotal.value = 0
+    fillError.value = failureMessage(caught, '账本成交读取失败')
+  } finally {
+    if (current === fillSequence) fillsLoading.value = false
+  }
+}
+
+/** 页码与每页条数写回地址栏，刷新和分享链接都能回到同一页。 */
+function syncFillQuery(): void {
+  const query: LocationQuery = { ...route.query }
+  for (const [key, value] of Object.entries(fillPaginationQuery.value)) query[key] = String(value)
+  void router.replace({ query })
+}
+
+function changeFillPagination(current: number, pageSize: number): void {
+  const before = `${fillPage.value}:${fillPageSize.value}`
+  applyFillPagination({ current, pageSize })
+  if (`${fillPage.value}:${fillPageSize.value}` === before) return
+  syncFillQuery()
+  void loadFillPage()
+}
+
 const { loading, error, refreshedAt, reload } = useLedgerLoader(
   async ({ isStale }) => {
     campaignPnl.value = null
     campaignPnlError.value = null
+    fillSequence += 1
     fills.value = []
+    fillTotal.value = 0
     fillError.value = null
+    chartFills.value = []
+    chartFillError.value = null
     events.value = []
     eventError.value = null
     if (!routeReady.value) {
       throw new Error('Campaign 链接缺少账户、策略或交易对身份。')
     }
-    // 三个来源独立成败：PnL 不可用时仍要展示权威账本成交。
-    const [pnlResult, eventResult, fillResult] = await Promise.allSettled([
+    // 四个来源独立成败：PnL 不可用时仍要展示权威账本成交。
+    const [pnlResult, eventResult, fillResult, chartFillResult] = await Promise.allSettled([
       operationsApi.campaignPnl(campaignId.value, { account_id: accountId.value, strategy_id: strategyId.value }),
       operationsApi.strategyAuditEvents({
         account_id: accountId.value,
@@ -147,15 +254,8 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(
         campaign_id: campaignId.value,
         limit: EVENT_LIMIT,
       }),
-      collectPageItems((page) =>
-        operationsApi.trades({
-          account_id: accountId.value,
-          strategy_id: strategyId.value,
-          symbol: symbol.value,
-          campaign_id: campaignId.value,
-          ...page,
-        }),
-      ),
+      fetchFillPage(),
+      fetchChartFills(),
     ])
     if (isStale()) return
     campaignPnl.value = pnlResult.status === 'fulfilled' ? pnlResult.value : null
@@ -165,7 +265,11 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(
     eventError.value =
       eventResult.status === 'rejected' ? failureMessage(eventResult.reason, '策略审计事件读取失败') : null
     fills.value = fillResult.status === 'fulfilled' ? fillResult.value.items : []
+    fillTotal.value = fillResult.status === 'fulfilled' ? fillResult.value.total : 0
     fillError.value = fillResult.status === 'rejected' ? failureMessage(fillResult.reason, '账本成交读取失败') : null
+    chartFills.value = chartFillResult.status === 'fulfilled' ? chartFillResult.value : []
+    chartFillError.value =
+      chartFillResult.status === 'rejected' ? failureMessage(chartFillResult.reason, 'K 线买卖点读取失败') : null
     if (pnlResult.status === 'rejected' && eventResult.status === 'rejected' && fillResult.status === 'rejected') {
       throw new Error('Campaign 明细读取失败')
     }
@@ -188,6 +292,7 @@ function backToTrades() {
 watch(
   routeKey,
   () => {
+    restoreFillPagination()
     void reload()
   },
   { immediate: true },
@@ -295,25 +400,40 @@ watch(
         :strategy-lines="false"
       />
       <a-alert
-        v-else-if="!fillError"
+        v-else-if="chartFillError"
         class="campaign-chart-empty"
         type="info"
         show-icon
-        message="暂无可定位到 K 线的账本成交"
+        message="K 线买卖点已跳过"
+        :description="chartFillError"
       />
+      <a-alert v-else class="campaign-chart-empty" type="info" show-icon message="暂无可定位到 K 线的账本成交" />
 
       <section class="detail-section">
         <h3>全部账本成交</h3>
         <a-alert v-if="fillError" type="warning" show-icon :message="fillError" class="section-alert" />
-        <a-table
-          v-else
-          :columns="fillColumns"
-          :data-source="sortedFills"
-          row-key="id"
-          size="small"
-          :pagination="false"
-          :scroll="{ x: 1080 }"
-        />
+        <template v-else>
+          <a-table
+            :columns="fillColumns"
+            :data-source="sortedFills"
+            row-key="id"
+            size="small"
+            :loading="fillsLoading"
+            :pagination="false"
+            :scroll="{ x: 1080 }"
+          />
+          <div class="pagination-bar">
+            <span>共 {{ fillTotal }} 笔</span>
+            <a-pagination
+              :current="fillPage"
+              :page-size="fillPageSize"
+              :total="fillTotal"
+              :page-size-options="FILL_PAGE_SIZE_OPTIONS"
+              show-size-changer
+              @change="changeFillPagination"
+            />
+          </div>
+        </template>
       </section>
       <section class="detail-section campaign-events">
         <h3>策略事件时间线</h3>
