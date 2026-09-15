@@ -54,10 +54,25 @@ async function readBody(response: Response): Promise<string> {
 }
 
 /**
+ * 把一条 FastAPI RequestValidationError 渲染成 `query.page_size: ...`。
+ *
+ * loc 是位置数组（query/path/body + 字段名），msg 是 pydantic 的错误说明；
+ * 两者缺一都当作无法解析，交给调用方回退到 HTTP 状态码。
+ */
+function formatValidationEntry(entry: unknown): string | null {
+  if (!entry || typeof entry !== 'object') return null
+  const message = (entry as { msg?: unknown }).msg
+  if (typeof message !== 'string') return null
+  const location = (entry as { loc?: unknown }).loc
+  const path = Array.isArray(location) ? location.map(String).join('.') : ''
+  return path ? `${path}: ${message}` : message
+}
+
+/**
  * 兼容 FastAPI 的业务错误字符串和 RequestValidationError 数组。
  *
- * 校验错误里的 loc 可能包含 query/path/body 等位置；保留第一条具体错误，
- * 页面就能告诉用户是哪个参数无效，而不是只显示 HTTP 422。
+ * 数组形式一次可能报多个参数，全部拼出来页面才能告诉用户到底哪些参数无效，
+ * 而不是只显示 HTTP 422。无法解析时返回 null，由调用方回退到状态码文案。
  */
 function parseErrorDetail(body: string): string | null {
   if (!body) return null
@@ -67,12 +82,8 @@ function parseErrorDetail(body: string): string | null {
     const detail = (parsed as { detail?: unknown }).detail
     if (typeof detail === 'string') return detail
     if (!Array.isArray(detail) || !detail.length) return null
-    const first = detail[0]
-    if (!first || typeof first !== 'object' || typeof (first as { msg?: unknown }).msg !== 'string') return null
-    const location = (first as { loc?: unknown }).loc
-    const path = Array.isArray(location) ? location.map(String).join('.') : ''
-    const message = (first as { msg: string }).msg
-    return path ? `${path}: ${message}` : message
+    const messages = detail.map(formatValidationEntry).filter((message): message is string => message !== null)
+    return messages.length ? messages.join('; ') : null
   } catch {
     return null
   }

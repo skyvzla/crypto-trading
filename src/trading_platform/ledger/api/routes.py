@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from functools import partial
 from pathlib import Path as FilePath
-from typing import Any, Literal, Optional
+from typing import Any, Generic, Literal, Optional, TypeVar
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
@@ -111,8 +111,11 @@ class AccountResponse(BaseModel):
     account_id: str
 
 
-class Page(BaseModel):
-    items: list[Any]
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
+    items: list[T]
     total: int
     limit: int
     offset: int
@@ -574,7 +577,7 @@ def _filter_kwargs(
     }
 
 
-@router.get("/orders", response_model=Page)
+@router.get("/orders", response_model=Page[OrderResponse])
 async def get_orders(
     account_id: Optional[str] = None,
     strategy_id: Optional[str] = None,
@@ -600,7 +603,7 @@ async def get_orders(
     )
 
 
-@router.get("/trades", response_model=Page)
+@router.get("/trades", response_model=Page[TradeResponse])
 async def get_trades(
     account_id: Optional[str] = None,
     strategy_id: Optional[str] = None,
@@ -640,7 +643,7 @@ async def get_trades(
     )
 
 
-@router.get("/positions", response_model=Page)
+@router.get("/positions", response_model=Page[PositionResponse])
 async def get_positions(
     account_id: Optional[str] = None,
     strategy_id: Optional[str] = None,
@@ -660,7 +663,7 @@ async def get_positions(
     )
 
 
-@router.get("/accounts", response_model=Page)
+@router.get("/accounts", response_model=Page[AccountResponse])
 async def get_accounts(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -1315,7 +1318,7 @@ async def get_campaign_snapshot_candles(
     )
 
 
-@router.get("/exchange-symbols", response_model=Page)
+@router.get("/exchange-symbols", response_model=Page[ExchangeSymbolResponse])
 async def list_exchange_symbols(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -1438,7 +1441,7 @@ async def list_exchange_categories(
 
 @router.get(
     "/exchange-categories/page",
-    response_model=Page,
+    response_model=Page[ExchangeCategoryResponse],
 )
 async def page_exchange_categories(
     active_only: bool = True,
@@ -1460,7 +1463,7 @@ async def page_exchange_categories(
 
 @router.get(
     "/exchange-categories/{category_key}/symbols",
-    response_model=Page,
+    response_model=Page[ExchangeSymbolResponse],
 )
 async def list_exchange_category_symbols(
     category_key: str = Path(min_length=1, max_length=256),
@@ -1481,7 +1484,10 @@ async def list_exchange_category_symbols(
     )
 
 
-@router.get("/symbol-global-admission-audit", response_model=Page)
+@router.get(
+    "/symbol-global-admission-audit",
+    response_model=Page[SymbolGlobalAdmissionAuditResponse],
+)
 async def list_symbol_global_admission_audit(
     symbol: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
@@ -1516,7 +1522,7 @@ async def list_strategy_category_admissions(
 
 @router.get(
     "/strategy-category-admissions/{strategy_id}/page",
-    response_model=Page,
+    response_model=Page[StrategyCategoryAdmissionResponse],
 )
 async def page_strategy_category_admissions(
     strategy_id: str = Path(min_length=1, max_length=64),
@@ -1641,7 +1647,10 @@ async def set_strategy_category_admission(
     return StrategyCategoryAdmissionResponse.model_validate(item)
 
 
-@router.get("/strategy-category-admission-audit", response_model=Page)
+@router.get(
+    "/strategy-category-admission-audit",
+    response_model=Page[StrategyCategoryAdmissionAuditResponse],
+)
 async def list_strategy_category_admission_audit(
     strategy_id: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
@@ -1662,7 +1671,7 @@ async def list_strategy_category_admission_audit(
     )
 
 
-@router.get("/subcategory-admissions", response_model=Page)
+@router.get("/subcategory-admissions", response_model=Page[AdmissionResponse])
 async def list_admissions(
     limit: int = Query(100, ge=1, le=1000),
     offset: int = Query(0, ge=0),
@@ -1719,7 +1728,7 @@ async def set_admission(
     return AdmissionResponse.model_validate(item)
 
 
-@router.get("/subcategory-admission-audit", response_model=Page)
+@router.get("/subcategory-admission-audit", response_model=Page[AuditResponse])
 async def list_audit(
     subcategory: Optional[str] = None,
     limit: int = Query(100, ge=1, le=1000),
@@ -1735,7 +1744,7 @@ async def list_audit(
     )
 
 
-@router.get("/strategy-audit-events", response_model=Page)
+@router.get("/strategy-audit-events", response_model=Page[StrategyAuditResponse])
 async def list_strategy_audit_events(
     account_id: Optional[str] = None,
     strategy_id: Optional[str] = None,
@@ -1763,7 +1772,7 @@ async def list_strategy_audit_events(
     )
 
 
-@router.get("/execution-events", response_model=Page)
+@router.get("/execution-events", response_model=Page[ExecutionEventResponse])
 async def list_execution_events(
     _authorized: None = Depends(require_execution_event_query_token),
     account_id: Optional[str] = Query(None, max_length=64),
@@ -1819,7 +1828,7 @@ async def list_execution_events(
     )
 
 
-@router.get("/strategy-runtime-status", response_model=Page)
+@router.get("/strategy-runtime-status", response_model=Page[StrategyRuntimeStatusResponse])
 async def list_strategy_runtime_status(
     account_id: Optional[str] = None,
     strategy_id: Optional[str] = None,
