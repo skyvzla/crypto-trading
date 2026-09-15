@@ -9,6 +9,9 @@
   --color-gold: #8a641f;
   --font-family-sans: 'IBM Plex Sans', 'Noto Sans SC', sans-serif;
   --font-family-mono: 'IBM Plex Mono', 'JetBrains Mono', monospace;
+  /* 等宽数字：数值列、指标值和时间戳都靠它对齐小数点与位宽。
+     等宽字体不等于等宽数字——IBM Plex Mono 的默认数字仍按比例排布。 */
+  --font-numeric-variant: tabular-nums;
   /* 统一按信息层级命名；业务页面的可见文字不低于 14px。 */
   --type-page-title: 22px;
   --type-section-title: 18px;
@@ -175,6 +178,7 @@ a {
 .mono-value,
 .report-value {
   font-family: var(--font-family-mono);
+  font-variant-numeric: var(--font-numeric-variant);
 }
 .report-value {
   display: block;
@@ -245,6 +249,7 @@ a {
 .row-count {
   color: var(--muted);
   font-family: var(--font-family-mono);
+  font-variant-numeric: var(--font-numeric-variant);
   text-align: right;
 }
 .trade-summary-strip {
@@ -842,6 +847,8 @@ a {
   margin-top: 9px;
   color: var(--text);
   font: 600 var(--type-display)/1.1 var(--font-family-mono);
+  /* `font` 简写会重置 font-variant-*，必须在它之后声明。 */
+  font-variant-numeric: var(--font-numeric-variant);
   overflow-wrap: anywhere;
 }
 .metric-tile small {
@@ -941,6 +948,7 @@ a {
 }
 .mono {
   font-family: var(--font-family-mono);
+  font-variant-numeric: var(--font-numeric-variant);
 }
 .pnl-calendar {
   display: grid;
@@ -1007,6 +1015,8 @@ a {
   text-overflow: ellipsis;
   white-space: nowrap;
   font: var(--type-meta) var(--font-family-mono);
+  /* `font` 简写会重置 font-variant-*，必须在它之后声明。 */
+  font-variant-numeric: var(--font-numeric-variant);
 }
 .calendar-cell small {
   display: block;

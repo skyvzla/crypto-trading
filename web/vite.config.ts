@@ -41,6 +41,28 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // 生产构建不需要 sourcemap；显式声明，避免被环境变量意外打开后把源码随产物发布。
+    sourcemap: false,
+    rollupOptions: {
+      output: {
+        // 首屏只依赖框架运行时，把框架和图表库拆成稳定的长缓存 chunk：
+        // 业务代码每次发布都会变，框架不会，混在一起会让用户每次重新下载 90KB+。
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return undefined
+          }
+          // `@vue/runtime-core`、`@vue/shared` 等子包必须和 `vue` 同组，
+          // 否则拆分反而会把同一个运行时切成两份。
+          if (/[\\/]node_modules[\\/](@vue|vue|vue-router|pinia|@tanstack)[\\/]/.test(id)) {
+            return 'vendor'
+          }
+          if (/[\\/]node_modules[\\/]lightweight-charts[\\/]/.test(id)) {
+            return 'charts'
+          }
+          return undefined
+        },
+      },
+    },
   },
   test: {
     globals: true,
@@ -49,5 +71,18 @@ export default defineConfig({
     setupFiles: ['./vitest.setup.ts'],
     exclude: [...configDefaults.exclude, 'e2e/**'],
     testTimeout: 20_000,
+    // 覆盖率闸门：目标是"锁住现状、防止下滑"，不是一次性冲高。
+    //
+    // 阈值要留出余量，否则会退化成噪音：实测 lines 77.96% / functions 65.17%，
+    // 若贴着实测值设 77/65，functions 只差 0.17pp（1151/1766），漏掉 4 个函数就红，
+    // 结果是有人把阈值调低而不是补测试。这里各留约 2pp 余量，仍能拦住真正的下滑
+    // （一次无测试的大改动会明显拉低比例），但不会因个别文件波动误报。
+    // 参考：stmt 76.3% / branch 65.26%，本次未纳入闸门。
+    coverage: {
+      provider: 'v8',
+      include: ['src/**/*.{ts,vue}'],
+      exclude: ['src/__tests__/**', 'src/**/*.d.ts', 'src/env.d.ts'],
+      thresholds: { lines: 76, functions: 63 },
+    },
   },
 })
