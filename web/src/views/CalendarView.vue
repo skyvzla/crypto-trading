@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ChevronLeft, ChevronRight, Clock3 } from 'lucide-vue-next'
 import { operationsApi } from '@/api/operations'
@@ -9,18 +9,13 @@ import FilterBar from '@/features/operations/FilterBar.vue'
 import MetricTile from '@/features/operations/MetricTile.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import PnlCalendar from '@/features/operations/PnlCalendar.vue'
-import {
-  isQuerySynced,
-  useLedgerLoader,
-  useOperationFilters,
-  useQuerySync,
-} from '@/features/operations/useOperationsView'
+import { useOperationFilters } from '@/features/operations/useOperationsView'
+import { useRouteSyncedLoader } from '@/features/operations/useRouteSyncedLoader'
 import { asNumber, formatMoney, pnlTone } from '@/shared/format'
 import { LEDGER_TIMEZONE, ledgerMonth, ledgerMonthRange, shiftLedgerMonth } from '@/shared/time'
 
 const route = useRoute()
 const router = useRouter()
-const syncQuery = useQuerySync()
 const { filters, query: filtersQuery, restore: restoreFilters } = useOperationFilters()
 
 function readMonth(): string {
@@ -63,7 +58,7 @@ function restoreFromRoute() {
   month.value = Number(restored.slice(5, 7))
 }
 
-const { loading, error, refreshedAt, reload } = useLedgerLoader(
+const { loading, error, refreshedAt, reload, syncRoute } = useRouteSyncedLoader(
   async ({ isStale }) => {
     const result = await operationsApi.dailyPnl({
       ...filtersQuery.value,
@@ -76,27 +71,13 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(
   },
   {
     fallbackMessage: '收益日历加载失败',
-    onActivate: restoreFromRoute,
-  },
-)
-
-// 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
-// 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
-//
-// 自己写回的 query 与 routeQuery() 一致，所以这里不会把应用筛选变成两次请求；
-// 路由名变了说明已经切走，被缓存的实例不该再管地址栏。
-const ownRoute = route.name
-watch(
-  () => route.query,
-  () => {
-    if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
-    restoreFromRoute()
-    void reload()
+    routeQuery,
+    restoreFromRoute,
   },
 )
 
 async function syncAndLoad() {
-  await syncQuery(routeQuery())
+  await syncRoute()
   await reload()
 }
 

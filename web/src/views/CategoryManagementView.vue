@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ChevronDown, ChevronRight, DatabaseBackup, FolderTree, ListFilter, Search } from 'lucide-vue-next'
 import { message } from 'ant-design-vue'
@@ -8,14 +8,13 @@ import type { ExchangeCategory, ExchangeSymbol, ExchangeSymbolSyncStatus } from 
 import DataState from '@/features/operations/DataState.vue'
 import PageHeader from '@/features/operations/PageHeader.vue'
 import { collectPageItems } from '@/shared/pagination'
-import { isQuerySynced, useLedgerLoader, useQuerySync } from '@/features/operations/useOperationsView'
+import { useRouteSyncedLoader } from '@/features/operations/useRouteSyncedLoader'
 import { formatDateTime } from '@/shared/format'
 
 /** 详情区每页交易对数量。 */
 const DETAIL_PAGE_SIZE = 50
 
 const route = useRoute()
-const syncQuery = useQuerySync()
 const categories = ref<ExchangeCategory[]>([])
 const syncStatus = ref<ExchangeSymbolSyncStatus | null>(null)
 const search = ref(String(route.query.q ?? ''))
@@ -78,7 +77,7 @@ function restoreFromRoute() {
   detailPage.value = Math.max(1, Number(route.query.detail_page) || 1)
 }
 
-const { loading, error, refreshedAt, reload } = useLedgerLoader(
+const { loading, error, refreshedAt, reload, syncRoute } = useRouteSyncedLoader(
   async ({ isStale }) => {
     const [categoryPage, status] = await Promise.all([
       collectPageItems((params) => operationsApi.categoriesPage(false, params)),
@@ -104,7 +103,8 @@ const { loading, error, refreshedAt, reload } = useLedgerLoader(
   },
   {
     fallbackMessage: '分类目录加载失败',
-    onActivate: restoreFromRoute,
+    routeQuery,
+    restoreFromRoute,
   },
 )
 
@@ -125,7 +125,7 @@ async function selectCategory(item: ExchangeCategory, resetPage = true) {
     detailPage.value = 1
     selectedTotal.value = 0
   }
-  await syncUrl()
+  await syncRoute()
   await loadDetailSymbols()
 }
 
@@ -136,7 +136,7 @@ async function selectUnclassified(resetPage = true) {
     detailPage.value = 1
     selectedTotal.value = 0
   }
-  await syncUrl()
+  await syncRoute()
   await loadDetailSymbols()
 }
 
@@ -155,7 +155,7 @@ async function loadDetailSymbols() {
       const lastPage = Math.max(1, Math.ceil(page.total / DETAIL_PAGE_SIZE))
       if (detailPage.value > lastPage) {
         detailPage.value = lastPage
-        await syncUrl()
+        await syncRoute()
         await loadDetailSymbols()
         return
       }
@@ -171,27 +171,8 @@ async function loadDetailSymbols() {
 
 async function changeDetailPage(page: number) {
   detailPage.value = page
-  await syncUrl()
+  await syncRoute()
   await loadDetailSymbols()
-}
-
-// 已经在本页时直接改地址栏——手改 URL、打开一条带不同筛选的分享链接——组件
-// 既不会重新挂载也不会重新 activate，只靠 onActivated 跟不上。
-//
-// 自己写回的 query 与 routeQuery() 一致，所以这里不会把应用筛选变成两次请求；
-// 路由名变了说明已经切走，被缓存的实例不该再管地址栏。
-const ownRoute = route.name
-watch(
-  () => route.query,
-  () => {
-    if (route.name !== ownRoute || isQuerySynced(route.query, routeQuery())) return
-    restoreFromRoute()
-    void reload()
-  },
-)
-
-async function syncUrl() {
-  await syncQuery(routeQuery())
 }
 </script>
 
@@ -219,8 +200,8 @@ async function syncUrl() {
         v-model:value="search"
         allow-clear
         placeholder="搜索 Category / Subcategory"
-        @change="syncUrl"
-        @press-enter="syncUrl"
+        @change="syncRoute"
+        @press-enter="syncRoute"
         ><template #prefix><Search :size="14" /></template></a-input
       ><a-button @click="toggleAll">{{ expanded.size ? '全部收起' : '全部展开' }}</a-button
       ><a-button :type="viewingUnclassified ? 'primary' : 'default'" @click="selectUnclassified()"

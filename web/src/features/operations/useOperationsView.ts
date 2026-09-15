@@ -1,6 +1,7 @@
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { LocationQuery } from 'vue-router'
+import { ApiError } from '@/api/client'
 import { formatLedgerClock } from '@/shared/time'
 import { useUrlPagination, type UrlPaginationOptions } from '@/shared/pagination'
 
@@ -14,6 +15,14 @@ export interface OperationFilters {
 
 /** 只保留填写过的字段，空串不进 URL 也不进请求。 */
 export type LedgerFilterQuery = Partial<Record<keyof OperationFilters, string>>
+
+/**
+ * 页面放进地址栏的内容。
+ *
+ * 值一律是标量：空串与 undefined 表示「这一项不存在」，写回时会被丢弃，
+ * 比较时按缺省值参与，页面因此不需要区分「没写」与「写成空」。
+ */
+export type RouteQueryParts = Record<string, string | number | undefined>
 
 function readFilters(query: LocationQuery): OperationFilters {
   return {
@@ -86,6 +95,14 @@ export interface LedgerLoaderOptions {
 export function useLedgerLoader(load: (context: LedgerLoaderContext) => Promise<void>, options: LedgerLoaderOptions) {
   const loading = ref(false)
   const error = ref<string | null>(null)
+  /**
+   * 最近一次失败的原始错误里携带的 HTTP 状态码，没有则为 null。
+   *
+   * `error` 只保留给用户看的文案，状态码在拼接文案时就丢了。页面要区分
+   * 「404 尚未初始化」这类正常状态与真正的故障时必须看状态码，而不是
+   * 去匹配文案——所以这里单独留一份，展示文案本身不变。
+   */
+  const errorStatus = ref<number | null>(null)
   const refreshedAt = ref<string | null>(null)
   let sequence = 0
   let activated = false
@@ -95,6 +112,7 @@ export function useLedgerLoader(load: (context: LedgerLoaderContext) => Promise<
     const isStale = () => current !== sequence
     loading.value = true
     error.value = null
+    errorStatus.value = null
     try {
       await load({ isStale })
       if (isStale()) return
@@ -102,6 +120,7 @@ export function useLedgerLoader(load: (context: LedgerLoaderContext) => Promise<
     } catch (caught) {
       if (isStale()) return
       error.value = caught instanceof Error ? caught.message : options.fallbackMessage
+      errorStatus.value = caught instanceof ApiError ? caught.status : null
     } finally {
       if (!isStale()) loading.value = false
     }
@@ -122,7 +141,7 @@ export function useLedgerLoader(load: (context: LedgerLoaderContext) => Promise<
     void run()
   })
 
-  return { loading, error, refreshedAt, reload: run }
+  return { loading, error, errorStatus, refreshedAt, reload: run }
 }
 
 export type PageParamsOptions = UrlPaginationOptions
@@ -135,7 +154,7 @@ export function usePageParams({ defaultSize, maxSize = 1000 }: PageParamsOptions
 }
 
 /** 写回地址栏的归一化：空串与 undefined 都不进 URL。 */
-function toQuery(parts: Record<string, string | number | undefined>): Record<string, string> {
+function toQuery(parts: RouteQueryParts): Record<string, string> {
   const query: Record<string, string> = {}
   for (const [key, value] of Object.entries(parts)) {
     if (value === undefined || value === '') continue
@@ -147,7 +166,7 @@ function toQuery(parts: Record<string, string | number | undefined>): Record<str
 /** 把筛选、分页与页面自定义参数合并写回地址栏。 */
 export function useQuerySync() {
   const router = useRouter()
-  return async function syncQuery(parts: Record<string, string | number | undefined>): Promise<void> {
+  return async function syncQuery(parts: RouteQueryParts): Promise<void> {
     await router.replace({ query: toQuery(parts) })
   }
 }
@@ -161,7 +180,7 @@ export function useQuerySync() {
  *
  * 只做无状态比较，页面放哪些参数进 URL 由页面自己声明。
  */
-export function isQuerySynced(current: LocationQuery, parts: Record<string, string | number | undefined>): boolean {
+export function isQuerySynced(current: LocationQuery, parts: RouteQueryParts): boolean {
   const expected = toQuery(parts)
   for (const key of new Set([...Object.keys(expected), ...Object.keys(current)])) {
     const raw = current[key]
