@@ -116,7 +116,15 @@ class OrderWAL:
             stream.flush()
             os.fsync(stream.fileno())
 
-    def record_intent(self, intent: OrderIntent, *, account_id: str, recorded_at: int) -> OrderWALRecord:
+    def record_intent(
+        self,
+        intent: OrderIntent,
+        *,
+        account_id: str,
+        recorded_at: int,
+        risk_value_usdt: Any | None = None,
+        risk_price_usdt: Any | None = None,
+    ) -> OrderWALRecord:
         record = OrderWALRecord(
             record_type="intent",
             recorded_at=recorded_at,
@@ -134,6 +142,16 @@ class OrderWAL:
                 "trigger_reason": intent.trigger_reason,
                 "reduce_only": intent.reduce_only,
                 "campaign_id": intent.campaign_id,
+                **(
+                    {"risk_value_usdt": str(risk_value_usdt)}
+                    if risk_value_usdt is not None
+                    else {}
+                ),
+                **(
+                    {"risk_price_usdt": str(risk_price_usdt)}
+                    if risk_price_usdt is not None
+                    else {}
+                ),
             },
         )
         self.append(record)

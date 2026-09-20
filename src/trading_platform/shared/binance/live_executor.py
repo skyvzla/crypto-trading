@@ -97,6 +97,8 @@ class BinanceOrderExecutor:
                     f"client_order_id reused with different intent: "
                     f"{intent.client_order_id}"
                 )
+            if not intent.reduce_only:
+                self._restore_risk_reservation(existing)
             if existing.record_type == "intent":
                 return self._record_unknown(
                     existing,
@@ -105,25 +107,37 @@ class BinanceOrderExecutor:
             if existing.status == "SUBMIT_UNKNOWN":
                 self._block_unknown(existing)
             return existing
+        risk_value: Decimal | None = None
+        risk_price: Decimal | None = None
         if not intent.reduce_only and self.risk_guard is not None:
             notional_price = (
                 intent.price if intent.order_type == "LIMIT" else reference_price
             )
             if notional_price is None:
                 raise ValueError("market entry requires reference_price")
-            allowed, reason = self.risk_guard.check_can_open(
+            risk_price = notional_price
+            risk_value = intent.quantity * notional_price
+            allowed, reason = self.risk_guard.reserve_open(
                 intent.symbol,
-                intent.quantity * notional_price,
+                risk_value,
+                intent.client_order_id,
                 leverage=leverage,
             )
             if not allowed:
                 raise PermissionError(f"order rejected by risk guard: {reason}")
 
-        intent_record = self.wal.record_intent(
-            intent,
-            account_id=self.account_id,
-            recorded_at=self._now_ms(),
-        )
+        try:
+            intent_record = self.wal.record_intent(
+                intent,
+                account_id=self.account_id,
+                recorded_at=self._now_ms(),
+                risk_value_usdt=risk_value,
+                risk_price_usdt=risk_price,
+            )
+        except BaseException:
+            if not intent.reduce_only and self.risk_guard is not None:
+                self.risk_guard.release_open(intent.client_order_id)
+            raise
         try:
             response = await self.rest_client.post_order(
                 symbol=intent.symbol,
@@ -153,6 +167,7 @@ class BinanceOrderExecutor:
                     },
                     recorded_at=self._now_ms(),
                 )
+                self._sync_risk_record(rejected)
                 self._refresh_symbol_risk(intent.symbol)
                 return rejected
             return self._record_unknown(
@@ -181,11 +196,13 @@ class BinanceOrderExecutor:
             return latest
 
         try:
-            return self.wal.record_exchange_status(
+            result = self.wal.record_exchange_status(
                 intent_record,
                 response,
                 recorded_at=self._now_ms(),
             )
+            self._sync_risk_record(result)
+            return result
         except ValueError:
             return self._record_unknown(
                 intent_record,
@@ -195,13 +212,20 @@ class BinanceOrderExecutor:
     async def resolve_submit_unknown(self, record: OrderWALRecord) -> Resolution:
         """对一个未知提交执行一次查单；未解析时保持未知。"""
         result = await self._resolver.resolve_once(record, recorded_at=self._now_ms())
-        self._refresh_symbol_risk(record.symbol)
+        latest = self.wal.recover_latest().get(record.client_order_id)
+        if latest is not None:
+            self._sync_risk_record(latest)
+            self._refresh_symbol_risk(latest.symbol)
+        else:
+            self._refresh_symbol_risk(record.symbol)
         return result
 
     async def resolve_recovered_unknowns_once(self) -> dict[str, Resolution]:
         """启动时对 WAL 中的未知提交各查询一次，不执行循环或重下单。"""
         results: dict[str, Resolution] = {}
         for client_order_id, record in self.wal.recover_latest().items():
+            if not bool(record.payload.get("reduce_only", False)):
+                self._restore_risk_reservation(record)
             if record.record_type == "intent":
                 record = self._record_unknown(
                     record,
@@ -265,6 +289,7 @@ class BinanceOrderExecutor:
                 },
                 recorded_at=self._now_ms(),
             )
+            self._sync_risk_record(updated, order_data=order_data)
         except ValueError:
             if self.risk_guard is not None:
                 self.risk_guard.block_symbol(
@@ -309,6 +334,7 @@ class BinanceOrderExecutor:
                 response,
                 recorded_at=self._now_ms(),
             )
+            self._sync_risk_record(updated)
         except (ArithmeticError, TypeError, ValueError):
             if self.risk_guard is not None:
                 self.risk_guard.block_symbol(
@@ -325,6 +351,7 @@ class BinanceOrderExecutor:
         *,
         error: str,
     ) -> OrderWALRecord:
+        self._restore_risk_reservation(record)
         unknown = self.wal.record_submit_unknown(
             record,
             recorded_at=self._now_ms(),
@@ -355,6 +382,146 @@ class BinanceOrderExecutor:
             self.risk_guard.block_symbol(symbol, "SUBMIT_UNKNOWN pending")
         else:
             self.risk_guard.unblock_symbol(symbol)
+
+    def _restore_risk_reservation(
+        self,
+        record: OrderWALRecord,
+        *,
+        response: dict[str, Any] | None = None,
+        include_fills: bool = True,
+    ) -> None:
+        if self.risk_guard is None or bool(record.payload.get("reduce_only", False)):
+            return
+        risk_value = self._risk_value(record)
+        exchange_response = response
+        if exchange_response is None:
+            exchange_response = record.payload.get("exchange_response") or {}
+        filled_value = (
+            self._filled_value(record, exchange_response) if include_fills else None
+        )
+        fill_time = self._fill_time(exchange_response)
+        status = record.status
+        if filled_value is not None:
+            has_fills: bool | None = filled_value > 0
+        elif status == "REJECTED":
+            has_fills = False
+        elif status in {"FILLED", "PARTIALLY_FILLED"}:
+            has_fills = True
+        else:
+            # A cancelled/expired response without executedQty is not proof that
+            # the order had no fills. Keep the reservation until an account fact
+            # or a later response makes that explicit.
+            has_fills = None
+        self.risk_guard.restore_open_reservation(
+            client_order_id=record.client_order_id,
+            symbol=record.symbol,
+            value_usdt=risk_value,
+            status=status,
+            has_fills=has_fills,
+            filled_value_usdt=filled_value,
+            fill_time_ms=fill_time,
+        )
+
+    def _sync_risk_record(
+        self,
+        record: OrderWALRecord,
+        *,
+        order_data: dict[str, Any] | None = None,
+    ) -> None:
+        if self.risk_guard is None or bool(record.payload.get("reduce_only", False)):
+            return
+        if order_data is not None and order_data.get("x") == "TRADE":
+            # Incremental quantity is recorded by BinanceStrategyAccount after
+            # trade-id de-duplication. Do not feed the cumulative ``z`` field
+            # into the reservation here as well.
+            self._restore_risk_reservation(
+                record,
+                response=order_data,
+                include_fills=False,
+            )
+            self.risk_guard.update_order_status(
+                record.client_order_id,
+                record.status or "SUBMIT_UNKNOWN",
+                has_fills=True,
+                fill_time_ms=self._fill_time(order_data),
+            )
+            return
+        self._restore_risk_reservation(record)
+
+    @staticmethod
+    def _risk_value(record: OrderWALRecord) -> Decimal | None:
+        raw = record.payload.get("risk_value_usdt")
+        if raw is not None:
+            try:
+                value = Decimal(str(raw))
+                if value > 0 and value.is_finite():
+                    return value
+            except (ArithmeticError, ValueError):
+                pass
+        # LIMIT 旧 WAL 至少能从原始价格重建。MARKET 的旧 WAL 通常以零价格
+        # 存储，缺少当时的 reference price 时必须按最大额度保守占用。
+        if record.order_type != "LIMIT":
+            return None
+        try:
+            value = Decimal(record.quantity) * Decimal(record.price)
+            return value if value > 0 and value.is_finite() else None
+        except (ArithmeticError, ValueError):
+            return None
+
+    @classmethod
+    def _filled_value(
+        cls, record: OrderWALRecord, response: dict[str, Any]
+    ) -> Decimal | None:
+        nested = response.get("user_stream_order")
+        if isinstance(nested, dict):
+            response = nested
+
+        raw_quote = response.get("Z")
+        if raw_quote is None:
+            raw_quote = response.get("quoteQty")
+        if raw_quote is not None:
+            try:
+                value = Decimal(str(raw_quote))
+                if value >= 0 and value.is_finite() and value > 0:
+                    return value
+            except (ArithmeticError, ValueError):
+                pass
+
+        raw_qty = response.get("z")
+        if raw_qty is None:
+            raw_qty = response.get("executedQty")
+        if raw_qty is None:
+            return None
+        try:
+            qty = Decimal(str(raw_qty))
+            if not qty.is_finite() or qty < 0:
+                return None
+            if qty == 0:
+                return Decimal("0")
+            price_raw = record.payload.get("risk_price_usdt")
+            if price_raw is None and record.order_type == "LIMIT":
+                price_raw = record.price
+            if price_raw is None:
+                return None
+            value = qty * Decimal(str(price_raw))
+            return value if value > 0 and value.is_finite() else None
+        except (ArithmeticError, ValueError):
+            return None
+
+    @staticmethod
+    def _fill_time(response: dict[str, Any]) -> int | None:
+        nested = response.get("user_stream_order")
+        if isinstance(nested, dict):
+            response = nested
+        for key in ("T", "updateTime", "E", "time"):
+            raw = response.get(key)
+            if raw is None:
+                continue
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
 
     @staticmethod
     def _same_intent(record: OrderWALRecord, intent: OrderIntent) -> bool:

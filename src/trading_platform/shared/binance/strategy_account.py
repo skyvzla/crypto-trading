@@ -288,6 +288,14 @@ class BinanceStrategyAccount:
         trade_key = (record.symbol, trade_id)
         if trade_key in self._processed_trade_ids:
             return None
+
+        if not bool(record.payload.get("reduce_only", False)):
+            self.risk_guard.note_fill(
+                record.client_order_id,
+                record.symbol,
+                fill_time,
+                fill.price * fill.quantity,
+            )
         self._processed_trade_ids.add(trade_key)
         if fill_time > self._position_update_ms.get(record.symbol, -1):
             self._pending_position_update_ms[record.symbol] = max(
@@ -353,6 +361,11 @@ class BinanceStrategyAccount:
             self._position_update_ms[symbol] = update_ms
             self._commissions.pop(symbol, None)
             self.risk_guard.update_position(symbol, Decimal("0"))
+            self.risk_guard.confirm_position_update(
+                symbol,
+                update_ms,
+                from_snapshot=not confirms_stream_fill,
+            )
             return
         is_short = amount < 0 or position_side == "SHORT"
         quantity = abs(amount)
@@ -369,6 +382,11 @@ class BinanceStrategyAccount:
         )
         self._position_update_ms[symbol] = update_ms
         self.risk_guard.update_position(symbol, entry_price * quantity)
+        self.risk_guard.confirm_position_update(
+            symbol,
+            update_ms,
+            from_snapshot=not confirms_stream_fill,
+        )
 
     def _to_order(self, record: OrderWALRecord) -> Order:
         payload = record.payload
