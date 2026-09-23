@@ -21,7 +21,7 @@ from trading_platform.notifications.adapters import (
     PermanentDeliveryError,
     RetryableDeliveryError,
 )
-from trading_platform.notifications.domain import DeliveryClaim
+from trading_platform.notifications.domain import DeliveryClaim, Severity
 from trading_platform.notifications.wakeup import PollingWakeup
 
 
@@ -235,12 +235,16 @@ class NotificationWorker:
                 delivery.id,
                 "event expired",
                 expected_attempt_count=attempt_count,
+                delivery=delivery,
+                event=event,
             )
         if attempt_count is not None and attempt_count > self.max_attempts:
             return await self._dead_result(
                 delivery.id,
                 "maximum delivery attempts exceeded",
                 expected_attempt_count=attempt_count,
+                delivery=delivery,
+                event=event,
             )
 
         try:
@@ -250,6 +254,8 @@ class NotificationWorker:
                 delivery.id,
                 f"invalid delivery snapshot: {type(exc).__name__}",
                 expected_attempt_count=attempt_count,
+                delivery=delivery,
+                event=event,
             )
         try:
             receipt = await self.adapters.send(request)
@@ -258,6 +264,8 @@ class NotificationWorker:
                 delivery.id,
                 _error_text(exc),
                 expected_attempt_count=attempt_count,
+                delivery=delivery,
+                event=event,
             )
         except RetryableDeliveryError as exc:
             return await self._handle_retry(delivery, event, exc, now)
@@ -269,6 +277,8 @@ class NotificationWorker:
                 delivery.id,
                 _error_text(exc),
                 expected_attempt_count=attempt_count,
+                delivery=delivery,
+                event=event,
             )
         except asyncio.CancelledError:
             raise
@@ -303,6 +313,8 @@ class NotificationWorker:
                 delivery.id,
                 _error_text(error),
                 expected_attempt_count=attempt,
+                delivery=delivery,
+                event=event,
             )
 
         delay = error.retry_after
@@ -321,6 +333,8 @@ class NotificationWorker:
                 delivery.id,
                 f"{_error_text(error)}; event expires before retry",
                 expected_attempt_count=attempt,
+                delivery=delivery,
+                event=event,
             )
         marked = await self._mark_retry(
             delivery.id,
@@ -360,16 +374,60 @@ class NotificationWorker:
         error: str,
         *,
         expected_attempt_count: int | None = None,
+        delivery: Any | None = None,
+        event: Any | None = None,
     ) -> WorkerStats:
         marked = await self._mark_dead(
             delivery_id,
             error,
             expected_attempt_count=expected_attempt_count,
         )
+        if marked and event is not None:
+            await self._publish_dead_letter_event(delivery, event, error)
         return WorkerStats(
             dead=1 if marked else 0,
             lease_lost=0 if marked else 1,
         )
+
+    async def _publish_dead_letter_event(
+        self, delivery: Any | None, event: Any, error: str
+    ) -> None:
+        if getattr(event, "event_type", None) == "notification.delivery.dead":
+            return
+        publisher = getattr(self.repository, "publish_event", None)
+        if not callable(publisher):
+            return
+        delivery_id = getattr(delivery, "id", None)
+        if delivery_id is None:
+            return
+        original_type = str(getattr(event, "event_type", "unknown"))
+        endpoint_id = getattr(delivery, "endpoint_id", None)
+        try:
+            result = await publisher(
+                event_type="notification.delivery.dead",
+                severity=Severity.WARNING,
+                source="notification.worker",
+                title="通知投递进入死信",
+                body=(
+                    f"事件 {original_type} 投递失败，已停止自动重试。"
+                    f" 原因：{error}"
+                ),
+                payload={
+                    "delivery_id": str(delivery_id),
+                    "event_id": str(getattr(event, "id", "")),
+                    "event_type": original_type,
+                    "endpoint_id": None if endpoint_id is None else str(endpoint_id),
+                    "last_error": error,
+                },
+                idempotency_key=f"dead-delivery:{delivery_id}",
+                correlation_id=str(getattr(event, "id", "")) or None,
+                fingerprint=f"dead-delivery:{original_type}",
+                occurred_at=_aware(self._now()),
+            )
+            if result.created:
+                await self.wakeup.notify(str(result.event.id))
+        except Exception:
+            logger.exception("notification dead-letter alert publish failed")
 
     async def _mark_sent(
         self,

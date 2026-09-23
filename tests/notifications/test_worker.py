@@ -173,6 +173,41 @@ async def test_worker_dead_letters_after_max_attempts_or_event_expiry() -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_publishes_one_dead_letter_event_without_recursion() -> None:
+    item = claim()
+    repository = FakeRepository([item])
+    published = []
+
+    async def publish_event(**event):
+        published.append(event)
+        return SimpleNamespace(
+            created=True,
+            event=SimpleNamespace(id=uuid4()),
+        )
+
+    repository.publish_event = publish_event
+    worker = NotificationWorker(
+        repository,
+        FakeAdapters([PermanentDeliveryError("bad endpoint")]),
+        worker_id="worker-1",
+        now=lambda: NOW,
+    )
+
+    stats = await worker.run_once()
+
+    assert stats.dead == 1
+    assert len(published) == 1
+    assert published[0]["event_type"] == "notification.delivery.dead"
+    assert published[0]["payload"]["event_type"] == "risk.halted"
+
+    recursive = claim()
+    recursive.event.event_type = "notification.delivery.dead"
+    repository.claims = [recursive]
+    await worker.run_once()
+    assert len(published) == 1
+
+
+@pytest.mark.asyncio
 async def test_worker_bridge_failure_does_not_drop_existing_deliveries() -> None:
     item = claim()
     repository = FakeRepository([item])

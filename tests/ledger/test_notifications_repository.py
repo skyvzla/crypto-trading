@@ -1,5 +1,6 @@
 """Notification repository integration tests against an isolated PostgreSQL schema."""
 
+import json
 import os
 import urllib.parse
 from datetime import UTC, datetime, timedelta
@@ -10,6 +11,11 @@ import pytest
 from trading_platform.ledger.db.migrations import apply_migrations
 from trading_platform.ledger.db.models import create_connection_pool
 from trading_platform.notifications.domain import ConnectorType, Severity
+from trading_platform.notifications.sources import (
+    DomainEventBridge,
+    PostgresNotificationSource,
+    SourceNotification,
+)
 from trading_platform.notifications.repository import (
     NotificationConflictError,
     NotificationRepository,
@@ -430,6 +436,187 @@ async def test_duplicate_endpoint_membership_is_one_delivery(notification_reposi
             event_type="market.degraded", severity=Severity.WARNING, source="market",
             title="different", body="x", payload={}, idempotency_key="m-1",
         )
+
+
+@pytest.mark.asyncio
+async def test_source_state_transitions_and_events_are_atomic(notification_repository):
+    repo = notification_repository
+    now = datetime.now(UTC)
+
+    def event(event_type, key):
+        return SourceNotification(
+            event_type=event_type,
+            severity="warning" if event_type.endswith("degraded") else "info",
+            source="market.quality",
+            title=event_type,
+            body=event_type,
+            payload={"state": event_type},
+            idempotency_key=key,
+            correlation_id=None,
+            fingerprint=event_type,
+            occurred_at=now,
+            expires_at=None,
+        )
+
+    assert await repo.observe_source_state(
+        "market-quality", "healthy", event=None, publish_from_states=None
+    ) is None
+    first = await repo.observe_source_state(
+        "market-quality",
+        "degraded",
+        event=event("market.data.degraded", "degraded-1"),
+        publish_from_states=None,
+    )
+    assert first is not None and first.created
+    assert await repo.observe_source_state(
+        "market-quality",
+        "degraded",
+        event=event("market.data.degraded", "degraded-duplicate"),
+        publish_from_states=None,
+    ) is None
+    recovered = await repo.observe_source_state(
+        "market-quality",
+        "healthy",
+        event=event("market.data.recovered", "recovered-1"),
+        publish_from_states=frozenset({"degraded"}),
+    )
+    assert recovered is not None and recovered.created
+    assert await repo.observe_source_state(
+        "market-quality",
+        "healthy",
+        event=event("market.data.recovered", "recovered-duplicate"),
+        publish_from_states=frozenset({"degraded"}),
+    ) is None
+
+    async with repo.pool.connection() as conn:
+        state = await (
+            await conn.execute(
+                "SELECT state FROM notification_source_states "
+                "WHERE state_key = %s",
+                ("market-quality",),
+            )
+        ).fetchone()
+        events = await (
+            await conn.execute(
+                "SELECT event_type FROM notification_events "
+                "WHERE source = %s ORDER BY created_at, event_type",
+                ("market.quality",),
+            )
+        ).fetchall()
+    assert state[0] == "healthy"
+    assert [row[0] for row in events] == [
+        "market.data.degraded",
+        "market.data.recovered",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notification_source_queries_run_against_migrated_schema(
+    notification_repository,
+):
+    source = PostgresNotificationSource(notification_repository.pool)
+    end = datetime.now(UTC)
+    start = end - timedelta(hours=1)
+
+    failures = await source.unpublished_order_failures()
+    metrics = await source.hourly_metrics(start=start, end=end)
+
+    assert failures == []
+    assert metrics == {
+        "signals": 0,
+        "order_failures": 0,
+        "fills": 0,
+        "open_positions": 0,
+        "pending_deliveries": 0,
+        "retry_deliveries": 0,
+        "dead_deliveries": 0,
+        "sent_deliveries": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_order_failure_bridge_skips_predeployment_history_and_replays_unpublished(
+    notification_repository,
+):
+    repo = notification_repository
+    source = PostgresNotificationSource(repo.pool)
+    async with repo.pool.connection() as conn:
+        row = await (
+            await conn.execute(
+                "SELECT state::timestamptz FROM notification_source_states "
+                "WHERE state_key = 'notification-order-failure-start'"
+            )
+        ).fetchone()
+        started_at = row[0]
+        old_at = started_at - timedelta(seconds=1)
+        current_at = started_at + timedelta(minutes=1)
+        for event_id, event_time, client_order_id, sequence in (
+            ("old-failure", old_at, "old-journal-order", 1),
+            ("new-failure", current_at, "new-journal-order", 2),
+        ):
+            await conn.execute(
+                """
+                INSERT INTO execution_event_journal (
+                  event_id, run_id, sequence, event_time, event_type, source,
+                  severity, account_id, strategy_id, trace_id, client_order_id,
+                  details, payload_hash
+                ) VALUES (%s, 'notification-test-run', %s, %s,
+                          'execution.order_submit_failed', 'test', 'error',
+                          'account', 'spike_short', %s, %s, %s::jsonb, %s)
+                """,
+                (
+                    event_id,
+                    sequence,
+                    int(event_time.timestamp() * 1000),
+                    event_id,
+                    client_order_id,
+                    json.dumps({"error_type": "TimeoutError"}),
+                    str(sequence) * 64,
+                ),
+            )
+        for suffix, created_at, updated_at, client_order_id in (
+            ("old", old_at, old_at, "old-ledger-order"),
+            ("late", old_at, current_at, "late-ledger-order"),
+            ("new", current_at, current_at, "new-ledger-order"),
+        ):
+            await conn.execute(
+                """
+                INSERT INTO orders (
+                  account_id, strategy_id, symbol, order_id, client_order_id,
+                  side, order_type, quantity, status, created_at, updated_at
+                ) VALUES ('account', 'spike_short', 'BTCUSDT', %s, %s,
+                          'BUY', 'LIMIT', 1, 'REJECTED', %s, %s)
+                """,
+                (f"exchange-{suffix}", client_order_id, created_at, updated_at),
+            )
+
+    failures = await source.unpublished_order_failures()
+    assert {row["event_id"] for row in failures} == {
+        "new-failure",
+        "ledger-order:account:late-ledger-order",
+        "ledger-order:account:new-ledger-order",
+    }
+
+    async def ignore_publish(_event):
+        return None
+
+    bridge = DomainEventBridge(source, ignore_publish)
+    for row in failures:
+        event = bridge._order_failure_event(row)
+        await repo.publish_event(
+            event_type=event.event_type,
+            severity=Severity(event.severity),
+            source=event.source,
+            title=event.title,
+            body=event.body,
+            payload=event.payload,
+            idempotency_key=event.idempotency_key,
+            correlation_id=event.correlation_id,
+            fingerprint=event.fingerprint,
+            occurred_at=event.occurred_at,
+            expires_at=event.expires_at,
+        )
+    assert await source.unpublished_order_failures() == []
 
 
 @pytest.mark.asyncio

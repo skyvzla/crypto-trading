@@ -24,7 +24,9 @@ from trading_platform.notifications.repository import NotificationRepository
 from trading_platform.notifications.domain import Severity
 from trading_platform.notifications.sources import (
     DomainEventBridge,
+    MarketQualitySource,
     PostgresNotificationSource,
+    SourceStateObservation,
     SourceNotification,
 )
 from trading_platform.notifications.wakeup import PollingWakeup, RedisWakeup
@@ -85,6 +87,13 @@ async def _run(args: argparse.Namespace) -> None:
         PostgresNotificationSource(pool),
         lambda event: _publish_source_event(repository, event, worker.wakeup),
         signal_lookback=timedelta(seconds=max(1, args.bridge_lookback_seconds)),
+        state_observer=lambda observation: _observe_source_state(
+            repository, observation, worker.wakeup
+        ),
+        market_quality=MarketQualitySource(
+            os.getenv("NOTIFICATION_MARKET_API_URL", "http://market:8000")
+        ),
+        enable_hourly_summary=True,
     )
     worker.source_bridge = bridge
 
@@ -102,6 +111,7 @@ async def _run(args: argparse.Namespace) -> None:
         else:
             await worker.run()
     finally:
+        await bridge.aclose()
         await worker.aclose()
         if redis_client is not None:
             await redis_client.aclose()
@@ -150,9 +160,26 @@ async def _publish_source_event(
         expires_at=event.expires_at,
     )
     event_id = getattr(result.event, "id", None)
-    if event_id is not None:
+    if result.created and event_id is not None:
         await wakeup.notify(str(event_id))
-    return result
+    return bool(result.created)
+
+
+async def _observe_source_state(
+    repository: NotificationRepository,
+    observation: SourceStateObservation,
+    wakeup: Any,
+) -> bool:
+    result = await repository.observe_source_state(
+        observation.state_key,
+        observation.state,
+        event=observation.event,
+        publish_from_states=observation.publish_from_states,
+    )
+    if result is None or not result.created:
+        return False
+    await wakeup.notify(str(result.event.id))
+    return True
 
 
 def main(argv: Sequence[str] | None = None) -> None:

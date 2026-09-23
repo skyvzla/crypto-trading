@@ -891,66 +891,144 @@ class NotificationRepository:
         occurred_at: datetime | None = None,
         expires_at: datetime | None = None,
     ) -> PublishResult:
-        event_id = uuid4()
-        occurred_at = occurred_at or datetime.now(UTC)
         async with self.pool.connection() as conn:
             async with conn.transaction():
-                row = await self._fetchone(
+                return await self._publish_event_on_connection(
                     conn,
-                    "INSERT INTO notification_events "
-                    "(id, event_type, severity, source, title, body, payload, "
-                    "idempotency_key, correlation_id, fingerprint, routing_status, "
-                    "occurred_at, expires_at) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
-                    "'pending', %s, %s) "
-                    "ON CONFLICT (source, idempotency_key) DO NOTHING RETURNING *",
-                    (
-                        event_id,
-                        event_type,
-                        severity.value,
-                        source,
-                        title,
-                        body,
-                        Jsonb(payload),
-                        idempotency_key,
-                        correlation_id,
-                        fingerprint,
-                        occurred_at,
-                        expires_at,
-                    ),
+                    event_type=event_type,
+                    severity=severity,
+                    source=source,
+                    title=title,
+                    body=body,
+                    payload=payload,
+                    idempotency_key=idempotency_key,
+                    correlation_id=correlation_id,
+                    fingerprint=fingerprint,
+                    occurred_at=occurred_at,
+                    expires_at=expires_at,
                 )
-                if row is None:
-                    existing = await self._fetchone(
-                        conn,
-                        "SELECT * FROM notification_events "
-                        "WHERE source = %s AND idempotency_key = %s",
-                        (source, idempotency_key),
-                    )
-                    assert existing is not None
-                    existing_event = _event(existing)
-                    immutable_pairs = (
-                        (existing_event.event_type, event_type),
-                        (existing_event.severity.value, severity.value),
-                        (existing_event.source, source),
-                        (existing_event.title, title),
-                        (existing_event.body, body),
-                        (existing_event.payload, payload),
-                        (existing_event.correlation_id, correlation_id),
-                        (existing_event.fingerprint, fingerprint),
-                    )
-                    if any(left != right for left, right in immutable_pairs):
-                        raise NotificationConflictError(
-                            "idempotency key is already used by a different event"
-                        )
-                    return PublishResult(
-                        event=existing_event,
-                        deliveries=await self._event_deliveries(
-                            conn, existing_event.id
-                        ),
-                        created=False,
-                    )
-                routed_event = await self._route_event(conn, _event(row))
-                deliveries = await self._event_deliveries(conn, routed_event.id)
+
+    async def observe_source_state(
+        self,
+        state_key: str,
+        state: str,
+        *,
+        event: Any | None,
+        publish_from_states: frozenset[str] | None,
+    ) -> PublishResult | None:
+        async with self.pool.connection() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    (state_key,),
+                )
+                previous = await self._fetchone(
+                    conn,
+                    "SELECT state FROM notification_source_states "
+                    "WHERE state_key = %s FOR UPDATE",
+                    (state_key,),
+                )
+                previous_state = None if previous is None else str(previous["state"])
+                if previous_state == state:
+                    return None
+                await conn.execute(
+                    "INSERT INTO notification_source_states (state_key, state) "
+                    "VALUES (%s, %s) ON CONFLICT (state_key) DO UPDATE SET "
+                    "state = EXCLUDED.state, updated_at = NOW()",
+                    (state_key, state),
+                )
+                if event is None or (
+                    publish_from_states is not None
+                    and previous_state not in publish_from_states
+                ):
+                    return None
+                return await self._publish_event_on_connection(
+                    conn,
+                    event_type=event.event_type,
+                    severity=Severity(event.severity),
+                    source=event.source,
+                    title=event.title,
+                    body=event.body,
+                    payload=event.payload,
+                    idempotency_key=event.idempotency_key,
+                    correlation_id=event.correlation_id,
+                    fingerprint=event.fingerprint,
+                    occurred_at=event.occurred_at,
+                    expires_at=event.expires_at,
+                )
+
+    async def _publish_event_on_connection(
+        self,
+        conn: object,
+        *,
+        event_type: str,
+        severity: Severity,
+        source: str,
+        title: str,
+        body: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
+        correlation_id: str | None = None,
+        fingerprint: str | None = None,
+        occurred_at: datetime | None = None,
+        expires_at: datetime | None = None,
+    ) -> PublishResult:
+        event_id = uuid4()
+        occurred_at = occurred_at or datetime.now(UTC)
+        row = await self._fetchone(
+            conn,
+            "INSERT INTO notification_events "
+            "(id, event_type, severity, source, title, body, payload, "
+            "idempotency_key, correlation_id, fingerprint, routing_status, "
+            "occurred_at, expires_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, "
+            "'pending', %s, %s) "
+            "ON CONFLICT (source, idempotency_key) DO NOTHING RETURNING *",
+            (
+                event_id,
+                event_type,
+                severity.value,
+                source,
+                title,
+                body,
+                Jsonb(payload),
+                idempotency_key,
+                correlation_id,
+                fingerprint,
+                occurred_at,
+                expires_at,
+            ),
+        )
+        if row is None:
+            existing = await self._fetchone(
+                conn,
+                "SELECT * FROM notification_events "
+                "WHERE source = %s AND idempotency_key = %s",
+                (source, idempotency_key),
+            )
+            assert existing is not None
+            existing_event = _event(existing)
+            immutable_pairs = (
+                (existing_event.event_type, event_type),
+                (existing_event.severity.value, severity.value),
+                (existing_event.source, source),
+                (existing_event.title, title),
+                (existing_event.body, body),
+                (existing_event.payload, payload),
+                (existing_event.correlation_id, correlation_id),
+                (existing_event.fingerprint, fingerprint),
+            )
+            if any(left != right for left, right in immutable_pairs):
+                raise NotificationConflictError(
+                    "idempotency key is already used by a different event"
+                )
+            return PublishResult(
+                event=existing_event,
+                deliveries=await self._event_deliveries(conn, existing_event.id),
+                created=False,
+            )
+        routed_event = await self._route_event(conn, _event(row))
+        deliveries = await self._event_deliveries(conn, routed_event.id)
         return PublishResult(routed_event, deliveries, True)
 
     async def create_endpoint_test(
