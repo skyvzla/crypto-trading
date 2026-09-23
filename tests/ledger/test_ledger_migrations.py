@@ -58,15 +58,16 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
     current_version = len(load_migrations())
     assert first.current_version == current_version
     assert first.applied_versions == tuple(range(1, current_version + 1))
-    assert first.applied_versions[-3:] == (21, 22, 23)
+    assert first.applied_versions[-3:] == (22, 23, 24)
     migrations = load_migrations()
-    assert migrations[-4].filename == "0020_notification_secrets.sql"
-    assert migrations[-4].checksum == (
+    assert migrations[-5].filename == "0020_notification_secrets.sql"
+    assert migrations[-5].checksum == (
         "9991f70e7ce17af00bef4b2d6a69a262a6f8b375ca8bbafa8e3e21c2aecb14f9"
     )
-    assert migrations[-3].filename == "0021_notification_secret_legacy_cleanup.sql"
-    assert migrations[-2].filename == "0022_notification_source_states.sql"
-    assert migrations[-1].filename == "0023_order_rejection_updated_at_index.sql"
+    assert migrations[-4].filename == "0021_notification_secret_legacy_cleanup.sql"
+    assert migrations[-3].filename == "0022_notification_source_states.sql"
+    assert migrations[-2].filename == "0023_order_rejection_updated_at_index.sql"
+    assert migrations[-1].filename == "0024_strategy_notification_state_identity.sql"
     assert second.current_version == current_version
     assert second.applied_versions == ()
     assert await verify_current(pool, schema=schema) == current_version
@@ -169,7 +170,7 @@ async def test_client_order_id_constraint_is_account_scoped_when_upgrading(
     upgraded = await apply_migrations(pool, schema=schema)
     repeated = await apply_migrations(pool, schema=schema)
 
-    assert upgraded.applied_versions == (15, 16, 17, 18, 19, 20, 21, 22, 23)
+    assert upgraded.applied_versions == (15, 16, 17, 18, 19, 20, 21, 22, 23, 24)
     assert repeated.applied_versions == ()
 
     async with pool.connection() as conn:
@@ -207,6 +208,101 @@ async def test_client_order_id_constraint_is_account_scoped_when_upgrading(
             )
 
 
+
+
+@pytest.mark.asyncio
+async def test_strategy_notification_states_merge_instance_keys_on_upgrade(
+    migration_db, tmp_path: Path
+):
+    pool, schema = migration_db
+    old_migrations = tmp_path / "migrations-through-23"
+    old_migrations.mkdir()
+    for source in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        if int(source.stem.split("_", 1)[0]) > 23:
+            continue
+        shutil.copy(source, old_migrations / source.name)
+
+    await apply_migrations(pool, schema=schema, directory=old_migrations)
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            await conn.execute(
+                """
+                INSERT INTO strategy_runtime_status (
+                  account_id, strategy_id, instance_id, mode, status,
+                  entry_enabled, halted, gate_conditions, started_at, heartbeat_at
+                ) VALUES (
+                  'state-account', 'spike_short', 'new-instance', 'testnet',
+                  'running', TRUE, FALSE, '{}'::jsonb, NOW(), NOW()
+                )
+                """
+            )
+            await conn.execute(
+                """
+                INSERT INTO notification_source_states (state_key, state, updated_at)
+                VALUES
+                  ('strategy-health:state-account:spike_short:old-instance-1',
+                   'degraded', NOW() - INTERVAL '20 minutes'),
+                  ('strategy-health:state-account:spike_short:old-instance-2',
+                   'unhealthy', NOW() - INTERVAL '10 minutes'),
+                  ('strategy-risk:state-account:spike_short:old-instance-1',
+                   'clear', NOW() - INTERVAL '20 minutes'),
+                  ('strategy-risk:state-account:spike_short:old-instance-2',
+                   'halted', NOW() - INTERVAL '10 minutes')
+                """
+            )
+
+    result = await apply_migrations(pool, schema=schema)
+
+    async with pool.connection() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                sql.SQL("SET LOCAL search_path TO {}, pg_catalog").format(
+                    sql.Identifier(schema)
+                )
+            )
+            rows = await (
+                await conn.execute(
+                    "SELECT state_key, state FROM notification_source_states "
+                    "WHERE state_key IN (%s, %s) ORDER BY state_key",
+                    (
+                        "strategy-health:state-account:spike_short",
+                        "strategy-risk:state-account:spike_short",
+                    ),
+                )
+            ).fetchall()
+            remaining_instances = await (
+                await conn.execute(
+                    "SELECT COUNT(*) FROM notification_source_states "
+                    "WHERE LEFT(state_key, %s) = %s",
+                    (
+                        len("strategy-health:state-account:spike_short:"),
+                        "strategy-health:state-account:spike_short:",
+                    ),
+                )
+            ).fetchone()
+            remaining_risk_instances = await (
+                await conn.execute(
+                    "SELECT COUNT(*) FROM notification_source_states "
+                    "WHERE LEFT(state_key, %s) = %s",
+                    (
+                        len("strategy-risk:state-account:spike_short:"),
+                        "strategy-risk:state-account:spike_short:",
+                    ),
+                )
+            ).fetchone()
+
+    assert result.applied_versions == (24,)
+    assert rows == [
+        ("strategy-health:state-account:spike_short", "unhealthy"),
+        ("strategy-risk:state-account:spike_short", "halted"),
+    ]
+    assert remaining_instances == (0,)
+    assert remaining_risk_instances == (0,)
 
 
 @pytest.mark.asyncio
@@ -383,7 +479,7 @@ async def test_notification_secret_migration_preserves_legacy_references(
     assert mid_snapshots["whitespace-ref"] == ("   ", None)
 
     result = await apply_migrations(pool, schema=schema)
-    assert result.applied_versions == (21, 22, 23)
+    assert result.applied_versions == (21, 22, 23, 24)
     assert (await apply_migrations(pool, schema=schema)).applied_versions == ()
 
     async with pool.connection() as conn:
@@ -541,6 +637,7 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
         21,
         22,
         23,
+        24,
     )
     async with pool.connection() as conn:
         async with conn.transaction():

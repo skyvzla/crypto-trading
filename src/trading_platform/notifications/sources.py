@@ -510,9 +510,7 @@ class DomainEventBridge:
             "gate_conditions": dict(row.get("gate_conditions") or {}),
             "heartbeat_at": heartbeat_at.isoformat(),
         }
-        identity = ":".join(
-            str(row[field]) for field in ("account_id", "strategy_id", "instance_id")
-        )
+        identity = f"{row['account_id']}:{row['strategy_id']}"
         health_event = None
         recovery_from = None
         if health_state in {"unhealthy", "degraded"}:

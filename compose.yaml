@@ -149,6 +149,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      market:
+        condition: service_healthy
     restart: unless-stopped
 
   symbol-sync:

@@ -116,8 +116,20 @@ async def test_bridge_marks_stale_runtime_critical_and_ignores_healthy():
     }
     source = FakeSource(
         statuses=[
-            {**base, "instance_id": "stale", "status": "running", "heartbeat_at": stale},
-            {**base, "instance_id": "healthy", "status": "running", "heartbeat_at": now},
+            {
+                **base,
+                "account_id": "stale-account",
+                "instance_id": "stale",
+                "status": "running",
+                "heartbeat_at": stale,
+            },
+            {
+                **base,
+                "account_id": "healthy-account",
+                "instance_id": "healthy",
+                "status": "running",
+                "heartbeat_at": now,
+            },
         ]
     )
     published = []
@@ -185,7 +197,13 @@ async def test_bridge_publishes_runtime_recovery_only_on_health_transition():
 
     assert await bridge.run_once(now=now + timedelta(seconds=10)) == 0
 
-    source.statuses = [{**status, "heartbeat_at": now + timedelta(seconds=20)}]
+    source.statuses = [
+        {
+            **status,
+            "instance_id": "instance-2",
+            "heartbeat_at": now + timedelta(seconds=20),
+        }
+    ]
     assert await bridge.run_once(now=now + timedelta(seconds=20)) == 1
     assert published[-1].event_type == "system.strategy.recovered"
 
@@ -221,6 +239,7 @@ async def test_bridge_publishes_risk_resumed_only_after_halt_is_cleared():
     source.statuses = [
         {
             **status,
+            "instance_id": "instance-2",
             "status": "running",
             "halted": False,
             "halt_reason": None,
