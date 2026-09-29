@@ -106,7 +106,7 @@ if [[ "$1 ${2:-}" == "info" ]]; then exit 0; fi
 if [[ "$1 ${2:-}" == "manifest inspect" ]]; then exit 0; fi
 if [[ "$*" == *"config --format json"* ]]; then
   image="${TRADING_PLATFORM_IMAGE:?}"
-  printf '{"services":{'
+  printf '{"name":"%s","services":{' "${FAKE_COMPOSE_PROJECT_NAME:-trading_platform}"
   separator=""
   for service in market ledger-migrate ledger notification-worker symbol-sync spike long_breakout strategy_kline strategy_tick; do
     if [[ "$service" == spike || "$service" == long_breakout || "$service" == strategy_kline || "$service" == strategy_tick ]]; then
@@ -228,6 +228,18 @@ def test_deploy_release_uses_latest_and_runs_source_free_bundle(tmp_path: Path) 
     assert (tmp_path / "instance" / "CURRENT_RELEASE").read_text(encoding="utf-8").strip() == "v1.2.3"
     assert not (installed / "src").exists()
     assert not (installed / "Dockerfile").exists()
+
+
+def test_deploy_release_rejects_a_different_resolved_project_name(tmp_path: Path) -> None:
+    result = _run_bootstrap(
+        tmp_path,
+        extra_env={"FAKE_COMPOSE_PROJECT_NAME": "alternate_project"},
+    )
+    assert result.returncode == 2
+    assert "Release Compose configuration is invalid" in result.stderr
+    docker_calls = (tmp_path / "docker.log").read_text(encoding="utf-8")
+    assert "config --format json" in docker_calls
+    assert " up " not in docker_calls
 
 
 def test_deploy_release_defaults_to_the_script_directory(tmp_path: Path) -> None:

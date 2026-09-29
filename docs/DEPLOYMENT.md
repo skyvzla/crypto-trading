@@ -45,6 +45,9 @@ Release 附带版本镜像、完整 commit SHA 镜像引用、部署 bundle、bu
 `deploy-release.sh`。bundle 只含 Compose 配置、`.env.example` 和运维脚本，不含 `src/`、
 测试、Dockerfile 或构建上下文。
 
+`v1.0.0` 指向仅发布镜像的旧工作流，没有 source-free 部署 bundle，不能用于首次无源码部署。
+不要移动或重打这个 tag；source-free 部署必须使用后续新版本 tag。
+
 代码已合入并通过现有测试后，在本机基于 `main` 的目标提交创建并推送版本 tag：
 
 ```bash

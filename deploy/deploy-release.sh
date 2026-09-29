@@ -301,7 +301,10 @@ import os
 import sys
 
 try:
-    services = json.load(sys.stdin)["services"]
+    config = json.load(sys.stdin)
+    if config.get("name") != "trading_platform":
+        raise ValueError("project name must be trading_platform")
+    services = config["services"]
     names = (
         "market", "ledger-migrate", "ledger", "notification-worker",
         "symbol-sync", "spike", "long_breakout", "strategy_kline", "strategy_tick",

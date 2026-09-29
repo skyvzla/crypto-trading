@@ -28,6 +28,33 @@ def test_ledger_and_migration_runner_use_the_same_image_artifact():
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is unavailable")
+def test_source_and_release_configs_keep_the_project_name_in_an_alternate_directory(
+    tmp_path,
+):
+    environment = os.environ.copy()
+    environment.pop("COMPOSE_PROJECT_NAME", None)
+    configs = (
+        ["compose.yaml"],
+        ["compose.yaml", "deploy/compose.release.yaml"],
+    )
+
+    for files in configs:
+        command = ["docker", "compose", "--project-directory", str(tmp_path)]
+        for compose_file in files:
+            command.extend(("-f", str(PROJECT_ROOT / compose_file)))
+        command.extend(("config", "--format", "json"))
+        result = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert json.loads(result.stdout)["name"] == "trading_platform"
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is unavailable")
 def test_release_compose_contains_no_source_build_context():
     result = subprocess.run(
         [
