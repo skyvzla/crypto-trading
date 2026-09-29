@@ -33,6 +33,7 @@ COPY pyproject.toml uv.lock ./
 COPY src/ ./src/
 COPY tests/ ./tests/
 COPY scripts/ ./scripts/
+COPY deploy/ ./deploy/
 
 # 安装项目依赖和测试依赖。
 # uv.lock 固定了 PyPI 文件直链；默认中国镜像构建时在镜像层内重写前缀，

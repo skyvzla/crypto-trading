@@ -18,7 +18,16 @@ ops_die() {
 }
 
 ops_compose() {
-  "$OPS_DOCKER_BIN" compose --profile '*' "$@"
+  if [[ -n "${TRADING_PLATFORM_RELEASE_COMPOSE_DIR:-}" ]]; then
+    "$OPS_DOCKER_BIN" compose \
+      --project-directory "$OPS_PROJECT_ROOT" \
+      --env-file "$OPS_ENV_FILE" \
+      -f "$TRADING_PLATFORM_RELEASE_COMPOSE_DIR/compose.yaml" \
+      -f "$TRADING_PLATFORM_RELEASE_COMPOSE_DIR/deploy/compose.release.yaml" \
+      --profile '*' "$@"
+  else
+    "$OPS_DOCKER_BIN" compose --profile '*' "$@"
+  fi
 }
 
 ops_require_host() {

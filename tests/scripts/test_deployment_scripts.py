@@ -354,7 +354,12 @@ def invoke(tmp_path: Path, script_name: str, *args: str, **overrides: str) -> su
     return run_script(tmp_path, script_name, *args, env=overrides)
 
 
-def run_backup_script(tmp_path: Path, *, database_state: str) -> subprocess.CompletedProcess[str]:
+def run_backup_script(
+    tmp_path: Path,
+    *,
+    database_state: str,
+    release_compose_dir: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     environment = prepare(tmp_path, "deploy")
     backup = tmp_path / "scripts" / "verify_ledger_backup_restore.sh"
     shutil.copy2(PROJECT_ROOT / "scripts" / "verify_ledger_backup_restore.sh", backup)
@@ -364,6 +369,14 @@ def run_backup_script(tmp_path: Path, *, database_state: str) -> subprocess.Comp
             "FAKE_BACKUP_DB_STATE": database_state,
         }
     )
+    if release_compose_dir is not None:
+        environment.update(
+            {
+                "TRADING_PLATFORM_PROJECT_ROOT": str(tmp_path),
+                "TRADING_PLATFORM_ENV_FILE": str(tmp_path / ".env"),
+                "TRADING_PLATFORM_RELEASE_COMPOSE_DIR": str(release_compose_dir),
+            }
+        )
     return subprocess.run(
         ["bash", str(backup)],
         cwd=tmp_path,
@@ -419,6 +432,52 @@ def test_deploy_pulls_fixed_ghcr_image_after_backup_without_building(tmp_path: P
     assert any(" pull market ledger-migrate ledger" in call for call in calls)
     assert not any(" build" in call for call in calls)
     assert any("--no-build --pull never ledger-migrate" in call for call in calls)
+
+
+def test_deploy_uses_release_compose_files_and_persistent_project_directory(
+    tmp_path: Path,
+) -> None:
+    release_dir = tmp_path / "release-v1"
+    result = invoke(
+        tmp_path,
+        "deploy",
+        TRADING_PLATFORM_IMAGE="ghcr.io/example/trading-platform:v1.2.3",
+        TRADING_PLATFORM_RELEASE_COMPOSE_DIR=str(release_dir),
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [call for call in docker_log(tmp_path) if call.startswith("compose ")]
+    relevant_calls = [
+        call
+        for call in calls
+        if "config --services" in call or " up -d" in call or " pull " in call
+    ]
+    assert relevant_calls
+    assert all(
+        f"--project-directory {tmp_path} --env-file {tmp_path}/.env "
+        f"-f {release_dir}/compose.yaml "
+        f"-f {release_dir}/deploy/compose.release.yaml" in call
+        for call in relevant_calls
+    )
+
+
+def test_backup_restore_uses_release_compose_and_persistent_project_directory(
+    tmp_path: Path,
+) -> None:
+    release_dir = tmp_path / "releases" / "v1.2.3"
+    result = run_backup_script(
+        tmp_path,
+        database_state="empty",
+        release_compose_dir=release_dir,
+    )
+    assert result.returncode == 0, result.stderr
+    calls = [call for call in docker_log(tmp_path) if call.startswith("compose ")]
+    assert calls
+    assert all(
+        f"--project-directory {tmp_path} --env-file {tmp_path}/.env "
+        f"-f {release_dir}/compose.yaml "
+        f"-f {release_dir}/deploy/compose.release.yaml" in call
+        for call in calls
+    ), calls
 
 
 def test_deploy_rejects_running_strategy_before_backup_or_pull(tmp_path: Path) -> None:

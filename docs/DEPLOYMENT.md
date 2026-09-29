@@ -1,6 +1,6 @@
 # 部署与运行手册
 
-运维只需要记住三个入口：
+在源码工作区使用：
 
 ```bash
 scripts/deploy.sh              # 部署基础服务，不启动策略
@@ -8,13 +8,16 @@ scripts/start.sh [SERVICE]     # 启动一个策略 service，默认 spike
 scripts/stop.sh [SERVICE]      # 停止一个策略 service，默认 spike
 ```
 
-三个脚本都从项目根目录执行，并统一使用 `docker compose --profile '*'`。它们不
+这些脚本都从项目根目录执行，并统一使用 `docker compose --profile '*'`。它们不
 `source .env`，不会把交易所密钥、数据库密码或事件 token 打到终端。不要使用
 `docker compose down -v`，这会删除 PostgreSQL/Redis 数据卷。
 
+目标机无需 checkout 应用源码，可安装 `deploy/deploy-release.sh` 作为单一部署入口；
+它只下载版本化 Compose/运维配置包，并运行匹配的 GHCR 镜像。
+
 ## 1. 第一次配置
 
-宿主机需要 Bash、Docker Engine、Docker Compose plugin、Python 3、curl 和 POSIX
+源码工作区需要 Bash、Docker Engine、Docker Compose plugin、Python 3、curl 和 POSIX
 工具。宿主机不需要安装 uv 或项目 Python 依赖。
 
 ```bash
@@ -29,17 +32,18 @@ $EDITOR .env
 - testnet API key/secret 使用专用账户，禁止提现权限；正式网配置必须遵守策略专用上线审批，不能绕过 runtime guard。
 - 数据库配置与 Compose 一致；生产环境不要使用 `.env.example` 中的默认密码。
 - `logs/`、`data/wal/` 和 `data/market/campaign_snapshots/` 由脚本创建，不要把它们放到临时目录。
-- 目标机使用 GHCR 发布镜像时，在 `.env` 设置固定版本，例如
-  `TRADING_PLATFORM_IMAGE=ghcr.io/OWNER/REPOSITORY:v1.2.3`；不要使用 `latest`。
+- 目标机使用发布脚本部署时，镜像版本由 Release tag 选择，不必在 `.env` 中维护镜像地址。
 
 脚本只检查 `.env` 存在、不是符号链接且权限为 `0600`，不会解析或打印密钥。缺少
 `.env` 或权限过宽会 fail-closed；策略环境是否合法由目标 service 的 runtime guard 负责。
 
-## 2. 发布应用镜像
+## 2. 发布应用镜像和部署配置
 
-现有测试流程保持不变。新增的 `.github/workflows/publish-image.yml` 只在推送 `v*`
-tag 时发布应用镜像；它要求 tag 指向已合入 `main` 的提交，并使用 GitHub Actions
-内置 `GITHUB_TOKEN` 写入 GHCR。镜像同时带 release tag 和完整 commit SHA tag。
+现有测试流程保持不变。`.github/workflows/publish-image.yml` 只在推送 `v*` tag 时运行；
+它要求 tag 指向已合入 `main` 的提交，构建镜像并推到 GHCR，同时创建 GitHub Release。
+Release 附带版本镜像、完整 commit SHA 镜像引用、部署 bundle、bundle SHA-256 和单文件
+`deploy-release.sh`。bundle 只含 Compose 配置、`.env.example` 和运维脚本，不含 `src/`、
+测试、Dockerfile 或构建上下文。
 
 代码已合入并通过现有测试后，在本机基于 `main` 的目标提交创建并推送版本 tag：
 
@@ -56,35 +60,74 @@ git push origin v1.2.3
 ghcr.io/<owner>/<repository>:v1.2.3
 ```
 
-第一次发布后，在 GitHub Package Settings 检查镜像包访问权限。私有包的目标机只需
-登录一次 GHCR，使用有 `read:packages` 权限的个人访问 token；不要把 token 写入仓库或
-`.env`：
+目标机的 GitHub CLI 和 Docker 登录由运维预先配置；发布脚本只检测已有登录状态，不创建、
+保存或传递 token。GitHub CLI 需能读取私有仓库 Release，Docker 需已登录 GHCR 并有镜像
+读取权限。登录凭据不要写进部署 bundle 或 `.env`。
+
+## 3. 目标机安装与部署
+
+目标机只需 Bash、GitHub CLI、Docker Engine/Compose、Python 3、curl、tar、sha256sum 和
+POSIX 工具。不需要 Git、Python 项目依赖、Node、Dockerfile 或应用源码。第一次从对应
+GitHub Release 安装单文件入口：
 
 ```bash
-read -rsp 'GHCR token: ' GHCR_TOKEN; echo
-printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u <github-user> --password-stdin
-unset GHCR_TOKEN
+mkdir -p "$HOME/.local/bin"
+gh release download v1.2.3 --repo skyvzla/crypto-trading \
+  --pattern deploy-release.sh --dir "$HOME/.local/bin"
+chmod 700 "$HOME/.local/bin/deploy-release.sh"
 ```
 
-## 3. 部署基础服务
+准备目标机自己的 `.env`。首次运行脚本会从版本 bundle 放置权限为 `0600` 的模板并停止；
+设置强 `DB_PASSWORD`（至少 24 字符）及所需环境后再次运行。默认持久化根目录是
+`$HOME/.local/share/trading-platform`，也可通过 `TRADING_PLATFORM_HOME` 指定。每次部署会
+把选中版本的部署文件留在 `releases/<tag>/`，数据库卷、`.env`、WAL、行情数据、日志和备份
+始终留在固定根目录，不随版本切换覆盖。
 
-不设置 `TRADING_PLATFORM_IMAGE` 时，下面命令保持原行为，在当前机器从源码构建：
+默认部署最新稳定 GitHub Release：
+
+```bash
+$HOME/.local/bin/deploy-release.sh
+```
+
+升级可继续部署最新版本，也可固定指定版本：
+
+```bash
+$HOME/.local/bin/deploy-release.sh latest
+$HOME/.local/bin/deploy-release.sh v1.2.3
+```
+
+基础服务部署不会启动策略。需要在同一脚本调用中显式启动某个策略时，使用 `--start`；
+策略运行中的升级会被拒绝，且仍须先人工关闭准入、排空、交易所对账：
+
+```bash
+$HOME/.local/bin/deploy-release.sh latest --start spike
+```
+
+完成准入关闭、排空、对账后，可通过同一个入口调用既有 stop 门禁，再执行升级：
+
+```bash
+$HOME/.local/bin/deploy-release.sh --stop spike
+$HOME/.local/bin/deploy-release.sh latest
+```
+
+成功部署后会在持久化根目录记录当前 Release。`--stop SERVICE` 只使用本机已安装的
+Release 配置，不访问 GitHub 或 GHCR，因此网络或仓库暂时不可用时仍能按原 stop 门禁停策略。
+
+发布脚本会检查 GitHub CLI 登录、Docker daemon 和 Compose、目标目录、`.env` 权限和数据库
+密码强度；下载后验证 SHA-256、Release tag 和 bundle 文件白名单，并确认 release Compose
+所有应用服务都没有源码构建上下文。之后已有的 `scripts/deploy.sh` 会确保 PostgreSQL/Redis
+就绪、运行并验证数据库备份（真正空库会明确跳过），再拉镜像、执行迁移、检查健康接口和
+通知状态。私有 GitHub/GHCR 访问沿用目标机已配置的 CLI/Docker 登录，不改造凭据流程。
+
+## 4. 本地源码部署
+
+不设置 `TRADING_PLATFORM_RELEASE_COMPOSE_DIR` 且在源码 checkout 中运行时，原有本地开发流程
+保持不变，`scripts/deploy.sh` 仍从源码构建：
 
 ```bash
 scripts/deploy.sh
 ```
 
-目标机设置了固定 GHCR 镜像时，同一个命令会拉取并使用预构建镜像，不执行源码构建：
-
-```dotenv
-TRADING_PLATFORM_IMAGE=ghcr.io/<owner>/<repository>:v1.2.3
-```
-
-目标机 checkout 对应的发布 tag，确认 `.env` 权限为 `0600` 后运行 `scripts/deploy.sh`。
-GHCR 模式会先确认所有策略 service 已安全停止，确保 PostgreSQL/Redis 镜像和容器就绪，
-再运行 `scripts/verify_ledger_backup_restore.sh` 创建并验证 PostgreSQL 备份，随后拉取应用镜像、
-运行迁移并更新基础服务。备份文件保留在 `backups/`。策略 service 正在运行时会拒绝发布；
-脚本无法替代人工完成准入关闭、排空和交易所对账。
 全新且尚无任何业务表的数据库会明确报告跳过备份；若已有业务表却缺少有效迁移历史则拒绝部署。
 
 部署顺序是：检查依赖和 `.env`、创建运行目录、校验 Compose、本地构建或拉取应用镜像、启动
@@ -102,7 +145,7 @@ PostgreSQL/Redis、运行 `ledger-migrate`、再启动 Market、Ledger、notific
 缺失的关键事件类型，后续 `start.sh` 会拒绝启动策略。`routable_policies` 仅是配置结构指标，不代表关键事件
 一定会被真实选路并投递。
 
-## 4. 配置并验证通知
+## 5. 配置并验证通知
 
 在 WebUI 的通知页面配置并启用至少一个 connector、endpoint 和 policy。Telegram Bot
 token 和 Webhook 认证密钥直接在连接器表单中填写，由通知系统单独持久化；读取接口、
@@ -117,7 +160,7 @@ token 和 Webhook 认证密钥直接在连接器表单中填写，由通知系�
 一个启用 endpoint/connector；这不证明 secret 可解析，也不证明外部平台能收到消息。配置完成后，必须在 WebUI 对目标 endpoint 执行
 一次 endpoint test，并检查 delivery 状态和目标平台收件箱，才算通知链路端到端通过。
 
-## 5. 启动策略服务
+## 6. 启动策略服务
 
 默认启动 Spike：
 
@@ -161,7 +204,7 @@ runtime guard。`up` 失败、等待超时或目标状态不是 running 时，�
 和目标服务末尾日志；本次启动留下的 running/restarting/paused 容器会停止，created/removing
 容器会按目标 service 精确移除，避免半启动服务继续写入或留下残留。
 
-## 6. 停止服务
+## 7. 停止服务
 
 ```bash
 scripts/stop.sh              # 默认停止 spike
@@ -183,11 +226,12 @@ docker compose --profile '*' stop --timeout 120 SERVICE
 和备份预案，再调用 stop。脚本输出的排查位置包括 Docker logs、`logs/`、`data/wal/`
 以及账本数据库中的事件记录。
 
-## 7. 回滚与常见故障
+## 8. 回滚与常见故障
 
-镜像回滚时，将 `.env` 中的 `TRADING_PLATFORM_IMAGE` 改回上一版本 tag，再运行
-`scripts/deploy.sh`。迁移可能改变数据库 schema；回滚前必须确认旧应用兼容当前 schema，
-否则应按数据库恢复预案处理，不能只把镜像 tag 改回去。
+源码部署环境可将 `.env` 中的 `TRADING_PLATFORM_IMAGE` 改回上一版本 tag，再运行
+`scripts/deploy.sh`。无源码目标机使用
+`$HOME/.local/bin/deploy-release.sh v1.2.2` 固定回滚到上一版。迁移可能改变数据库 schema；
+回滚前必须确认旧应用兼容当前 schema，否则应按数据库恢复预案处理，不能只把镜像 tag 改回去。
 
 查看整体状态：
 

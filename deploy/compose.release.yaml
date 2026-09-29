@@ -1,0 +1,24 @@
+services:
+  market:
+    build: !reset null
+
+  ledger:
+    build: !reset null
+
+  notification-worker:
+    build: !reset null
+
+  symbol-sync:
+    build: !reset null
+
+  spike:
+    build: !reset null
+
+  long_breakout:
+    build: !reset null
+
+  strategy_kline:
+    build: !reset null
+
+  strategy_tick:
+    build: !reset null

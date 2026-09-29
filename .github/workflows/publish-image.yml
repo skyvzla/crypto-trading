@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 env:
@@ -21,6 +21,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Require a stable semantic version tag
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Release tags must use stable vMAJOR.MINOR.PATCH format" >&2
+            exit 1
+          }
 
       - name: Ensure release commit is on main
         run: |
@@ -60,3 +67,28 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Create deployment bundle and checksum
+        id: bundle
+        run: |
+          bundle="$RUNNER_TEMP/deploy-bundle.tar.gz"
+          checksum="$bundle.sha256"
+          bash deploy/create-release-bundle.sh "$GITHUB_REF_NAME" "$bundle"
+          (cd "$RUNNER_TEMP" && sha256sum "$(basename "$bundle")" > "$(basename "$checksum")")
+          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUNDLE_PATH: ${{ steps.bundle.outputs.bundle }}
+          CHECKSUM_PATH: ${{ steps.bundle.outputs.checksum }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "$BUNDLE_PATH#deploy-bundle.tar.gz" \
+            "$CHECKSUM_PATH#deploy-bundle.tar.gz.sha256" \
+            "deploy/deploy-release.sh#deploy-release.sh" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

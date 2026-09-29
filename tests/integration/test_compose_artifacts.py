@@ -28,6 +28,45 @@ def test_ledger_and_migration_runner_use_the_same_image_artifact():
 
 
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is unavailable")
+def test_release_compose_contains_no_source_build_context():
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "compose.yaml",
+            "-f",
+            "deploy/compose.release.yaml",
+            "--profile",
+            "*",
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    services = json.loads(result.stdout)["services"]
+    app_services = (
+        "market",
+        "ledger-migrate",
+        "ledger",
+        "notification-worker",
+        "symbol-sync",
+        "spike",
+        "long_breakout",
+        "strategy_kline",
+        "strategy_tick",
+    )
+    assert {services[name]["image"] for name in app_services} == {
+        "trading_platform-ledger"
+    }
+    assert all("build" not in services[name] for name in app_services)
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is unavailable")
 def test_spike_profile_runs_preflight_and_checks_persisted_runtime_health():
     result = subprocess.run(
         ["docker", "compose", "--profile", "spike", "config", "--format", "json"],

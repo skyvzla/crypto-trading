@@ -2,12 +2,22 @@
 
 set -euo pipefail
 
-project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+project_root="${TRADING_PLATFORM_PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$project_root"
 OPS_DOCKER_BIN="${TRADING_OPS_DOCKER_BIN:-docker}"
+OPS_ENV_FILE="${TRADING_PLATFORM_ENV_FILE:-$project_root/.env}"
 
 ops_compose() {
-  "$OPS_DOCKER_BIN" compose "$@"
+  if [[ -n "${TRADING_PLATFORM_RELEASE_COMPOSE_DIR:-}" ]]; then
+    "$OPS_DOCKER_BIN" compose \
+      --project-directory "$project_root" \
+      --env-file "$OPS_ENV_FILE" \
+      -f "$TRADING_PLATFORM_RELEASE_COMPOSE_DIR/compose.yaml" \
+      -f "$TRADING_PLATFORM_RELEASE_COMPOSE_DIR/deploy/compose.release.yaml" \
+      --profile '*' "$@"
+  else
+    "$OPS_DOCKER_BIN" compose "$@"
+  fi
 }
 
 ops_pg_scalar() {
