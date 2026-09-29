@@ -4,6 +4,7 @@ import hashlib
 from io import BytesIO
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 
@@ -131,6 +132,7 @@ def _run_bootstrap(
     extra_entry: str | None = None,
     env_file: bool = True,
     env_symlink: bool = False,
+    home_from_script: bool = False,
     extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     assets = tmp_path / "assets"
@@ -169,9 +171,15 @@ def _run_bootstrap(
             "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
         }
     )
+    script_path = DEPLOY_SCRIPT
+    if home_from_script:
+        script_path = deploy_root / "deploy-release.sh"
+        shutil.copy2(DEPLOY_SCRIPT, script_path)
+        script_path.chmod(0o700)
+        environment.pop("TRADING_PLATFORM_HOME", None)
     environment.update(extra_env or {})
     return subprocess.run(
-        ["bash", str(DEPLOY_SCRIPT), *args],
+        ["bash", str(script_path), *args],
         cwd=tmp_path,
         env=environment,
         text=True,
@@ -220,6 +228,15 @@ def test_deploy_release_uses_latest_and_runs_source_free_bundle(tmp_path: Path) 
     assert (tmp_path / "instance" / "CURRENT_RELEASE").read_text(encoding="utf-8").strip() == "v1.2.3"
     assert not (installed / "src").exists()
     assert not (installed / "Dockerfile").exists()
+
+
+def test_deploy_release_defaults_to_the_script_directory(tmp_path: Path) -> None:
+    result = _run_bootstrap(tmp_path, home_from_script=True)
+    assert result.returncode == 0, result.stderr
+    expected_root = tmp_path / "instance"
+    assert "DEPLOY_OK:ghcr.io/example/trading-platform:v1.2.3" in result.stdout
+    assert str(expected_root) in result.stdout
+    assert (expected_root / "CURRENT_RELEASE").read_text(encoding="utf-8").strip() == "v1.2.3"
 
 
 def test_deploy_release_accepts_an_explicit_tag(tmp_path: Path) -> None:

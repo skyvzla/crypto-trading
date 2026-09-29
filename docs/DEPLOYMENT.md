@@ -71,43 +71,44 @@ POSIX 工具。不需要 Git、Python 项目依赖、Node、Dockerfile 或应用
 GitHub Release 安装单文件入口：
 
 ```bash
-mkdir -p "$HOME/.local/bin"
+DEPLOY_DIR="$HOME/services/trading-platform"
+mkdir -p "$DEPLOY_DIR"
 gh release download v1.2.3 --repo skyvzla/crypto-trading \
-  --pattern deploy-release.sh --dir "$HOME/.local/bin"
-chmod 700 "$HOME/.local/bin/deploy-release.sh"
+  --pattern deploy-release.sh --dir "$DEPLOY_DIR"
+chmod 700 "$DEPLOY_DIR/deploy-release.sh"
 ```
 
 准备目标机自己的 `.env`。首次运行脚本会从版本 bundle 放置权限为 `0600` 的模板并停止；
-设置强 `DB_PASSWORD`（至少 24 字符）及所需环境后再次运行。默认持久化根目录是
-`$HOME/.local/share/trading-platform`，也可通过 `TRADING_PLATFORM_HOME` 指定。每次部署会
+设置强 `DB_PASSWORD`（至少 24 字符）及所需环境后再次运行。默认持久化根目录就是入口脚本
+所在目录；也可通过 `TRADING_PLATFORM_HOME` 指定其他目录。每次部署会
 把选中版本的部署文件留在 `releases/<tag>/`，数据库卷、`.env`、WAL、行情数据、日志和备份
 始终留在固定根目录，不随版本切换覆盖。
 
 默认部署最新稳定 GitHub Release：
 
 ```bash
-$HOME/.local/bin/deploy-release.sh
+"$DEPLOY_DIR/deploy-release.sh"
 ```
 
 升级可继续部署最新版本，也可固定指定版本：
 
 ```bash
-$HOME/.local/bin/deploy-release.sh latest
-$HOME/.local/bin/deploy-release.sh v1.2.3
+"$DEPLOY_DIR/deploy-release.sh" latest
+"$DEPLOY_DIR/deploy-release.sh" v1.2.3
 ```
 
 基础服务部署不会启动策略。需要在同一脚本调用中显式启动某个策略时，使用 `--start`；
 策略运行中的升级会被拒绝，且仍须先人工关闭准入、排空、交易所对账：
 
 ```bash
-$HOME/.local/bin/deploy-release.sh latest --start spike
+"$DEPLOY_DIR/deploy-release.sh" latest --start spike
 ```
 
 完成准入关闭、排空、对账后，可通过同一个入口调用既有 stop 门禁，再执行升级：
 
 ```bash
-$HOME/.local/bin/deploy-release.sh --stop spike
-$HOME/.local/bin/deploy-release.sh latest
+"$DEPLOY_DIR/deploy-release.sh" --stop spike
+"$DEPLOY_DIR/deploy-release.sh" latest
 ```
 
 成功部署后会在持久化根目录记录当前 Release。`--stop SERVICE` 只使用本机已安装的
@@ -230,7 +231,7 @@ docker compose --profile '*' stop --timeout 120 SERVICE
 
 源码部署环境可将 `.env` 中的 `TRADING_PLATFORM_IMAGE` 改回上一版本 tag，再运行
 `scripts/deploy.sh`。无源码目标机使用
-`$HOME/.local/bin/deploy-release.sh v1.2.2` 固定回滚到上一版。迁移可能改变数据库 schema；
+`"$DEPLOY_DIR/deploy-release.sh" v1.2.2` 固定回滚到上一版。迁移可能改变数据库 schema；
 回滚前必须确认旧应用兼容当前 schema，否则应按数据库恢复预案处理，不能只把镜像 tag 改回去。
 
 查看整体状态：
