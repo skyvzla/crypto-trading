@@ -45,6 +45,65 @@ ops_require_compose() {
   [[ -n "$OPS_COMPOSE_SERVICES" ]] || ops_die "Compose 没有返回服务列表"
 }
 
+ops_application_image() {
+  ops_compose config --format json | "$OPS_PYTHON_BIN" -c '
+import json
+import sys
+
+try:
+    services = json.load(sys.stdin)["services"]
+    names = (
+        "market", "ledger-migrate", "ledger", "notification-worker",
+        "symbol-sync", "spike", "long_breakout", "strategy_kline", "strategy_tick",
+    )
+    images = {services[name]["image"] for name in names}
+    if len(images) != 1:
+        raise ValueError("application services must use one image")
+    print(images.pop())
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+' || return 1
+}
+
+ops_is_ghcr_image() {
+  [[ "$1" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ && \
+    "$1" != *:latest ]]
+}
+
+ops_strategy_services() {
+  ops_compose config --format json | "$OPS_PYTHON_BIN" -c '
+import json
+import sys
+
+try:
+    services = json.load(sys.stdin)["services"]
+    strategies = []
+    for name, service in services.items():
+        labels = service.get("labels", {})
+        if isinstance(labels, list):
+            labels = dict(item.split("=", 1) for item in labels if "=" in item)
+        if isinstance(labels, dict) and labels.get("trading-platform.role") == "strategy":
+            strategies.append(name)
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not strategies:
+    raise SystemExit(1)
+print("\n".join(sorted(strategies)))
+' || return 1
+}
+
+ops_require_strategies_stopped() {
+  local strategies service
+  strategies="$(ops_strategy_services)" || ops_die "无法安全读取策略 service 列表"
+  while IFS= read -r service; do
+    [[ -n "$service" ]] || continue
+    ops_require_single_state "$service" true
+    if [[ "$OPS_STATE_FOUND" == 1 && "$OPS_STATE" != exited ]]; then
+      ops_die "$service 当前状态为 ${OPS_STATE:-unknown}；发布前须关闭准入、排空、对账并安全停止策略"
+    fi
+  done <<<"$strategies"
+}
+
 ops_require_service() {
   local service="$1" item
   [[ "$service" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]] || ops_die "非法 Compose service: $service"

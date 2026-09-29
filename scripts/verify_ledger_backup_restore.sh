@@ -4,6 +4,17 @@ set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
+OPS_DOCKER_BIN="${TRADING_OPS_DOCKER_BIN:-docker}"
+
+ops_compose() {
+  "$OPS_DOCKER_BIN" compose "$@"
+}
+
+ops_pg_scalar() {
+  ops_compose exec -T postgres sh -ceu '
+    psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"
+  ' sh "$1"
+}
 
 backup_path="${1:-backups/ledger_$(date -u +%Y%m%dT%H%M%SZ).dump}"
 if [[ "$backup_path" != /* ]]; then
@@ -23,23 +34,37 @@ if ! [[ "$verify_db" =~ ^[a-z0-9_]+$ ]]; then
   exit 2
 fi
 
-postgres_container="$(docker compose ps -q postgres)"
+postgres_container="$(ops_compose ps -q postgres)"
 if [[ -z "$postgres_container" ]]; then
   echo "Compose PostgreSQL is not running" >&2
   exit 1
 fi
 
+migration_table_exists="$(ops_pg_scalar "SELECT to_regclass('public.ledger_schema_migrations') IS NOT NULL")"
+if [[ "$migration_table_exists" != "t" ]]; then
+  public_table_count="$(ops_pg_scalar "SELECT COUNT(*) FROM pg_catalog.pg_tables WHERE schemaname = 'public'")"
+  if [[ "$public_table_count" == "0" ]]; then
+    echo "BACKUP_SKIPPED_EMPTY_DATABASE: no application tables exist yet"
+    exit 0
+  fi
+  echo "database has application tables but no migration history; refusing deployment" >&2
+  exit 1
+fi
+
+migration_row_count="$(ops_pg_scalar "SELECT COUNT(*) FROM ledger_schema_migrations")"
+if [[ ! "$migration_row_count" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ledger migration history is empty or invalid; refusing deployment" >&2
+  exit 1
+fi
+
 cleanup() {
-  docker compose exec -T postgres sh -ceu '
+  ops_compose exec -T postgres sh -ceu '
     dropdb --if-exists --force -U "$POSTGRES_USER" "$1"
   ' sh "$verify_db" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-current_version="$(docker compose exec -T postgres sh -ceu '
-  psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-    -c "SELECT COALESCE(MAX(version), 0) FROM ledger_schema_migrations"
-')"
+current_version="$(ops_pg_scalar "SELECT COALESCE(MAX(version), 0) FROM ledger_schema_migrations")"
 extra_count_sql=""
 if (( current_version >= 5 )); then
   extra_count_sql="
@@ -89,14 +114,14 @@ SELECT COALESCE(
 )::text FROM ledger_schema_migrations;
 "
 
-source_counts="$(docker compose exec -T postgres sh -ceu '
+source_counts="$(ops_compose exec -T postgres sh -ceu '
   psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"
 ' sh "$count_sql")"
-source_migrations="$(docker compose exec -T postgres sh -ceu '
+source_migrations="$(ops_compose exec -T postgres sh -ceu '
   psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "$1"
 ' sh "$migration_sql")"
 
-docker compose exec -T postgres sh -ceu '
+ops_compose exec -T postgres sh -ceu '
   pg_dump --format=custom --no-owner --no-privileges \
     --serializable-deferrable -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 ' >"$backup_path"
@@ -105,20 +130,20 @@ if [[ ! -s "$backup_path" ]]; then
   echo "backup archive is empty" >&2
   exit 1
 fi
-docker compose exec -T postgres pg_restore --list <"$backup_path" >/dev/null
+ops_compose exec -T postgres pg_restore --list <"$backup_path" >/dev/null
 
-docker compose exec -T postgres sh -ceu '
+ops_compose exec -T postgres sh -ceu '
   createdb -U "$POSTGRES_USER" "$1"
 ' sh "$verify_db"
-docker compose exec -T postgres sh -ceu '
+ops_compose exec -T postgres sh -ceu '
   pg_restore --exit-on-error --no-owner --no-privileges \
     -U "$POSTGRES_USER" -d "$1"
 ' sh "$verify_db" <"$backup_path"
 
-restored_counts="$(docker compose exec -T postgres sh -ceu '
+restored_counts="$(ops_compose exec -T postgres sh -ceu '
   psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1" -c "$2"
 ' sh "$verify_db" "$count_sql")"
-restored_migrations="$(docker compose exec -T postgres sh -ceu '
+restored_migrations="$(ops_compose exec -T postgres sh -ceu '
   psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1" -c "$2"
 ' sh "$verify_db" "$migration_sql")"
 

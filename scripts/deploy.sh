@@ -15,6 +15,7 @@ usage() {
 用法: scripts/deploy.sh
 
 部署数据库、缓存、行情、账本、通知 worker 和币种同步服务，不启动策略 service。
+本地默认从源码构建；.env 设置 TRADING_PLATFORM_IMAGE=ghcr.io/OWNER/REPO:TAG 时，拉取并部署指定镜像。
 EOF
 }
 
@@ -25,7 +26,7 @@ health_check() {
 }
 
 main() {
-  local migration_attempts migration_interval
+  local migration_attempts migration_interval image release_image=0
   case "${1:-}" in
     "") ;;
     --help|-h) usage; return 0 ;;
@@ -37,20 +38,39 @@ main() {
   ops_prepare_paths
   ops_require_compose
 
-  ops_compose build
-  ops_compose up -d --wait postgres redis
+  image="$(ops_application_image)" || ops_die "无法确定应用镜像配置"
+  if [[ "$image" != "trading_platform-ledger" ]]; then
+    ops_is_ghcr_image "$image" || ops_die "应用镜像必须是带固定 tag 的 GHCR 镜像，不能使用 latest: $image"
+    release_image=1
+    ops_require_strategies_stopped
+    printf '开始部署预构建镜像: %s\n' "$image"
+    ops_compose up -d --wait --no-build --pull missing postgres redis
+    TRADING_OPS_DOCKER_BIN="$OPS_DOCKER_BIN" bash "$SCRIPT_DIR/verify_ledger_backup_restore.sh"
+    ops_compose pull market ledger-migrate ledger notification-worker symbol-sync spike long_breakout strategy_kline strategy_tick
+  else
+    ops_compose build
+    ops_compose up -d --wait postgres redis
+  fi
   migration_attempts="${DEPLOY_MIGRATION_ATTEMPTS:-60}"
   migration_interval="${DEPLOY_MIGRATION_INTERVAL:-0.5}"
   # Do not let Compose's one-shot --wait own the timeout; the bounded helper
   # below must cover the entire migration lifecycle.
-  if ! ops_compose up -d ledger-migrate; then
+  if (( release_image == 1 )); then
+    if ! ops_compose up -d --no-build --pull never ledger-migrate; then
+      ops_die "ledger-migrate 启动失败"
+    fi
+  elif ! ops_compose up -d ledger-migrate; then
     ops_die "ledger-migrate 启动失败"
   fi
   if ! ops_wait_for_state ledger-migrate exited "" "$migration_attempts" "$migration_interval"; then
     ops_die "${OPS_WAIT_REASON:-ledger-migrate 状态等待失败}"
   fi
   [[ "$OPS_EXIT_CODE" == 0 ]] || ops_die "ledger-migrate 退出码不是 0: ${OPS_EXIT_CODE:-unknown}"
-  ops_compose up -d --wait market ledger notification-worker symbol-sync
+  if (( release_image == 1 )); then
+    ops_compose up -d --wait --no-build --pull never market ledger notification-worker symbol-sync
+  else
+    ops_compose up -d --wait market ledger notification-worker symbol-sync
+  fi
 
   ops_require_state postgres running healthy
   ops_require_state redis running healthy

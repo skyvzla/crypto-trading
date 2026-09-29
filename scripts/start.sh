@@ -67,7 +67,7 @@ cleanup_after_failure() {
 }
 
 main() {
-  local build=0 service="spike" service_given=0 arg
+  local build=0 service="spike" service_given=0 arg image release_image=0
   while (($#)); do
     arg="$1"
     case "$arg" in
@@ -82,6 +82,12 @@ main() {
   ops_require_host "$OPS_CURL_BIN" "$OPS_PYTHON_BIN" stat
   ops_require_env
   ops_require_compose
+  image="$(ops_application_image)" || ops_die "无法确定应用镜像配置"
+  if [[ "$image" != "trading_platform-ledger" ]]; then
+    ops_is_ghcr_image "$image" || ops_die "应用镜像必须是带固定 tag 的 GHCR 镜像，不能使用 latest: $image"
+    (( build == 0 )) || ops_die "GHCR 发布模式不能使用 --build；先运行 scripts/deploy.sh"
+    release_image=1
+  fi
   ops_require_strategy_service "$service"
   target_service="$service"
   ops_require_single_state "$service" true || ops_die "$service 状态无法安全确认"
@@ -95,7 +101,9 @@ main() {
     "$OPS_CRITICAL_ROUTE_COUNT" "$OPS_CRITICAL_ROUTE_TOTAL" "$OPS_ROUTABLE_POLICIES" "$OPS_ENABLED_CONNECTORS" "$OPS_ENABLED_ENDPOINTS" "$OPS_POLICIES"
 
   start_attempted=1
-  if (( build == 1 )); then
+  if (( release_image == 1 )); then
+    ops_compose up -d --wait --no-build --pull never "$service"
+  elif (( build == 1 )); then
     ops_compose up -d --wait --build "$service"
   else
     ops_compose up -d --wait "$service"

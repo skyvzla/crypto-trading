@@ -87,31 +87,84 @@ if [[ "$args" == *" compose version"* ]]; then
   printf 'Docker Compose version v2.40.3\n'
   exit 0
 fi
+if [[ "$args" == *" ps -q postgres"* ]]; then
+  printf 'id-postgres\n'
+  exit 0
+fi
+if [[ "$args" == *"to_regclass('public.ledger_schema_migrations')"* ]]; then
+  case "${FAKE_BACKUP_DB_STATE:-empty}" in
+    empty|partial) printf 'f\n' ;;
+    migrated|history-empty) printf 't\n' ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+if [[ "$args" == *"pg_catalog.pg_tables"* ]]; then
+  case "${FAKE_BACKUP_DB_STATE:-empty}" in
+    empty) printf '0\n' ;;
+    partial) printf '2\n' ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
+if [[ "$args" == *"COUNT(*) FROM ledger_schema_migrations"* ]]; then
+  case "${FAKE_BACKUP_DB_STATE:-empty}" in
+    migrated) printf '4\n' ;;
+    history-empty) printf '0\n' ;;
+    *) exit 1 ;;
+  esac
+  exit 0
+fi
 if [[ "$args" == *" config --services"* ]]; then
   printf '%s\n' postgres ledger-migrate ledger redis market notification-worker symbol-sync spike strategy_kline strategy_tick
   exit 0
 fi
 if [[ "$args" == *" config --format json"* ]]; then
+  image="${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}"
   case "${FAKE_STRATEGY_LABEL_MODE:-valid}" in
     valid)
-      printf '%s\n' '{"services":{"spike":{"labels":{"trading-platform.role":"strategy"}},"strategy_kline":{"labels":{"trading-platform.role":"strategy"}},"strategy_tick":{"labels":{"trading-platform.role":"strategy"}}},"x-fake-secret":"'"${FAKE_COMPOSE_SECRET:-}"'"}'
+      spike_label='{"trading-platform.role":"strategy"}'
+      long_label='{"trading-platform.role":"strategy"}'
+      kline_label='{"trading-platform.role":"strategy"}'
+      tick_label='{"trading-platform.role":"strategy"}'
       ;;
     wrong)
-      printf '%s\n' '{"services":{"spike":{"labels":{"trading-platform.role":"worker"}},"strategy_kline":{"labels":{"trading-platform.role":"worker"}},"strategy_tick":{"labels":{"trading-platform.role":"worker"}}}}'
+      spike_label='{"trading-platform.role":"worker"}'
+      long_label='{"trading-platform.role":"worker"}'
+      kline_label='{"trading-platform.role":"worker"}'
+      tick_label='{"trading-platform.role":"worker"}'
       ;;
     missing)
-      printf '%s\n' '{"services":{"spike":{"labels":{}},"strategy_kline":{"labels":{}},"strategy_tick":{"labels":{}}}}'
+      spike_label='{}'
+      long_label='{}'
+      kline_label='{}'
+      tick_label='{}'
       ;;
     cross)
-      printf '%s\n' '{"services":{"spike":{"labels":{"trading-platform.role":"strategy"}},"strategy_kline":{"labels":{}},"strategy_tick":{"labels":{}}}}'
+      spike_label='{"trading-platform.role":"strategy"}'
+      long_label='{}'
+      kline_label='{}'
+      tick_label='{}'
       ;;
     *)
-      printf '%s\n' '{}'
+      exit 1
       ;;
   esac
+  printf '{"services":{"market":{"image":"%s"},"ledger-migrate":{"image":"%s"},"ledger":{"image":"%s"},"notification-worker":{"image":"%s"},"symbol-sync":{"image":"%s"},"spike":{"image":"%s","labels":%s},"long_breakout":{"image":"%s","labels":%s},"strategy_kline":{"image":"%s","labels":%s},"strategy_tick":{"image":"%s","labels":%s}},"x-fake-secret":"%s"}\n' \
+    "$image" "$image" "$image" "$image" "$image" "$image" "$spike_label" \
+    "$image" "$long_label" "$image" "$kline_label" "$image" "$tick_label" \
+    "${FAKE_COMPOSE_SECRET:-}"
   exit 0
 fi
 if [[ "$args" == *" build"* ]]; then
+  exit 0
+fi
+if [[ "$args" == *" pull market ledger-migrate ledger notification-worker symbol-sync spike long_breakout strategy_kline strategy_tick"* ]]; then
+  exit 0
+fi
+if [[ "$args" == *" up -d --wait --no-build --pull missing postgres redis"* ]]; then
+  write_state postgres running healthy
+  write_state redis running healthy
   exit 0
 fi
 if [[ "$args" == *" up -d --wait postgres redis"* ]]; then
@@ -119,7 +172,7 @@ if [[ "$args" == *" up -d --wait postgres redis"* ]]; then
   write_state redis running healthy
   exit 0
 fi
-if [[ "$args" == *" up -d ledger-migrate"* ]]; then
+if [[ "$args" == *" up -d ledger-migrate"* || "$args" == *" up -d --no-build --pull never ledger-migrate"* ]]; then
   if [[ "${FAKE_MIGRATION_UP_FAIL:-0}" == 1 ]]; then
     exit 1
   fi
@@ -132,11 +185,20 @@ if [[ "$args" == *" up -d ledger-migrate"* ]]; then
   fi
   exit 0
 fi
-if [[ "$args" == *" up -d --wait market ledger notification-worker symbol-sync"* ]]; then
+if [[ "$args" == *" up -d --wait --no-build --pull never market ledger notification-worker symbol-sync"* || "$args" == *" up -d --wait market ledger notification-worker symbol-sync"* ]]; then
   write_state market running healthy
   write_state ledger running healthy
   write_state notification-worker running
   write_state symbol-sync running
+  exit 0
+fi
+if [[ "$args" == *" up -d --wait --no-build --pull never "* ]]; then
+  service="${args##*--pull never }"
+  if [[ "${FAKE_UP_FAIL:-0}" == 1 ]]; then
+    write_state "$service" "${FAKE_UP_FAIL_STATE:-restarting}"
+    exit 1
+  fi
+  write_state "$service" "${FAKE_UP_STATE:-running}"
   exit 0
 fi
 if [[ "$args" == *" up -d --wait"* ]]; then
@@ -238,6 +300,11 @@ def prepare(tmp_path: Path, script_name: str, *, overview: str | None = None, **
     script_dir.mkdir()
     shutil.copy2(SCRIPTS[script_name], script_dir / f"{script_name}.sh")
     shutil.copy2(COMMON, script_dir / "ops_common.sh")
+    backup = script_dir / "verify_ledger_backup_restore.sh"
+    _write_executable(
+        backup,
+        '#!/usr/bin/env bash\nif [[ "${FAKE_BACKUP_FAIL:-0}" == 1 ]]; then echo "backup failed" >&2; exit 1; fi\nprintf "BACKUP_RESTORE_OK\\n"\nprintf "backup\\n" >> "${FAKE_BACKUP_LOG:?}"\n',
+    )
     env_file = tmp_path / ".env"
     env_file.write_text("BINANCE_TESTNET=true\nSPIKE_MODE=testnet\n", encoding="utf-8")
     env_file.chmod(0o600)
@@ -260,6 +327,7 @@ def prepare(tmp_path: Path, script_name: str, *, overview: str | None = None, **
             "START_PYTHON_BIN": os.sys.executable,
             "FAKE_DOCKER_LOG": str(tmp_path / "docker.log"),
             "FAKE_CURL_LOG": str(tmp_path / "curl.log"),
+            "FAKE_BACKUP_LOG": str(tmp_path / "backup.log"),
             "FAKE_STATE_DIR": str(state_dir),
             "DEPLOY_MIGRATION_INTERVAL": "0",
             "DEPLOY_MIGRATION_ATTEMPTS": "2",
@@ -284,6 +352,25 @@ def run_script(tmp_path: Path, script_name: str, *args: str, env: dict[str, str]
 
 def invoke(tmp_path: Path, script_name: str, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
     return run_script(tmp_path, script_name, *args, env=overrides)
+
+
+def run_backup_script(tmp_path: Path, *, database_state: str) -> subprocess.CompletedProcess[str]:
+    environment = prepare(tmp_path, "deploy")
+    backup = tmp_path / "scripts" / "verify_ledger_backup_restore.sh"
+    shutil.copy2(PROJECT_ROOT / "scripts" / "verify_ledger_backup_restore.sh", backup)
+    environment.update(
+        {
+            "TRADING_OPS_DOCKER_BIN": environment["DEPLOY_DOCKER_BIN"],
+            "FAKE_BACKUP_DB_STATE": database_state,
+        }
+    )
+    return subprocess.run(
+        ["bash", str(backup)],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
 
 
 def docker_log(tmp_path: Path) -> list[str]:
@@ -318,6 +405,74 @@ def test_deploy_creates_runtime_directories_and_warns_for_empty_notifications(tm
     assert any("config --services" in call for call in calls)
     assert any("build" in call for call in calls)
     assert not any(" up -d --wait spike" in call for call in calls)
+
+
+def test_deploy_pulls_fixed_ghcr_image_after_backup_without_building(tmp_path: Path) -> None:
+    image = "ghcr.io/example/trading-platform:v1.2.3"
+    result = invoke(tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image)
+    assert result.returncode == 0, result.stderr
+    assert "BACKUP_RESTORE_OK" in result.stdout
+    assert image in result.stdout
+    assert (tmp_path / "backup.log").read_text(encoding="utf-8").strip() == "backup"
+    calls = docker_log(tmp_path)
+    assert any("--pull missing postgres redis" in call for call in calls)
+    assert any(" pull market ledger-migrate ledger" in call for call in calls)
+    assert not any(" build" in call for call in calls)
+    assert any("--no-build --pull never ledger-migrate" in call for call in calls)
+
+
+def test_deploy_rejects_running_strategy_before_backup_or_pull(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "deploy",
+        TRADING_PLATFORM_IMAGE="ghcr.io/example/trading-platform:v1.2.3",
+        FAKE_SPIKE_STATE="running",
+    )
+    assert result.returncode == 2
+    assert "关闭准入" in result.stderr
+    assert not (tmp_path / "backup.log").exists()
+    assert not any(" pull " in call for call in docker_log(tmp_path))
+
+
+def test_deploy_backup_failure_stops_before_application_pull_and_migration(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "deploy",
+        TRADING_PLATFORM_IMAGE="ghcr.io/example/trading-platform:v1.2.3",
+        FAKE_BACKUP_FAIL="1",
+    )
+    assert result.returncode != 0
+    calls = docker_log(tmp_path)
+    assert any("--pull missing postgres redis" in call for call in calls)
+    assert not any(" pull market ledger-migrate ledger" in call for call in calls)
+    assert not any("ledger-migrate" in call and "up -d" in call for call in calls)
+
+
+def test_deploy_rejects_floating_or_non_ghcr_image_tags(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "deploy",
+        TRADING_PLATFORM_IMAGE="ghcr.io/example/trading-platform:latest",
+    )
+    assert result.returncode == 2
+    assert "固定 tag" in result.stderr
+    assert not (tmp_path / "backup.log").exists()
+
+
+def test_verified_backup_skips_a_truly_empty_database(tmp_path: Path) -> None:
+    result = run_backup_script(tmp_path, database_state="empty")
+    assert result.returncode == 0, result.stderr
+    assert "BACKUP_SKIPPED_EMPTY_DATABASE" in result.stdout
+    assert not list((tmp_path / "backups").glob("*.dump"))
+
+
+@pytest.mark.parametrize("database_state", ["partial", "history-empty"])
+def test_verified_backup_rejects_schema_without_valid_migration_history(
+    tmp_path: Path, database_state: str
+) -> None:
+    result = run_backup_script(tmp_path, database_state=database_state)
+    assert result.returncode == 1
+    assert "migration history" in result.stderr.lower()
 
 
 def test_deploy_waits_for_one_shot_migration_to_exit(tmp_path: Path) -> None:
@@ -437,6 +592,19 @@ def test_start_accepts_any_single_compose_service_after_notification_gate(tmp_pa
     calls = docker_log(tmp_path)
     assert any("config --services" in call for call in calls)
     assert any(call.endswith("up -d --wait strategy_kline") for call in calls)
+
+
+def test_start_uses_configured_ghcr_image_without_building(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "start",
+        TRADING_PLATFORM_IMAGE="ghcr.io/example/trading-platform:v1.2.3",
+        FAKE_NOTIFICATION_OVERVIEW='{"enabled_connectors":1,"enabled_endpoints":1,"policies":1,"routable_policies":1,"critical_routes_ready":true,"critical_routes":{"risk.halted":true,"system.strategy.unhealthy":true}}',
+    )
+    assert result.returncode == 0, result.stderr
+    calls = docker_log(tmp_path)
+    assert any(call.endswith("up -d --wait --no-build --pull never spike") for call in calls)
+    assert not any(" build" in call for call in calls)
 
 
 def test_start_counts_all_critical_routes_returned_by_overview(tmp_path: Path) -> None:
@@ -569,6 +737,29 @@ def test_strategy_label_validation_does_not_trace_interpolated_compose_secret(tm
     environment = prepare(tmp_path, "stop", FAKE_COMPOSE_SECRET="fake-compose-secret")
     result = subprocess.run(
         ["bash", "-x", str(tmp_path / "scripts" / "stop.sh"), "spike"],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "fake-compose-secret" not in result.stdout
+    assert "fake-compose-secret" not in result.stderr
+
+
+def test_start_image_inspection_does_not_trace_compose_environment(tmp_path: Path) -> None:
+    environment = prepare(
+        tmp_path,
+        "start",
+        FAKE_COMPOSE_SECRET="fake-compose-secret",
+        FAKE_NOTIFICATION_OVERVIEW=(
+            '{"enabled_connectors":1,"enabled_endpoints":1,"policies":1,'
+            '"routable_policies":1,"critical_routes_ready":true,'
+            '"critical_routes":{"risk.halted":true,"system.strategy.unhealthy":true}}'
+        ),
+    )
+    result = subprocess.run(
+        ["bash", "-x", str(tmp_path / "scripts" / "start.sh")],
         cwd=tmp_path,
         env=environment,
         text=True,
