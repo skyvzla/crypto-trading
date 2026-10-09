@@ -429,6 +429,8 @@ class SubmitUnknownPollingService:
         self._fatal_exception: RuntimeError | None = None
         self.attempts = 0
         self.last_error: Exception | None = None
+        self.on_recovered: Callable[[], Awaitable[None]] | None = None
+        self._wakeup = asyncio.Event()
 
     @property
     def is_running(self) -> bool:
@@ -449,9 +451,44 @@ class SubmitUnknownPollingService:
         if self.is_running:
             assert self._task is not None
             return self._task
-        self._task = asyncio.create_task(self.run())
+        self._task = asyncio.create_task(self._monitor())
         self._task.add_done_callback(self._task_done)
         return self._task
+
+    def wake(self) -> None:
+        """New ambiguous submissions are queried promptly; periodic polling is the fallback."""
+        self._wakeup.set()
+
+    async def _monitor(self) -> dict[str, Resolution]:
+        """Keep monitoring after idle periods; network trouble never silently ends recovery."""
+        delay = max(0.05, self.poll_interval_seconds)
+        needs_reconciliation = False
+        while True:
+            self._wakeup.clear()
+            self.attempts += 1
+            try:
+                results = await self.resolver.resolve_recovered_unknowns_once()
+                needs_reconciliation |= bool(results)
+                unresolved = any(not result.resolved for result in results.values())
+                if not unresolved and needs_reconciliation:
+                    if self.on_recovered is not None:
+                        await self.on_recovered()
+                    needs_reconciliation = False
+                self.last_error = None
+                delay = min(60.0, delay * 2) if unresolved else max(0.05, self.poll_interval_seconds)
+            except asyncio.CancelledError:
+                raise
+            except ValueError:
+                # Corrupt/conflicting order facts require the owner's fatal gate.
+                raise
+            except Exception as exc:
+                self.last_error = exc
+                delay = min(60.0, delay * 2)
+                logger.warning("Order recovery will retry: %s", type(exc).__name__)
+            try:
+                await asyncio.wait_for(self._wakeup.wait(), timeout=delay)
+            except TimeoutError:
+                pass
 
     def _task_done(self, task: asyncio.Task[dict[str, Resolution]]) -> None:
         if task.cancelled():

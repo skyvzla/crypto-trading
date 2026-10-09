@@ -1594,7 +1594,7 @@ async def test_reduce_only_exit_waits_while_execution_stream_is_unavailable():
     await coordinator._execute([exit_intent], event_time=1_001)
 
     executor.submit.assert_not_awaited()
-    assert risk.halted is True
+    assert risk.halted is False
 
 
 @pytest.mark.asyncio
@@ -1939,7 +1939,7 @@ async def test_background_failure_wins_when_explicit_stop_is_also_ready():
 
 
 @pytest.mark.asyncio
-async def test_full_process_exits_fatal_when_submit_unknown_attempts_exhausted():
+async def test_full_process_exits_fatal_when_order_recovery_finds_corruption():
     settings = SpikeLiveSettings(
         account_id="spike-test", symbols=["AKEUSDT"], total_notional="20"
     )
@@ -1957,13 +1957,7 @@ async def test_full_process_exits_fatal_when_submit_unknown_attempts_exhausted()
     process.gate.set_condition("metrics_5m", True)
     risk = RiskGuard("spike-test", RiskConfig())
     resolver = Mock(
-        resolve_recovered_unknowns_once=AsyncMock(
-            return_value={
-                "unknown-order": Resolution(
-                    False, None, reason="order_not_found"
-                )
-            }
-        )
+        resolve_recovered_unknowns_once=AsyncMock(side_effect=ValueError("corrupt WAL"))
     )
     poller = SubmitUnknownPollingService(
         resolver,
@@ -1993,10 +1987,10 @@ async def test_full_process_exits_fatal_when_submit_unknown_attempts_exhausted()
     with pytest.raises(RuntimeError, match="SUBMIT_UNKNOWN recovery failed"):
         await process.run()
 
-    assert resolver.resolve_recovered_unknowns_once.await_count == 2
+    assert resolver.resolve_recovered_unknowns_once.await_count == 1
     assert process.gate.condition("execution") is False
     assert risk.halted is True
-    assert risk.halt_reason == "SUBMIT_UNKNOWN resolution attempts exhausted"
+    assert risk.halt_reason == "SUBMIT_UNKNOWN polling task failed"
     statuses = [
         call.args[0]
         for call in process.db.upsert_strategy_runtime_status.await_args_list
@@ -2556,7 +2550,7 @@ async def test_foreign_campaign_prevents_entry_submission():
 
 
 @pytest.mark.asyncio
-async def test_submit_unknown_halts_risk_guard_and_closes_execution_gate():
+async def test_submit_unknown_pauses_execution_without_permanent_risk_halt():
     strategy = StrategyStub()
     gate = CompositeEntryGate(strategy)
     for name in ("execution", "market", "subcategory", "campaign"):
@@ -2580,8 +2574,8 @@ async def test_submit_unknown_halts_risk_guard_and_closes_execution_gate():
 
     await coordinator._execute([_entry()], event_time=1_001)
 
-    assert risk.halted is True
-    assert risk.halt_reason == "submit status unknown"
+    assert risk.halted is False
+    assert not risk.halt_reason
     assert gate.enabled is False
 
 

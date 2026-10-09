@@ -109,6 +109,7 @@ async def test_user_stream_terminal_fact_wins_over_late_rest_submit_response(tmp
     "late_error",
     [
         httpx.ReadTimeout("submit timed out"),
+        httpx.ConnectError("connection lost"),
         RuntimeError("connection reset"),
         BinanceAPIException(-1007, "Timeout waiting for response"),
         BinanceAPIException(-2019, "Margin is insufficient"),

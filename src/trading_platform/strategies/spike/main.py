@@ -726,7 +726,7 @@ class SpikeLiveProcess:
     async def _submit_unknown_fatal_loop(self) -> None:
         assert self.runtime is not None
         exc = await self.runtime.unknown_poller.wait_fatal()
-        self._mark_runtime_fatal("SUBMIT_UNKNOWN resolution attempts exhausted")
+        self._mark_runtime_fatal(str(exc))
         await self._try_publish_fatal_status()
         raise RuntimeError("SUBMIT_UNKNOWN recovery failed") from exc
 

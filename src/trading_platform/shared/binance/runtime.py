@@ -63,6 +63,15 @@ class BinanceExecutionRuntime:
         self._running = False
         self._previous_reconnect = user_stream.on_reconnect
         user_stream.on_reconnect = self._on_reconnect
+        unknown_poller.on_recovered = self._on_unknowns_recovered
+
+    async def _on_unknowns_recovered(self) -> None:
+        """Restore execution only after order, fill and position facts agree."""
+        await self.reconcile_once("submit_unknown")
+        if self.on_recovered is not None:
+            result = self.on_recovered()
+            if inspect.isawaitable(result):
+                await result
 
     @property
     def is_running(self) -> bool:

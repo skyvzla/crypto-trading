@@ -1496,7 +1496,6 @@ class SpikeExecutionCoordinator:
         approved_exits: list[OrderIntent] = []
         for intent in exits:
             if not self.gate.condition("execution"):
-                self.risk_guard.halt("exit blocked while execution facts are unavailable")
                 return False
             approved_exits.append(intent)
         if approved_exits:
@@ -1939,7 +1938,6 @@ class SpikeExecutionCoordinator:
             )
         if record.status == "SUBMIT_UNKNOWN":
             self.gate.set_condition("execution", False)
-            self.risk_guard.halt("submit status unknown")
         if record.status == "REJECTED":
             response = record.payload.get("exchange_response") or {}
             code = response.get("code", "unknown")

@@ -100,6 +100,7 @@ def create_binance_execution_runtime(
         poll_interval_seconds=poll_interval_seconds,
         max_attempts=max_poll_attempts,
     )
+    executor.on_submit_unknown = poller.wake
     strict_reconciler = BinanceStartupReconciler(
         rest_client,
         db,

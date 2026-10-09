@@ -755,21 +755,19 @@ async def test_unknown_poller_recovers_from_orchestration_error_fail_closed():
 @pytest.mark.asyncio
 async def test_unknown_poller_start_is_idempotent_and_stop_cancels_task():
     entered_sleep = asyncio.Event()
-
-    async def wait_forever(_seconds):
+    async def query():
         entered_sleep.set()
-        await asyncio.Event().wait()
+        return {"cid-1": Resolution(False, None)}
 
     resolver = Mock(
         resolve_recovered_unknowns_once=AsyncMock(
-            return_value={"cid-1": Mock(resolved=False)}
+            side_effect=query
         )
     )
     poller = SubmitUnknownPollingService(
         resolver,
         poll_interval_seconds=1,
         max_attempts=2,
-        sleep=wait_forever,
     )
 
     first = poller.start()
@@ -786,24 +784,68 @@ async def test_unknown_poller_start_is_idempotent_and_stop_cancels_task():
 async def test_unknown_poller_background_orchestration_failure_sets_fatal():
     resolver = Mock(
         resolve_recovered_unknowns_once=AsyncMock(
-            return_value={"cid": Resolution(False, None, reason="order_not_found")}
+            side_effect=ValueError("corrupt WAL")
         )
     )
-
-    async def broken_sleep(_seconds):
-        raise RuntimeError("scheduler unavailable")
 
     poller = SubmitUnknownPollingService(
         resolver,
         poll_interval_seconds=1,
         max_attempts=2,
-        sleep=broken_sleep,
     )
 
     task = poller.start()
     failure = await asyncio.wait_for(poller.wait_fatal(), timeout=1)
 
     assert str(failure) == "SUBMIT_UNKNOWN polling task failed"
-    assert isinstance(poller.last_error, RuntimeError)
-    assert str(poller.last_error) == "scheduler unavailable"
+    assert isinstance(poller.last_error, ValueError)
+    assert str(poller.last_error) == "corrupt WAL"
     assert task.done()
+
+
+async def test_monitor_resolves_new_unknown_after_idle_without_resubmission(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    rest = Mock(post_order=AsyncMock(side_effect=httpx.ReadTimeout("timeout")),
+                query_order=AsyncMock(return_value={"status": "FILLED", "orderId": 42}))
+    executor = BinanceOrderExecutor(rest, wal, account_id="account-1")
+    poller = SubmitUnknownPollingService(executor, poll_interval_seconds=60, max_attempts=1)
+    executor.on_submit_unknown = poller.wake
+    recovered = asyncio.Event()
+    async def on_recovered():
+        recovered.set()
+    poller.on_recovered = on_recovered
+    task = poller.start()
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert (await executor.submit(make_intent())).status == "SUBMIT_UNKNOWN"
+        await asyncio.wait_for(recovered.wait(), 1)
+        assert wal.recover_latest()["cid-1"].status == "FILLED"
+        assert not task.done()
+        rest.post_order.assert_awaited_once()
+        rest.query_order.assert_awaited_once()
+    finally:
+        await poller.stop()
+
+
+async def test_monitor_keeps_reconciling_after_transient_failure():
+    resolver = Mock(resolve_recovered_unknowns_once=AsyncMock(
+        side_effect=[{"cid": Resolution(True, "FILLED")}, {}, {}]))
+    poller = SubmitUnknownPollingService(resolver, poll_interval_seconds=0, max_attempts=1)
+    recovered = asyncio.Event()
+    attempts = 0
+    async def reconcile():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary database failure")
+        recovered.set()
+    poller.on_recovered = reconcile
+    poller.start()
+    try:
+        await asyncio.wait_for(recovered.wait(), 1)
+        assert attempts == 2
+        assert poller.is_running
+        assert poller.fatal_exception is None
+    finally:
+        await poller.stop()

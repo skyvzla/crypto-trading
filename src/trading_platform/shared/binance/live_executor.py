@@ -65,6 +65,7 @@ class BinanceOrderExecutor:
         self.risk_guard = risk_guard
         self.symbol_rules = symbol_rules
         self.can_open_symbol = can_open_symbol
+        self.on_submit_unknown: Callable[[], None] | None = None
 
     async def submit(
         self,
@@ -174,7 +175,7 @@ class BinanceOrderExecutor:
                 intent_record,
                 error=f"submit_api_ambiguous:{exc.code}",
             )
-        except (httpx.TimeoutException, RuntimeError) as exc:
+        except (httpx.TransportError, RuntimeError) as exc:
             return self._record_unknown(
                 intent_record,
                 error=f"submit_timeout:{type(exc).__name__}",
@@ -359,6 +360,8 @@ class BinanceOrderExecutor:
         self._sync_risk_record(updated)
         if updated.status == "SUBMIT_UNKNOWN":
             self._block_unknown(updated)
+            if self.on_submit_unknown is not None:
+                self.on_submit_unknown()
         else:
             self._refresh_symbol_risk(updated.symbol)
         return updated
