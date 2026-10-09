@@ -274,6 +274,15 @@ class MarketLayerService:
         )
 
     async def _restore_persisted_watermarks(self, streams: list[str]) -> None:
+        # Live watermarks include the unfinished aggregation bucket. Restoring
+        # an older committed ID while retaining that bucket replays its trades.
+        active = self.quality.watermarks()
+        streams = [
+            stream for stream in streams
+            if all(value is None for value in active.get(stream, (None, None)))
+        ]
+        if not streams:
+            return
         values = await self.redis.hgetall(self.WATERMARK_KEY)
         if not isinstance(values, dict):
             return

@@ -1,3 +1,5 @@
+import asyncio
+import json
 from decimal import Decimal
 
 import pytest
@@ -116,6 +118,59 @@ async def test_service_restores_persisted_watermark_after_restart():
     await service._restore_persisted_watermarks(["btcusdt@aggTrade"])
 
     assert service.quality.watermarks()["btcusdt@aggTrade"][0] == 42
+
+
+@pytest.mark.parametrize("third_timestamp", [2000, 2100])
+async def test_subscription_refresh_preserves_unfinished_trade_bucket(third_timestamp):
+    """Changing another subscription must not replay the retained stream's bucket."""
+    stored = {}
+    published = []
+    client = AsyncMock()
+    client.hgetall.side_effect = lambda _key: dict(stored)
+    client.hset.side_effect = lambda _key, field, value: stored.update({field: value})
+    client.xadd.side_effect = lambda _key, fields, **_kwargs: published.append(
+        json.loads(fields["data"])
+    )
+    client.publish.return_value = 1
+    service = MarketLayerService(MarketLayerConfig(), client, "refresh-test")
+    await service.rest_client.close()
+    messages = asyncio.Queue()
+
+    async def receive_messages():
+        while True:
+            yield await messages.get()
+            messages.task_done()
+
+    async def connect(_streams):
+        service.ws_client.connection_generation += 1
+
+    service.ws_client.connect = AsyncMock(side_effect=connect)
+    service.ws_client.disconnect = AsyncMock()
+    service.ws_client.receive_messages = receive_messages
+    service.rest_client.get_agg_trades = AsyncMock(return_value=[])
+    service.subscription_manager.update_subscription("one", ["BTCUSDT"], ["bar1s"])
+
+    def trade(number, timestamp):
+        return {"e": "aggTrade", "s": "BTCUSDT", "a": number,
+                "p": "1", "q": "1", "f": number, "l": number,
+                "T": timestamp, "m": False}
+
+    try:
+        await service.refresh_ws_streams()
+        for item in [trade(1, 1000), trade(2, 2000), trade(3, third_timestamp)]:
+            await messages.put(item)
+        await asyncio.wait_for(messages.join(), 2)
+        assert stored["btcusdt@aggTrade"] == "1"
+        service.subscription_manager.update_subscription("two", ["BTCUSDT"], ["kline:1m"])
+        await service.refresh_ws_streams()
+        await messages.put(trade(4, 3000))
+        await asyncio.wait_for(messages.join(), 2)
+        bar = next(item for item in published if item["timestamp"] == 2000)
+        assert Decimal(bar["volume"]) == 2
+        assert bar["trade_count"] == 2
+        assert service.quality.snapshot()["btcusdt@aggTrade"]["status"] == "healthy"
+    finally:
+        await service._stop_ws_task()
 
 
 @pytest.mark.asyncio
