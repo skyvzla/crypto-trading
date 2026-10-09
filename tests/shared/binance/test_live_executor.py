@@ -2,9 +2,11 @@ import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
 
 from trading_platform.shared.binance import (
+    BinanceAPIException,
     BinanceOrderExecutor,
     BinanceSymbolRuleBook,
     BinanceSymbolRules,
@@ -100,6 +102,42 @@ async def test_user_stream_terminal_fact_wins_over_late_rest_submit_response(tmp
     assert stream_record.status == "FILLED"
     assert result.status == "FILLED"
     assert wal.recover_latest()["cid-concurrent"].status == "FILLED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "late_error",
+    [
+        httpx.ReadTimeout("submit timed out"),
+        RuntimeError("connection reset"),
+        BinanceAPIException(-1007, "Timeout waiting for response"),
+        BinanceAPIException(-2019, "Margin is insufficient"),
+    ],
+)
+async def test_user_stream_fill_survives_late_submit_error_without_reblocking(
+    tmp_path, late_error
+):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    guard = RiskGuard("account-1", RiskConfig())
+
+    async def post_order(**_kwargs):
+        executor.handle_order_trade_update(
+            {"c": "cid-concurrent", "s": "BTCUSDT", "X": "FILLED", "i": 42}
+        )
+        raise late_error
+
+    rest = Mock(post_order=AsyncMock(side_effect=post_order))
+    executor = BinanceOrderExecutor(rest, wal, account_id="account-1", risk_guard=guard)
+
+    result = await executor.submit(_intent("cid-concurrent"))
+    repeated = await executor.submit(_intent("cid-concurrent"))
+
+    assert result == repeated == wal.recover_latest()["cid-concurrent"]
+    assert result.status == "FILLED"
+    assert result.exchange_order_id == "42"
+    assert "BTCUSDT" not in guard.blocked_symbols
+    assert len(wal.path.read_text().splitlines()) == 2
+    rest.post_order.assert_awaited_once()
 
 
 @pytest.mark.asyncio

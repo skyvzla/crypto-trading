@@ -106,7 +106,7 @@ class OrderWAL:
     def __init__(self, path: str | os.PathLike[str]):
         self.path = Path(path)
         self.ledger_ack_path = self.path.with_name(f"{self.path.name}.ledger-acks")
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def append(self, record: OrderWALRecord) -> None:
         line = json.dumps(record.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
@@ -160,17 +160,23 @@ class OrderWAL:
     def record_submit_unknown(self, record: OrderWALRecord, *, recorded_at: int, error: str) -> OrderWALRecord:
         if record.record_type not in {"intent", "submit_unknown"}:
             raise ValueError("SUBMIT_UNKNOWN must follow an order intent")
-        unknown = OrderWALRecord(
-            **{
-                **record.to_dict(),
-                "record_type": "submit_unknown",
-                "recorded_at": recorded_at,
-                "status": "SUBMIT_UNKNOWN",
-                "payload": {**record.payload, "error": error},
-            }
-        )
-        self.append(unknown)
-        return unknown
+        with self._lock:
+            latest = self._latest_record(record)
+            # A transport outcome cannot revoke an exchange fact received while
+            # the request was in flight.
+            if latest.record_type == "exchange_status":
+                return latest
+            unknown = OrderWALRecord(
+                **{
+                    **latest.to_dict(),
+                    "record_type": "submit_unknown",
+                    "recorded_at": recorded_at,
+                    "status": "SUBMIT_UNKNOWN",
+                    "payload": {**latest.payload, "error": error},
+                }
+            )
+            self.append(unknown)
+            return unknown
 
     def record_exchange_status(
         self,
@@ -179,30 +185,61 @@ class OrderWAL:
         *,
         recorded_at: int,
     ) -> OrderWALRecord:
-        """追加一次已知的交易所订单状态事实。"""
+        """在同一临界区内按最新事实合并并持久化交易所状态。"""
         status = _KNOWN_EXCHANGE_STATUSES.get(response.get("status"))
         if status is None:
             raise ValueError(f"unknown exchange order status: {response.get('status')!r}")
-        if record.status is not None and not is_valid_transition(record.status, status):
-            raise ValueError(f"invalid status transition: {record.status} -> {status}")
-        resolved = OrderWALRecord(
-            **{
-                **record.to_dict(),
-                "record_type": "exchange_status",
-                "recorded_at": recorded_at,
-                "status": status,
-                "exchange_order_id": (
-                    str(response["orderId"])
-                    if response.get("orderId") is not None
-                    else record.exchange_order_id
-                ),
-                "payload": {**record.payload, "exchange_response": response},
-            }
-        )
-        self.append(resolved)
-        return resolved
+        with self._lock:
+            latest = self._latest_record(record)
+            response_order_id = response.get("orderId")
+            if (
+                response_order_id is not None
+                and latest.exchange_order_id is not None
+                and str(response_order_id) != latest.exchange_order_id
+            ):
+                raise ValueError("exchange order id mismatch")
+            if latest.status is not None:
+                valid_transition = is_valid_transition(latest.status, status)
+                if latest != record and latest.record_type == "exchange_status":
+                    # Ignore a stale request's equal or older state, including
+                    # its payload; a genuine forward transition can still win.
+                    if latest.status == status or not valid_transition:
+                        return latest
+                if not valid_transition:
+                    raise ValueError(
+                        f"invalid status transition: {latest.status} -> {status}"
+                    )
+            resolved = OrderWALRecord(
+                **{
+                    **latest.to_dict(),
+                    "record_type": "exchange_status",
+                    "recorded_at": recorded_at,
+                    "status": status,
+                    "exchange_order_id": (
+                        str(response_order_id)
+                        if response_order_id is not None
+                        else latest.exchange_order_id
+                    ),
+                    "payload": {**latest.payload, "exchange_response": response},
+                }
+            )
+            self.append(resolved)
+            return resolved
+
+    def _latest_record(self, record: OrderWALRecord) -> OrderWALRecord:
+        latest = self.recover_latest().get(record.client_order_id, record)
+        if any(
+            getattr(latest, field) != getattr(record, field)
+            for field in ("account_id", "symbol", "side", "order_type", "quantity", "price")
+        ):
+            raise ValueError("order WAL identity mismatch")
+        return latest
 
     def recover_latest(self) -> dict[str, OrderWALRecord]:
+        with self._lock:
+            return self._recover_latest()
+
+    def _recover_latest(self) -> dict[str, OrderWALRecord]:
         if not self.path.exists():
             return {}
         latest: dict[str, OrderWALRecord] = {}
@@ -331,6 +368,7 @@ class SubmitUnknownResolver:
     async def resolve_once(self, record: OrderWALRecord, *, recorded_at: int) -> Resolution:
         if record.status != "SUBMIT_UNKNOWN":
             raise ValueError("only SUBMIT_UNKNOWN records can be resolved")
+        reason = None
         try:
             response = await self.query_client.query_order(
                 record.symbol, orig_client_order_id=record.client_order_id
@@ -338,17 +376,24 @@ class SubmitUnknownResolver:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            return Resolution(False, None, reason=f"query_failed:{type(exc).__name__}")
+            response = None
+            reason = f"query_failed:{type(exc).__name__}"
         if response is None:
-            return Resolution(False, None, reason="order_not_found")
-        exchange_status = response.get("status")
-        status = _KNOWN_EXCHANGE_STATUSES.get(exchange_status)
-        if status is None:
-            return Resolution(False, None, response=response, reason="unknown_exchange_status")
-        if not is_valid_transition("SUBMIT_UNKNOWN", status):
-            return Resolution(False, None, response=response, reason="invalid_status_transition")
+            reason = reason or "order_not_found"
+        elif response.get("status") not in _KNOWN_EXCHANGE_STATUSES:
+            reason = "unknown_exchange_status"
+        if reason is not None:
+            latest = self.wal.recover_latest().get(record.client_order_id)
+            if latest is not None and latest.record_type == "exchange_status":
+                return Resolution(
+                    True, latest.status, response=latest.payload.get("exchange_response")
+                )
+            return Resolution(False, None, response=response, reason=reason)
+        assert response is not None
         resolved = self.wal.record_exchange_status(record, response, recorded_at=recorded_at)
-        return Resolution(True, status, response=response)
+        return Resolution(
+            True, resolved.status, response=resolved.payload.get("exchange_response")
+        )
 
 
 class RecoveredUnknownResolver(Protocol):

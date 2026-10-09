@@ -51,6 +51,60 @@ def test_wal_persists_explicit_campaign_identity(tmp_path):
     assert record.payload["campaign_id"] == "spike_short:BTCUSDT:1000"
 
 
+@pytest.mark.parametrize("status", ["NEW", "PARTIALLY_FILLED", "FILLED"])
+def test_wal_late_submit_failure_preserves_newer_exchange_fact(tmp_path, status):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(make_intent(), account_id="a-1", recorded_at=1000)
+    confirmed = wal.record_exchange_status(
+        intent, {"orderId": 42, "status": status}, recorded_at=1001
+    )
+
+    result = wal.record_submit_unknown(intent, recorded_at=1002, error="timeout")
+
+    assert result == confirmed
+    assert OrderWAL(wal.path).recover_latest()["cid-1"] == confirmed
+    assert len(wal.path.read_text().splitlines()) == 2
+
+
+def test_wal_stale_exchange_snapshot_can_only_advance_latest_fact(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(make_intent(), account_id="a-1", recorded_at=1000)
+    wal.record_exchange_status(
+        intent, {"orderId": 42, "status": "NEW"}, recorded_at=1001
+    )
+    filled = wal.record_exchange_status(
+        intent,
+        {"orderId": 42, "status": "FILLED", "executedQty": "0.1"},
+        recorded_at=1002,
+    )
+
+    stale = wal.record_exchange_status(
+        intent, {"orderId": 42, "status": "NEW"}, recorded_at=1003
+    )
+    sparse = wal.record_exchange_status(
+        intent, {"orderId": 42, "status": "FILLED"}, recorded_at=1004
+    )
+
+    assert stale == sparse == filled
+    assert wal.recover_latest()["cid-1"] == filled
+    assert len(wal.path.read_text().splitlines()) == 3
+
+
+def test_wal_stale_exchange_snapshot_cannot_hide_order_id_conflict(tmp_path):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    intent = wal.record_intent(make_intent(), account_id="a-1", recorded_at=1000)
+    filled = wal.record_exchange_status(
+        intent, {"orderId": 42, "status": "FILLED"}, recorded_at=1001
+    )
+
+    with pytest.raises(ValueError, match="exchange order id mismatch"):
+        wal.record_exchange_status(
+            intent, {"orderId": 99, "status": "NEW"}, recorded_at=1002
+        )
+
+    assert wal.recover_latest()["cid-1"] == filled
+
+
 def test_wal_preserves_intent_created_at_across_order_statuses_and_restart(tmp_path):
     path = tmp_path / "orders.jsonl"
     wal = OrderWAL(path)
@@ -255,6 +309,44 @@ async def test_resolver_keeps_unknown_on_query_failure(tmp_path):
     assert result.resolved is False
     assert result.reason == "query_failed:RuntimeError"
     assert len((tmp_path / "orders.jsonl").read_text().splitlines()) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "late_response",
+    [
+        {"orderId": 42, "status": "NEW"},
+        {"orderId": 42, "status": "FILLED"},
+        {"status": "UNKNOWN"},
+        None,
+        httpx.ReadTimeout("query timed out"),
+    ],
+)
+async def test_resolver_uses_exchange_fact_received_during_query(tmp_path, late_response):
+    wal = OrderWAL(tmp_path / "orders.jsonl")
+    unknown = wal.record_submit_unknown(
+        wal.record_intent(make_intent(), account_id="a-1", recorded_at=1000),
+        recorded_at=1001,
+        error="submit timeout",
+    )
+    confirmed_response = {"orderId": 42, "status": "FILLED", "executedQty": "0.1"}
+
+    async def query_order(*_args, **_kwargs):
+        wal.record_exchange_status(unknown, confirmed_response, recorded_at=1003)
+        if isinstance(late_response, Exception):
+            raise late_response
+        return late_response
+
+    result = await SubmitUnknownResolver(
+        wal, Mock(query_order=AsyncMock(side_effect=query_order))
+    ).resolve_once(unknown, recorded_at=1002)
+
+    assert result == Resolution(True, "FILLED", response=confirmed_response)
+    latest = OrderWAL(wal.path).recover_latest()["cid-1"]
+    assert latest.status == "FILLED"
+    assert latest.exchange_order_id == "42"
+    assert latest.payload["exchange_response"] == confirmed_response
+    assert len(wal.path.read_text().splitlines()) == 3
 
 
 @pytest.mark.asyncio

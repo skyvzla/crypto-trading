@@ -351,14 +351,17 @@ class BinanceOrderExecutor:
         *,
         error: str,
     ) -> OrderWALRecord:
-        self._restore_risk_reservation(record)
-        unknown = self.wal.record_submit_unknown(
+        updated = self.wal.record_submit_unknown(
             record,
             recorded_at=self._now_ms(),
             error=error,
         )
-        self._block_unknown(unknown)
-        return unknown
+        self._sync_risk_record(updated)
+        if updated.status == "SUBMIT_UNKNOWN":
+            self._block_unknown(updated)
+        else:
+            self._refresh_symbol_risk(updated.symbol)
+        return updated
 
     def _block_unknown(self, record: OrderWALRecord) -> None:
         if self.risk_guard is not None:
