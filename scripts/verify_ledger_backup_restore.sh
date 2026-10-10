@@ -102,6 +102,10 @@ if (( current_version >= 16 )); then
   extra_count_sql+="
   'execution_event_journal', (SELECT COUNT(*) FROM execution_event_journal),"
 fi
+if (( current_version >= 25 )); then
+  extra_count_sql+="
+  'strategy_execution_jobs', (SELECT COUNT(*) FROM strategy_execution_jobs),"
+fi
 
 count_sql="
 SELECT jsonb_build_object(
