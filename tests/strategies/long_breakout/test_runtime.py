@@ -238,7 +238,7 @@ async def test_resource_build_binds_risk_guard_to_the_strategy_account():
     runtime = process()
     pool = Mock(close=AsyncMock())
     lease = Mock(acquire=AsyncMock(), release=AsyncMock())
-    journal = Mock(start=AsyncMock(), append=AsyncMock())
+    journal = Mock(start=AsyncMock(), append=AsyncMock(), close=AsyncMock(), mirror_task=None)
     rest = Mock(
         close=AsyncMock(),
         get_exchange_info=AsyncMock(return_value={"symbols": []}),
@@ -295,7 +295,7 @@ async def test_resource_build_binds_risk_guard_to_the_strategy_account():
         ),
         patch(
             "trading_platform.strategies.long_breakout.runtime.LongBreakoutExecutionCoordinator",
-            return_value=Mock(),
+            return_value=Mock(execution_queue=Mock(restore=AsyncMock())),
         ),
         patch(
             "trading_platform.strategies.long_breakout.runtime.create_binance_execution_runtime",

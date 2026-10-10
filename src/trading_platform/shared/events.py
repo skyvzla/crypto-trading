@@ -378,6 +378,11 @@ class Kline(OHLCVBar):
         return cls.from_dict(json.loads(json_str))
 
 
+def market_event_key(event: Bar1s | Kline) -> tuple[int, int, str, str]:
+    """Match archive SQL ordering, including deterministic cross-symbol ties."""
+    return event.available_time, event.type_priority, event.symbol, getattr(event, "interval", "1s")
+
+
 @dataclass
 class OrderIntent:
     """

@@ -125,12 +125,20 @@ class MarketDataRequirements:
     bar1s_feature_columns: frozenset[str] | None = None
     shared_metrics: tuple[SharedMetricSpec, ...] = ()
     retention_minutes: int | Callable[[Any], int] = 30 * 60
+    history_bars: tuple[tuple[str, int], ...] = ()
+
+    def resolve_required_history(self, settings: Any = None) -> dict[str, int]:
+        """Minimum complete history, independent of cache retention capacity."""
+        return dict(self.history_bars)
 
     def __post_init__(self) -> None:
         if not self.market_timeframes:
             raise ValueError("market_timeframes must not be empty")
         if self.execution_timeframe not in self.market_timeframes:
             raise ValueError("execution_timeframe must be included in market_timeframes")
+        if any(interval not in self.market_timeframes or count <= 0
+               for interval, count in self.history_bars):
+            raise ValueError("history_bars must declare positive supported intervals")
         shared_features = frozenset(self.shared_features)
         object.__setattr__(self, "shared_features", shared_features)
         object.__setattr__(self, "shared_metrics", tuple(self.shared_metrics))

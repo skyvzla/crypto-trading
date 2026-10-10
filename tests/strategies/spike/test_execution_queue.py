@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from trading_platform.shared.events import OrderIntent
-from trading_platform.strategies.spike.execution_queue import (
+from trading_platform.strategies.execution_queue import (
     ExecutionQueue,
     ExecutionWorker,
 )

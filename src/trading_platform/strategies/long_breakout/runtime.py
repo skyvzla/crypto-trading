@@ -14,6 +14,7 @@ from uuid import uuid4
 import httpx
 
 from trading_platform.ledger.binance_runtime import create_binance_execution_runtime
+from trading_platform.ledger.execution_jobs import ExecutionJobStore
 from trading_platform.ledger.db.models import (
     LedgerDB,
     StrategyRuntimeStatus,
@@ -351,12 +352,16 @@ class LongBreakoutProcess:
 
         self.event_journal = DurableExecutionEventJournal(
             f"{self.settings.wal_path}.events.jsonl",
+            mirror_async=True,
             run_id=self.instance_id,
             account_id=self.settings.account_id,
             strategy_id=STRATEGY_ID,
             persist=self._persist_execution_events,
         )
         await self.event_journal.start()
+        self._stack.push_async_callback(self.event_journal.close)
+        if self.event_journal.mirror_task is not None:
+            self._tasks.append(self.event_journal.mirror_task)
         await self._append_event(
             "runtime.initializing",
             source="long_breakout.runtime",
@@ -433,6 +438,12 @@ class LongBreakoutProcess:
             entry_allowed=lambda: self.entry_enabled,
             account_id=self.settings.account_id,
             trade_source=self.db,
+        )
+        self.coordinator.execution_queue.store = ExecutionJobStore(
+            self.db.pool, self.settings.account_id, STRATEGY_ID,
+        )
+        await self.coordinator.execution_queue.restore(
+            submitted=lambda client_id: self.coordinator.account.get_order(client_id) is not None,
         )
         self.runtime = create_binance_execution_runtime(
             rest_client=self.rest,
@@ -624,7 +635,7 @@ class LongBreakoutProcess:
         self.strategy.set_entry_enabled(self.entry_enabled)
         for kline in pending:
             intents = self.strategy.on_kline(kline)
-            self.coordinator.enqueue(intents, event_time=kline.available_time)
+            await self.coordinator.enqueue(intents, event_time=kline.available_time)
 
     async def _refresh_admission(self) -> None:
         assert self.db is not None

@@ -52,7 +52,7 @@ def _write_candle_archive(path):
 def test_duckdb_loader_reads_candles_without_mutating_archive(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
-    loader = BacktestDataLoader(
+    loader = BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive),
         symbols=["akeusdt"],
         start_ms=0,
@@ -85,7 +85,7 @@ def test_duckdb_loader_supports_explicit_empty_one_second_projection(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
 
-    events = list(BacktestDataLoader(
+    events = list(BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -102,7 +102,7 @@ def test_duckdb_loader_supports_explicit_empty_one_second_projection(tmp_path):
 
 def test_duckdb_loader_rejects_unknown_projected_one_second_feature():
     with pytest.raises(ValueError, match="unknown projected 1s feature columns"):
-        BacktestDataLoader(
+        BacktestDataLoader(validate_coverage=False,
             duckdb_path="missing.duckdb",
             symbols=["AKEUSDT"],
             start_ms=0,
@@ -145,7 +145,7 @@ def test_duckdb_loader_canonicalizes_projected_feature_order(tmp_path):
     finally:
         connection.close()
 
-    event = next(iter(BacktestDataLoader(
+    event = next(iter(BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -163,7 +163,7 @@ def test_duckdb_loader_canonicalizes_projected_feature_order(tmp_path):
 def test_duckdb_loader_rejects_missing_projected_feature_before_yield(tmp_path):
     archive = tmp_path / "missing-feature.duckdb"
     _write_candle_archive(archive)
-    loader = BacktestDataLoader(
+    loader = BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -207,7 +207,7 @@ def test_duckdb_loader_checks_projected_features_in_physical_archive_schema(tmp_
     build_archive_index(root, workers=1)
     catalog = create_duckdb_catalog(root, tmp_path / "history.duckdb")
 
-    loader = BacktestDataLoader(
+    loader = BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(catalog),
         symbols=["AKEUSDT"],
         start_ms=int(start.timestamp() * 1_000),
@@ -251,11 +251,11 @@ def test_duckdb_loader_full_and_projected_events_preserve_requested_values(tmp_p
     finally:
         connection.close()
 
-    full = list(BacktestDataLoader(
+    full = list(BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive), symbols=["AKEUSDT"], start_ms=0, end_ms=100_000,
         require_aggtrades=True, required_kline_intervals=["1m"],
     ).iter_all())
-    projected = list(BacktestDataLoader(
+    projected = list(BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive), symbols=["AKEUSDT"], start_ms=0, end_ms=100_000,
         require_aggtrades=True, required_kline_intervals=["1m"],
         bar1s_feature_columns=["vwap", "trade_count"],
@@ -348,9 +348,9 @@ def test_duckdb_stream_matches_materialized_event_order(tmp_path):
         "required_kline_intervals": ["1m", "5m"],
     }
 
-    first = list(BacktestDataLoader(**kwargs).iter_all())
+    first = list(BacktestDataLoader(validate_coverage=False, **kwargs).iter_all())
     streamed = list(
-        BacktestDataLoader(**kwargs).iter_all(
+        BacktestDataLoader(validate_coverage=False, **kwargs).iter_all(
             chunk_hours=0.0003,
             fetch_batch_size=1,
         )
@@ -374,7 +374,7 @@ def test_duckdb_loader_can_run_without_one_second_data(tmp_path):
     finally:
         connection.close()
 
-    events = list(BacktestDataLoader(
+    events = list(BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive), symbols=["AKEUSDT"], start_ms=0,
         end_ms=400_000, required_kline_intervals=["1m", "5m"]
     ).iter_all())
@@ -384,7 +384,7 @@ def test_duckdb_loader_can_run_without_one_second_data(tmp_path):
 def test_duckdb_stream_rejects_missing_required_dataset_before_yield(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
-    loader = BacktestDataLoader(
+    loader = BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -399,7 +399,7 @@ def test_duckdb_stream_rejects_missing_required_dataset_before_yield(tmp_path):
 def test_duckdb_loader_applies_explicit_one_second_time_shift(tmp_path):
     archive = tmp_path / "history.duckdb"
     _write_candle_archive(archive)
-    loader = BacktestDataLoader(
+    loader = BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -421,7 +421,7 @@ def test_duckdb_loader_rejects_incompatible_archive(tmp_path):
     connection.execute("CREATE TABLE candles (symbol VARCHAR)")
     connection.close()
 
-    loader = BacktestDataLoader(
+    loader = BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -444,7 +444,7 @@ def test_duckdb_loader_rejects_invalid_one_second_duration(tmp_path):
     finally:
         connection.close()
 
-    loader = BacktestDataLoader(
+    loader = BacktestDataLoader(validate_coverage=False,
         duckdb_path=str(archive),
         symbols=["AKEUSDT"],
         start_ms=0,
@@ -454,3 +454,54 @@ def test_duckdb_loader_rejects_invalid_one_second_duration(tmp_path):
 
     with pytest.raises(ValueError, match="invalid 1s candle duration"):
         list(loader.iter_all())
+
+
+def test_formal_loader_rejects_internal_gap_before_emitting_events(tmp_path):
+    archive = tmp_path / "partial.duckdb"
+    connection = duckdb.connect(str(archive))
+    connection.execute("""CREATE TABLE candles AS
+        SELECT 'BTCUSDT' AS symbol, '1m' AS timeframe,
+               to_timestamp(i * 60) AS open_time,
+               100.0 AS open, 101.0 AS high, 99.0 AS low, 100.0 AS close, 1.0 AS volume,
+               to_timestamp((i * 60000 + 59999) / 1000.0) AS close_time
+        FROM (VALUES (0), (2)) AS minutes(i)""")
+    connection.close()
+    loader = BacktestDataLoader(str(archive), ["BTCUSDT"], 0, 180000,
+                                required_kline_intervals=["1m"])
+    with pytest.raises(ValueError, match="Incomplete required 1m"):
+        next(loader.iter_all())
+
+
+def test_formal_loader_accepts_complete_minute_grid(tmp_path):
+    archive = tmp_path / "complete.duckdb"
+    connection = duckdb.connect(str(archive))
+    connection.execute("""CREATE TABLE candles AS
+        SELECT 'BTCUSDT' AS symbol, '1m' AS timeframe,
+               to_timestamp(i * 60) AS open_time,
+               100.0 AS open, 101.0 AS high, 99.0 AS low, 100.0 AS close, 1.0 AS volume,
+               to_timestamp((i * 60000 + 59999) / 1000.0) AS close_time
+        FROM range(3) AS minutes(i)""")
+    connection.close()
+    assert len(list(BacktestDataLoader(str(archive), ["BTCUSDT"], 0, 180000,
+                required_kline_intervals=["1m"]).iter_all())) == 3
+
+
+@pytest.mark.parametrize("last_id,valid", [(11, True), (12, False)])
+def test_formal_sparse_seconds_require_contiguous_trade_ids(tmp_path, last_id, valid):
+    archive = tmp_path / "sparse.duckdb"
+    connection = duckdb.connect(str(archive))
+    connection.execute("""CREATE TABLE candles AS
+        SELECT 'BTCUSDT' AS symbol, '1s' AS timeframe,
+               to_timestamp(t / 1000.0) AS open_time,
+               100.0 AS open, 101.0 AS high, 99.0 AS low, 100.0 AS close, 1.0 AS volume,
+               to_timestamp((t + 1000) / 1000.0) AS close_time,
+               id AS first_aggregate_trade_id, id AS last_aggregate_trade_id
+        FROM (VALUES (0, 10), (120000, ?)) AS samples(t, id)""", [last_id])
+    connection.close()
+    loader = BacktestDataLoader(str(archive), ["BTCUSDT"], 0, 180000,
+                                require_aggtrades=True, bar1s_feature_columns=[])
+    if valid:
+        assert len(list(loader.iter_all())) == 2
+    else:
+        with pytest.raises(ValueError, match="1s trade continuity"):
+            next(loader.iter_all())

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import json
 import logging
 import math
@@ -79,6 +80,12 @@ from trading_platform.strategies.universe import (
     ExchangeSymbolSnapshot,
 )
 
+
+from trading_platform.market.history import closed_kline_window, fetch_closed_klines
+from trading_platform.shared.events import market_event_key
+
+
+from trading_platform.ledger.execution_jobs import ExecutionJobStore
 
 logger = logging.getLogger(__name__)
 BAR_STREAM_STALE_SECONDS = 10.0
@@ -171,6 +178,12 @@ class SpikeLiveProcess:
         self._market_event_queue_overflowed = False
         self._queued_execution_started = False
         self._last_kline: dict[tuple[str, str], int] = {}
+        self._queued_kline: dict[tuple[str, str], int] = {}
+        self._live_after_ms = 0
+        self._kline_stream_ids: dict[str, str] = {}
+        self._history_ready = asyncio.Event()
+        self._history_ready.set()
+        self._last_bar_available_time: dict[str, int] = {}
         self._last_bar_received_monotonic: dict[str, float] = {}
         self._last_bar_trade_id: dict[str, int] = {}
         self._bar_continuity_streak: dict[str, int] = {}
@@ -255,9 +268,12 @@ class SpikeLiveProcess:
             self.gate.set_condition("event_queue", True)
 
             await self._register_market_subscriptions()
+            self._history_ready.clear()
             await self._start_bar_consumer()
             await self._warm_metrics_history()
             await self._warm_strategy_history()
+            self._live_after_ms = int(time.time() * 1000)
+            self._history_ready.set()
             await self._refresh_market_gate(require_ready=True)
             await self.admission.on_universe_scan()
             await self.coordinator.request_cancellation_flush()
@@ -451,6 +467,7 @@ class SpikeLiveProcess:
             return
         self.event_journal = DurableExecutionEventJournal(
             f"{self.settings.wal_path}.events.jsonl",
+            mirror_async=True,
             run_id=self.instance_id,
             account_id=self.settings.account_id,
             strategy_id=STRATEGY_ID,
@@ -487,6 +504,9 @@ class SpikeLiveProcess:
         # Flush records appended before the DB/lease became available, then
         # continue appending with PostgreSQL persistence enabled.
         await self.event_journal.start()
+        self._stack.push_async_callback(self.event_journal.close)
+        if self.event_journal.mirror_task is not None:
+            self._tasks.append(self.event_journal.mirror_task)
         await self._append_process_event(
             "runtime.initializing",
             source="spike.runtime",
@@ -659,6 +679,12 @@ class SpikeLiveProcess:
             ),
             event_journal=self.event_journal,
             snapshot_runtime=self.snapshot_runtime,
+        )
+        self.coordinator.execution_queue.store = ExecutionJobStore(
+            db.pool, self.settings.account_id, STRATEGY_ID,
+        )
+        await self.coordinator.execution_queue.restore(
+            submitted=lambda client_id: self.coordinator.account.get_order(client_id) is not None,
         )
         self.admission = SubcategoryAdmissionService(
             source=db,
@@ -978,6 +1004,13 @@ class SpikeLiveProcess:
 
     async def _recover_execution_after_reconnect(self) -> bool:
         """重连后以交易所仓位和钱包事实重新决定执行与资金准入。"""
+        if self.coordinator is not None:
+            await self.coordinator.account.refresh_positions()
+            await self.coordinator.reconcile_entry_expirations()
+            self.coordinator.validate_recovered_campaign()
+            await self.coordinator.restore_campaign_timing()
+            for symbol in self.settings.symbols:
+                await self.coordinator.maybe_release_campaign(symbol)
 
         if (
             self.coordinator is None
@@ -985,7 +1018,6 @@ class SpikeLiveProcess:
             or self.capital_snapshot is None
         ):
             return self._restore_execution_gate()
-        await self.coordinator.account.refresh_positions()
         snapshot = await self.capital_store.get_state(
             account_id=self.settings.account_id,
             strategy_id=STRATEGY_ID,
@@ -1088,42 +1120,33 @@ class SpikeLiveProcess:
             subscriptions.append("metrics:5m")
         return subscriptions
 
+    def _required_history(self) -> dict[str, int]:
+        result = self.strategy_definition.data_requirements.resolve_required_history(
+            self.strategy_definition.defaults
+        )
+        if self.settings.exit_policy == "candidate-v1":
+            result.setdefault("15m", 10)
+        missing = set(self._required_kline_intervals()) - result.keys()
+        if missing:
+            raise ValueError(f"missing live history requirements: {sorted(missing)}")
+        return result
+
     async def _warm_strategy_history(self) -> None:
         assert self.coordinator is not None
-        rest = self.coordinator.account.rest_client
-        now_ms = int(time.time() * 1000)
+        assert self.http is not None
         strategy = self.coordinator.strategy
         strategy.set_trading_enabled(False)
+        now_ms = int(time.time() * 1000)
         for symbol in self._market_symbols():
-            warmup_requirements = {
-                "1m": (1000, 960),
-                "5m": (100, 15),
-                "15m": (100, 10),
-            }
-            for interval in self._required_kline_intervals():
-                if interval not in warmup_requirements:
-                    raise RuntimeError(
-                        f"missing live warmup policy for {interval}"
-                    )
-                limit, minimum = warmup_requirements[interval]
-                rows = await rest.get_klines(
-                    symbol, interval, limit=limit, end_time=now_ms
-                )
-                klines = [
-                    self._parse_binance_kline(symbol, interval, row)
-                    for row in rows
-                ]
-                completed = [
-                    kline for kline in klines if kline.close_time < now_ms
-                ]
-                if len(completed) < minimum:
-                    raise RuntimeError(
-                        f"insufficient {interval} warmup for {symbol}: "
-                        f"{len(completed)} < {minimum}"
-                    )
-                for kline in completed:
-                    await self.coordinator.on_kline(kline)
-                self._last_kline[(symbol, interval)] = completed[-1].close_time
+            history = []
+            for interval, count in self._required_history().items():
+                start, end = closed_kline_window(interval, count, now_ms)
+                history.extend(await fetch_closed_klines(
+                    self.http, symbol, interval, start_ms=start, end_ms=end,
+                ))
+                self._last_kline[(symbol, interval)] = end - 1
+            for kline in sorted(history, key=lambda item: (item.available_time, item.interval)):
+                strategy.on_kline(kline)
         strategy.refresh_candidate_features()
         strategy.set_trading_enabled(True)
 
@@ -1428,7 +1451,7 @@ class SpikeLiveProcess:
         attempts = 30 if require_ready else 1
         for attempt in range(attempts):
             try:
-                health = (await self.http.get("/health")).json()
+                health = (await self.http.get("/health", params={"consumer_id": self._consumer_id})).json()
                 epoch = health.get("instance_epoch")
                 if not isinstance(epoch, str) or not epoch:
                     raise RuntimeError("market health has no instance_epoch")
@@ -1436,7 +1459,7 @@ class SpikeLiveProcess:
                     self._market_instance_epoch = epoch
                 elif epoch != self._market_instance_epoch:
                     await self._handle_market_epoch_change(epoch)
-                quality_response = await self.http.get("/quality")
+                quality_response = await self.http.get("/quality", params={"consumer_id": self._consumer_id})
                 quality_response.raise_for_status()
                 quality = quality_response.json()
                 expected_testnet = self.settings.mode == "testnet"
@@ -1531,6 +1554,13 @@ class SpikeLiveProcess:
     async def _enqueue_market_event(self, event: Bar1s | Kline) -> None:
         """正常路径不等待策略；满载时关闭入场并背压，保证事件不丢。"""
 
+        if event.available_time > int(time.time() * 1000) + 1000:
+            reason = "market event availability is in the future"
+            self._mark_runtime_fatal(reason)
+            raise ValueError(reason)
+
+        if isinstance(event, Bar1s):
+            self._last_bar_received_monotonic[event.symbol] = asyncio.get_running_loop().time()
         try:
             self._market_events.put_nowait(event)
             return
@@ -1553,21 +1583,62 @@ class SpikeLiveProcess:
         await self._market_events.put(event)
 
     async def _strategy_event_loop(self) -> None:
-        """按实际入队顺序串行更新策略状态，网络执行由独立 worker 处理。"""
-
+        """Order ready events by their availability, with bounded late-arrival buffering."""
+        pending = []
+        sequence = 0
         while True:
-            event = await self._market_events.get()
+            await self._history_ready.wait()
             try:
+                event = await asyncio.wait_for(self._market_events.get(), 0.05) if pending else await self._market_events.get()
+            except TimeoutError:
+                event = None
+            while event is not None:
+                if len(pending) >= MARKET_EVENT_QUEUE_MAXSIZE:
+                    reason = "market reorder buffer capacity exceeded"
+                    self._mark_runtime_fatal(reason)
+                    raise RuntimeError(reason)
+                sequence += 1
+                heapq.heappush(pending, (*market_event_key(event), sequence, event))
+                try:
+                    event = self._market_events.get_nowait()
+                except asyncio.QueueEmpty:
+                    event = None
+            now_ms = int(time.time() * 1000)
+            while pending and pending[0][0] <= now_ms - 250:
+                event = pending[0][-1]
                 if isinstance(event, Bar1s):
-                    await self._handle_live_bar(event)
-                else:
-                    assert self.coordinator is not None
-                    if self._queued_execution_started:
-                        await self.coordinator.on_kline_queued(event)
+                    from trading_platform.market.recovery import RecoveryCoordinator
+                    covered = all(
+                        self._last_kline.get((event.symbol, interval), -1)
+                        >= ((event.available_time - 1) // RecoveryCoordinator.interval_ms(interval))
+                           * RecoveryCoordinator.interval_ms(interval) - 1
+                        for interval in self._required_kline_intervals()
+                    )
+                    if not covered and now_ms - event.available_time < 2000:
+                        break
+                    if not covered and self.gate is not None:
+                        self.gate.set_condition("kline_history", False)
+                heapq.heappop(pending)
+                try:
+                    if isinstance(event, Bar1s):
+                        await self._handle_live_bar(event)
                     else:
-                        await self.coordinator.on_kline(event)
-            finally:
-                self._market_events.task_done()
+                        assert self.coordinator is not None
+                        if self._queued_execution_started:
+                            await self.coordinator.on_kline_queued(event)
+                        else:
+                            await self.coordinator.on_kline(event)
+                        key = (event.symbol, event.interval)
+                        self._last_kline[key] = max(self._last_kline.get(key, -1), event.close_time)
+                finally:
+                    self._market_events.task_done()
+            if (self._market_event_queue_overflowed and not pending and self._market_events.empty()
+                    and self._refresh_bar_continuity_gate() and self._refresh_kline_history_gate()):
+                self._market_event_queue_overflowed = False
+                if self._refresh_bar_stream_gate():
+                    self.gate.set_condition("event_queue", True)
+                else:
+                    self._market_event_queue_overflowed = True
 
     async def _deliver_bar1s(self, bar: Bar1s) -> None:
         assert self.coordinator is not None
@@ -1579,9 +1650,14 @@ class SpikeLiveProcess:
     async def _handle_live_bar(self, bar: Bar1s) -> None:
         """校验逐币种水位，必要时回放缺口，然后交给策略串行处理。"""
         assert self.coordinator is not None
-        self._last_bar_received_monotonic[bar.symbol] = (
-            asyncio.get_running_loop().time()
-        )
+        if bar.available_time <= self._live_after_ms:
+            self.coordinator.strategy.set_trading_enabled(False)
+            try:
+                self.coordinator.strategy.on_bar1s(bar)
+            finally:
+                self.coordinator.strategy.set_trading_enabled(True)
+            return
+        self._last_bar_available_time[bar.symbol] = bar.available_time
         self._refresh_bar_stream_gate()
 
         first_id = bar.first_aggregate_trade_id
@@ -1589,7 +1665,6 @@ class SpikeLiveProcess:
         previous_id = self._last_bar_trade_id.get(bar.symbol)
         if first_id is None or last_id is None or first_id > last_id:
             await self._fail_bar_continuity(bar.symbol, "missing or invalid watermark")
-            self._last_bar_trade_id.pop(bar.symbol, None)
             self._bar_continuity_streak[bar.symbol] = 0
             await self._deliver_bar1s(bar)
             return
@@ -1611,8 +1686,16 @@ class SpikeLiveProcess:
                 recovered = await self._recover_bar_gap(
                     bar.symbol, previous_id + 1, first_id - 1
                 )
-            for recovered_bar in recovered:
-                await self._deliver_bar1s(recovered_bar)
+            if not recovered:
+                await self._deliver_bar1s(bar)
+                return
+            self.coordinator.strategy.set_trading_enabled(False)
+            try:
+                for recovered_bar in recovered:
+                    self.coordinator.strategy.on_bar1s(recovered_bar)
+            finally:
+                self.coordinator.strategy.set_trading_enabled(True)
+            self._continuity_failed_symbols.discard(bar.symbol)
             self._bar_continuity_streak[bar.symbol] = 0
 
         self._last_bar_trade_id[bar.symbol] = last_id
@@ -1664,6 +1747,13 @@ class SpikeLiveProcess:
             return recovered
         except asyncio.CancelledError:
             raise
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in {400, 409}:
+                reason = f"{symbol} market gap requires fresh history and account reconciliation"
+                self._mark_runtime_fatal(reason)
+                raise RuntimeError(reason) from exc
+            logger.warning("%s market recovery will retry: HTTP %s", symbol, exc.response.status_code)
+            return []
         except Exception as exc:
             logger.error(
                 "%s 行情缺口无法恢复，保持开仓关闭: %s: %s",
@@ -1720,19 +1810,60 @@ class SpikeLiveProcess:
     async def _kline_loop(self) -> None:
         assert self.redis is not None
         assert self.coordinator is not None
+        assert self.gate is not None
         while True:
-            for symbol in self._market_symbols():
-                for interval in self._required_kline_intervals():
-                    raw = await self.redis.hget(f"kline:{symbol}:{interval}", "latest")
-                    if not raw:
-                        continue
-                    kline = Kline.from_json(raw)
-                    key = (symbol, interval)
-                    if kline.close_time <= self._last_kline.get(key, -1):
-                        continue
-                    await self._enqueue_market_event(kline)
-                    self._last_kline[key] = kline.close_time
+            streams = {
+                f"kline:stream:{symbol}:{interval}": self._kline_stream_ids.get(
+                    f"kline:stream:{symbol}:{interval}", "0-0")
+                for symbol in self._market_symbols()
+                for interval in self._required_kline_intervals()
+            }
+            try:
+                rows = await self.redis.xread(streams, count=256) if streams else []
+                events = []
+                for stream, entries in rows:
+                    stream = self._decode_stream_id(stream)
+                    for cursor, fields in entries:
+                        raw = fields.get("data") or fields.get(b"data")
+                        events.append((Kline.from_json(raw), stream, cursor))
+                for kline, stream, cursor in sorted(events, key=lambda row: (row[0].available_time, row[0].symbol, row[0].interval)):
+                    key = (kline.symbol, kline.interval)
+                    previous = self._queued_kline.get(key, self._last_kline.get(key))
+                    if previous is not None and kline.open_time > previous + 1:
+                        self.gate.set_condition("kline_history", False)
+                        assert self.http is not None
+                        recovered = await fetch_closed_klines(
+                            self.http, kline.symbol, kline.interval,
+                            start_ms=previous + 1, end_ms=kline.open_time,
+                        )
+                        for item in recovered:
+                            await self._enqueue_market_event(item)
+                            self._queued_kline[key] = item.close_time
+                    if previous is None or kline.close_time > previous:
+                        await self._enqueue_market_event(kline)
+                        self._queued_kline[key] = kline.close_time
+                    self._kline_stream_ids[stream] = self._decode_stream_id(cursor)
+                self._refresh_kline_history_gate()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.gate.set_condition("kline_history", False)
+                logger.warning("Kline replay will retry: %s", type(exc).__name__)
             await asyncio.sleep(1)
+
+    def _refresh_kline_history_gate(self, *, now_ms: int | None = None) -> bool:
+        assert self.gate is not None
+        from trading_platform.market.recovery import RecoveryCoordinator
+        current = int(time.time() * 1000) if now_ms is None else now_ms
+        ready = bool(self._market_symbols()) and all(
+            self._last_kline.get((symbol, interval), -1)
+            >= (current - 5_000) // RecoveryCoordinator.interval_ms(interval)
+               * RecoveryCoordinator.interval_ms(interval) - 1
+            for symbol in self._market_symbols()
+            for interval in self._required_kline_intervals()
+        )
+        self.gate.set_condition("kline_history", ready)
+        return ready
 
     def _required_kline_intervals(self) -> tuple[str, ...]:
         intervals = [
@@ -1882,6 +2013,8 @@ class SpikeLiveProcess:
         ready = all(
             current - self._last_bar_received_monotonic.get(symbol, float("-inf"))
             <= BAR_STREAM_STALE_SECONDS
+            and 0 <= int(time.time() * 1000) - self._last_bar_available_time.get(symbol, 0)
+                <= BAR_STREAM_STALE_SECONDS * 1000
             for symbol in self._market_symbols()
         ) and not self._market_event_queue_overflowed
         self.gate.set_condition("bar_stream", ready)

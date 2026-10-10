@@ -1,3 +1,4 @@
+import time
 import asyncio
 import json
 from dataclasses import replace
@@ -312,10 +313,8 @@ async def test_bar_gap_replays_redis_stream_with_entries_closed():
 
     await process._handle_live_bar(_watermarked_bar(12))
 
-    assert [call.args[0] for call in process.coordinator.on_bar1s.await_args_list] == [
-        recovered,
-        _watermarked_bar(12),
-    ]
+    process.coordinator.strategy.on_bar1s.assert_called_once_with(recovered)
+    process.coordinator.on_bar1s.assert_awaited_once_with(_watermarked_bar(12))
     process.http.get.assert_not_awaited()
     process.coordinator.cancel_open_entry_orders.assert_awaited_once_with()
     assert process.gate.condition("bar_continuity") is False
@@ -338,7 +337,8 @@ async def test_bar_gap_falls_back_to_market_api_when_stream_is_incomplete():
     process.http.get.assert_awaited_once_with(
         "/bar1s/BTCUSDT/recover", params={"from_id": 21, "to_id": 21}
     )
-    assert process.coordinator.on_bar1s.await_args_list[0].args[0] == recovered
+    process.coordinator.strategy.on_bar1s.assert_called_once_with(recovered)
+    process.coordinator.on_bar1s.assert_awaited_once_with(_watermarked_bar(22))
     assert process.gate.condition("bar_continuity") is False
 
 
@@ -357,7 +357,7 @@ async def test_unrecoverable_bar_gap_stays_closed_but_delivers_current_bar_for_e
 
     process.coordinator.on_bar1s.assert_awaited_once_with(current)
     process.coordinator.cancel_open_entry_orders.assert_awaited_once_with()
-    assert process._last_bar_trade_id["BTCUSDT"] == 32
+    assert process._last_bar_trade_id["BTCUSDT"] == 30
     assert process.gate.condition("bar_continuity") is False
 
 
@@ -1429,6 +1429,7 @@ def test_blocked_symbol_without_live_risk_does_not_close_bar_stream_gate():
     )
     process.gate = Mock(set_condition=Mock())
     process._last_bar_received_monotonic = {"BTCUSDT": 99.0}
+    process._last_bar_available_time = {"BTCUSDT": int(time.time() * 1000)}
 
     assert process._market_symbols() == ("BTCUSDT",)
     assert process._refresh_bar_stream_gate(now=100.0) is True
@@ -1458,6 +1459,7 @@ async def test_local_bar_delivery_gate_requires_every_symbol_and_expires():
     )
 
     process._last_bar_received_monotonic = {"AKEUSDT": 100.0}
+    process._last_bar_available_time = dict.fromkeys(settings.symbols, int(time.time() * 1000))
     assert process._refresh_bar_stream_gate(now=100.0) is False
     assert process.gate.condition("bar_stream") is False
 
@@ -1511,20 +1513,15 @@ async def test_kline_loop_consumes_15m_updates():
         strategy_config=Mock(account_id="spike-test"),
     )
     seen_keys = []
-
-    async def hget(key, field):
-        seen_keys.append(key)
-        if key.endswith(":15m"):
-            raise asyncio.CancelledError
-        return None
-
-    process.redis = Mock(hget=AsyncMock(side_effect=hget))
+    async def xread(streams, **kwargs):
+        seen_keys.extend(streams)
+        raise asyncio.CancelledError
+    process.redis = Mock(xread=AsyncMock(side_effect=xread))
     process.coordinator = Mock()
-
+    process.gate = Mock()
     with pytest.raises(asyncio.CancelledError):
         await process._kline_loop()
-
-    assert "kline:AKEUSDT:15m" in seen_keys
+    assert "kline:stream:AKEUSDT:15m" in seen_keys
 
 
 def test_composite_gate_requires_every_condition():

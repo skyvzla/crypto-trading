@@ -15,6 +15,7 @@ from trading_platform.strategies.execution_queue import (
     ExecutionJob,
     ExecutionQueue,
     ExecutionWorker,
+    prepare_recovered_exit,
 )
 
 from .core import LongBreakoutStrategy
@@ -83,7 +84,7 @@ class LongBreakoutExecutionCoordinator:
         self.worker_task = self.worker.start()
         return self.worker_task
 
-    def enqueue(self, intents: Iterable[OrderIntent], *, event_time: int) -> int:
+    async def enqueue(self, intents: Iterable[OrderIntent], *, event_time: int) -> int:
         queued = 0
         for intent in intents:
             self._validate_intent(intent)
@@ -93,7 +94,7 @@ class LongBreakoutExecutionCoordinator:
                 self.strategy.clear_pending_entry(intent.symbol)
                 continue
             try:
-                self.execution_queue.put_nowait(
+                await self.execution_queue.put(
                     "exit" if intent.reduce_only else "entry",
                     intent=intent,
                     event_time=event_time,
@@ -107,7 +108,10 @@ class LongBreakoutExecutionCoordinator:
             queued += 1
         return queued
 
-    async def _handle_execution_job(self, job: ExecutionJob) -> None:
+    async def _handle_execution_job(self, job: ExecutionJob) -> bool | None:
+        prepared = prepare_recovered_exit(job, self.account)
+        if prepared is not True:
+            return prepared
         if job.kind == "cancel":
             await self._flush_cancellations()
             return

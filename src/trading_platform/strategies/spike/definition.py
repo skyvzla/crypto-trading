@@ -100,6 +100,19 @@ class SpikeDataRequirements(MarketDataRequirements):
     shared_metrics: tuple[SharedMetricSpec, ...] = ()
     retention_minutes: int | Callable[[Any], int] = _resolve_spike_1m_retention
 
+    def resolve_required_history(self, settings: Any = None) -> dict[str, int]:
+        def minutes(name: str) -> int:
+            return int(getattr(settings, f"{name}_minutes",
+                               getattr(settings, f"{name}_hours", 0) * 60))
+        minimum = {
+            "1m": max(960, minutes("rise_low_lookback"), minutes("prior_high_lookback"),
+                      10080 if getattr(settings, "box_duration_min_minutes", 0) > 0 else 0),
+            "5m": 15,
+            "15m": 10,
+        }
+        return {interval: count for interval, count in minimum.items()
+                if interval in self.market_timeframes}
+
 
 @dataclass(frozen=True)
 class SpikeStrategyDefaults:

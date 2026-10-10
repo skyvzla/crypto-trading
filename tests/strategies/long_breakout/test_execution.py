@@ -147,9 +147,9 @@ async def test_worker_converts_entry_notional_to_quantity_and_keeps_buy_directio
     assert job.intent.quantity == Decimal("1")
 
 
-def test_enqueue_accepts_buy_entry_and_reduce_only_sell_exit_but_rejects_wrong_sides():
+async def test_enqueue_accepts_buy_entry_and_reduce_only_sell_exit_but_rejects_wrong_sides():
     coordinator_instance = coordinator()
-    assert coordinator_instance.enqueue(
+    assert await coordinator_instance.enqueue(
         [entry_intent(), exit_intent()], event_time=123
     ) == 2
 
@@ -164,7 +164,7 @@ def test_enqueue_accepts_buy_entry_and_reduce_only_sell_exit_but_rejects_wrong_s
         coordinator_instance._validate_intent(wrong_exit)
 
 
-def test_enqueue_does_not_leave_pending_entry_when_entry_gate_is_disabled():
+async def test_enqueue_does_not_leave_pending_entry_when_entry_gate_is_disabled():
     strategy = LongBreakoutStrategy(symbol=SYMBOL)
     strategy.restore_pending_order(
         SYMBOL,
@@ -174,7 +174,7 @@ def test_enqueue_does_not_leave_pending_entry_when_entry_gate_is_disabled():
     )
     coordinator_instance = coordinator(entry_allowed=False, strategy=strategy)
 
-    assert coordinator_instance.enqueue([entry_intent()], event_time=1) == 0
+    assert await coordinator_instance.enqueue([entry_intent()], event_time=1) == 0
     assert strategy.pending_entry(SYMBOL) is None
 
 
@@ -343,7 +343,7 @@ async def test_execution_worker_processes_queued_entry_outside_enqueue_call():
     coordinator_instance = coordinator(executor=executor)
     worker_task = coordinator_instance.start()
     try:
-        assert coordinator_instance.enqueue([entry_intent()], event_time=10) == 1
+        assert await coordinator_instance.enqueue([entry_intent()], event_time=10) == 1
         await asyncio.wait_for(submitted_event.wait(), timeout=1)
         await coordinator_instance.execution_queue.join()
         assert len(submitted) == 1
@@ -420,7 +420,7 @@ async def test_stop_waits_for_in_flight_entry_then_rescans_and_cancels_it():
     )
     coordinator_instance = coordinator(account=account, executor=executor)
     coordinator_instance.start()
-    coordinator_instance.enqueue([entry_intent()], event_time=1)
+    await coordinator_instance.enqueue([entry_intent()], event_time=1)
     await submit_started.wait()
 
     stop_task = asyncio.create_task(coordinator_instance.stop())
@@ -486,7 +486,7 @@ async def test_stop_recovers_and_cancels_submit_interrupted_at_timeout(
         strategy=strategy,
     )
     coordinator_instance.start()
-    coordinator_instance.enqueue([entry_intent()], event_time=1)
+    await coordinator_instance.enqueue([entry_intent()], event_time=1)
     await submit_started.wait()
 
     await coordinator_instance.stop()

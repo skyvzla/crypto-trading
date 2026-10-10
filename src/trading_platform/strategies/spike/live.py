@@ -29,10 +29,11 @@ from trading_platform.shared.execution_event_journal import (
 )
 from trading_platform.shared.risk import RiskGuard
 from trading_platform.strategies.campaign_store import CampaignLease, RedisCampaignStore
-from trading_platform.strategies.spike.execution_queue import (
+from trading_platform.strategies.execution_queue import (
     ExecutionJob,
     ExecutionQueue,
     ExecutionWorker,
+    prepare_recovered_exit,
 )
 from trading_platform.strategies.spike.exit_policy import (
     CANDIDATE_FULL_EXIT_REASONS,
@@ -50,6 +51,7 @@ from trading_platform.strategies.universe import DEFAULT_DELISTING_FREEZE_DAYS
 STRATEGY_ID = "spike_short"
 ENTRY_REASONS = {"spike_entry", "spike_tier1", "spike_tier2", "spike_tier3"}
 LIVE_CONFIRMATION = "I_UNDERSTAND_LIVE_ORDERS_ARE_REAL"
+
 
 
 logger = logging.getLogger(__name__)
@@ -1564,7 +1566,7 @@ class SpikeExecutionCoordinator:
         exits = [intent for intent in intents if intent.reduce_only]
         queued = 0
         for intent in exits:
-            self.execution_queue.put_nowait(
+            await self.execution_queue.put(
                 "exit", intent=intent, event_time=event_time
             )
             await self._append_execution_event(
@@ -1605,7 +1607,7 @@ class SpikeExecutionCoordinator:
             campaign_id = self._campaign_id(campaign_entries[0])
             for intent in campaign_entries:
                 try:
-                    self.execution_queue.put_nowait(
+                    await self.execution_queue.put(
                         "entry", intent=intent, event_time=event_time
                     )
                 except asyncio.QueueFull:
@@ -1761,7 +1763,10 @@ class SpikeExecutionCoordinator:
         if cancellation_requested or self._pending_audit_events:
             self._enqueue_maintenance(event_time=event_time)
 
-    async def _handle_execution_job(self, job: ExecutionJob) -> None:
+    async def _handle_execution_job(self, job: ExecutionJob) -> bool | None:
+        prepared = prepare_recovered_exit(job, self.account)
+        if prepared is not True:
+            return prepared
         intent = job.intent
         trace_id = (
             intent.client_order_id
@@ -1856,6 +1861,8 @@ class SpikeExecutionCoordinator:
                     f"{type(journal_exc).__name__}: {journal_exc}"
                 )
             raise
+
+        return execution_complete
 
     async def _submit(self, intent: OrderIntent) -> None:
         campaign_id = self._owned_campaign_id

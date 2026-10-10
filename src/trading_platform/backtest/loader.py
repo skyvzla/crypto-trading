@@ -2,6 +2,7 @@
 
 from collections.abc import Collection, Iterator
 from decimal import Decimal
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Union
 
@@ -20,6 +21,7 @@ from trading_platform.market.archive.parquet import (
     archive_root_from_catalog,
 )
 from trading_platform.shared.events import Bar1s, Kline
+from trading_platform.market.recovery import RecoveryCoordinator
 
 Event = Union[Bar1s, Kline]
 # 默认按 180 天（4320 小时）切分 DuckDB 流式回放窗口。
@@ -120,6 +122,7 @@ class BacktestDataLoader:
         archive_index_path: str | None = None,
         bar1s_time_shift_ms: int = 0,
         bar1s_feature_columns: Collection[str] | None = None,
+        validate_coverage: bool = True,
     ):
         if start_ms >= end_ms:
             raise ValueError("start_ms must be earlier than end_ms")
@@ -131,6 +134,7 @@ class BacktestDataLoader:
         self.end_ms = end_ms
         self.require_aggtrades = require_aggtrades
         self.required_kline_intervals = set(required_kline_intervals or [])
+        self.validate_coverage = validate_coverage
         if "1s" in self.required_kline_intervals:
             raise ValueError("use require_aggtrades for 1s market data")
         if bar1s_feature_columns is None:
@@ -195,6 +199,10 @@ class BacktestDataLoader:
                 connection.execute("SET memory_limit = ?", [duckdb_memory_limit])
             self._validate_duckdb_source()
             self._validate_stream_datasets()
+            if self.validate_coverage:
+                self._validate_complete_klines()
+                if self.require_aggtrades:
+                    self._validate_complete_seconds()
 
             sequence_by_stream: dict[tuple[str, str], int] = {}
             stream_end_ms = self.end_ms + 1_001
@@ -264,6 +272,88 @@ class BacktestDataLoader:
                     raise ValueError(
                         f"Missing required {interval} Kline data for {symbol}"
                     )
+
+    def _validate_complete_klines(self) -> None:
+        """Validate the whole requested grid before emitting any trading events."""
+        connection = self._require_duckdb_connection()
+        for symbol in self.symbols:
+            for interval in self.required_kline_intervals:
+                step = RecoveryCoordinator.interval_ms(interval)
+                start = self.start_ms // step * step
+                end = self.end_ms // step * step
+                expected = max(0, (end - start) // step)
+                if not expected:
+                    continue
+                source = "main.candles"
+                params = []
+                if self._source_index is not None:
+                    frame = self._source_index
+                    selected = frame[(frame["symbol"] == symbol) & (frame["timeframe"] == interval)]
+                    paths = [str(self.archive_index_path.parent / item)
+                             for item in selected["relative_path"].drop_duplicates()]
+                    source = "read_parquet(?, union_by_name=true)"
+                    params.append(paths)
+                row = connection.execute(
+                    "SELECT count(*), count(DISTINCT epoch_ms(open_time)), "
+                    "min(epoch_ms(open_time)), max(epoch_ms(open_time)), "
+                    "count(*) FILTER (WHERE epoch_ms(open_time) % ? <> 0 "
+                    "OR epoch_ms(close_time) <> epoch_ms(open_time) + ? - 1) "
+                    f"FROM {source} WHERE symbol = ? AND timeframe = ? "
+                    "AND epoch_ms(close_time) >= ? AND epoch_ms(close_time) < ?",
+                    [step, step, *params, symbol, interval, self.start_ms, self.end_ms],
+                ).fetchone()
+                if tuple(row) != (expected, expected, start, end - step, 0):
+                    raise ValueError(
+                        f"Incomplete required {interval} Kline data for {symbol}: "
+                        f"expected {expected} closed bars in [{start}, {end}), got {row[0]}"
+                    )
+
+    def _validate_complete_seconds(self) -> None:
+        """Sparse seconds need contiguous trade IDs; absent metadata needs a dense grid."""
+        connection = self._require_duckdb_connection()
+        start = self.start_ms - self.bar1s_time_shift_ms
+        end = self.end_ms - self.bar1s_time_shift_ms
+        for symbol in self.symbols:
+            source, params = "main.candles", []
+            if self._source_index is not None:
+                frame = self._source_index
+                selected = frame[(frame["symbol"] == symbol) & (frame["timeframe"] == "1s")]
+                available_days = {(int(row.year), int(row.month), int(row.day)) for row in selected.itertuples()}
+                day = datetime.fromtimestamp(start / 1000, UTC).date()
+                last_day = datetime.fromtimestamp((end - 1) / 1000, UTC).date()
+                while day <= last_day:
+                    if (day.year, day.month, day.day) not in available_days:
+                        raise ValueError(f"Missing required 1s archive partition for {symbol}: {day}")
+                    day += timedelta(days=1)
+                source = "read_parquet(?, union_by_name=true)"
+                params = [[str(self.archive_index_path.parent / item) for item in selected["relative_path"].drop_duplicates()]]
+            columns = {row[0] for row in connection.execute(f"DESCRIBE SELECT * FROM {source}", params).fetchall()}
+            where = "WHERE symbol = ? AND timeframe = '1s' AND epoch_ms(open_time) >= ? AND epoch_ms(open_time) < ?"
+            arguments = [*params, symbol, start, end]
+            if {"first_aggregate_trade_id", "last_aggregate_trade_id"} <= columns:
+                total, distinct_times, identified, invalid = connection.execute(
+                    "SELECT count(*), count(DISTINCT t), count(f), "
+                    "count(*) FILTER (WHERE f IS NULL OR l IS NULL OR f > l "
+                    "OR (previous IS NOT NULL AND f <> previous + 1) OR t % 1000 <> 0) "
+                    "FROM (SELECT epoch_ms(open_time) AS t, first_aggregate_trade_id AS f, "
+                    "last_aggregate_trade_id AS l, lag(last_aggregate_trade_id) OVER (ORDER BY open_time) AS previous "
+                    f"FROM {source} {where})",
+                    arguments,
+                ).fetchone()
+                if identified:
+                    if invalid or total != distinct_times:
+                        raise ValueError(f"Incomplete required 1s trade continuity for {symbol}")
+                    continue
+            first = (start + 999) // 1000 * 1000
+            stop = (end + 999) // 1000 * 1000
+            expected = (stop - first) // 1000
+            values = connection.execute(
+                "SELECT count(*), count(DISTINCT epoch_ms(open_time)), min(epoch_ms(open_time)), max(epoch_ms(open_time)), "
+                "count(*) FILTER (WHERE epoch_ms(open_time) % 1000 <> 0) "
+                f"FROM {source} {where}", arguments,
+            ).fetchone()
+            if tuple(values) != (expected, expected, first, stop - 1000, 0):
+                raise ValueError(f"Incomplete required 1s coverage for {symbol}; sparse data requires trade IDs")
 
     def _validate_stream_datasets_from_index(self) -> None:
         frame = load_archive_index(self.archive_index_path)

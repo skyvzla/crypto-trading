@@ -342,6 +342,9 @@ def live_process():
     strategy = StrategyStub()
     process.gate = CompositeEntryGate(strategy)
     process.coordinator = Mock(
+        reconcile_entry_expirations=AsyncMock(),
+        restore_campaign_timing=AsyncMock(),
+        maybe_release_campaign=AsyncMock(),
         record_capital_admission=AsyncMock(),
         expiry_failed=False,
     )

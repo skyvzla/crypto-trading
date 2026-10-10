@@ -10,7 +10,7 @@ from trading_platform.shared.events import Bar1s, OrderIntent
 from trading_platform.shared.execution_recovery import OrderWAL
 from trading_platform.shared.risk import RiskConfig, RiskGuard
 from trading_platform.strategies.campaign_store import CampaignLease
-from trading_platform.strategies.spike.execution_queue import ExecutionJob, ExecutionQueue
+from trading_platform.strategies.execution_queue import ExecutionJob, ExecutionQueue
 from trading_platform.strategies.spike.live import (
     CompositeEntryGate,
     SpikeExecutionCoordinator,
@@ -1122,9 +1122,49 @@ async def test_pubsub_listener_keeps_accepting_while_strategy_loop_is_slow():
 
     await asyncio.wait_for(first_strategy_call.wait(), timeout=1)
     await asyncio.wait_for(listener_task, timeout=0.1)
-    assert process._market_events.qsize() == 1
+    assert process.coordinator.on_bar1s_queued.await_count == 1
 
     release_strategy.set()
     await asyncio.wait_for(process._market_events.join(), timeout=1)
+    assert process.coordinator.on_bar1s_queued.await_count == 2
     strategy_task.cancel()
     await asyncio.gather(strategy_task, return_exceptions=True)
+
+
+async def test_market_dispatcher_uses_archive_order_at_a_shared_close_boundary():
+    from dataclasses import replace
+    from trading_platform.shared.events import Kline
+    process = make_process()
+    process._queued_execution_started = True
+    visible = []
+    observations = []
+    async def on_bar(event):
+        observations.append((event.available_time, tuple(visible)))
+    async def on_kline(event):
+        visible.append(event.available_time)
+    process._handle_live_bar = AsyncMock(side_effect=on_bar)
+    process.coordinator.on_kline_queued = AsyncMock(side_effect=on_kline)
+    kline = Kline(symbol="BTCUSDT", interval="1m", open_time=0,
+                  close_time=59999, available_time=60000, open=Decimal("1"),
+                  high=Decimal("1"), low=Decimal("1"), close=Decimal("1"), volume=Decimal("1"))
+    for event in [kline, replace(bar("BTCUSDT", 2), available_time=61000),
+                  replace(bar("BTCUSDT", 1), available_time=60000)]:
+        await process._enqueue_market_event(event)
+    task = asyncio.create_task(process._strategy_event_loop())
+    try:
+        await asyncio.wait_for(process._market_events.join(), 1)
+        assert observations == [(60000, ()), (61000, (60000,))]
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_future_market_event_cannot_fill_the_reorder_buffer():
+    import time
+    from dataclasses import replace
+    process = make_process()
+    event = replace(bar("BTCUSDT", 1), available_time=int(time.time() * 1000) + 60_000)
+    with pytest.raises(ValueError, match="in the future"):
+        await process._enqueue_market_event(event)
+    assert process._market_events.empty()
+    assert process.gate.condition("execution") is False
