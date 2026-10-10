@@ -318,9 +318,10 @@ class BinanceStrategyAccount:
             and all(record.status in _TERMINAL for record in records)
         )
 
-    def has_unresolved_orders(self) -> bool:
+    def has_unresolved_orders(self, symbol: str | None = None) -> bool:
         return any(
             record.account_id == self.account_id
+            and (symbol is None or record.symbol == symbol)
             and (record.record_type == "intent" or record.status == "SUBMIT_UNKNOWN")
             for record in self.wal.recover_latest().values()
         )

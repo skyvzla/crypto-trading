@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from typing import Awaitable, Callable, Literal
 
@@ -26,6 +26,26 @@ class ExecutionJob:
     kind: JobKind = field(compare=False)
     intent: OrderIntent | None = field(compare=False, default=None)
     event_time: int = field(compare=False, default=0)
+    recovered: bool = field(compare=False, default=False)
+
+
+def prepare_recovered_exit(job: ExecutionJob, account) -> bool | None:
+    """Revalidate an undispatched exit after account reconciliation, without new I/O."""
+    if not job.recovered:
+        return True
+    intent = job.intent
+    assert intent is not None and intent.reduce_only
+    if account.get_order(intent.client_order_id) is not None:
+        return None  # The order WAL/reconciler already owns this submission.
+    if account.has_unresolved_orders(intent.symbol) or account.has_pending_position_update(intent.symbol):
+        return False
+    position = account.get_position(intent.symbol)
+    if position is None or position.quantity <= 0:
+        return None
+    if intent.side != ("SELL" if position.side == "LONG" else "BUY"):
+        raise ValueError("recovered exit conflicts with the reconciled position side")
+    job.intent = replace(intent, quantity=min(intent.quantity, position.quantity))
+    return True
 
 
 class ExecutionQueue:
@@ -38,6 +58,52 @@ class ExecutionQueue:
         self._queue: asyncio.PriorityQueue[ExecutionJob] = asyncio.PriorityQueue()
         self._next_sequence = 1
         self._pending_entries = 0
+        self.store = None
+        self._queued_ids: set[str] = set()
+
+    async def put(self, kind: JobKind, *, intent: OrderIntent | None = None,
+                  event_time: int = 0) -> ExecutionJob | None:
+        if kind == "entry" and self._pending_entries >= self.max_pending_entries:
+            raise asyncio.QueueFull
+        if self.store is not None and intent is not None:
+            if not await self.store.save(kind, intent, event_time):
+                return None
+            if intent.client_order_id in self._queued_ids:
+                return None
+        try:
+            job = self.put_nowait(kind, intent=intent, event_time=event_time)
+        except asyncio.QueueFull:
+            if self.store is not None and intent is not None:
+                await self.store.finish(intent.client_order_id, expired=True)
+            raise
+        if intent is not None:
+            self._queued_ids.add(intent.client_order_id)
+        return job
+
+    async def restore(self, *, submitted: Callable[[str], bool] | None = None) -> None:
+        """Restart entries need a fresh signal; acknowledged exit intents remain actionable."""
+        if self.store is None:
+            return
+        for kind, event_time, intent in await self.store.pending():
+            if submitted is not None and submitted(intent.client_order_id):
+                await self.store.finish(intent.client_order_id)
+            elif kind == "entry":
+                await self.store.finish(intent.client_order_id, expired=True)
+            elif intent.client_order_id not in self._queued_ids:
+                job = self.put_nowait(kind, intent=intent, event_time=event_time)
+                job.recovered = True
+                self._queued_ids.add(intent.client_order_id)
+
+    async def complete(self, job: ExecutionJob) -> None:
+        if job.intent is not None:
+            if self.store is not None:
+                await self.store.finish(job.intent.client_order_id)
+            self._queued_ids.discard(job.intent.client_order_id)
+
+    def retry(self, job: ExecutionJob) -> None:
+        job.sequence = self._next_sequence
+        self._next_sequence += 1
+        self._queue.put_nowait(job)
 
     @property
     def qsize(self) -> int:
@@ -101,7 +167,7 @@ class ExecutionWorker:
     def __init__(
         self,
         queue: ExecutionQueue,
-        handler: Callable[[ExecutionJob], Awaitable[None]],
+        handler: Callable[[ExecutionJob], Awaitable[bool | None]],
         *,
         task_name: str = "strategy-execution-worker",
     ) -> None:
@@ -120,7 +186,12 @@ class ExecutionWorker:
         while True:
             job = await self.queue.get()
             try:
-                await self.handler(job)
+                result = await self.handler(job)
+                if result is False and job.kind == "exit":
+                    await asyncio.sleep(0.5)
+                    self.queue.retry(job)
+                else:
+                    await self.queue.complete(job)
             finally:
                 self.queue.task_done()
 

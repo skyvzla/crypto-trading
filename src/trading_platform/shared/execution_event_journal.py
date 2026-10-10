@@ -375,6 +375,7 @@ class DurableExecutionEventJournal:
         persist: PersistCallback,
         now_ms: Callable[[], int] | None = None,
         id_factory: Callable[[], str | uuid.UUID] | None = None,
+        mirror_async: bool = False,
     ) -> None:
         self.path = Path(path)
         _require_non_empty_string(run_id, "run_id")
@@ -394,12 +395,66 @@ class DurableExecutionEventJournal:
         self._next_sequence = 0
         self._event_ids: set[str] = set()
         self._pending_events: list[ExecutionEvent] = []
+        self.mirror_async = mirror_async
+        self.mirror_task: asyncio.Task | None = None
+        self._mirror_lock = asyncio.Lock()
+        self._mirror_wakeup = asyncio.Event()
+        self.last_mirror_error: Exception | None = None
 
     async def start(self) -> int:
         """Parse and replay the complete local journal once for this instance."""
 
         async with self._lock:
-            return await self._start_locked()
+            count = await self._start_locked()
+        if self.mirror_async and self.mirror_task is None:
+            self.mirror_task = asyncio.create_task(self._mirror_loop(), name="execution-audit-mirror")
+        return count
+
+    @property
+    def pending_count(self) -> int:
+        return len(self._pending_events)
+
+    async def flush(self) -> int:
+        """Mirror a durable prefix without holding the append lock across PostgreSQL I/O."""
+        async with self._mirror_lock:
+            async with self._lock:
+                await self._ensure_local_loaded_locked()
+                batch = tuple(self._pending_events)
+            if not batch:
+                return 0
+            count = await self._persist_events(batch)
+            async with self._lock:
+                await self._ensure_local_loaded_locked()
+                if tuple(self._pending_events[:len(batch)]) != batch:
+                    raise ValueError("execution journal prefix changed during mirror")
+                remaining = self._pending_events[len(batch):]
+                await asyncio.to_thread(self._compact_local_sync, remaining)
+                self._pending_events = remaining
+                self._started = True
+            return count
+
+    async def _mirror_loop(self) -> None:
+        while True:
+            await self._mirror_wakeup.wait()
+            self._mirror_wakeup.clear()
+            try:
+                await self.flush()
+                self.last_mirror_error = None
+            except asyncio.CancelledError:
+                raise
+            except (ValueError, TypeError):
+                raise
+            except Exception as exc:
+                self.last_mirror_error = exc
+                await asyncio.sleep(1)
+                self._mirror_wakeup.set()
+
+    async def close(self) -> None:
+        if self.mirror_task is not None:
+            self.mirror_task.cancel()
+            await asyncio.gather(self.mirror_task, return_exceptions=True)
+            self.mirror_task = None
+        await asyncio.wait_for(self.flush(), timeout=10)
 
     async def append(
         self,
@@ -498,7 +553,10 @@ class DurableExecutionEventJournal:
         self._next_sequence = events[-1].sequence
         self._event_ids.update(ids)
         self._pending_events.extend(events)
-        await self._persist_pending_locked()
+        if self.mirror_async:
+            self._mirror_wakeup.set()
+        else:
+            await self._persist_pending_locked()
         return tuple(events)
 
     async def _persist_events(self, events: Sequence[ExecutionEvent]) -> int:
@@ -541,8 +599,8 @@ class DurableExecutionEventJournal:
             finally:
                 os.close(directory_fd)
 
-    def _compact_local_sync(self) -> None:
-        """Atomically replace the confirmed WAL with an empty durable file."""
+    def _compact_local_sync(self, remaining: Sequence[ExecutionEvent] = ()) -> None:
+        """Atomically retain only events not yet confirmed by PostgreSQL."""
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary_fd, temporary_name = tempfile.mkstemp(
@@ -555,6 +613,7 @@ class DurableExecutionEventJournal:
             stream = os.fdopen(temporary_fd, "w", encoding="utf-8", newline="")
             temporary_fd = -1
             with stream:
+                stream.writelines(event.to_json() + "\n" for event in remaining)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary_path, self.path)

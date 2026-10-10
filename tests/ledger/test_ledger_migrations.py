@@ -58,16 +58,15 @@ async def test_fresh_database_migrates_and_second_run_is_idempotent(migration_db
     current_version = len(load_migrations())
     assert first.current_version == current_version
     assert first.applied_versions == tuple(range(1, current_version + 1))
-    assert first.applied_versions[-3:] == (22, 23, 24)
     migrations = load_migrations()
-    assert migrations[-5].filename == "0020_notification_secrets.sql"
-    assert migrations[-5].checksum == (
+    assert migrations[19].filename == "0020_notification_secrets.sql"
+    assert migrations[19].checksum == (
         "9991f70e7ce17af00bef4b2d6a69a262a6f8b375ca8bbafa8e3e21c2aecb14f9"
     )
-    assert migrations[-4].filename == "0021_notification_secret_legacy_cleanup.sql"
-    assert migrations[-3].filename == "0022_notification_source_states.sql"
-    assert migrations[-2].filename == "0023_order_rejection_updated_at_index.sql"
-    assert migrations[-1].filename == "0024_strategy_notification_state_identity.sql"
+    assert migrations[20].filename == "0021_notification_secret_legacy_cleanup.sql"
+    assert migrations[21].filename == "0022_notification_source_states.sql"
+    assert migrations[22].filename == "0023_order_rejection_updated_at_index.sql"
+    assert migrations[23].filename == "0024_strategy_notification_state_identity.sql"
     assert second.current_version == current_version
     assert second.applied_versions == ()
     assert await verify_current(pool, schema=schema) == current_version
@@ -170,7 +169,7 @@ async def test_client_order_id_constraint_is_account_scoped_when_upgrading(
     upgraded = await apply_migrations(pool, schema=schema)
     repeated = await apply_migrations(pool, schema=schema)
 
-    assert upgraded.applied_versions == (15, 16, 17, 18, 19, 20, 21, 22, 23, 24)
+    assert upgraded.applied_versions == tuple(range(15, len(load_migrations()) + 1))
     assert repeated.applied_versions == ()
 
     async with pool.connection() as conn:
@@ -296,7 +295,7 @@ async def test_strategy_notification_states_merge_instance_keys_on_upgrade(
                 )
             ).fetchone()
 
-    assert result.applied_versions == (24,)
+    assert result.applied_versions == tuple(range(24, len(load_migrations()) + 1))
     assert rows == [
         ("strategy-health:state-account:spike_short", "unhealthy"),
         ("strategy-risk:state-account:spike_short", "halted"),
@@ -479,7 +478,7 @@ async def test_notification_secret_migration_preserves_legacy_references(
     assert mid_snapshots["whitespace-ref"] == ("   ", None)
 
     result = await apply_migrations(pool, schema=schema)
-    assert result.applied_versions == (21, 22, 23, 24)
+    assert result.applied_versions == tuple(range(21, len(load_migrations()) + 1))
     assert (await apply_migrations(pool, schema=schema)).applied_versions == ()
 
     async with pool.connection() as conn:
@@ -624,21 +623,7 @@ async def test_capital_breach_facts_are_backfilled_when_upgrading_from_0011(
 
     result = await apply_migrations(pool, schema=schema)
 
-    assert result.applied_versions == (
-        12,
-        13,
-        14,
-        15,
-        16,
-        17,
-        18,
-        19,
-        20,
-        21,
-        22,
-        23,
-        24,
-    )
+    assert result.applied_versions == tuple(range(12, len(load_migrations()) + 1))
     async with pool.connection() as conn:
         async with conn.transaction():
             await conn.execute(
