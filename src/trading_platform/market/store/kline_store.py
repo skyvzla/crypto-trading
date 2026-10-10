@@ -5,23 +5,14 @@ K线存储
 """
 import json
 import logging
-from decimal import Decimal
 
 import redis.asyncio as redis
 
 from trading_platform.shared.events import Kline
+from trading_platform.market.store.stream import append_event
 
 
 logger = logging.getLogger(__name__)
-
-
-class DecimalEncoder(json.JSONEncoder):
-    """处理 Decimal 类型的 JSON 编码器"""
-
-    def default(self, obj):
-        if isinstance(obj, Decimal):
-            return str(obj)
-        return super().default(obj)
 
 
 class KlineStore:
@@ -47,35 +38,18 @@ class KlineStore:
         """
         key = f"kline:{kline.symbol}:{kline.interval}"
 
-        # 序列化为 JSON
-        payload = {
-            "symbol": kline.symbol,
-            "interval": kline.interval,
-            "open_time": kline.open_time,
-            "close_time": kline.close_time,
-            "available_time": kline.available_time,
-            "open": str(kline.open),
-            "high": str(kline.high),
-            "low": str(kline.low),
-            "close": str(kline.close),
-            "volume": str(kline.volume),
-        }
-
-        message = json.dumps(payload, cls=DecimalEncoder)
+        payload = kline.to_dict()
+        payload.pop("type_priority", None)
+        payload.pop("sequence", None)
+        message = json.dumps(payload)
 
         try:
-            # WS reconnects can replay a completed candle. Never let an older
-            # event move the Redis "latest" watermark backwards.
-            existing = await self.redis.hget(key, "latest")
-            if existing is not None:
-                if isinstance(existing, bytes):
-                    existing = existing.decode("utf-8")
-                previous_close_time = json.loads(existing).get("close_time")
-                if previous_close_time is not None and int(previous_close_time) >= kline.close_time:
-                    return
-
-            # 写入 Redis Hash 的 latest 字段
-            await self.redis.hset(key, "latest", message)
+            await append_event(
+                self.redis, f"kline:stream:{kline.symbol}:{kline.interval}", message,
+                timestamp=kline.open_time,
+                watermark_field=f"{kline.symbol.lower()}@kline_{kline.interval}",
+                watermark=kline.close_time, maxlen=1500, latest_key=key,
+            )
 
             logger.debug(
                 f"存储 Kline: {kline.symbol} {kline.interval} "

@@ -1,7 +1,8 @@
 import asyncio
 import json
+import time
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,6 +15,35 @@ from trading_platform.market.quality import MarketDataQualityTracker
 from trading_platform.market.store.kline_store import KlineStore
 from trading_platform.market.store.redis_pub import RedisPublisher
 from trading_platform.shared.events import Bar1s
+
+
+def test_stale_events_are_not_ready_even_if_receiving_keeps_progressing():
+    tracker = MarketDataQualityTracker()
+    tracker.set_expected_streams(["btcusdt@aggTrade"])
+    tracker.observe_aggtrade("BTCUSDT", 1, 1000, 60_000)
+    assert tracker.ready
+    assert not tracker.ready_at(60_000)
+
+
+def test_consumer_readiness_is_not_blocked_by_an_unrelated_stream():
+    from trading_platform.market.main import create_app
+    app, service = create_app(MarketLayerConfig(), "scope-test")
+    service.redis.ping = AsyncMock(return_value=True)
+    service.subscription_manager.update_subscription("one", ["BTCUSDT"], ["bar1s"])
+    service.subscription_manager.update_subscription("two", ["ETHUSDT"], ["bar1s"])
+    service.quality.set_expected_streams(["btcusdt@aggTrade", "ethusdt@aggTrade"])
+    now = int(time.time() * 1000)
+    service.quality.observe_aggtrade("BTCUSDT", 1, now, now)
+    service.quality.mark_stream_failed("ethusdt@aggTrade", "backfill_failed")
+    service._ws_task = Mock(done=lambda: False)
+    service.ws_client._running = True
+    service.ws_client._ws = Mock()
+    api = TestClient(app)
+    assert api.get("/health").status_code == 503
+    assert api.get("/health?consumer_id=one").json()["status"] == "ready"
+    assert api.get("/quality?consumer_id=one").json()["ready"] is True
+    assert api.get("/health?consumer_id=two").status_code == 503
+    assert api.get("/quality?consumer_id=missing").json()["ready"] is False
 
 
 def _bar(symbol: str = "BTCUSDT") -> Bar1s:
@@ -45,16 +75,13 @@ async def test_redis_publisher_detects_and_reports_consumer_disconnect(caplog):
     assert publisher.delivery_ready is False
     assert publisher.delivery_issue_count == 1
     assert "消费端断流" in caplog.text
-    stream_call = redis_client.xadd.await_args
-    assert stream_call.args[0] == "bar1s:stream:BTCUSDT"
-    assert json.loads(stream_call.args[1]["data"])["symbol"] == "BTCUSDT"
+    stream_call = redis_client.eval.await_args
+    assert stream_call.args[2] == "bar1s:stream:BTCUSDT"
+    assert json.loads(stream_call.args[6])["symbol"] == "BTCUSDT"
     assert "first_aggregate_trade_id" not in json.loads(
-        stream_call.args[1]["data"]
+        stream_call.args[6]
     )
-    assert stream_call.kwargs == {
-        "maxlen": RedisPublisher.STREAM_MAXLEN,
-        "approximate": True,
-    }
+    assert stream_call.args[10] == str(RedisPublisher.STREAM_MAXLEN)
 
     await publisher.publish_bar1s(_bar())
     state = publisher.delivery_snapshot()["bar1s:BTCUSDT"]
@@ -68,7 +95,7 @@ async def test_redis_publisher_detects_and_reports_consumer_disconnect(caplog):
 async def test_redis_publisher_writes_replay_stream_before_pubsub():
     redis_client = AsyncMock()
     calls = []
-    redis_client.xadd.side_effect = lambda *args, **kwargs: calls.append("stream")
+    redis_client.eval.side_effect = lambda *args, **kwargs: calls.append("stream")
     redis_client.publish.side_effect = lambda *args, **kwargs: calls.append("pubsub") or 1
 
     await RedisPublisher(redis_client).publish_bar1s(_bar())
@@ -261,7 +288,7 @@ async def test_health_fails_closed_when_active_pubsub_has_no_consumers():
 
     app, service = create_app(MarketLayerConfig(), "test-epoch")
     service.redis.ping = AsyncMock(return_value=True)
-    service.redis_publisher.redis.xadd = AsyncMock(return_value="1-0")
+    service.redis_publisher.redis.eval = AsyncMock(return_value=1)
     service.redis_publisher.redis.publish = AsyncMock(return_value=0)
     await service.redis_publisher.publish_bar1s(_bar())
     service.subscription_manager.update_subscription(
@@ -326,7 +353,7 @@ def test_bar1s_recovery_http_rejects_unclosed_or_oversized_ranges():
         "/bar1s/BTCUSDT/recover?from_id=11&to_id=12"
     ).status_code == 409
     assert client.get(
-        "/bar1s/BTCUSDT/recover?from_id=1&to_id=1001"
+        "/bar1s/BTCUSDT/recover?from_id=1&to_id=20001"
     ).status_code == 400
 
 
@@ -507,7 +534,8 @@ async def test_message_task_failure_is_recovered_with_existing_subscription():
     service.ws_client.reconnect_delay = 0
     service.ws_client.connection_generation = 1
     service.ws_client.connect.side_effect = [None]
-    service.ws_client.connected = True
+    service.ws_client._running = True
+    service.ws_client._ws = Mock()
 
     async def receive_messages():
         await asyncio.Event().wait()

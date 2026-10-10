@@ -6,9 +6,11 @@ from decimal import Decimal
 import httpx
 import pytest
 import redis.asyncio as redis
+from redis.exceptions import ResponseError
 
 from trading_platform.market.main import MarketLayerConfig, MarketLayerService, create_app
 from trading_platform.shared.events import Kline
+from trading_platform.market.store.kline_store import KlineStore
 
 
 @pytest.fixture
@@ -22,12 +24,38 @@ async def real_redis():
         await client.ping()
     except Exception as exc:
         await client.aclose()
+
         pytest.fail(f"TEST_REDIS_URL is unavailable: {exc}")
 
     try:
         yield client
     finally:
         await client.aclose()
+
+
+async def test_completed_kline_commit_is_idempotent_and_replayable(real_redis):
+    symbol = "T" + uuid.uuid4().hex[:12].upper()
+    store = KlineStore(real_redis)
+    stream = f"kline:stream:{symbol}:1m"
+    keys = [stream, f"kline:{symbol}:1m", f"market:published:{stream}"]
+    try:
+        for timestamp in [0, 60_000, 60_000, 120_000]:
+            await store.store_kline(Kline(symbol=symbol, interval="1m", open_time=timestamp,
+                close_time=timestamp + 59_999, available_time=timestamp + 60_000,
+                open=Decimal("1"), high=Decimal("1"), low=Decimal("1"),
+                close=Decimal("1"), volume=Decimal("1")))
+        rows = await real_redis.xrange(stream)
+        assert [json.loads(fields[b"data"])["open_time"] for _, fields in rows] == [0, 60_000, 120_000]
+        assert (await store.get_latest_kline(symbol, "1m"))["open_time"] == 120_000
+        with pytest.raises(ResponseError, match="conflicting"):
+            await store.store_kline(Kline(symbol=symbol, interval="1m", open_time=120_000,
+                close_time=179_999, available_time=180_000,
+                open=Decimal("1"), high=Decimal("2"), low=Decimal("1"),
+                close=Decimal("2"), volume=Decimal("1")))
+        assert await real_redis.xlen(stream) == 3
+    finally:
+        await real_redis.delete(*keys)
+        await real_redis.hdel("market:continuity_watermarks:v2", f"{symbol.lower()}@kline_1m")
 
 
 @pytest.mark.asyncio

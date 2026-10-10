@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import redis.asyncio as redis
 
 from trading_platform.shared.events import Bar1s
+from trading_platform.market.store.stream import append_event
 
 
 logger = logging.getLogger(__name__)
@@ -97,11 +98,12 @@ class RedisPublisher:
 
         try:
             # Stream 是短期传输日志；必须先落盘，Pub/Sub 消费者才能可靠回放。
-            await self.redis.xadd(
-                stream,
-                {"data": message},
+            await append_event(
+                self.redis, stream, message,
+                timestamp=bar.timestamp,
+                watermark_field=f"{bar.symbol.lower()}@aggTrade",
+                watermark=bar.last_aggregate_trade_id,
                 maxlen=self.STREAM_MAXLEN,
-                approximate=True,
             )
             subscriber_count = await self.redis.publish(channel, message)
             state = self._delivery.setdefault(

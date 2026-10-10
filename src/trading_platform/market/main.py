@@ -8,6 +8,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import Any
@@ -42,6 +43,7 @@ from trading_platform.market.quality import MarketDataQualityTracker
 from trading_platform.market.recovery import RecoveryError, RecoveryCoordinator
 from trading_platform.market.store.kline_store import KlineStore
 from trading_platform.market.store.redis_pub import RedisPublisher
+from trading_platform.market.store.stream import WATERMARK_KEY
 from trading_platform.shared.config import BinanceConfig, MarketLayerConfig
 from trading_platform.shared.binance.rest_client import BinanceRestClient
 
@@ -60,7 +62,7 @@ class MarketLayerService:
     4. 发布 Bar1s 到 Redis Pub/Sub
     5. 存储 Kline 到 Redis Hash
     """
-    WATERMARK_KEY = "market:continuity_watermarks:v2"
+    WATERMARK_KEY = WATERMARK_KEY
     BACKFILL_TIMEOUT_SECONDS = 30.0
     METRICS_POLL_SECONDS = 30.0
 
@@ -108,9 +110,14 @@ class MarketLayerService:
         self.quality = MarketDataQualityTracker()
         self._quality_generation = 0
         self._replay_watermarks: dict[str, int] = {}
-        self._backfill_lock = asyncio.Lock()
+        self._stream_generations: dict[str, int] = {}
+        self._stream_recovery_locks: dict[str, asyncio.Lock] = {}
+        self._recovery_retry_at: dict[str, float] = {}
+        self._recovery_slots = asyncio.Semaphore(4)
         self._metrics_task: asyncio.Task | None = None
+        self._continuity_task: asyncio.Task | None = None
         self._metrics_wakeup = asyncio.Event()
+        self._pending_bars: dict[str, deque] = {}
 
     async def start(self) -> None:
         """启动服务"""
@@ -118,12 +125,18 @@ class MarketLayerService:
         self._metrics_task = asyncio.create_task(
             self._metrics_loop(), name="market-metrics-5m"
         )
+        self._continuity_task = asyncio.create_task(self._continuity_loop())
         logger.info(f"行情层服务启动，instance_epoch={self.instance_epoch}")
 
     async def stop(self) -> None:
         """停止服务"""
         logger.info("正在停止行情层服务...")
         self._running = False
+
+        if self._continuity_task is not None:
+            self._continuity_task.cancel()
+            await asyncio.gather(self._continuity_task, return_exceptions=True)
+            self._continuity_task = None
 
         metrics_task = self._metrics_task
         self._metrics_task = None
@@ -167,15 +180,6 @@ class MarketLayerService:
                     for stream in build_stream_names([symbol], list(symbol_types))
                 }
             )
-            self.quality.set_expected_streams(needed_streams)
-            removed_streams = set(self._current_streams) - set(needed_streams)
-            for stream in removed_streams:
-                if "@aggTrade" in stream:
-                    self.aggregator.flush_symbol(stream.split("@", 1)[0].upper())
-            self._replay_watermarks = {
-                stream: value for stream, value in self._replay_watermarks.items()
-                if stream in needed_streams
-            }
 
             task_is_running = self._ws_task is not None and not self._ws_task.done()
             if needed_streams == self._current_streams and task_is_running:
@@ -191,7 +195,22 @@ class MarketLayerService:
 
             await self._stop_ws_task()
             await self.ws_client.disconnect()
+            previous_streams = self._current_streams
             self._current_streams = []
+
+            self.quality.set_expected_streams(needed_streams)
+            removed_streams = set(previous_streams) - set(needed_streams)
+            for stream in removed_streams:
+                if "@aggTrade" in stream:
+                    symbol = stream.split("@", 1)[0].upper()
+                    self.aggregator.flush_symbol(symbol)
+                    self._pending_bars.pop(symbol, None)
+                self._stream_generations.pop(stream, None)
+                self._recovery_retry_at.pop(stream, None)
+            self._replay_watermarks = {
+                stream: value for stream, value in self._replay_watermarks.items()
+                if stream in needed_streams
+            }
 
             if needed_streams:
                 try:
@@ -359,19 +378,57 @@ class MarketLayerService:
                 self._recovery_task = None
 
     async def _ws_message_loop(self) -> None:
-        """WebSocket 消息处理循环"""
+        """Keep a recovering stream from blocking other symbols on the socket."""
+        queues: dict[str, asyncio.Queue] = {}
+        workers: list[asyncio.Task] = []
+        overflow: dict[str, dict] = {}
+        owner = asyncio.current_task()
+
+        def worker_done(task: asyncio.Task) -> None:
+            if not task.cancelled() and task.exception() is not None and owner is not None:
+                logger.error("Market stream worker failed: %s", task.exception())
+                owner.cancel()
+
+        async def consume(stream: str, queue: asyncio.Queue) -> None:
+            while True:
+                message = await queue.get()
+                try:
+                    if stream in overflow:
+                        self._stream_generations.pop(stream, None)
+                    await self._recover_if_generation_changed(overflow.pop(stream, message))
+                    await self._handle_ws_message(message)
+                finally:
+                    queue.task_done()
         try:
             async for message in self.ws_client.receive_messages():
-                await self._recover_if_generation_changed(message)
-                await self._handle_ws_message(message)
+                stream = self._message_stream(message)
+                if stream is None:
+                    continue
+                if stream not in queues:
+                    queues[stream] = asyncio.Queue(maxsize=4096)
+                    worker = asyncio.create_task(consume(stream, queues[stream]))
+                    worker.add_done_callback(worker_done)
+                    workers.append(worker)
+                try:
+                    queues[stream].put_nowait(message)
+                except asyncio.QueueFull:
+                    overflow[stream] = message
+                    self.quality.mark_stream_failed(stream, "receive_queue_full")
         except asyncio.CancelledError:
             logger.info("WebSocket 消息循环已取消")
         except Exception as e:
             logger.error(f"WebSocket 消息循环异常: {e}", exc_info=True)
+        finally:
+            for task in workers:
+                task.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     async def _handle_ws_message(self, message: dict[str, Any]) -> None:
         """处理单条 WebSocket 消息"""
         try:
+            stream = self._message_stream(message)
+            if self.quality.snapshot().get(stream, {}).get("status") == "degraded":
+                return
             if self._is_replayed_overlap(message):
                 return
             # 解析 aggTrade
@@ -438,111 +495,112 @@ class MarketLayerService:
     async def _recover_if_generation_changed(
         self, pending_message: dict[str, Any] | None = None
     ) -> None:
-        """Backfill continuity gaps before delivering post-reconnect messages."""
+        """Recover streams independently, including failures in the current connection."""
         generation = self.ws_client.connection_generation
-        if generation == self._quality_generation or not self._current_streams:
-            return
-        async with self._backfill_lock:
-            generation = self.ws_client.connection_generation
-            if generation == self._quality_generation or not self._current_streams:
+        stream = self._message_stream(pending_message or {})
+        streams = [stream] if stream in self._current_streams else list(self._current_streams)
+        await asyncio.gather(*(
+            self._recover_stream(stream, generation, pending_message) for stream in streams
+        ))
+        if all(self._stream_generations.get(item) == generation for item in self._current_streams):
+            self._quality_generation = generation
+
+    async def _continuity_loop(self) -> None:
+        while self._running:
+            if self.websocket_required() and (self._ws_task is None or self._ws_task.done()):
+                self._schedule_ws_recovery()
+            async with self._refresh_lock:
+                await self._recover_if_generation_changed()
+            await asyncio.sleep(1)
+
+    async def _recover_stream(self, stream: str, generation: int, pending_message) -> None:
+        lock = self._stream_recovery_locks.setdefault(stream, asyncio.Lock())
+        async with lock:
+            state = self.quality.snapshot().get(stream, {})
+            if (self._stream_generations.get(stream) == generation
+                    and state.get("status") != "degraded"):
                 return
+            if asyncio.get_running_loop().time() < self._recovery_retry_at.get(stream, 0):
+                return
+            self.quality.prepare_backfill([stream])
             try:
-                async with asyncio.timeout(self.BACKFILL_TIMEOUT_SECONDS):
-                    await self._recover_generation(generation, pending_message)
-            except TimeoutError:
-                self.quality.mark_backfill_failed(list(self._current_streams))
-                self._quality_generation = generation
-                logger.error("行情断流回补超时，保持 fail-closed")
+                async with self._recovery_slots, asyncio.timeout(self.BACKFILL_TIMEOUT_SECONDS):
+                    await self._backfill_stream(stream, pending_message)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.quality.mark_backfill_failed([stream])
+                self._stream_generations.pop(stream, None)
+                self._recovery_retry_at[stream] = asyncio.get_running_loop().time() + 5
+                logger.warning("%s recovery will retry: %s", stream, type(exc).__name__)
+            else:
+                self._stream_generations[stream] = generation
+                self._recovery_retry_at.pop(stream, None)
+                self.quality.finish_backfill(stream, generation)
+            finally:
+                ids = self.quality.watermarks().get(stream, (None, None))
+                watermark = ids[0] if "@aggTrade" in stream else ids[1]
+                if watermark is not None:
+                    self._replay_watermarks[stream] = watermark
 
-    async def _recover_generation(
-        self, generation: int, pending_message: dict[str, Any] | None = None
-    ) -> None:
-        streams = list(self._current_streams)
-        watermarks = self.quality.watermarks()
-        self.quality.prepare_backfill(streams)
-        try:
-            now_ms = int(time.time() * 1000)
-            agg_batches: list[tuple[str, list[dict[str, Any]]]] = []
-            kline_batches: list[tuple[str, str, list[Any]]] = []
-            for stream in streams:
-                if "@aggTrade" in stream:
-                    symbol = stream.split("@", 1)[0].upper()
-                    last_id, _ = watermarks.get(stream, (None, None))
-                    if last_id is None:
-                        continue
-                    rows = await self.rest_client.get_agg_trades(
-                        symbol, from_id=last_id + 1, limit=1000
-                    )
-                    pending_id = None
-                    if (
-                        pending_message is not None
-                        and pending_message.get("e") == "aggTrade"
-                        and str(pending_message.get("s", "")).upper() == symbol
-                    ):
-                        pending_id = int(pending_message["a"])
-                        rows = [row for row in rows if int(row["a"]) < pending_id]
-                    if pending_id is None and len(rows) >= 1000:
-                        raise RecoveryError("aggTrade backfill exceeds one REST page")
-                    recovered = self.recovery.aggtrades(
-                        rows,
-                        expected_start_id=last_id + 1,
-                        expected_end_id=(pending_id - 1 if pending_id is not None else None),
-                    )
-                    agg_batches.append((symbol, recovered))
-                elif "@kline_" in stream:
-                    symbol, interval = stream.split("@kline_", 1)
-                    _, last_close = watermarks.get(stream, (None, None))
-                    if last_close is None:
-                        continue
-                    expected_open = last_close + 1 if last_close is not None else None
-                    rows = await self.rest_client.get_klines(
-                        symbol.upper(), interval, limit=1500,
-                        start_time=expected_open, end_time=now_ms,
-                    )
-                    if expected_open is not None:
-                        rows = [row for row in rows if int(row[0]) >= expected_open]
-                    recovered_klines = self.recovery.klines(
-                        rows, symbol.upper(), interval, now_ms=now_ms
-                    )
-                    if (
-                        expected_open is not None
-                        and recovered_klines
-                        and recovered_klines[0].open_time != expected_open
-                    ):
-                        raise RecoveryError("kline backfill starts with a gap")
-                    interval_ms = self.recovery.interval_ms(interval)
-                    required_close = (now_ms // interval_ms) * interval_ms - 1
-                    recovered_close = (
-                        recovered_klines[-1].close_time
-                        if recovered_klines else last_close
-                    )
-                    if recovered_close is not None and recovered_close < required_close:
-                        raise RecoveryError("kline backfill exceeds one REST page")
-                    kline_batches.append((symbol.upper(), interval, recovered_klines))
-
-            for symbol, batch in agg_batches:
+    async def _backfill_stream(self, stream: str, pending_message) -> None:
+        last_id, last_close = self.quality.watermarks().get(stream, (None, None))
+        if "@aggTrade" in stream:
+            symbol = stream.split("@", 1)[0].upper()
+            await self._flush_pending_bars(symbol)
+            if last_id is None:
+                return
+            target = None
+            if self._message_stream(pending_message or {}) == stream:
+                target = int(pending_message["a"]) - 1
+            cursor = last_id + 1
+            for _ in range(20):
+                if target is not None and cursor > target:
+                    return
+                rows = await self.rest_client.get_agg_trades(symbol, from_id=cursor, limit=1000)
+                count = len(rows)
+                if target is not None:
+                    rows = [row for row in rows if int(row["a"]) <= target]
+                if not rows:
+                    if target is not None and cursor <= target:
+                        raise RecoveryError("aggTrade recovery contains a gap")
+                    return
+                batch = self.recovery.aggtrades(rows, expected_start_id=cursor)
                 for row in batch:
                     await self._handle_aggtrade(symbol, row)
-            for symbol, interval, batch in kline_batches:
-                for kline in batch:
-                    await self._handle_kline(symbol, interval, kline)
-        except Exception as exc:
-            logger.error("行情断流回补失败，保持 fail-closed: %s", type(exc).__name__)
-            self.quality.mark_backfill_failed(streams)
-            self._quality_generation = generation
+                cursor = batch[-1]["agg_trade_id"] + 1
+                if target is not None and cursor > target:
+                    return
+                if count < 1000:
+                    if target is not None:
+                        raise RecoveryError("aggTrade recovery ends with a gap")
+                    return
+            raise RecoveryError("aggTrade recovery batch budget reached; continue from watermark")
+        if "@kline_" not in stream or last_close is None:
             return
-        self.quality.begin_connection(streams, generation)
-        recovered = self.quality.watermarks()
-        for stream, (last_id, last_close) in recovered.items():
-            watermark = last_id if "@aggTrade" in stream else last_close
-            if watermark is not None:
-                self._replay_watermarks[stream] = watermark
-        self._quality_generation = generation
-
+        symbol, interval = stream.split("@kline_", 1)
+        step = self.recovery.interval_ms(interval)
+        end = int(time.time() * 1000) // step * step
+        cursor = last_close + 1
+        for _ in range(20):
+            if cursor >= end:
+                return
+            rows = await self.rest_client.get_klines(
+                symbol.upper(), interval, limit=1500, start_time=cursor, end_time=end - 1,
+            )
+            batch = self.recovery.klines(rows, symbol.upper(), interval, now_ms=end)
+            if not batch or batch[0].open_time != cursor:
+                raise RecoveryError("Kline recovery contains a gap")
+            for kline in batch:
+                await self._handle_kline(symbol.upper(), interval, kline)
+            cursor = batch[-1].close_time + 1
+        if cursor < end:
+            raise RecoveryError("Kline recovery batch budget reached; continue from watermark")
 
     async def _handle_aggtrade(self, symbol: str, trade_data: dict[str, Any]) -> None:
         """处理 aggTrade，聚合为 1s Bar"""
         stream = f"{symbol.lower()}@aggTrade"
+        await self._flush_pending_bars(symbol)
         previous = self.quality.watermarks().get(stream, (None, None))
         if not self.quality.observe_aggtrade(
             symbol=symbol,
@@ -563,14 +621,17 @@ class MarketLayerService:
                 is_buyer_maker=trade_data.get("is_buyer_maker"),
             )
 
-            for bar in bars:
-                await self.redis_publisher.publish_bar1s(bar)
-            finalized_trade_id = self.aggregator.last_finalized_trade_id(symbol)
-            if finalized_trade_id is not None:
-                await self._persist_watermark(stream, finalized_trade_id)
         except Exception:
             self.quality.restore_watermarks(stream, previous)
             raise
+        self._pending_bars.setdefault(symbol, deque()).extend(bars)
+        await self._flush_pending_bars(symbol)
+
+    async def _flush_pending_bars(self, symbol: str) -> None:
+        pending = self._pending_bars.get(symbol)
+        while pending:
+            await self.redis_publisher.publish_bar1s(pending[0])
+            pending.popleft()
 
     async def _handle_kline(self, symbol: str, interval: str, kline: Any) -> None:
         """处理已完成的 Kline，存储到 Redis Hash"""
@@ -586,7 +647,6 @@ class MarketLayerService:
             return
         try:
             await self.kline_store.store_kline(kline)
-            await self._persist_watermark(stream, int(kline.close_time))
         except Exception:
             self.quality.restore_watermarks(stream, previous)
             raise
@@ -709,17 +769,14 @@ def create_app(
         if from_id > to_id:
             raise HTTPException(status_code=400, detail="from_id must not exceed to_id")
         count = to_id - from_id + 1
-        if count > service.recovery.aggtrade_limit:
-            raise HTTPException(status_code=400, detail="recovery range exceeds 1000 trades")
+        if count > 20 * service.recovery.aggtrade_limit:
+            raise HTTPException(status_code=400, detail="recovery range exceeds 20000 trades")
         try:
-            rows = await service.rest_client.get_agg_trades(
-                symbol.upper(), from_id=from_id, limit=count
-            )
-            trades = service.recovery.aggtrades(
-                rows,
-                expected_start_id=from_id,
-                expected_end_id=to_id,
-            )
+            trades = []
+            for cursor in range(from_id, to_id + 1, service.recovery.aggtrade_limit):
+                end = min(cursor + service.recovery.aggtrade_limit - 1, to_id)
+                rows = await service.rest_client.get_agg_trades(symbol.upper(), from_id=cursor, limit=end - cursor + 1)
+                trades.extend(service.recovery.aggtrades(rows, expected_start_id=cursor, expected_end_id=end))
             aggregator = Bar1sAggregator()
             bars = []
             for trade in trades:
@@ -750,9 +807,21 @@ def create_app(
             bars=[bar.to_dict() for bar in bars],
         )
 
+    def consumer_scope(consumer_id):
+        metrics = service.metrics_quality.snapshot()
+        if consumer_id is None:
+            return None, metrics, True
+        subscription = service.subscription_manager.consumers.get(consumer_id)
+        if subscription is None:
+            return [], {}, False
+        streams = [stream for symbol, types in subscription.items()
+                   for stream in build_stream_names([symbol], list(types))]
+        metric_symbols = {symbol for symbol, types in subscription.items() if "metrics:5m" in types}
+        return streams, {symbol: metrics.get(symbol, {"status": "awaiting_data"}) for symbol in metric_symbols}, True
+
     # 更新健康检查，返回运行时长
     @app.get("/health")
-    async def health_check(response: Response) -> HealthResponse:
+    async def health_check(response: Response, consumer_id: str | None = None) -> HealthResponse:
         """健康检查"""
         stats = service.subscription_manager.get_stats()
         try:
@@ -760,7 +829,6 @@ def create_app(
         except Exception:
             redis_connected = False
 
-        await service._recover_if_generation_changed()
         websocket_required = service.websocket_required()
         websocket_connected = (
             not websocket_required
@@ -770,15 +838,14 @@ def create_app(
                 and service.ws_client.connected
             )
         )
-        data_quality_ready = service.quality.ready
+        selected, selected_metrics, registered = consumer_scope(consumer_id)
+        data_quality_ready = registered and service.quality.ready_at(int(time.time() * 1000), streams=selected)
         pubsub_delivery_ready = service.redis_publisher.delivery_ready
-        pubsub_required = websocket_required
-        metrics_quality_ready = service.metrics_quality.ready
+        metrics_quality_ready = all(item["status"] == "healthy" for item in selected_metrics.values())
         ready = (
             redis_connected
             and websocket_connected
             and data_quality_ready
-            and (not pubsub_required or pubsub_delivery_ready)
             and metrics_quality_ready
         )
         if not ready:
@@ -803,17 +870,17 @@ def create_app(
         )
 
     @app.get("/quality")
-    async def quality_status(response: Response) -> QualityResponse:
-        await service._recover_if_generation_changed()
+    async def quality_status(response: Response, consumer_id: str | None = None) -> QualityResponse:
+        selected, selected_metrics, registered = consumer_scope(consumer_id)
         required = service.websocket_required()
         websocket_connected = service.ws_client.connected
         pubsub_delivery_ready = service.redis_publisher.delivery_ready
         websocket_ready = not required or (
             websocket_connected
-            and service.quality.ready
-            and pubsub_delivery_ready
+            and registered
+            and service.quality.ready_at(int(time.time() * 1000), streams=selected)
         )
-        ready = websocket_ready and service.metrics_quality.ready
+        ready = registered and websocket_ready and all(item["status"] == "healthy" for item in selected_metrics.values())
         if not ready:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
         return QualityResponse(
@@ -822,11 +889,11 @@ def create_app(
             connection_generation=service.ws_client.connection_generation,
             last_connected_at_ms=service.ws_client.last_connected_at_ms,
             last_disconnected_at_ms=service.ws_client.last_disconnected_at_ms,
-            streams=service.quality.snapshot(),
+            streams={name: value for name, value in service.quality.snapshot().items() if selected is None or name in selected},
             pubsub_delivery_ready=pubsub_delivery_ready,
             pubsub_delivery_issues=service.redis_publisher.delivery_issue_count,
             pubsub_channels=service.redis_publisher.delivery_snapshot(),
-            metrics=service.metrics_quality.snapshot(),
+            metrics=selected_metrics,
         )
 
     return app, service

@@ -128,9 +128,10 @@ async def test_subscription_refresh_preserves_unfinished_trade_bucket(third_time
     client = AsyncMock()
     client.hgetall.side_effect = lambda _key: dict(stored)
     client.hset.side_effect = lambda _key, field, value: stored.update({field: value})
-    client.xadd.side_effect = lambda _key, fields, **_kwargs: published.append(
-        json.loads(fields["data"])
-    )
+    def append_event(*args):
+        published.append(json.loads(args[6]))
+        stored[args[8]] = args[9]
+    client.eval.side_effect = append_event
     client.publish.return_value = 1
     service = MarketLayerService(MarketLayerConfig(), client, "refresh-test")
     await service.rest_client.close()
@@ -155,16 +156,22 @@ async def test_subscription_refresh_preserves_unfinished_trade_bucket(third_time
                 "p": "1", "q": "1", "f": number, "l": number,
                 "T": timestamp, "m": False}
 
+    async def processed(number):
+        while service.quality.watermarks().get("btcusdt@aggTrade", (None, None))[0] != number:
+            await asyncio.sleep(0)
+
     try:
         await service.refresh_ws_streams()
         for item in [trade(1, 1000), trade(2, 2000), trade(3, third_timestamp)]:
             await messages.put(item)
         await asyncio.wait_for(messages.join(), 2)
+        await asyncio.wait_for(processed(3), 2)
         assert stored["btcusdt@aggTrade"] == "1"
         service.subscription_manager.update_subscription("two", ["BTCUSDT"], ["kline:1m"])
         await service.refresh_ws_streams()
         await messages.put(trade(4, 3000))
         await asyncio.wait_for(messages.join(), 2)
+        await asyncio.wait_for(processed(4), 2)
         bar = next(item for item in published if item["timestamp"] == 2000)
         assert Decimal(bar["volume"]) == 2
         assert bar["trade_count"] == 2
@@ -174,7 +181,7 @@ async def test_subscription_refresh_preserves_unfinished_trade_bucket(third_time
 
 
 @pytest.mark.asyncio
-async def test_service_backfill_validates_before_publishing_partial_page():
+async def test_service_keeps_valid_prefix_when_later_recovery_page_is_missing():
     service = MarketLayerService(MarketLayerConfig(), AsyncMock(), "bounded-test")
     stream = "btcusdt@aggTrade"
     service._current_streams = [stream]
@@ -194,25 +201,69 @@ async def test_service_backfill_validates_before_publishing_partial_page():
     })
 
     assert service.quality.snapshot()[stream]["status"] == "degraded"
-    service.redis_publisher.publish_bar1s.assert_not_awaited()
+    assert service.redis_publisher.publish_bar1s.await_count > 0
+    assert service.quality.watermarks()[stream][0] == 1100
 
 
 @pytest.mark.asyncio
-async def test_trade_side_effect_failure_restores_quality_watermark():
+async def test_trade_side_effect_failure_retains_unpublished_bar():
     service = MarketLayerService(MarketLayerConfig(), AsyncMock(), "rollback-test")
     stream = "btcusdt@aggTrade"
     service._current_streams = [stream]
     service.quality.begin_connection([stream], generation=1)
-    service.aggregator.add_trade = lambda **kwargs: []
-    service.aggregator.last_finalized_trade_id = lambda symbol: 7
-    service.redis_publisher.publish_bar1s = AsyncMock(side_effect=RuntimeError("redis"))
-
-    # Force the durable watermark write to fail after the trade is accepted.
-    service._persist_watermark = AsyncMock(side_effect=RuntimeError("redis"))
     await service._handle_ws_message({
-        "e": "aggTrade", "s": "BTCUSDT", "a": 7, "p": "1", "q": "1",
-        "f": 7, "l": 7, "T": 1000, "m": False,
+        "e": "aggTrade", "s": "BTCUSDT", "a": 1, "p": "1", "q": "1",
+        "f": 1, "l": 1, "T": 1000, "m": False,
     })
-
-    assert service.quality.watermarks()[stream][0] is None
+    service.redis_publisher.publish_bar1s = AsyncMock(side_effect=RuntimeError("redis"))
+    await service._handle_ws_message({
+        "e": "aggTrade", "s": "BTCUSDT", "a": 2, "p": "1", "q": "1",
+        "f": 2, "l": 2, "T": 2000, "m": False,
+    })
+    assert service.quality.watermarks()[stream][0] == 2
     assert service.quality.snapshot()[stream]["status"] == "degraded"
+    assert len(service._pending_bars["BTCUSDT"]) == 1
+    service.redis_publisher.publish_bar1s.side_effect = None
+    await service._flush_pending_bars("BTCUSDT")
+    assert not service._pending_bars["BTCUSDT"]
+    assert service.redis_publisher.publish_bar1s.await_args.args[0].timestamp == 1000
+
+
+async def test_unsubscribe_waits_for_backfill_before_discarding_aggregation():
+    service = MarketLayerService(MarketLayerConfig(), AsyncMock(), "concurrent-refresh")
+    stream = "btcusdt@aggTrade"
+    service.subscription_manager.update_subscription("one", ["BTCUSDT"], ["bar1s"])
+    service._current_streams = [stream]
+    service.ws_client.connection_generation = 2
+    service.ws_client.disconnect = AsyncMock()
+    service.quality.begin_connection([stream], 1)
+    service.quality.restore_watermark(stream, last_sequence=10)
+    service.aggregator.add_trade("BTCUSDT", Decimal("1"), Decimal("1"), 10_000, aggregate_trade_id=10)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def backfill(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return [_trade(11)]
+    service.rest_client.get_agg_trades = AsyncMock(side_effect=backfill)
+    service.redis_publisher.publish_bar1s = AsyncMock()
+    service._running = True
+    service._ws_task = asyncio.create_task(asyncio.Event().wait())
+    recovery = asyncio.create_task(service._continuity_loop())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        service.subscription_manager.remove_consumer("one")
+        refresh = asyncio.create_task(service.refresh_ws_streams())
+        await asyncio.sleep(0)
+        assert not refresh.done()
+        release.set()
+        await asyncio.wait_for(refresh, 1)
+        assert service.quality.watermarks() == {}
+        assert service.aggregator.flush_symbol("BTCUSDT") == []
+        assert service._current_streams == []
+    finally:
+        service._running = False
+        release.set()
+        recovery.cancel()
+        await asyncio.gather(recovery, return_exceptions=True)
+        await service._stop_ws_task()
+        await service.rest_client.close()

@@ -67,6 +67,19 @@ class MarketDataQualityTracker:
     def ready(self) -> bool:
         return all(item.status == "healthy" for item in self._streams.values())
 
+    def ready_at(self, now_ms: int, *, max_silence_ms: int = 10_000,
+                 streams: list[str] | None = None) -> bool:
+        """Transport continuity and recent reception are separate requirements."""
+        selected = self._streams.values() if streams is None else [self._streams.get(name) for name in streams]
+        return all(
+            item is not None and item.status == "healthy"
+            and item.last_received_at_ms is not None
+            and 0 <= now_ms - item.last_received_at_ms <= max_silence_ms
+            and item.last_event_time_ms is not None
+            and -1000 <= now_ms - item.last_event_time_ms <= max_silence_ms
+            for item in selected
+        )
+
     @property
     def issue_count(self) -> int:
         return sum(item.status != "healthy" for item in self._streams.values())
@@ -115,6 +128,13 @@ class MarketDataQualityTracker:
     def mark_backfill_failed(self, streams: list[str]) -> None:
         for stream in streams:
             self.mark_stream_failed(stream, "backfill_failed")
+
+    def finish_backfill(self, stream: str, generation: int) -> None:
+        quality = self._streams.get(stream)
+        if quality is not None:
+            quality.status = "awaiting_data"
+            quality.issue = None
+            quality.connection_generation = generation
 
     def mark_stream_failed(self, stream: str, issue: str) -> None:
         quality = self._streams.get(stream)
