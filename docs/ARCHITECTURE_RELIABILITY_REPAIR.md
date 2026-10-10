@@ -47,3 +47,16 @@
 - `docker compose config --quiet`、`git diff --check` 通过。
 
 Astra 子任务多次遇到 429／503。首阶段代码产出已由主代理复核，后续修复、回归和代码复核由主代理完成；未将失败的独立复审记为通过。
+
+## 本机部署记录
+
+2026-10-10 通过 `scripts/deploy.sh` 完成基础服务部署：
+
+- 部署前 PostgreSQL 备份及实际恢复校验通过：`backups/ledger_20261010T065047Z.dump`。
+- 本地订单／事件 WAL 备份：`backups/wal_20261010T065313Z.tar.gz`。
+- 共享应用镜像重新构建，Market、Ledger、通知 worker、币种同步服务重启；PostgreSQL、Redis 的自动重启策略已生效。
+- Market、Ledger、PostgreSQL、Redis 健康；迁移执行成功，数据库版本 `0025`。
+- 本地与部署镜像的 Python／SQL 源文件摘要一致：`5df9d676cf9d717d55ff88a4a7f0f77b0d534acf992e6458ff52d7b6a361484d`。
+- Market API 返回 3 根连续、已闭合的 BTCUSDT 1m K 线；未注册消费者的就绪检查返回 HTTP 503。
+- 当前没有策略容器，持久化 Spike 状态为 stopped、entry_enabled=false；全局 Market 无订阅时的 ready 仅表示基础服务就绪。
+- 临时故障演练 Compose 项目已移除。本次没有发送交易所订单或启用新策略。
