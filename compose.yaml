@@ -48,6 +48,8 @@ services:
       MARKET_PORT: 8000
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://demo-fapi.binance.com}
+      BINANCE_WS_BASE_URL: ${BINANCE_WS_BASE_URL:-wss://stream.binancefuture.com}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     ports:
       - "8000:8000"
@@ -247,6 +249,8 @@ services:
       SPIKE_DELISTING_FREEZE_DAYS: ${SPIKE_DELISTING_FREEZE_DAYS:-15}
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://demo-fapi.binance.com}
+      BINANCE_WS_BASE_URL: ${BINANCE_WS_BASE_URL:-wss://stream.binancefuture.com}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     volumes:
       - ./src:/app/src:ro
@@ -299,7 +303,7 @@ services:
       STRATEGY_LEDGER_API_URL: http://ledger:8001
       STRATEGY_RISK_MAX_POSITION_VALUE_USDT: ${LONG_BREAKOUT_RISK_MAX_POSITION_VALUE_USDT:-50}
       STRATEGY_RISK_MAX_SYMBOLS: ${LONG_BREAKOUT_RISK_MAX_SYMBOLS:-1}
-      LONG_BREAKOUT_MODE: testnet
+      LONG_BREAKOUT_MODE: ${LONG_BREAKOUT_MODE:-testnet}
       LONG_BREAKOUT_ACCOUNT_ID: ${LONG_BREAKOUT_ACCOUNT_ID:-long_breakout_testnet}
       LONG_BREAKOUT_SYMBOLS: ${LONG_BREAKOUT_SYMBOLS:-BTCUSDT}
       LONG_BREAKOUT_TIMEFRAME: ${LONG_BREAKOUT_TIMEFRAME:-4h}
@@ -321,9 +325,9 @@ services:
       LONG_BREAKOUT_MAX_POLL_ATTEMPTS: "12"
       BINANCE_API_KEY: ${LONG_BREAKOUT_BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${LONG_BREAKOUT_BINANCE_API_SECRET:-}
-      BINANCE_BASE_URL: https://demo-fapi.binance.com
-      BINANCE_WS_BASE_URL: wss://stream.binancefuture.com
-      BINANCE_TESTNET: "true"
+      BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://demo-fapi.binance.com}
+      BINANCE_WS_BASE_URL: ${BINANCE_WS_BASE_URL:-wss://stream.binancefuture.com}
+      BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
@@ -368,6 +372,8 @@ services:
       STRATEGY_MARKET_API_URL: http://market:8000
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
+      BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://demo-fapi.binance.com}
+      BINANCE_WS_BASE_URL: ${BINANCE_WS_BASE_URL:-wss://stream.binancefuture.com}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     volumes:
       - ./src:/app/src:ro
@@ -405,6 +411,8 @@ services:
       STRATEGY_MARKET_API_URL: http://market:8000
       BINANCE_API_KEY: ${BINANCE_API_KEY_2:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET_2:-}
+      BINANCE_BASE_URL: ${BINANCE_BASE_URL:-https://demo-fapi.binance.com}
+      BINANCE_WS_BASE_URL: ${BINANCE_WS_BASE_URL:-wss://stream.binancefuture.com}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     volumes:
       - ./src:/app/src:ro
