@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="title">
+  <title>Trade Ledger</title>
+  <rect width="32" height="32" rx="6" fill="#0b1220"/>
+  <rect x="4.5" y="4.5" width="23" height="23" rx="4" fill="#8a641f" fill-opacity=".12" stroke="#e5b75d"/>
+  <text x="16" y="20.5" fill="#f8fafc" font-family="Arial, sans-serif" font-size="10" font-weight="700" text-anchor="middle">TL</text>
+</svg>

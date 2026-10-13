@@ -34,7 +34,7 @@ services:
       retries: 10
 
   market:
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     build: &app_build
       context: .
       dockerfile: Dockerfile
@@ -52,6 +52,8 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
       - ./data:/app/data
       # data/market is a separate host filesystem; bind it explicitly so
       # Docker does not hide the archive disk behind the parent bind mount.
@@ -71,7 +73,7 @@ services:
     restart: unless-stopped
 
   ledger-migrate:
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     command: ["python", "-m", "trading_platform.ledger.db.migrations", "migrate"]
     environment:
       DB_HOST: postgres
@@ -79,6 +81,11 @@ services:
       DB_USER: ${DB_USER:-postgres}
       DB_PASSWORD: ${DB_PASSWORD:-postgres}
       DB_DATABASE: ${DB_DATABASE:-trading_platform}
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
     networks:
       - trading_net
     depends_on:
@@ -87,7 +94,7 @@ services:
     restart: "no"
 
   ledger:
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     build: *app_build
     command: ["python", "-m", "trading_platform.ledger"]
     init: true
@@ -105,9 +112,12 @@ services:
     ports:
       - "8001:8001"
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
       - ./data:/app/data
       - ./data/market:/app/data/market
       - ./logs:/app/logs
+      - ./web/dist:/app/web/dist:ro
     networks:
       - trading_net
     depends_on:
@@ -122,7 +132,7 @@ services:
     restart: unless-stopped
 
   notification-worker:
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     build: *app_build
     command: ["python", "-m", "trading_platform.notifications", "--poll-interval", "5"]
     init: true
@@ -144,6 +154,9 @@ services:
       NOTIFICATION_MARKET_API_URL: ${NOTIFICATION_MARKET_API_URL:-http://market:8000}
       NOTIFICATION_BRIDGE_LOOKBACK_SECONDS: ${NOTIFICATION_BRIDGE_LOOKBACK_SECONDS:-900}
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data
       - ./logs:/app/logs
     networks:
       - trading_net
@@ -159,7 +172,7 @@ services:
     restart: unless-stopped
 
   symbol-sync:
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     build: *app_build
     command: ["python", "-m", "trading_platform.ledger.exchange_symbols", "--watch"]
     init: true
@@ -171,6 +184,11 @@ services:
       DB_DATABASE: ${DB_DATABASE:-trading_platform}
       SPIKE_DELISTING_FREEZE_DAYS: ${SPIKE_DELISTING_FREEZE_DAYS:-15}
       EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS: ${EXCHANGE_SYMBOL_SYNC_INTERVAL_SECONDS:-86400}
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
     networks:
       - trading_net
     depends_on:
@@ -180,7 +198,7 @@ services:
 
   spike:
     profiles: ["spike"]
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     labels:
       trading-platform.role: strategy
     build: *app_build
@@ -231,6 +249,8 @@ services:
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
       - ./data:/app/data
       - ./data/market:/app/data/market
       - ./logs:/app/logs
@@ -257,7 +277,7 @@ services:
 
   long_breakout:
     profiles: ["long_breakout"]
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     labels:
       trading-platform.role: strategy
     build: *app_build
@@ -305,6 +325,8 @@ services:
       BINANCE_WS_BASE_URL: wss://stream.binancefuture.com
       BINANCE_TESTNET: "true"
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
       - ./data:/app/data
       - ./logs:/app/logs
     networks:
@@ -328,7 +350,7 @@ services:
 
   strategy_kline:
     profiles: ["examples"]
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     labels:
       trading-platform.role: strategy
     build: *app_build
@@ -348,6 +370,9 @@ services:
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data
       - ./logs:/app/logs
     networks:
       - trading_net
@@ -362,7 +387,7 @@ services:
 
   strategy_tick:
     profiles: ["examples"]
-    image: ${TRADING_PLATFORM_IMAGE:-trading_platform-ledger}
+    image: ${TRADING_PLATFORM_IMAGE:-qianxiy/crypto:latest}
     labels:
       trading-platform.role: strategy
     build: *app_build
@@ -382,6 +407,9 @@ services:
       BINANCE_API_SECRET: ${BINANCE_API_SECRET_2:-}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
     volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./data:/app/data
       - ./logs:/app/logs
     networks:
       - trading_net

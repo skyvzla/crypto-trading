@@ -88,7 +88,7 @@ def test_release_compose_contains_no_source_build_context():
         "strategy_tick",
     )
     assert {services[name]["image"] for name in app_services} == {
-        "trading_platform-ledger"
+        "qianxiy/crypto:latest"
     }
     assert all("build" not in services[name] for name in app_services)
 

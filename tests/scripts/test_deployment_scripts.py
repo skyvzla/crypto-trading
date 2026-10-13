@@ -507,15 +507,37 @@ def test_deploy_backup_failure_stops_before_application_pull_and_migration(tmp_p
     assert not any("ledger-migrate" in call and "up -d" in call for call in calls)
 
 
-def test_deploy_rejects_floating_or_non_ghcr_image_tags(tmp_path: Path) -> None:
+def test_deploy_rejects_invalid_image_name(tmp_path: Path) -> None:
     result = invoke(
         tmp_path,
         "deploy",
-        TRADING_PLATFORM_IMAGE="ghcr.io/example/trading-platform:latest",
+        TRADING_PLATFORM_IMAGE="invalid image with spaces",
     )
     assert result.returncode == 2
-    assert "固定 tag" in result.stderr
+    assert "应用镜像格式无效" in result.stderr
     assert not (tmp_path / "backup.log").exists()
+
+
+def test_deploy_pulls_docker_hub_latest_image_without_building(tmp_path: Path) -> None:
+    image = "qianxiy/crypto:latest"
+    result = invoke(tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image)
+    assert result.returncode == 0, result.stderr
+    assert "BACKUP_RESTORE_OK" in result.stdout
+    assert image in result.stdout
+    assert (tmp_path / "backup.log").read_text(encoding="utf-8").strip() == "backup"
+    calls = docker_log(tmp_path)
+    assert any("--pull missing postgres redis" in call for call in calls)
+    assert any(" pull market ledger-migrate ledger" in call for call in calls)
+    assert not any(" build" in call for call in calls)
+    assert any("--no-build --pull never ledger-migrate" in call for call in calls)
+
+
+def test_deploy_pulls_docker_hub_versioned_image_without_building(tmp_path: Path) -> None:
+    image = "qianxiy/crypto:v1.0.0"
+    result = invoke(tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image)
+    assert result.returncode == 0, result.stderr
+    assert "BACKUP_RESTORE_OK" in result.stdout
+    assert image in result.stdout
 
 
 def test_verified_backup_skips_a_truly_empty_database(tmp_path: Path) -> None:
@@ -664,6 +686,29 @@ def test_start_uses_configured_ghcr_image_without_building(tmp_path: Path) -> No
     calls = docker_log(tmp_path)
     assert any(call.endswith("up -d --wait --no-build --pull never spike") for call in calls)
     assert not any(" build" in call for call in calls)
+
+
+def test_start_uses_configured_docker_hub_image_without_building(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "start",
+        TRADING_PLATFORM_IMAGE="qianxiy/crypto:latest",
+        FAKE_NOTIFICATION_OVERVIEW='{"enabled_connectors":1,"enabled_endpoints":1,"policies":1,"routable_policies":1,"critical_routes_ready":true,"critical_routes":{"risk.halted":true,"system.strategy.unhealthy":true}}',
+    )
+    assert result.returncode == 0, result.stderr
+    calls = docker_log(tmp_path)
+    assert any(call.endswith("up -d --wait --no-build --pull never spike") for call in calls)
+    assert not any(" build" in call for call in calls)
+
+
+def test_start_rejects_invalid_image_name(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "start",
+        TRADING_PLATFORM_IMAGE="invalid image with spaces",
+    )
+    assert result.returncode == 2
+    assert "应用镜像格式无效" in result.stderr
 
 
 def test_start_counts_all_critical_routes_returned_by_overview(tmp_path: Path) -> None:
@@ -855,3 +900,28 @@ def test_stop_fails_closed_for_multiple_instances(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "多个容器" in result.stderr
     assert not any("stop --timeout" in call for call in docker_log(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "image_name,expected_valid",
+    [
+        ("qianxiy/crypto", True),
+        ("qianxiy/crypto:latest", True),
+        ("qianxiy/crypto:v1.0.0", True),
+        ("qianxiy/crypto:v1.2.3", True),
+        ("ghcr.io/example/trading-platform:v1.2.3", True),
+        ("ghcr.io/example/trading-platform:latest", True),
+        ("trading_platform-ledger", True),
+        ("localhost:5000/repo:tag", True),
+        ("", False),
+        ("qianxiy/crypto:", False),
+        ("qianxiy/crypto: invalid", False),
+        ("qianxiy/crypto;echo", False),
+        ("qianxiy/crypto:tag1:tag2", False),
+    ],
+)
+def test_ops_is_valid_image(image_name: str, expected_valid: bool) -> None:
+    ops_common = PROJECT_ROOT / "scripts" / "ops_common.sh"
+    cmd = f'source "{ops_common}" && ops_is_valid_image "{image_name}"'
+    res = subprocess.run(["bash", "-c", cmd], capture_output=True)
+    assert (res.returncode == 0) is expected_valid

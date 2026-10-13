@@ -15,7 +15,7 @@ usage() {
 用法: scripts/deploy.sh
 
 部署数据库、缓存、行情、账本、通知 worker 和币种同步服务，不启动策略 service。
-本地默认从源码构建；.env 设置 TRADING_PLATFORM_IMAGE=ghcr.io/OWNER/REPO:TAG 时，拉取并部署指定镜像。
+本地默认从源码构建；.env 设置 TRADING_PLATFORM_IMAGE 时（如 qianxiy/crypto:latest 或 qianxiy/crypto:vX.Y.Z），拉取并部署指定镜像。
 EOF
 }
 
@@ -40,13 +40,21 @@ main() {
 
   image="$(ops_application_image)" || ops_die "无法确定应用镜像配置"
   if [[ "$image" != "trading_platform-ledger" ]]; then
-    ops_is_ghcr_image "$image" || ops_die "应用镜像必须是带固定 tag 的 GHCR 镜像，不能使用 latest: $image"
+    ops_is_valid_image "$image" || ops_die "应用镜像格式无效: $image"
     release_image=1
     ops_require_strategies_stopped
     printf '开始部署预构建镜像: %s\n' "$image"
     ops_compose up -d --wait --no-build --pull missing postgres redis
     TRADING_OPS_DOCKER_BIN="$OPS_DOCKER_BIN" bash "$SCRIPT_DIR/verify_ledger_backup_restore.sh"
-    ops_compose pull market ledger-migrate ledger notification-worker symbol-sync spike long_breakout strategy_kline strategy_tick
+    if [[ "${DEPLOY_PULL_IMAGE:-1}" == "1" ]]; then
+      if ! ops_compose pull market ledger-migrate ledger notification-worker symbol-sync spike long_breakout strategy_kline strategy_tick; then
+        if "$OPS_DOCKER_BIN" image inspect "$image" >/dev/null 2>&1; then
+          printf 'WARNING: 镜像 %s 拉取失败或尚未推送到远端仓库，使用本地已存在镜像继续部署。\n' "$image"
+        else
+          ops_die "无法拉取镜像且本地不存在: $image"
+        fi
+      fi
+    fi
   else
     ops_compose build
     ops_compose up -d --wait postgres redis

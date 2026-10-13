@@ -74,9 +74,14 @@ except (KeyError, TypeError, ValueError, json.JSONDecodeError):
 ' || return 1
 }
 
+ops_is_valid_image() {
+  local image="${1:-}"
+  [[ -n "$image" ]] || return 1
+  [[ "$image" =~ ^([a-zA-Z0-9_.-]+(:[0-9]+)?/)?[a-zA-Z0-9_.-]+(/[a-zA-Z0-9_.-]+)*(:[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127})?$ ]]
+}
+
 ops_is_ghcr_image() {
-  [[ "$1" =~ ^ghcr\.io/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ && \
-    "$1" != *:latest ]]
+  ops_is_valid_image "$1"
 }
 
 ops_strategy_services() {

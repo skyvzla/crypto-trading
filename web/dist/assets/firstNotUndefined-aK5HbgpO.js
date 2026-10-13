@@ -1,0 +1,1 @@
+function e(){let e=arguments.length>0&&arguments[0]!==void 0?arguments[0]:[];for(let t=0,n=e.length;t<n;t++)if(e[t]!==void 0)return e[t]}export{e as t};

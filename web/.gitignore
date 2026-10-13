@@ -1,5 +1,6 @@
 node_modules/
-dist/
+# dist/ is tracked for source-mounted deployment without host node
+
 *.local
 .vite/
 test-results/

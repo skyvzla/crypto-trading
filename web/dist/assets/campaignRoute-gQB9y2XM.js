@@ -1,0 +1,1 @@
+function e(e){return e.campaign_id?{name:`campaign-trade-detail`,params:{campaignId:e.campaign_id},query:{account_id:e.account_id,strategy_id:e.strategy_id,symbol:e.symbol}}:null}export{e as t};

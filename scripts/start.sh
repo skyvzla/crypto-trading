@@ -84,8 +84,8 @@ main() {
   ops_require_compose
   image="$(ops_application_image)" || ops_die "无法确定应用镜像配置"
   if [[ "$image" != "trading_platform-ledger" ]]; then
-    ops_is_ghcr_image "$image" || ops_die "应用镜像必须是带固定 tag 的 GHCR 镜像，不能使用 latest: $image"
-    (( build == 0 )) || ops_die "GHCR 发布模式不能使用 --build；先运行 scripts/deploy.sh"
+    ops_is_valid_image "$image" || ops_die "应用镜像格式无效: $image"
+    (( build == 0 )) || ops_die "预构建镜像模式不能使用 --build；先运行 scripts/deploy.sh"
     release_image=1
   fi
   ops_require_strategy_service "$service"

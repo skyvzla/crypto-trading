@@ -1,19 +1,35 @@
 # 部署与运行手册
 
-在源码工作区使用：
+本项目采用 **环境镜像 + 源码挂载（`./src`）+ `git pull` 更新** 的极简稳健部署模式：
+- 运行时镜像为 `qianxiy/crypto:latest`（不包含业务代码，预装 Python 3.12、uv 及所有三方依赖）；
+- 宿主机 `./src` 与 `./scripts` 经只读（`:ro`）卷挂载进容器；
+- 日常更新只需在服务器执行 `git pull` 并重启对应服务即可秒级生效。
+
+在工作区或生产服务器使用：
 
 ```bash
-scripts/deploy.sh              # 部署基础服务，不启动策略
-scripts/start.sh [SERVICE]     # 启动一个策略 service，默认 spike
-scripts/stop.sh [SERVICE]      # 停止一个策略 service，默认 spike
+# 基础服务部署（启动 postgres, redis, market, ledger, notification-worker, symbol-sync）
+scripts/deploy.sh
+
+# 策略 service 独立启停（默认 spike，需先确认持仓并完成平仓/对账）
+scripts/start.sh [SERVICE]
+scripts/stop.sh [SERVICE]
 ```
 
 这些脚本都从项目根目录执行，并统一使用 `docker compose --profile '*'`。它们不
 `source .env`，不会把交易所密钥、数据库密码或事件 token 打到终端。不要使用
 `docker compose down -v`，这会删除 PostgreSQL/Redis 数据卷。
 
-目标机无需 checkout 应用源码，可安装 `deploy/deploy-release.sh` 作为单一部署入口；
-它只下载版本化 Compose/运维配置包，并运行匹配的 GHCR 镜像。
+## 0. 环境镜像构建与发布 (`qianxiy/crypto`)
+
+仅当修改了 `pyproject.toml` 或 `uv.lock` 中的第三方依赖库时，才需要在开发机重新构建镜像：
+
+```bash
+scripts/build_image.sh                 # 构建 qianxiy/crypto:latest
+scripts/build_image.sh v1.0.0          # 同时打标签 qianxiy/crypto:v1.0.0 和 :latest
+scripts/build_image.sh v1.0.0 --push   # 构建并推送到 Docker Hub
+```
+
 
 ## 1. 第一次配置
 
