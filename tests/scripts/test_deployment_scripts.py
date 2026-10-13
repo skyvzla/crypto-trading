@@ -185,7 +185,10 @@ if [[ "$args" == *" up -d ledger-migrate"* || "$args" == *" up -d --no-build --p
   fi
   exit 0
 fi
-if [[ "$args" == *" up -d --wait --no-build --pull never market ledger notification-worker symbol-sync"* || "$args" == *" up -d --wait market ledger notification-worker symbol-sync"* ]]; then
+if [[ "$args" == *" up -d --wait --no-build --pull never --force-recreate --no-deps market ledger notification-worker symbol-sync"* || "$args" == *" up -d --wait --force-recreate --no-deps market ledger notification-worker symbol-sync"* ]]; then
+  if [[ "${FAKE_APPLICATION_UP_FAIL:-0}" == 1 ]]; then
+    exit 1
+  fi
   write_state market running healthy
   write_state ledger running healthy
   write_state notification-worker running
@@ -420,6 +423,48 @@ def test_deploy_creates_runtime_directories_and_warns_for_empty_notifications(tm
     assert not any(" up -d --wait spike" in call for call in calls)
 
 
+@pytest.mark.parametrize("image", ["trading_platform-ledger", "qianxiy/crypto:latest"])
+def test_deploy_recreates_only_applications_after_successful_migration(
+    tmp_path: Path, image: str
+) -> None:
+    result = invoke(tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image)
+    assert result.returncode == 0, result.stderr
+    calls = docker_log(tmp_path)
+    recreated = [call for call in calls if "--force-recreate" in call]
+    assert len(recreated) == 1
+    assert " up -d --wait " in recreated[0]
+    assert "--no-deps" in recreated[0]
+    assert recreated[0].endswith(" market ledger notification-worker symbol-sync")
+    migration_index = next(
+        index for index, call in enumerate(calls)
+        if " up -d" in call and call.endswith(" ledger-migrate")
+    )
+    application_index = calls.index(recreated[0])
+    assert migration_index < application_index
+    assert any(
+        " ps -a --format " in call and call.endswith(" ledger-migrate")
+        for call in calls[migration_index + 1:application_index]
+    )
+    assert (tmp_path / "backup.log").read_text(encoding="utf-8").strip() == "backup"
+    if image == "trading_platform-ledger":
+        assert "--no-build" not in recreated[0]
+    else:
+        assert "--no-build --pull never" in recreated[0]
+
+
+@pytest.mark.parametrize("image", ["trading_platform-ledger", "qianxiy/crypto:latest"])
+def test_deploy_application_recreation_failure_is_not_reported_as_success(
+    tmp_path: Path, image: str
+) -> None:
+    result = invoke(
+        tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image, FAKE_APPLICATION_UP_FAIL="1"
+    )
+    assert result.returncode != 0
+    assert any("--force-recreate" in call for call in docker_log(tmp_path))
+    assert "基础服务部署完成" not in result.stdout
+    assert not (tmp_path / "curl.log").exists()
+
+
 def test_deploy_pulls_fixed_ghcr_image_after_backup_without_building(tmp_path: Path) -> None:
     image = "ghcr.io/example/trading-platform:v1.2.3"
     result = invoke(tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image)
@@ -480,31 +525,35 @@ def test_backup_restore_uses_release_compose_and_persistent_project_directory(
     ), calls
 
 
-def test_deploy_rejects_running_strategy_before_backup_or_pull(tmp_path: Path) -> None:
+@pytest.mark.parametrize("image", ["trading_platform-ledger", "qianxiy/crypto:latest"])
+def test_deploy_rejects_running_strategy_before_backup_or_pull(tmp_path: Path, image: str) -> None:
     result = invoke(
         tmp_path,
         "deploy",
-        TRADING_PLATFORM_IMAGE="ghcr.io/example/trading-platform:v1.2.3",
+        TRADING_PLATFORM_IMAGE=image,
         FAKE_SPIKE_STATE="running",
     )
     assert result.returncode == 2
     assert "关闭准入" in result.stderr
     assert not (tmp_path / "backup.log").exists()
     assert not any(" pull " in call for call in docker_log(tmp_path))
+    assert not any(" build" in call or " up -d" in call for call in docker_log(tmp_path))
 
 
-def test_deploy_backup_failure_stops_before_application_pull_and_migration(tmp_path: Path) -> None:
+@pytest.mark.parametrize("image", ["trading_platform-ledger", "qianxiy/crypto:latest"])
+def test_deploy_backup_failure_stops_before_application_pull_and_migration(tmp_path: Path, image: str) -> None:
     result = invoke(
         tmp_path,
         "deploy",
-        TRADING_PLATFORM_IMAGE="ghcr.io/example/trading-platform:v1.2.3",
+        TRADING_PLATFORM_IMAGE=image,
         FAKE_BACKUP_FAIL="1",
     )
     assert result.returncode != 0
     calls = docker_log(tmp_path)
-    assert any("--pull missing postgres redis" in call for call in calls)
+    assert any(call.endswith("postgres redis") and " up -d" in call for call in calls)
     assert not any(" pull market ledger-migrate ledger" in call for call in calls)
     assert not any("ledger-migrate" in call and "up -d" in call for call in calls)
+    assert not any("--force-recreate" in call for call in calls)
 
 
 def test_deploy_rejects_invalid_image_name(tmp_path: Path) -> None:
@@ -573,10 +622,12 @@ def test_deploy_waits_for_one_shot_migration_to_exit(tmp_path: Path) -> None:
     ) >= 2
 
 
-def test_deploy_fails_closed_when_migration_does_not_exit_before_timeout(tmp_path: Path) -> None:
+@pytest.mark.parametrize("image", ["trading_platform-ledger", "qianxiy/crypto:latest"])
+def test_deploy_fails_closed_when_migration_does_not_exit_before_timeout(tmp_path: Path, image: str) -> None:
     result = invoke(
         tmp_path,
         "deploy",
+        TRADING_PLATFORM_IMAGE=image,
         FAKE_MIGRATION_STAY_RUNNING="1",
         DEPLOY_MIGRATION_ATTEMPTS="2",
         DEPLOY_MIGRATION_INTERVAL="0",
@@ -584,30 +635,33 @@ def test_deploy_fails_closed_when_migration_does_not_exit_before_timeout(tmp_pat
     assert result.returncode == 2
     assert "状态等待超时" in result.stderr
     calls = docker_log(tmp_path)
-    assert any(call.endswith("up -d ledger-migrate") for call in calls)
+    assert any(" up -d" in call and call.endswith(" ledger-migrate") for call in calls)
     assert not any("up -d --wait ledger-migrate" in call for call in calls)
-    assert not any(" up -d --wait market ledger" in call for call in calls)
+    assert not any("--force-recreate" in call for call in calls)
 
 
-def test_deploy_fails_closed_for_migration_state_query_error(tmp_path: Path) -> None:
-    result = invoke(tmp_path, "deploy", FAKE_MIGRATION_PS_FAIL="1")
+@pytest.mark.parametrize("image", ["trading_platform-ledger", "qianxiy/crypto:latest"])
+def test_deploy_fails_closed_for_migration_state_query_error(tmp_path: Path, image: str) -> None:
+    result = invoke(tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image, FAKE_MIGRATION_PS_FAIL="1")
     assert result.returncode == 2
     assert "状态查询失败" in result.stderr
-    assert not any(" up -d --wait market ledger" in call for call in docker_log(tmp_path))
+    assert not any("--force-recreate" in call for call in docker_log(tmp_path))
 
 
-def test_deploy_fails_closed_when_migration_up_fails(tmp_path: Path) -> None:
-    result = invoke(tmp_path, "deploy", FAKE_MIGRATION_UP_FAIL="1")
+@pytest.mark.parametrize("image", ["trading_platform-ledger", "qianxiy/crypto:latest"])
+def test_deploy_fails_closed_when_migration_up_fails(tmp_path: Path, image: str) -> None:
+    result = invoke(tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image, FAKE_MIGRATION_UP_FAIL="1")
     assert result.returncode == 2
     assert "启动失败" in result.stderr
-    assert not any(" up -d --wait market ledger" in call for call in docker_log(tmp_path))
+    assert not any("--force-recreate" in call for call in docker_log(tmp_path))
 
 
-def test_deploy_rejects_nonzero_migration_exit_code(tmp_path: Path) -> None:
-    result = invoke(tmp_path, "deploy", FAKE_MIGRATION_FAIL="1")
+@pytest.mark.parametrize("image", ["trading_platform-ledger", "qianxiy/crypto:latest"])
+def test_deploy_rejects_nonzero_migration_exit_code(tmp_path: Path, image: str) -> None:
+    result = invoke(tmp_path, "deploy", TRADING_PLATFORM_IMAGE=image, FAKE_MIGRATION_FAIL="1")
     assert result.returncode == 2
     assert "退出码不是 0" in result.stderr
-    assert not any(" up -d --wait market ledger" in call for call in docker_log(tmp_path))
+    assert not any("--force-recreate" in call for call in docker_log(tmp_path))
 
 
 def test_deploy_requires_private_env(tmp_path: Path) -> None:

@@ -38,8 +38,6 @@ def _environment(**overrides: str) -> dict[str, str]:
         "SPIKE_WAL_PATH": "/app/data/wal/spike_short.jsonl",
         "STRATEGY_ACCOUNT_ID": "long_breakout_testnet",
         "BINANCE_TESTNET": "true",
-        "BINANCE_BASE_URL": "https://demo-fapi.binance.com",
-        "BINANCE_WS_BASE_URL": "wss://stream.binancefuture.com",
         "BINANCE_API_KEY": "long-breakout-key",
         "BINANCE_API_SECRET": "long-breakout-secret",
     }
@@ -56,11 +54,32 @@ def test_preflight_accepts_default_legal_testnet_configuration():
     _validate(_environment())
 
 
+def test_preflight_ignores_legacy_endpoint_environment():
+    _validate(_environment(
+        BINANCE_BASE_URL="https://example.invalid",
+        BINANCE_WS_BASE_URL="wss://example.invalid",
+    ))
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "message"),
+    [("base_url", "testnet REST URL"), ("ws_base_url", "testnet WS URL")],
+)
+def test_preflight_still_rejects_injected_non_testnet_endpoint(monkeypatch, endpoint, message):
+    config = MODULE.BinanceConfig(testnet=True)
+    setattr(config, endpoint, "https://example.invalid")
+    monkeypatch.setattr(MODULE, "BinanceConfig", lambda **kwargs: config)
+
+    with pytest.raises(ValueError, match=message):
+        _validate(_environment())
+
+
 @pytest.mark.parametrize(
     ("override", "message"),
     [
         ({"STRATEGY_ACCOUNT_ID": "another_account"}, "must match"),
         ({"LONG_BREAKOUT_MODE": "live"}, "Input should be 'testnet'"),
+        ({"BINANCE_TESTNET": "false"}, "requires BINANCE_TESTNET=true"),
         ({"BINANCE_API_KEY": ""}, "credentials"),
         ({"BINANCE_API_SECRET": ""}, "credentials"),
         ({"LONG_BREAKOUT_LOOKBACK_BARS": "7"}, "must be 42"),

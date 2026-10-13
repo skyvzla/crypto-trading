@@ -74,8 +74,6 @@ def validate_preflight(environ: Mapping[str, str] | None = None) -> None:
         api_key=env["BINANCE_API_KEY"],
         api_secret=env["BINANCE_API_SECRET"],
         testnet=True,
-        base_url=env.get("BINANCE_BASE_URL", TESTNET_REST_URL),
-        ws_base_url=env.get("BINANCE_WS_BASE_URL", TESTNET_WS_URL),
     )
     if binance.base_url.rstrip("/") != TESTNET_REST_URL:
         raise ValueError("long_breakout requires the Binance Futures testnet REST URL")

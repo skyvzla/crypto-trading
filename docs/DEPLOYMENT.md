@@ -3,7 +3,8 @@
 本项目采用 **环境镜像 + 源码挂载（`./src`）+ `git pull` 更新** 的极简稳健部署模式：
 - 运行时镜像为 `qianxiy/crypto:latest`（不包含业务代码，预装 Python 3.12、uv 及所有三方依赖）；
 - 宿主机 `./src` 与 `./scripts` 经只读（`:ro`）卷挂载进容器；
-- 日常更新只需在服务器执行 `git pull` 并重启对应服务即可秒级生效。
+- 更新前先关闭策略准入、排空、对账并安全停止策略；执行 `git pull` 后运行
+  `scripts/deploy.sh`，脚本会验证备份、执行迁移并重新创建应用服务，使挂载的最新源码生效。
 
 在工作区或生产服务器使用：
 
@@ -45,6 +46,13 @@ $EDITOR .env
 至少确认：
 
 - 交易策略使用的账户、endpoint 和密钥由对应 Compose service 的 runtime guard 校验；部署入口本身不复制策略环境判断。
+- Binance Futures 地址固定，由 `BINANCE_TESTNET` 选网：`true` 使用
+  `https://demo-fapi.binance.com` 和 `wss://stream.binancefuture.com`，`false` 使用
+  `https://fapi.binance.com` 和 `wss://fstream.binance.com`。应用不读取旧的
+  `BINANCE_BASE_URL`、`BINANCE_WS_BASE_URL` 环境配置；切换时需同时配置对应环境的密钥
+  和策略运行模式，long_breakout 仍只允许测试网。
+- 专用 `binance_testnet_*` 人工验证工具仍会拒绝与测试网冲突的遗留 URL 配置；使用这些工具前
+  应移除旧 URL 环境变量，并保留其测试网及执行确认门禁。
 - testnet API key/secret 使用专用账户，禁止提现权限；正式网配置必须遵守策略专用上线审批，不能绕过 runtime guard。
 - 数据库配置与 Compose 一致；生产环境不要使用 `.env.example` 中的默认密码。
 - `logs/`、`data/wal/` 和 `data/market/campaign_snapshots/` 由脚本创建，不要把它们放到临时目录。
@@ -141,8 +149,8 @@ Release 配置，不访问 GitHub 或 GHCR，因此网络或仓库暂时不可�
 
 ## 4. 本地源码部署
 
-不设置 `TRADING_PLATFORM_RELEASE_COMPOSE_DIR` 且在源码 checkout 中运行时，原有本地开发流程
-保持不变，`scripts/deploy.sh` 仍从源码构建：
+在源码 checkout 中运行时，默认使用预构建的环境镜像并挂载当前源码。仅依赖变更需要先运行
+`scripts/build_image.sh`；部署使用：
 
 ```bash
 scripts/deploy.sh
@@ -150,9 +158,10 @@ scripts/deploy.sh
 
 全新且尚无任何业务表的数据库会明确报告跳过备份；若已有业务表却缺少有效迁移历史则拒绝部署。
 
-部署顺序是：检查依赖和 `.env`、创建运行目录、校验 Compose、本地构建或拉取应用镜像、启动
-PostgreSQL/Redis、运行 `ledger-migrate`、再启动 Market、Ledger、notification-worker
-和 symbol-sync。脚本会检查：
+部署先检查依赖、`.env`、运行目录、Compose 配置和策略停机状态；PostgreSQL/Redis 就绪并
+完成备份恢复验证后，运行 `ledger-migrate`，再重新创建 Market、Ledger、notification-worker
+和 symbol-sync。应用服务即使镜像及 Compose 配置未变化，也会重新创建，以加载最新源码。
+重新创建应用时使用 `--no-deps`，数据库、Redis 和已完成的迁移服务不会随之重建。脚本会检查：
 
 - PostgreSQL、Redis、Market、Ledger 为 `running + healthy`；
 - `ledger-migrate` 为单个 `exited + exit code 0` 容器；

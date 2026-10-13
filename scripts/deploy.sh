@@ -42,7 +42,11 @@ main() {
   if [[ "$image" != "trading_platform-ledger" ]]; then
     ops_is_valid_image "$image" || ops_die "应用镜像格式无效: $image"
     release_image=1
-    ops_require_strategies_stopped
+  fi
+  # Both image modes restart application services; strategies must be drained
+  # and stopped before their dependencies can be replaced.
+  ops_require_strategies_stopped
+  if (( release_image == 1 )); then
     printf '开始部署预构建镜像: %s\n' "$image"
     ops_compose up -d --wait --no-build --pull missing postgres redis
     TRADING_OPS_DOCKER_BIN="$OPS_DOCKER_BIN" bash "$SCRIPT_DIR/verify_ledger_backup_restore.sh"
@@ -58,6 +62,7 @@ main() {
   else
     ops_compose build
     ops_compose up -d --wait postgres redis
+    TRADING_OPS_DOCKER_BIN="$OPS_DOCKER_BIN" bash "$SCRIPT_DIR/verify_ledger_backup_restore.sh"
   fi
   migration_attempts="${DEPLOY_MIGRATION_ATTEMPTS:-60}"
   migration_interval="${DEPLOY_MIGRATION_INTERVAL:-0.5}"
@@ -74,10 +79,12 @@ main() {
     ops_die "${OPS_WAIT_REASON:-ledger-migrate 状态等待失败}"
   fi
   [[ "$OPS_EXIT_CODE" == 0 ]] || ops_die "ledger-migrate 退出码不是 0: ${OPS_EXIT_CODE:-unknown}"
+  # Bind-mounted source changes do not change Compose's config hash. Replace
+  # only applications after migration succeeds, without recreating dependencies.
   if (( release_image == 1 )); then
-    ops_compose up -d --wait --no-build --pull never market ledger notification-worker symbol-sync
+    ops_compose up -d --wait --no-build --pull never --force-recreate --no-deps market ledger notification-worker symbol-sync
   else
-    ops_compose up -d --wait market ledger notification-worker symbol-sync
+    ops_compose up -d --wait --force-recreate --no-deps market ledger notification-worker symbol-sync
   fi
 
   ops_require_state postgres running healthy

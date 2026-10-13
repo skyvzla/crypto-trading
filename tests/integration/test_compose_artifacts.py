@@ -11,6 +11,41 @@ import pytest
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
+def test_compose_and_env_template_select_binance_endpoints_only_by_testnet_flag():
+    compose = (PROJECT_ROOT / "compose.yaml").read_text()
+    template = (PROJECT_ROOT / ".env.example").read_text()
+
+    for contents in (compose, template):
+        assert "BINANCE_BASE_URL" not in contents
+        assert "BINANCE_WS_BASE_URL" not in contents
+        assert "BINANCE_TESTNET" in contents
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is unavailable")
+@pytest.mark.parametrize("testnet", ["true", "false"])
+def test_rendered_binance_services_only_receive_the_selected_environment(testnet):
+    environment = os.environ.copy()
+    environment.update(
+        BINANCE_TESTNET=testnet,
+        BINANCE_BASE_URL="https://example.invalid",
+        BINANCE_WS_BASE_URL="wss://example.invalid",
+    )
+    result = subprocess.run(
+        ["docker", "compose", "--profile", "*", "config", "--format", "json"],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    services = json.loads(result.stdout)["services"]
+    for name in ("market", "spike", "long_breakout", "strategy_kline", "strategy_tick"):
+        selected = services[name]["environment"]
+        assert selected["BINANCE_TESTNET"] == testnet
+        assert "BINANCE_BASE_URL" not in selected
+        assert "BINANCE_WS_BASE_URL" not in selected
+
+
 @pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is unavailable")
 def test_ledger_and_migration_runner_use_the_same_image_artifact():
     result = subprocess.run(

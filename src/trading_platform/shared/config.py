@@ -3,7 +3,7 @@
 使用 pydantic-settings 加载环境变量和配置文件
 """
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 from typing import Literal
 
 
@@ -45,6 +45,32 @@ class BinanceConfig(BaseSettings):
     base_url: str = 'https://fapi.binance.com'
     ws_base_url: str = 'wss://fstream.binance.com'
     testnet: bool = False
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple:
+        # 部署只用 BINANCE_TESTNET 选网；旧 URL 环境配置不能覆盖固定端点。
+        # 保留显式程序注入，供客户端测试和策略 endpoint 安全检查使用。
+        def fixed_endpoints(source: PydanticBaseSettingsSource):
+            def values() -> dict:
+                return {
+                    key: value for key, value in source().items()
+                    if key not in {"base_url", "ws_base_url"}
+                }
+            return values
+
+        return (
+            init_settings,
+            fixed_endpoints(env_settings),
+            fixed_endpoints(dotenv_settings),
+            fixed_endpoints(file_secret_settings),
+        )
 
     @model_validator(mode="after")
     def apply_testnet_endpoints(self) -> "BinanceConfig":
