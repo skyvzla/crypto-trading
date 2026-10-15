@@ -39,21 +39,7 @@ const PAGES = [
   { name: 'Campaign 成交', path: CAMPAIGN_PATH },
 ]
 
-/**
- * 已知横向溢出：不是本次改动的文件，未修复，因此在这里登记而不把回归矩阵挂红。
- *
- * `views/StrategyRiskView.vue` 的 `.risk-layout` 声明
- * `grid-template-columns: minmax(440px, 1fr) minmax(390px, 1fr)`，即 842px 的内容
- * 最小值，但只在 `max-width: 1020px` 折叠成单列；antd Sider 200px + 工作区左右各
- * 24px 之后，1024px 视口的内容列只有约 776px，于是 1021–1090px 这一段被撑破。
- *
- * 1024px 实测（Chromium，本文件）：document 1024/1024（文档本身不滚），
- * workspace 866/824，main 842/776 —— 溢出发生在内容滚动容器里，所以断言必须
- * 同时量 `.workspace` 和 `main`，只量 `documentElement` 会漏掉它。
- *
- * 该页面修好后请删掉这里的条目，让它回到正常的硬断言。
- */
-const KNOWN_OVERFLOW = [{ page: '策略风控', width: 1024 }]
+const KNOWN_OVERFLOW: Array<{ page: string; width: number }> = []
 
 interface BoxMeasurement {
   scrollWidth: number

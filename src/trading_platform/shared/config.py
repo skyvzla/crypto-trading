@@ -45,6 +45,7 @@ class BinanceConfig(BaseSettings):
     base_url: str = 'https://fapi.binance.com'
     ws_base_url: str = 'wss://fstream.binance.com'
     testnet: bool = False
+    recv_window: int = 10000
 
     @classmethod
     def settings_customise_sources(

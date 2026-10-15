@@ -139,9 +139,22 @@ def require_same_origin(request: Request) -> None:
         parsed_origin.netloc,
         parsed_origin.scheme,
     )
+    forwarded_host = request.headers.get("x-forwarded-host")
+    forwarded_proto = request.headers.get("x-forwarded-proto")
+    effective_host = (
+        forwarded_host.split(",")[0].strip()
+        if forwarded_host
+        else request.headers.get("host", "")
+    )
+    effective_scheme = (
+        forwarded_proto.split(",")[0].strip()
+        if forwarded_proto
+        else request.url.scheme
+    ).lower()
+
     request_authority = _normalized_authority(
-        request.headers.get("host", ""),
-        request.url.scheme,
+        effective_host,
+        effective_scheme,
     )
     if (
         not parsed_origin.netloc
@@ -150,7 +163,7 @@ def require_same_origin(request: Request) -> None:
         or parsed_origin.fragment
         or origin_authority is None
         or request_authority is None
-        or parsed_origin.scheme.lower() != request.url.scheme.lower()
+        or parsed_origin.scheme.lower() != effective_scheme
         or origin_authority != request_authority
     ):
         raise HTTPException(status_code=403, detail="cross-origin notification write rejected")

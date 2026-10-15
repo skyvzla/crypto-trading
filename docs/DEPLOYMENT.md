@@ -274,3 +274,53 @@ docker compose --profile '*' logs --tail 100 long_breakout
 不要通过裸 `docker compose up` 绕过脚本，也不要删除数据库/Redis volume。若启动失败，
 先看脚本打印的目标日志和 Compose 状态；若出现网络结果不明、挂单或仓位无法确认，保持
 策略停止并人工对账，不要改 client ID 重下单。
+
+## 9. 生产高频关键故障与解决方案
+
+### 9.1 关键通知路由未就绪（策略启动拒绝）
+- **现象**：执行 `scripts/start.sh spike` 报错 `关键通知路由未就绪；缺失: risk.halted...`。
+- **原因**：全新部署时数据库尚未配置通知策略与渠道，安全门禁阻断策略拉起。
+- **解决方案**：
+  1. 登录 Web 控制台（8001 端口），在通知页面添加 Connector、Endpoint 并激活 Policy；
+  2. 若初期仅在测试网联调，可使用 `--allow-unnotified` 参数跳过门禁：
+     ```bash
+     scripts/start.sh --allow-unnotified spike
+     # 或在 .env 中设置：
+     START_ALLOW_UNNOTIFIED=1
+     ```
+
+### 9.2 反向代理访问 Web 面板报 403 Forbidden（CSRF 同源拒绝）
+- **现象**：通过域名或 HTTPS 访问 WebUI，修改配置时接口返回 `403 detail: cross-origin notification write rejected`。
+- **原因**：Nginx/Caddy 等反向代理未透传客户端的真实 Host 与 Proto 协议。
+- **解决方案**：Nginx 配置中必须添加如下标头透传：
+  ```nginx
+  server {
+      listen 443 ssl http2;
+      server_name trading.yourdomain.com;
+      # ... SSL 证书配置 ...
+
+      location / {
+          proxy_pass http://127.0.0.1:8001;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+          proxy_set_header X-Forwarded-Host $host;
+      }
+  }
+  ```
+
+### 9.3 币安报错 1021 INVALID_TIMESTAMP（时钟漂移）
+- **现象**：下单或查单请求被币安拒绝，提示 `Timestamp for this request is outside of the recvWindow`。
+- **原因**：宿主机 VPS 本地时钟与币安服务器时钟偏差超过 5 秒。
+- **解决方案**：
+  1. 系统层配置 Chrony 高精度时钟同步：
+     ```bash
+     sudo apt-get update && sudo apt-get install -y chrony
+     sudo systemctl enable --now chrony
+     chronyc tracking  # 验证 offset 在毫秒级
+     ```
+  2. 应用层已支持 `recvWindow` 容错缓冲，可在 `.env` 调整（默认 10000ms）：
+     ```env
+     BINANCE_RECV_WINDOW=10000
+     ```

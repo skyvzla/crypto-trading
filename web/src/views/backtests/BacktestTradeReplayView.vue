@@ -132,24 +132,28 @@ const orderColumns: TableColumnsType<BacktestOrder> = [
     title: '委托价',
     key: 'price',
     width: 120,
+    align: 'right',
     customRender: ({ record }) => formatNumber(record.price, symbolPricePrecision.value),
   },
   {
     title: '委托数量',
     key: 'quantity',
     width: 120,
+    align: 'right',
     customRender: ({ record }) => formatNumber(record.quantity, 8),
   },
   {
     title: '成交数量',
     key: 'filled_quantity',
     width: 120,
+    align: 'right',
     customRender: ({ record }) => formatNumber(record.filled_quantity, 8),
   },
   {
     title: '成交均价',
     key: 'avg_fill_price',
     width: 120,
+    align: 'right',
     customRender: ({ record }) => formatNumber(record.avg_fill_price, symbolPricePrecision.value),
   },
   {
@@ -180,18 +184,21 @@ const fillColumns: TableColumnsType<BacktestFill> = [
     title: '价格',
     key: 'price',
     width: 120,
+    align: 'right',
     customRender: ({ record }) => formatNumber(record.price, symbolPricePrecision.value),
   },
   {
     title: '数量',
     key: 'quantity',
     width: 120,
+    align: 'right',
     customRender: ({ record }) => formatNumber(record.quantity, 8),
   },
   {
     title: '手续费',
     key: 'commission',
     width: 140,
+    align: 'right',
     customRender: ({ record }) =>
       record.commission_asset
         ? `${formatNumber(record.commission, 8)} ${record.commission_asset}`

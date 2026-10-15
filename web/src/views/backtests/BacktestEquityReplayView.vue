@@ -110,6 +110,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'positionAmount',
     dataIndex: 'positionAmount',
     width: 110,
+    align: 'right',
     customRender: ({ text }) => `${formatNumber(text)} U`,
   },
   {
@@ -117,6 +118,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'grossReturn',
     dataIndex: 'grossReturn',
     width: 100,
+    align: 'right',
     customRender: ({ text }) => formatPercent(text),
   },
   {
@@ -124,6 +126,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'feeAmount',
     dataIndex: 'feeAmount',
     width: 100,
+    align: 'right',
     customRender: ({ text }) => `${formatNumber(text)} U`,
   },
   {
@@ -131,6 +134,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'slippageAmount',
     dataIndex: 'slippageAmount',
     width: 100,
+    align: 'right',
     customRender: ({ text }) => `${formatNumber(text)} U`,
   },
   {
@@ -138,6 +142,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'replayPnl',
     dataIndex: 'replayPnl',
     width: 110,
+    align: 'right',
     customRender: ({ record }) =>
       h('span', { class: pnlClass(record.replayPnl) }, `${formatNumber(record.replayPnl)} U`),
   },
@@ -146,6 +151,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'reinvestedProfit',
     dataIndex: 'reinvestedProfit',
     width: 110,
+    align: 'right',
     customRender: ({ text }) => `${formatNumber(text)} U`,
   },
   {
@@ -153,6 +159,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'tradingCapitalAfter',
     dataIndex: 'tradingCapitalAfter',
     width: 120,
+    align: 'right',
     customRender: ({ text }) => `${formatNumber(text)} U`,
   },
   {
@@ -160,6 +167,7 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'reserveCapitalAfter',
     dataIndex: 'reserveCapitalAfter',
     width: 110,
+    align: 'right',
     customRender: ({ text }) => `${formatNumber(text)} U`,
   },
   {
@@ -167,9 +175,17 @@ const columns: TableColumnsType<EquityReplayRow> = [
     key: 'balanceAfter',
     dataIndex: 'balanceAfter',
     width: 120,
+    align: 'right',
     customRender: ({ text }) => `${formatNumber(text)} U`,
   },
-  { title: '回撤', key: 'drawdown', dataIndex: 'drawdown', width: 90, customRender: ({ text }) => formatPercent(text) },
+  {
+    title: '回撤',
+    key: 'drawdown',
+    dataIndex: 'drawdown',
+    width: 90,
+    align: 'right',
+    customRender: ({ text }) => formatPercent(text),
+  },
   {
     title: '',
     key: 'action',

@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { ArrowLeft } from 'lucide-vue-next'
 import { useRouter, type RouteLocationRaw } from 'vue-router'
 
-defineProps<{
+const props = defineProps<{
   title: string
   eyebrow?: string
   backTo?: RouteLocationRaw
@@ -10,28 +11,30 @@ defineProps<{
 }>()
 
 const router = useRouter()
+
+/** 过滤掉纯装饰性的 RESEARCH ARCHIVE 口号，只保留真实的实体 ID（如 researchId / tradeId）。 */
+const entityBadge = computed(() => {
+  if (!props.eyebrow || props.eyebrow === 'RESEARCH ARCHIVE') return ''
+  return props.eyebrow
+})
 </script>
 
 <template>
   <section class="backtest-page">
     <div class="page-heading">
       <div class="heading-copy">
-        <a-breadcrumb>
-          <a-breadcrumb-item v-for="crumb in crumbs" :key="crumb.label">
-            <RouterLink v-if="crumb.to" :to="crumb.to">{{ crumb.label }}</RouterLink>
-            <span v-else>{{ crumb.label }}</span>
-          </a-breadcrumb-item>
-        </a-breadcrumb>
-        <span v-if="eyebrow" class="eyebrow">{{ eyebrow }}</span>
-        <h2>{{ title }}</h2>
+        <div class="heading-title-row">
+          <a-tooltip v-if="backTo" title="返回">
+            <a-button type="text" shape="circle" aria-label="返回" @click="router.push(backTo!)">
+              <ArrowLeft :size="16" />
+            </a-button>
+          </a-tooltip>
+          <h2>{{ title }}</h2>
+          <span v-if="entityBadge" class="eyebrow-inline">{{ entityBadge }}</span>
+        </div>
       </div>
-      <div class="page-actions">
+      <div v-if="$slots.actions" class="page-actions">
         <slot name="actions" />
-        <a-tooltip v-if="backTo" title="返回">
-          <a-button type="text" shape="circle" aria-label="返回" @click="router.push(backTo!)"
-            ><ArrowLeft :size="16"
-          /></a-button>
-        </a-tooltip>
       </div>
     </div>
     <slot />

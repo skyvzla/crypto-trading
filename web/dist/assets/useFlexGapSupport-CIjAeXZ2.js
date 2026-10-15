@@ -1,1 +1,0 @@
-import{G as e,dt as t}from"./vendor-BdP3Iq61.js";import{n}from"./styleChecker-ClwDbBnm.js";var r=(()=>{let r=t(!1);return e(()=>{r.value=n()}),r});export{r as t};

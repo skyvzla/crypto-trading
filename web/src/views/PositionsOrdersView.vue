@@ -77,12 +77,13 @@ const positionColumns: TableColumnsType<LedgerPosition> = [
     customRender: ({ text }) =>
       h(Tag, { color: String(text).toUpperCase() === 'LONG' ? 'green' : 'volcano' }, () => sideLabel(String(text))),
   },
-  { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 130 },
+  { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 130, align: 'right' },
   {
     title: '入场均价',
     dataIndex: 'entry_price',
     key: 'entry_price',
     width: 135,
+    align: 'right',
     customRender: ({ text }) => formatMoney(String(text), 6),
   },
   {
@@ -90,6 +91,7 @@ const positionColumns: TableColumnsType<LedgerPosition> = [
     dataIndex: 'mark_price',
     key: 'mark_price',
     width: 135,
+    align: 'right',
     customRender: ({ text }) => formatMoney(text == null ? null : String(text), 6),
   },
   {
@@ -97,6 +99,7 @@ const positionColumns: TableColumnsType<LedgerPosition> = [
     dataIndex: 'unrealized_pnl',
     key: 'unrealized_pnl',
     width: 130,
+    align: 'right',
     customCell: (record) => ({ class: pnlClass(record.unrealized_pnl) }),
     customRender: ({ text }) => formatMoney(text == null ? null : String(text)),
   },
@@ -144,14 +147,16 @@ const orderColumns: TableColumnsType<LedgerOrder> = [
     dataIndex: 'price',
     key: 'price',
     width: 125,
+    align: 'right',
     customRender: ({ text }) => formatMoney(text == null ? null : String(text), 6),
   },
-  { title: '原始数量', dataIndex: 'quantity', key: 'quantity', width: 125 },
-  { title: '已成交', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 125 },
+  { title: '原始数量', dataIndex: 'quantity', key: 'quantity', width: 125, align: 'right' },
+  { title: '已成交', dataIndex: 'filled_quantity', key: 'filled_quantity', width: 125, align: 'right' },
   {
     title: '剩余',
     key: 'remaining',
     width: 125,
+    align: 'right',
     customRender: ({ record }) =>
       formatMoney(Math.max(0, asNumber(record.quantity) - asNumber(record.filled_quantity)), 6),
   },

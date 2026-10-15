@@ -7,6 +7,7 @@
   --color-warning: #a16207;
   --color-danger: #b91c1c;
   --color-gold: #8a641f;
+  --color-teal: #0f766e;
   --font-family-sans: 'IBM Plex Sans', 'Noto Sans SC', sans-serif;
   --font-family-mono: 'IBM Plex Mono', 'JetBrains Mono', monospace;
   /* 等宽数字：数值列、指标值和时间戳都靠它对齐小数点与位宽。
@@ -24,9 +25,11 @@
   --surface: #ffffff;
   --surface-raised: #ffffff;
   --surface-hover: #f8fafc;
+  --surface-subtle: #f1f5f9;
   --line: #dbe3ee;
   --text: #1e293b;
   --muted: #64748b;
+  --sider-bg: #0f172a;
   --chart-overlay: rgba(255, 255, 255, 0.96);
   --chart-indicator-overlay: rgba(255, 255, 255, 0.72);
 }
@@ -34,17 +37,20 @@
 :root[data-theme='dark'] {
   --color-primary: #60a5fa;
   --color-info: #93c5fd;
-  --color-success: #6ee7b7;
+  --color-success: #34d399;
   --color-warning: #fbbf24;
-  --color-danger: #fca5a5;
+  --color-danger: #f87171;
   --color-gold: #e5b75d;
+  --color-teal: #5eead4;
   --app-bg: #0b1220;
   --surface: #111827;
   --surface-raised: #172033;
   --surface-hover: #1c2940;
+  --surface-subtle: #151f32;
   --line: #27364a;
   --text: #dbe7f5;
   --muted: #94a8c1;
+  --sider-bg: #0d1526;
   --chart-overlay: rgba(17, 24, 39, 0.96);
   --chart-indicator-overlay: rgba(17, 24, 39, 0.72);
 }
@@ -75,6 +81,16 @@ a {
   text-decoration: none;
 }
 
+.ant-breadcrumb li:not(:last-child) a {
+  color: var(--color-primary);
+  font-weight: 500;
+  transition: opacity 0.15s;
+}
+.ant-breadcrumb li:not(:last-child) a:hover {
+  color: var(--color-primary);
+  opacity: 0.82;
+}
+
 /* ── 页面骨架 ─────────────────────────────────────────────────────── */
 .backtest-page,
 .operations-page {
@@ -84,27 +100,45 @@ a {
 
 .page-heading {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 18px;
-  padding-bottom: 14px;
+  margin-bottom: 14px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--line);
 }
 
 .heading-copy {
   min-width: 0;
   h2 {
-    margin: 5px 0 0;
+    margin: 0;
     font-size: var(--type-page-title);
     line-height: 1.25;
     letter-spacing: 0;
   }
 }
+.heading-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  h2 {
+    margin: 0;
+  }
+}
+.eyebrow-inline {
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface-subtle);
+  color: var(--muted);
+  font: var(--type-meta)/1.2 var(--font-family-mono);
+  overflow-wrap: anywhere;
+}
 .eyebrow {
   display: block;
   margin-top: 12px;
-  color: var(--color-gold);
+  color: var(--muted);
   font: var(--type-meta)/1.2 var(--font-family-mono);
   text-transform: uppercase;
   overflow-wrap: anywhere;
@@ -229,7 +263,7 @@ a {
   }
 }
 .catalog-icon {
-  color: var(--color-gold);
+  color: var(--color-primary);
 }
 .catalog-copy {
   min-width: 0;
@@ -255,18 +289,16 @@ a {
 .trade-summary-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 1px;
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
-  background: var(--surface);
+  background: var(--line);
 }
 .trade-summary-strip > div {
   min-width: 0;
   padding: 11px 13px;
-  border-right: 1px solid var(--line);
-}
-.trade-summary-strip > div:last-child {
-  border-right: 0;
+  background: var(--surface);
 }
 .trade-summary-strip {
   span {
@@ -539,18 +571,16 @@ a {
 .equity-summary-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  gap: 1px;
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
-  background: var(--surface);
+  background: var(--line);
 }
 .equity-summary-strip > div {
   min-width: 0;
   padding: 12px;
-  border-right: 1px solid var(--line);
-}
-.equity-summary-strip > div:last-child {
-  border-right: 0;
+  background: var(--surface);
 }
 .equity-summary-strip span {
   display: block;
@@ -641,9 +671,6 @@ a {
   .trade-summary-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .trade-summary-strip > div {
-    border-bottom: 1px solid var(--line);
-  }
   .chart-toolbar {
     align-items: flex-start;
     flex-direction: column;
@@ -664,9 +691,6 @@ a {
   }
   .equity-summary-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .equity-summary-strip > div {
-    border-bottom: 1px solid var(--line);
   }
 }
 
@@ -719,25 +743,28 @@ a {
 /* Shared operations console vocabulary. Values remain legible in both themes. */
 .operations-heading {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 18px;
-  padding: 6px 0 15px;
+  gap: 20px;
+  margin-bottom: 14px;
+  padding: 0 0 12px;
   border-bottom: 1px solid var(--line);
 }
+.operations-heading-copy {
+  min-width: 0;
+}
 .operations-heading h1 {
-  margin: 4px 0 4px;
+  margin: 0;
   color: var(--text);
   font-size: var(--type-page-title);
-  line-height: 1.15;
+  line-height: 1.25;
   letter-spacing: 0;
 }
 .operations-heading p {
-  max-width: 760px;
-  margin: 0;
+  max-width: 780px;
+  margin: 4px 0 0;
   color: var(--muted);
-  font-size: var(--type-primary);
+  font-size: var(--type-secondary);
 }
 .operations-heading-actions {
   display: flex;
@@ -745,11 +772,6 @@ a {
   gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
-}
-.refresh-stamp {
-  color: var(--color-gold);
-  font: var(--type-meta)/1.2 var(--font-family-mono);
-  letter-spacing: 0;
 }
 .filter-ledger {
   display: flex;
@@ -942,9 +964,25 @@ a {
   gap: 14px;
 }
 .table-link {
-  color: var(--color-primary);
+  color: var(--color-primary) !important;
   cursor: pointer;
   font-weight: 600;
+  transition: opacity 0.15s;
+}
+.table-link:hover {
+  opacity: 0.82;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.ant-table-cell .ant-btn-text:not(.ant-btn-dangerous),
+.ant-table-cell .ant-btn-link:not(.ant-btn-dangerous),
+.campaign-button {
+  color: var(--color-primary) !important;
+  font-weight: 500;
+}
+.ant-table-cell .ant-btn-text:not(.ant-btn-dangerous):hover,
+.ant-table-cell .ant-btn-link:not(.ant-btn-dangerous):hover {
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent) !important;
 }
 .mono {
   font-family: var(--font-family-mono);

@@ -190,11 +190,8 @@ const endpointsByConnector = computed(() => {
   background: color-mix(in srgb, var(--color-info) 10%, transparent);
 }
 .connector-mark.webhook {
-  color: #0f766e;
-  background: rgba(13, 148, 136, 0.1);
-}
-:root[data-theme='dark'] .connector-mark.webhook {
-  color: #5eead4;
+  color: var(--color-teal);
+  background: color-mix(in srgb, var(--color-teal) 10%, transparent);
 }
 .connector-name {
   display: flex;

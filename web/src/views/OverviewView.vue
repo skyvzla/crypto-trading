@@ -414,7 +414,7 @@ function openRecentTrade(trade: LedgerTrade) {
   margin-bottom: 14px;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-left: 3px solid var(--color-gold);
+  border-left: 3px solid var(--color-primary);
   border-radius: 6px;
   background: var(--surface);
 }
@@ -435,7 +435,7 @@ function openRecentTrade(trade: LedgerTrade) {
 }
 .capital-title > svg {
   flex: 0 0 auto;
-  color: var(--color-gold);
+  color: var(--color-primary);
 }
 .capital-title h2 {
   margin: 0;
@@ -450,18 +450,13 @@ function openRecentTrade(trade: LedgerTrade) {
 .capital-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--line);
 }
 .capital-grid > div {
   min-width: 0;
   padding: 12px 14px;
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-}
-.capital-grid > div:nth-child(4n) {
-  border-right: 0;
-}
-.capital-grid > div:nth-last-child(-n + 4) {
-  border-bottom: 0;
+  background: var(--surface);
 }
 .capital-grid > .capital-primary {
   background: var(--surface-hover);
@@ -560,15 +555,6 @@ function openRecentTrade(trade: LedgerTrade) {
   .capital-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .capital-grid > div {
-    border-bottom: 1px solid var(--line);
-  }
-  .capital-grid > div:nth-child(2n) {
-    border-right: 0;
-  }
-  .capital-grid > div:nth-last-child(-n + 2) {
-    border-bottom: 0;
-  }
 }
 @media (max-width: 560px) {
   .health-rail {
@@ -576,13 +562,6 @@ function openRecentTrade(trade: LedgerTrade) {
   }
   .capital-grid {
     grid-template-columns: 1fr;
-  }
-  .capital-grid > div {
-    border-right: 0;
-    border-bottom: 1px solid var(--line) !important;
-  }
-  .capital-grid > div:last-child {
-    border-bottom: 0 !important;
   }
 }
 </style>

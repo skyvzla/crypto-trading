@@ -79,12 +79,13 @@ const campaignColumns: TableColumnsType<CampaignSummary> = [
         () => (record.closed_at ? '已结束' : record.has_open_quantity ? '进行中' : '事实不完整'),
       ),
   },
-  { title: 'fills', dataIndex: 'fill_count', key: 'fills', width: 75 },
+  { title: 'fills', dataIndex: 'fill_count', key: 'fills', width: 75, align: 'right' },
   {
     title: '净已实现 PnL',
     dataIndex: 'net_realized_pnl',
     key: 'netPnl',
     width: 135,
+    align: 'right',
     customCell: (record) => ({
       class: record.net_realized_pnl == null ? 'value-unavailable' : pnlClass(record.net_realized_pnl),
     }),
@@ -106,12 +107,14 @@ const campaignColumns: TableColumnsType<CampaignSummary> = [
     dataIndex: 'gross_realized_pnl',
     key: 'grossPnl',
     width: 115,
+    align: 'right',
     customRender: ({ text }) => formatMoney(String(text)),
   },
   {
     title: '手续费',
     key: 'commission',
     width: 150,
+    align: 'right',
     customRender: ({ record }) => `${formatMoney(record.total_commission)} ${record.commission_asset || '资产不一致'}`,
   },
   { title: '账户', dataIndex: 'account_id', key: 'account', width: 145 },
@@ -227,6 +230,7 @@ function openCampaign(group: CampaignSummary) {
         >服务端共 {{ serverTotal }} Campaigns · 当前页 {{ campaigns.length }} 个 · 未归属
         {{ unattributedFills }} fills</span
       >
+      <span class="scope-note">完整 Campaign 聚合 · 非 USDT 手续费无权威换算时净 PnL 标为不可用</span>
     </div>
     <a-alert
       v-if="unattributedFills"
@@ -234,14 +238,6 @@ function openCampaign(group: CampaignSummary) {
       show-icon
       :message="`${unattributedFills} 笔成交缺少 Campaign 归属`"
       description="未归属 fills 不参与 Campaign 列表、收益日历或绩效统计，页面不会按时间相邻关系猜测归属。"
-      class="scope-alert"
-    />
-    <a-alert
-      v-else
-      type="info"
-      show-icon
-      message="Campaign 由服务端完整聚合"
-      description="分页单位为完整 Campaign；非 USDT 手续费没有权威换算时，净 PnL 明确显示不可用。结果与规范化退出原因筛选仍待权威字段。"
       class="scope-alert"
     />
     <DataState :loading="loading" :error="error" :empty="!campaigns.length" @retry="reload">
@@ -264,10 +260,14 @@ function openCampaign(group: CampaignSummary) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 10px;
   color: var(--muted);
   font: var(--type-meta) var(--font-family-mono);
+}
+.scope-note {
+  font-family: var(--font-family-sans);
 }
 .scope-alert {
   margin-bottom: 12px;

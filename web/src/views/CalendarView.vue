@@ -159,7 +159,7 @@ function openDay(date: string) {
   align-items: center;
   gap: 5px;
   margin-left: auto;
-  color: var(--color-gold);
+  color: var(--muted);
   font: var(--type-meta) var(--font-family-mono);
 }
 .calendar-metrics {

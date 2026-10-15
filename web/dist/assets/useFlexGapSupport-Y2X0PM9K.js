@@ -1,0 +1,1 @@
+import{G as e,ut as t}from"./vendor-qM0ga2p-.js";import{n}from"./styleChecker-C5TPP9EM.js";var r=(()=>{let r=t(!1);return e(()=>{r.value=n()}),r});export{r as t};

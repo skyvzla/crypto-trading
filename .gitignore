@@ -18,3 +18,4 @@ backups/
 !reports/dynamic_final_run1/
 !reports/dynamic_final_run1/**
 .claude
+start-ctm.sh

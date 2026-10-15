@@ -481,7 +481,7 @@ function reasons(item: UniversePreviewItem): string {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--color-gold);
+  color: var(--muted);
   font: var(--type-meta) var(--font-family-mono);
 }
 .preview-metrics {
@@ -493,14 +493,16 @@ function reasons(item: UniversePreviewItem): string {
   gap: 8px;
   margin-bottom: 10px;
   padding: 9px 12px;
-  border-left: 3px solid var(--color-gold);
-  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--color-primary);
+  border-radius: 5px;
+  background: var(--surface);
   color: var(--muted);
   font-size: var(--type-meta);
 }
 .risk-layout {
   display: grid;
-  grid-template-columns: minmax(440px, 1fr) minmax(390px, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   align-items: start;
 }
@@ -535,7 +537,7 @@ function reasons(item: UniversePreviewItem): string {
 .policy-row.child {
   min-height: 47px;
   padding-left: 34px;
-  background: rgba(80, 100, 120, 0.025);
+  background: var(--surface-subtle);
 }
 .policy-row.blocked {
   box-shadow: inset 3px 0 var(--color-danger);
@@ -548,11 +550,16 @@ function reasons(item: UniversePreviewItem): string {
   border: 1px solid var(--line);
   border-radius: 3px;
   background: transparent;
-  color: var(--color-gold);
+  color: var(--muted);
   cursor: pointer;
 }
+.tree-toggle:hover,
+.tree-toggle:focus-visible {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
 .tree-branch {
-  color: var(--color-gold);
+  color: var(--muted);
 }
 .policy-name {
   min-width: 0;

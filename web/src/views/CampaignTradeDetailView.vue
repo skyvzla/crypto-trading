@@ -136,14 +136,16 @@ const fillColumns: TableColumnsType<LedgerTrade> = [
     dataIndex: 'price',
     key: 'price',
     width: 130,
+    align: 'right',
     customRender: ({ text }) => formatMoney(String(text), 6),
   },
-  { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 120 },
+  { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 120, align: 'right' },
   {
     title: '已实现 PnL',
     dataIndex: 'realized_pnl',
     key: 'pnl',
     width: 125,
+    align: 'right',
     customCell: (record) => ({ class: pnlClass(record.realized_pnl) }),
     customRender: ({ text }) => formatMoney(text == null ? null : String(text)),
   },
@@ -151,6 +153,7 @@ const fillColumns: TableColumnsType<LedgerTrade> = [
     title: '手续费',
     key: 'fee',
     width: 150,
+    align: 'right',
     customRender: ({ record }) => `${record.commission} ${record.commission_asset || '资产未知'}`,
   },
   {
@@ -369,16 +372,15 @@ watch(
         </article>
       </section>
       <a-alert
-        v-if="campaignPnl"
-        type="info"
+        v-if="campaignPnl?.has_open_quantity"
+        type="warning"
         show-icon
-        message="资金费、滑点与规范化退出原因暂不可用"
-        :description="
-          campaignPnl.has_open_quantity
-            ? '该 Campaign 尚有敞口；当前数值是截至最新 fill 的账本已实现 PnL 扣 USDT 手续费，不是最终轮次收益。'
-            : '该 Campaign 已完整闭合；净 PnL 为账本 realized_pnl 扣 USDT 手续费。'
-        "
+        message="该 Campaign 尚有敞口"
+        description="当前数值是截至最新 fill 的账本已实现 PnL 扣 USDT 手续费，不是最终轮次收益（资金费、滑点暂不可用）。"
       />
+      <p v-else-if="campaignPnl" class="campaign-scope-note">
+        口径：该 Campaign 已完整闭合，净 PnL 为账本 realized_pnl 扣 USDT 手续费；资金费、滑点与规范化退出原因暂不可用。
+      </p>
       <a-alert
         v-else-if="campaignPnlError"
         type="warning"
@@ -483,6 +485,11 @@ watch(
 }
 .campaign-detail-metrics {
   margin-bottom: 14px;
+}
+.campaign-scope-note {
+  margin: -4px 0 14px;
+  color: var(--muted);
+  font-size: var(--type-meta);
 }
 .detail-section {
   margin-top: 18px;

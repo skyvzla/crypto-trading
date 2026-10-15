@@ -840,6 +840,18 @@ def test_start_rejects_unready_critical_route_even_with_routable_policy(tmp_path
     assert not any(" up -d --wait spike" in call for call in docker_log(tmp_path))
 
 
+def test_start_allows_unready_critical_route_with_flag(tmp_path: Path) -> None:
+    result = invoke(
+        tmp_path,
+        "start",
+        "--allow-unnotified",
+        FAKE_NOTIFICATION_OVERVIEW='{"enabled_connectors":1,"enabled_endpoints":1,"policies":1,"routable_policies":1,"critical_routes_ready":false,"critical_routes":{"risk.halted":false,"system.strategy.unhealthy":true}}',
+    )
+    assert result.returncode == 0, result.stderr
+    assert "已根据 --allow-unnotified 允许启动策略" in result.stdout
+    assert any(" up -d --wait spike" in call for call in docker_log(tmp_path))
+
+
 def test_start_rejects_inconsistent_critical_readiness_response(tmp_path: Path) -> None:
     result = invoke(
         tmp_path,

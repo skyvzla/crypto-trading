@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import hmac
 import inspect
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -63,6 +64,7 @@ class BinanceRestClient:
         rate_limiter: RateLimiter | None = None,
         timeout: float = 10.0,
         event_observer: EventObserver | None = None,
+        recv_window: int | None = None,
     ):
         """
         Args:
@@ -71,6 +73,8 @@ class BinanceRestClient:
             base_url: API 基础 URL
             rate_limiter: 限速器（默认使用全局实例）
             timeout: 请求超时时间（秒）
+            event_observer: 事件观察器
+            recv_window: Binance 请求有效时间窗口毫秒数（防时间漂移，默认从 BINANCE_RECV_WINDOW 读取或 10000ms）
         """
         self.api_key = api_key
         self.api_secret = api_secret
@@ -78,6 +82,11 @@ class BinanceRestClient:
         self.rate_limiter = rate_limiter or DEFAULT_RATE_LIMITER
         self.timeout = timeout
         self.event_observer = event_observer
+        if recv_window is not None:
+            self.recv_window = recv_window
+        else:
+            raw_rw = os.getenv("BINANCE_RECV_WINDOW")
+            self.recv_window = int(raw_rw) if raw_rw and raw_rw.isdigit() else 10000
 
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
@@ -102,8 +111,10 @@ class BinanceRestClient:
         Returns:
             添加了签名的参数字典
         """
-        # 添加时间戳
+        # 添加时间戳与有效窗口（容忍服务器轻微时钟偏差）
         params['timestamp'] = int(time.time() * 1000)
+        if self.recv_window and 'recvWindow' not in params:
+            params['recvWindow'] = self.recv_window
 
         # 生成查询字符串
         query_string = urlencode(params)

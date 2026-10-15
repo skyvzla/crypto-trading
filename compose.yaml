@@ -248,6 +248,7 @@ services:
       BINANCE_API_KEY: ${BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${BINANCE_API_SECRET:-}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
+      BINANCE_RECV_WINDOW: ${BINANCE_RECV_WINDOW:-10000}
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro
@@ -322,6 +323,7 @@ services:
       BINANCE_API_KEY: ${LONG_BREAKOUT_BINANCE_API_KEY:-}
       BINANCE_API_SECRET: ${LONG_BREAKOUT_BINANCE_API_SECRET:-}
       BINANCE_TESTNET: ${BINANCE_TESTNET:-true}
+      BINANCE_RECV_WINDOW: ${BINANCE_RECV_WINDOW:-10000}
     volumes:
       - ./src:/app/src:ro
       - ./scripts:/app/scripts:ro

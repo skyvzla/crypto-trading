@@ -44,13 +44,14 @@ const columns: TableColumnsType<BacktestResearch> = [
     customRender: ({ record: row }) =>
       h(Tag, { color: row.status === 'completed' ? 'success' : 'warning' }, () => row.status),
   },
-  { title: '交易对', key: 'symbol_count', dataIndex: 'symbol_count', width: 80 },
-  { title: '交易数', key: 'trade_count', dataIndex: 'trade_count', width: 90 },
+  { title: '交易对', key: 'symbol_count', dataIndex: 'symbol_count', width: 80, align: 'right' },
+  { title: '交易数', key: 'trade_count', dataIndex: 'trade_count', width: 90, align: 'right' },
   {
     title: '胜率',
     key: 'win_rate',
     dataIndex: 'win_rate',
     width: 90,
+    align: 'right',
     customRender: ({ record: row }) => formatPercent(row.win_rate),
   },
   {
@@ -58,6 +59,7 @@ const columns: TableColumnsType<BacktestResearch> = [
     key: 'net_pnl',
     dataIndex: 'net_pnl',
     width: 140,
+    align: 'right',
     customRender: ({ record: row }) => h('span', { class: pnlClass(row.net_pnl) }, formatNumber(row.net_pnl)),
   },
   {
@@ -70,7 +72,7 @@ const columns: TableColumnsType<BacktestResearch> = [
   {
     title: '操作',
     key: 'actions',
-    width: 154,
+    width: 240,
     fixed: 'right',
     customRender: ({ record: row }) =>
       h(Space, { size: 4 }, () => [
@@ -79,9 +81,10 @@ const columns: TableColumnsType<BacktestResearch> = [
             RouterLink,
             { to: { path: `/backtests/${encodeURIComponent(row.id)}/reports`, query: preservedQuery.value } },
             () =>
-              h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看分析报表' }, () =>
+              h(Button, { type: 'link', size: 'small', 'aria-label': '查看分析报表' }, () => [
                 h(BarChart3, { size: 16 }),
-              ),
+                h('span', ' 报表'),
+              ]),
           ),
         ),
         h(Tooltip, { title: '查看交易对' }, () =>
@@ -89,9 +92,10 @@ const columns: TableColumnsType<BacktestResearch> = [
             RouterLink,
             { to: { path: `/backtests/${encodeURIComponent(row.id)}/symbols`, query: preservedQuery.value } },
             () =>
-              h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看交易对' }, () =>
+              h(Button, { type: 'link', size: 'small', 'aria-label': '查看交易对' }, () => [
                 h(CandlestickChart, { size: 16 }),
-              ),
+                h('span', ' 交易对'),
+              ]),
           ),
         ),
         h(Tooltip, { title: '查看收益曲线' }, () =>
@@ -99,9 +103,10 @@ const columns: TableColumnsType<BacktestResearch> = [
             RouterLink,
             { to: { path: `/backtests/${encodeURIComponent(row.id)}/equity`, query: preservedQuery.value } },
             () =>
-              h(Button, { type: 'text', shape: 'circle', 'aria-label': '查看收益曲线' }, () =>
+              h(Button, { type: 'link', size: 'small', 'aria-label': '查看收益曲线' }, () => [
                 h(ChartSpline, { size: 16 }),
-              ),
+                h('span', ' 曲线'),
+              ]),
           ),
         ),
       ]),

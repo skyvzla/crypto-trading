@@ -292,6 +292,7 @@ async def test_get_income_history_uses_signed_rest_request(monkeypatch):
     assert request.url.path == "/fapi/v1/income"
     assert request.url.params["limit"] == "1"
     assert request.url.params["timestamp"] == "1700000000000"
+    assert request.url.params["recvWindow"] == "10000"
     assert request.url.params["signature"]
     assert request.headers["X-MBX-APIKEY"] == "test-key"
 

@@ -48,15 +48,31 @@ const accountsQuery = useQuery({
   },
   staleTime: ACCOUNTS_STALE_TIME_MS,
 })
+const strategiesQuery = useQuery({
+  queryKey: ['ledger-strategies'],
+  queryFn: async () => {
+    const page = await collectPageItems((params) => operationsApi.runtimeStatus(params))
+    return [...new Set(page.items.map((item) => item.strategy_id).filter(Boolean))].sort()
+  },
+  enabled: false,
+  staleTime: ACCOUNTS_STALE_TIME_MS,
+})
 const accountsLoading = computed(() => accountsQuery.isFetching.value)
 const accountsError = computed(() => Boolean(accountsQuery.error.value))
 const accountOptions = computed(() => [
   ...(props.accountRequired ? [] : [{ label: '全部账户', value: '' }]),
   ...(accountsQuery.data.value ?? []).map((accountId) => ({ label: accountId, value: accountId })),
 ])
+const strategyOptions = computed(() => (strategiesQuery.data.value ?? []).map((strategyId) => ({ value: strategyId })))
 
 function loadAccounts() {
   void accountsQuery.refetch()
+}
+
+function ensureStrategiesLoaded() {
+  if (!strategiesQuery.data.value && !strategiesQuery.isFetching.value) {
+    void strategiesQuery.refetch()
+  }
 }
 
 function update(key: keyof OperationFilters, value: string) {
@@ -95,10 +111,18 @@ function reset() {
     </label>
     <label>
       <span>策略</span>
-      <a-input
+      <a-auto-complete
         :value="filters.strategy_id"
+        :options="strategyOptions"
+        :filter-option="
+          (input: string, option: { value?: string }) =>
+            String(option?.value ?? '')
+              .toLowerCase()
+              .includes(input.toLowerCase())
+        "
         allow-clear
         placeholder="全部策略"
+        @focus="ensureStrategiesLoaded"
         @update:value="update('strategy_id', String($event ?? ''))"
         @keyup.enter="$emit('apply')"
       />

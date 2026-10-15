@@ -39,7 +39,7 @@ defineProps<{
 }
 .metric-link:hover .metric-tile,
 .metric-link:focus-visible .metric-tile {
-  border-color: var(--color-gold);
+  border-color: var(--color-primary);
   transform: translateY(-1px);
 }
 </style>

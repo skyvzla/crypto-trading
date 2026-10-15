@@ -322,6 +322,29 @@ async def test_notification_writes_enforce_same_origin(api_app, origin, status_c
 
 
 @pytest.mark.asyncio
+async def test_notification_writes_accept_reverse_proxy_forwarded_headers(api_app):
+    app, _ = api_app
+    transport = httpx.ASGITransport(app=app)
+    headers = {
+        "Origin": "https://trade.example.com",
+        "X-Forwarded-Host": "trade.example.com",
+        "X-Forwarded-Proto": "https",
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8001") as client:
+        response = await client.post(
+            "/api/v1/notifications/connectors",
+            headers=headers,
+            json={
+                "name": "proxy-origin-check",
+                "type": "telegram",
+                "secret_ref": "env:TG_OPS",
+                "config": {},
+            },
+        )
+    assert response.status_code == 201
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("field", ["secret", "secret_ref"])
 async def test_connector_update_rejects_clear_secret_with_credential(api_app, field):
     app, repository = api_app

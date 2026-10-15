@@ -385,8 +385,8 @@ async function changeDetailPage(page: number) {
   background: var(--surface-hover);
 }
 .taxonomy-node.selected {
-  box-shadow: inset 3px 0 var(--color-gold);
-  background: color-mix(in srgb, var(--color-warning) 8%, transparent);
+  box-shadow: inset 3px 0 var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
 }
 .taxonomy-node.inactive {
   opacity: 0.58;
@@ -419,12 +419,13 @@ async function changeDetailPage(page: number) {
   border: 1px solid var(--line);
   border-radius: 3px;
   background: transparent;
-  color: var(--color-gold);
+  color: var(--muted);
   cursor: pointer;
 }
 .expand-control:hover,
 .expand-control:focus-visible {
-  border-color: var(--color-gold);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
   outline: none;
 }
 .node-copy {
@@ -446,7 +447,7 @@ async function changeDetailPage(page: number) {
 }
 .taxonomy-children {
   border-top: 1px solid var(--line);
-  background: rgba(80, 100, 120, 0.025);
+  background: var(--surface-subtle);
 }
 .taxonomy-node.child {
   min-height: 43px;
@@ -457,7 +458,7 @@ async function changeDetailPage(page: number) {
   border-bottom: 0;
 }
 .tree-line {
-  color: var(--color-gold);
+  color: var(--muted);
   font-family: var(--font-family-mono);
 }
 .no-children {

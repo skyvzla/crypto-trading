@@ -5,16 +5,17 @@ import {
   Bell,
   ChartNoAxesCombined,
   FlaskConical,
-  Gauge,
   LayoutDashboard,
   ListChecks,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   ShieldCheck,
   Sun,
   Tags,
   WalletCards,
 } from 'lucide-vue-next'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { RouterLink, RouterView, useRoute, type RouteLocationRaw } from 'vue-router'
 import { theme as antdTheme, type MenuProps } from 'ant-design-vue'
 import { useHealthStore } from '@/stores/health'
 import { DARK_UI_COLORS, IS_DARK_THEME, LIGHT_UI_COLORS } from '@/shared/theme'
@@ -26,6 +27,7 @@ const HEALTH_POLL_INTERVAL_MS = 30_000
 
 const route = useRoute()
 const health = useHealthStore()
+const siderCollapsed = ref(false)
 const themeMode = ref<'light' | 'dark'>('light')
 const isDarkTheme = computed(() => themeMode.value === 'dark')
 const uiColors = computed(() => (isDarkTheme.value ? DARK_UI_COLORS : LIGHT_UI_COLORS))
@@ -101,6 +103,18 @@ const sideMenuOptions: MenuProps['items'] = [
   },
 ]
 
+const GROUP_LABELS: Record<string, string> = {
+  overview: '运行中心',
+  positions: '运行中心',
+  trades: '运行中心',
+  performance: '分析复盘',
+  backtests: '分析复盘',
+  'strategy-risk': '策略与风控',
+  universe: '基础数据',
+  categories: '基础数据',
+  notifications: '系统管理',
+}
+
 /**
  * 侧栏高亮项。
  *
@@ -115,7 +129,80 @@ const activeKey = computed(() => {
   if (name === 'calendar') return 'overview'
   return name
 })
-const pageTitle = computed(() => String(route.meta.title ?? '运行账本'))
+
+/**
+ * 全局面包屑路径：固定在 Layout Header 左侧，
+ * 一级页面显示「所属分组 / 页面名」，下钻页面自动生成可点击的层级链。
+ */
+const headerBreadcrumbs = computed<Array<{ label: string; to?: RouteLocationRaw }>>(() => {
+  const name = String(route.name ?? '')
+  const groupLabel = GROUP_LABELS[activeKey.value] ?? '控制台'
+  const currentTitle = String(route.meta.title ?? '运行账本')
+  const researchId = typeof route.params.researchId === 'string' ? route.params.researchId : ''
+  const symbol = typeof route.params.symbol === 'string' ? route.params.symbol : ''
+
+  if (name === 'calendar') {
+    return [
+      { label: groupLabel },
+      { label: '运行总览', to: { path: '/overview', query: route.query } },
+      { label: '收益日历' },
+    ]
+  }
+  if (name === 'campaign-trade-detail') {
+    return [
+      { label: groupLabel },
+      {
+        label: '成交复盘',
+        to: {
+          path: '/trades',
+          query: {
+            account_id: route.query.account_id,
+            strategy_id: route.query.strategy_id,
+            symbol: route.query.symbol,
+          },
+        },
+      },
+      { label: String(route.query.symbol || 'Campaign 明细') },
+    ]
+  }
+  if (name.startsWith('backtest') && name !== 'backtests') {
+    const items: Array<{ label: string; to?: RouteLocationRaw }> = [
+      { label: groupLabel },
+      { label: '回测复盘', to: '/backtests' },
+    ]
+    if (name === 'backtest-reports') {
+      items.push({ label: '分析报表' })
+    } else if (name === 'backtest-report-detail') {
+      items.push(
+        { label: '分析报表', to: `/backtests/${encodeURIComponent(researchId)}/reports` },
+        { label: String(route.params.reportType || '报表详情') },
+      )
+    } else if (name === 'backtest-symbols') {
+      items.push({ label: '交易对数据' })
+    } else if (name === 'backtest-trades') {
+      items.push(
+        { label: '交易对数据', to: `/backtests/${encodeURIComponent(researchId)}/symbols` },
+        { label: symbol || '交易记录' },
+      )
+    } else if (name === 'backtest-equity') {
+      items.push({ label: '收益曲线' })
+    } else if (name === 'backtest-trade-replay') {
+      if (route.query.from === 'equity') {
+        items.push(
+          { label: '收益曲线', to: `/backtests/${encodeURIComponent(researchId)}/equity` },
+          { label: '单笔复盘' },
+        )
+      } else {
+        items.push(
+          { label: '交易对数据', to: `/backtests/${encodeURIComponent(researchId)}/symbols` },
+          { label: '单笔复盘' },
+        )
+      }
+    }
+    return items
+  }
+  return [{ label: groupLabel }, { label: currentTitle }]
+})
 
 /** 徽标颜色与文案来自同一处，避免出现「文案异常但徽标常绿」。 */
 const healthPresentation = computed(
@@ -138,6 +225,9 @@ function applyTheme(mode: 'light' | 'dark') {
 function toggleTheme() {
   applyTheme(isDarkTheme.value ? 'light' : 'dark')
 }
+function toggleSider() {
+  siderCollapsed.value = !siderCollapsed.value
+}
 
 let healthTimer: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
@@ -154,38 +244,64 @@ onBeforeUnmount(() => {
 <template>
   <a-config-provider :theme="providerTheme">
     <a-layout has-sider class="app-layout">
-      <a-layout-sider collapsible breakpoint="md" :collapsed-width="56" class="app-sider">
+      <a-layout-sider
+        v-model:collapsed="siderCollapsed"
+        collapsible
+        :trigger="null"
+        breakpoint="md"
+        :collapsed-width="56"
+        class="app-sider"
+      >
         <div class="brand">
           <span class="brand-mark">TL</span>
           <span class="brand-name">Trade Ledger</span>
         </div>
         <a-menu :selected-keys="[activeKey]" :items="sideMenuOptions" mode="inline" theme="dark" class="side-menu" />
-        <a-tooltip :title="healthCheckedAt" placement="right">
-          <div class="rail-status">
-            <a-badge :status="healthPresentation.status" />
-            <span>{{ healthPresentation.label }}</span>
-          </div>
-        </a-tooltip>
       </a-layout-sider>
       <a-layout class="app-body">
         <a-layout-header class="app-header">
           <div class="header-actions">
-            <div class="header-context">
-              <Gauge :size="15" />
-              <span>{{ pageTitle }}</span>
-              <i>LEDGER CONSOLE</i>
+            <div class="header-left">
+              <a-tooltip :title="siderCollapsed ? '展开菜单' : '收起菜单'">
+                <a-button
+                  type="text"
+                  shape="circle"
+                  class="sider-toggle"
+                  :aria-label="siderCollapsed ? '展开菜单' : '收起菜单'"
+                  @click="toggleSider"
+                >
+                  <template #icon>
+                    <PanelLeftOpen v-if="siderCollapsed" :size="17" />
+                    <PanelLeftClose v-else :size="17" />
+                  </template>
+                </a-button>
+              </a-tooltip>
+              <a-breadcrumb class="header-breadcrumb">
+                <a-breadcrumb-item v-for="crumb in headerBreadcrumbs" :key="crumb.label">
+                  <RouterLink v-if="crumb.to" :to="crumb.to">{{ crumb.label }}</RouterLink>
+                  <span v-else>{{ crumb.label }}</span>
+                </a-breadcrumb-item>
+              </a-breadcrumb>
             </div>
-            <a-tooltip :title="isDarkTheme ? '切换浅色模式' : '切换深色模式'">
-              <a-button
-                type="text"
-                shape="circle"
-                class="theme-toggle"
-                :aria-label="isDarkTheme ? '切换浅色模式' : '切换深色模式'"
-                @click="toggleTheme"
-              >
-                <template #icon><Sun v-if="isDarkTheme" :size="17" /><Moon v-else :size="17" /></template>
-              </a-button>
-            </a-tooltip>
+            <div class="header-right">
+              <a-tooltip :title="healthCheckedAt" placement="bottom">
+                <div class="header-health">
+                  <a-badge :status="healthPresentation.status" />
+                  <span>{{ healthPresentation.label }}</span>
+                </div>
+              </a-tooltip>
+              <a-tooltip :title="isDarkTheme ? '切换浅色模式' : '切换深色模式'">
+                <a-button
+                  type="text"
+                  shape="circle"
+                  class="theme-toggle"
+                  :aria-label="isDarkTheme ? '切换浅色模式' : '切换深色模式'"
+                  @click="toggleTheme"
+                >
+                  <template #icon><Sun v-if="isDarkTheme" :size="17" /><Moon v-else :size="17" /></template>
+                </a-button>
+              </a-tooltip>
+            </div>
           </div>
         </a-layout-header>
         <a-layout-content class="workspace">
@@ -202,15 +318,21 @@ onBeforeUnmount(() => {
 
 <style scoped lang="scss">
 .app-sider {
-  --sider-text-color: rgba(255, 255, 255, 0.65);
-  --sider-border-color: rgba(255, 255, 255, 0.12);
+  --sider-text-color: rgba(255, 255, 255, 0.72);
+  --sider-muted-color: rgba(255, 255, 255, 0.48);
+  --sider-border-color: rgba(255, 255, 255, 0.1);
   --menu-group-font-size: var(--type-meta);
+  background: var(--sider-bg) !important;
+  border-right: 1px solid var(--sider-border-color);
+}
+.app-sider :deep(.ant-menu-dark) {
+  background: transparent;
 }
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 64px;
+  height: 48px;
   padding: 0 16px;
   border-bottom: 1px solid var(--sider-border-color);
 }
@@ -230,14 +352,14 @@ onBeforeUnmount(() => {
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border-radius: 6px;
   border: 1px solid color-mix(in srgb, var(--color-gold) 72%, transparent);
   background: color-mix(in srgb, var(--color-gold) 12%, transparent);
   color: color-mix(in srgb, var(--color-gold) 72%, white);
   font-weight: 700;
-  font-size: var(--type-secondary);
+  font-size: var(--type-meta);
 }
 .brand-name {
   color: var(--sider-text-color);
@@ -249,21 +371,12 @@ onBeforeUnmount(() => {
   justify-content: center;
   padding-inline: 0;
 }
-.app-sider.ant-layout-sider-collapsed .brand-name,
-.app-sider.ant-layout-sider-collapsed .rail-status span {
+.app-sider.ant-layout-sider-collapsed .brand-name {
   display: none;
 }
-.rail-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: auto;
-  padding: 16px 18px;
-  border-top: 1px solid var(--sider-border-color);
-  color: var(--sider-text-color);
-  font-size: var(--type-secondary);
-}
 .app-header {
+  height: 48px;
+  line-height: 48px;
   padding: 0;
   background: var(--surface);
   border-bottom: 1px solid var(--line);
@@ -273,40 +386,40 @@ onBeforeUnmount(() => {
   height: 100%;
   align-items: center;
   justify-content: space-between;
-  padding-inline: 20px;
+  padding-inline: 12px 16px;
 }
-.header-context {
+.header-left {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   color: var(--muted);
-  font-size: var(--type-secondary);
+  font-size: var(--type-meta);
 }
-.header-context span {
-  color: var(--text);
-  font-weight: 600;
-}
-.header-context i {
-  padding-left: 8px;
-  border-left: 1px solid var(--line);
-  color: var(--color-gold);
-  font: var(--type-meta) var(--font-family-mono);
-  font-style: normal;
-  letter-spacing: 0;
-}
+.sider-toggle,
 .theme-toggle {
   color: var(--text);
 }
 .workspace {
   flex: 1;
   min-height: 0;
-  padding: 20px 24px 32px;
+  padding: 16px 24px 32px;
   overflow: auto;
 }
 .side-menu :deep(.ant-menu-item-group-title) {
-  padding-top: 17px;
-  padding-bottom: 5px;
-  color: color-mix(in srgb, var(--color-gold) 68%, transparent);
+  padding-top: 16px;
+  padding-bottom: 4px;
+  color: var(--sider-muted-color);
   font: var(--menu-group-font-size) var(--font-family-mono);
   letter-spacing: 0;
 }
@@ -323,11 +436,14 @@ onBeforeUnmount(() => {
   }
 }
 @media (max-width: 640px) {
-  .header-context i {
+  .header-health span {
     display: none;
   }
 }
 @media (max-width: 767px) {
+  .sider-toggle {
+    display: none;
+  }
   .app-sider {
     flex: 0 0 56px !important;
     width: 56px !important;
@@ -339,20 +455,12 @@ onBeforeUnmount(() => {
     padding-inline: 0;
   }
   .app-sider .brand-name,
-  .app-sider .rail-status span,
   .app-sider .side-menu :deep(.ant-menu-title-content),
   .app-sider .side-menu :deep(.ant-menu-item-group-title) {
     display: none;
   }
   .app-sider .side-menu :deep(.ant-menu-item) {
     padding-inline: 20px !important;
-  }
-  .app-sider :deep(.ant-layout-sider-trigger) {
-    display: none;
-  }
-  .rail-status {
-    justify-content: center;
-    padding-inline: 0;
   }
 }
 </style>

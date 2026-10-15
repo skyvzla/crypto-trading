@@ -13,9 +13,9 @@ export const LIGHT_UI_COLORS = {
 export const DARK_UI_COLORS = {
   primary: '#60a5fa',
   info: '#93c5fd',
-  success: '#6ee7b7',
+  success: '#34d399',
   warning: '#fbbf24',
-  error: '#fca5a5',
+  error: '#f87171',
   solidText: '#0b1220',
 } as const
 

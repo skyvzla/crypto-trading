@@ -1,7 +1,7 @@
 <script setup lang="ts">
 defineProps<{
   id: string
-  kicker: string
+  kicker?: string
   title: string
   description?: string
   note?: string
@@ -10,37 +10,38 @@ defineProps<{
 
 <template>
   <header class="section-heading">
-    <div>
-      <span class="section-kicker">{{ kicker }}</span>
+    <div class="section-title-group">
       <h2 :id="id">{{ title }}</h2>
+      <p v-if="description" class="section-description">{{ description }}</p>
     </div>
     <div v-if="note || $slots.actions" class="section-actions">
       <span v-if="note" class="section-note">{{ note }}</span>
       <slot name="actions" />
     </div>
   </header>
-  <p v-if="description" class="section-description">{{ description }}</p>
 </template>
 
 <style scoped lang="scss">
 .section-heading {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
+}
+.section-title-group {
+  min-width: 0;
 }
 .section-heading h2 {
-  margin: 4px 0 0;
-  font-size: var(--type-page-title);
-  line-height: 1.25;
+  margin: 0;
+  font-size: var(--type-section-title);
+  line-height: 1.3;
   letter-spacing: 0;
 }
-.section-kicker {
-  display: block;
-  color: var(--color-gold);
-  font: var(--type-meta)/1.3 var(--font-family-mono);
-  letter-spacing: 0;
+.section-description {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: var(--type-meta);
 }
 .section-note {
   color: var(--muted);
@@ -49,12 +50,8 @@ defineProps<{
 .section-actions {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 8px;
-}
-.section-description {
-  margin: 0 0 14px;
-  color: var(--muted);
-  font-size: var(--type-secondary);
 }
 
 @media (max-width: 900px) {

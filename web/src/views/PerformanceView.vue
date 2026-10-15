@@ -152,19 +152,32 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
       :refreshed-at="refreshedAt"
       @refresh="reload"
     />
-    <FilterBar v-model="filters" account-required @apply="applyFilters" />
-    <div class="date-filter">
-      <label
-        ><span>开始日期</span
-        ><a-date-picker :value="startDate" value-format="YYYY-MM-DD" @update:value="startDate = String($event ?? '')"
-      /></label>
-      <span class="date-rule">ASIA/SHANGHAI</span>
-      <label
-        ><span>结束日期</span
-        ><a-date-picker :value="endDate" value-format="YYYY-MM-DD" @update:value="endDate = String($event ?? '')"
-      /></label>
-      <a-button @click="applyFilters">应用日期</a-button>
-    </div>
+    <FilterBar
+      v-model="filters"
+      account-required
+      @reset="
+        () => {
+          startDate = defaultStartDate
+          endDate = defaultEndDate
+        }
+      "
+      @apply="applyFilters"
+    >
+      <template #extra-fields>
+        <label>
+          <span>开始日期 (上海)</span>
+          <a-date-picker
+            :value="startDate"
+            value-format="YYYY-MM-DD"
+            @update:value="startDate = String($event ?? '')"
+          />
+        </label>
+        <label>
+          <span>结束日期 (上海)</span>
+          <a-date-picker :value="endDate" value-format="YYYY-MM-DD" @update:value="endDate = String($event ?? '')" />
+        </label>
+      </template>
+    </FilterBar>
     <a-alert
       v-if="!filters.account_id.trim()"
       type="info"
@@ -345,19 +358,19 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
                       }}</small></template
                     ></a-table-column
                   >
-                  <a-table-column key="trades" title="轮次" data-index="total_trades" />
-                  <a-table-column key="win_rate" title="胜率"
+                  <a-table-column key="trades" title="轮次" data-index="total_trades" align="right" />
+                  <a-table-column key="win_rate" title="胜率" align="right"
                     ><template #default="{ record }">{{ formatPercent(record.win_rate) }}</template></a-table-column
                   >
-                  <a-table-column key="payoff" title="盈亏比"
+                  <a-table-column key="payoff" title="盈亏比" align="right"
                     ><template #default="{ record }">{{ formatRatio(record.payoff_ratio) }}</template></a-table-column
                   >
-                  <a-table-column key="net" title="净 PnL"
+                  <a-table-column key="net" title="净 PnL" align="right"
                     ><template #default="{ record }"
                       ><span :class="pnlClass(record.net_pnl)">{{ formatMoney(record.net_pnl) }}</span></template
                     ></a-table-column
                   >
-                  <a-table-column key="drawdown" title="最大回撤"
+                  <a-table-column key="drawdown" title="最大回撤" align="right"
                     ><template #default="{ record }">{{ formatMoney(record.max_drawdown) }}</template></a-table-column
                   >
                 </a-table>
@@ -378,26 +391,6 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
 </template>
 
 <style scoped lang="scss">
-.date-filter {
-  display: flex;
-  align-items: flex-end;
-  gap: 9px;
-  margin: -4px 0 14px;
-}
-.date-filter label {
-  display: grid;
-  gap: 4px;
-}
-.date-filter label span {
-  color: var(--muted);
-  font-size: var(--type-meta);
-}
-.date-rule {
-  align-self: center;
-  margin-top: 15px;
-  color: var(--color-gold);
-  font: var(--type-meta) var(--font-family-mono);
-}
 .metric-scope {
   display: flex;
   align-items: center;
@@ -481,7 +474,8 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
   min-height: 155px;
   padding: 20px;
   border: 1px solid var(--line);
-  border-top: 3px solid var(--color-gold);
+  border-top: 3px solid var(--color-primary);
+  border-radius: 6px;
   background: var(--surface);
   text-align: center;
 }
@@ -504,7 +498,7 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
   place-items: center;
   gap: 6px;
   max-width: 130px;
-  color: var(--color-gold);
+  color: var(--muted);
   text-align: center;
 }
 .quality-cross span {
@@ -524,7 +518,7 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
 }
 .breakdown-panel svg {
   flex: 0 0 auto;
-  color: var(--color-gold);
+  color: var(--color-primary);
 }
 .breakdown-panel h2 {
   margin: 0 0 7px;
@@ -559,14 +553,6 @@ async function changeBreakdownDimension(value: PerformanceDimension) {
   font: var(--type-meta) var(--font-family-mono);
 }
 @media (max-width: 650px) {
-  .date-filter {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .date-rule {
-    align-self: flex-start;
-    margin: 0;
-  }
   .quality-hero {
     grid-template-columns: 1fr;
   }

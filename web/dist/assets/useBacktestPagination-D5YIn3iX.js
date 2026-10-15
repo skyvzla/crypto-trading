@@ -1,0 +1,1 @@
+import{D as e,a as t}from"./vendor-qM0ga2p-.js";import{n}from"./pagination-CXomX2Xo.js";function r(r,i,a=500){let o=t(),s=`${i}_page`,c=`${i}_page_size`,l=n({defaultSize:r,maxSize:a,pageKey:s,pageSizeKey:c}),u=e(()=>({...o.query}));return{...l,preservedQuery:u}}export{r as t};

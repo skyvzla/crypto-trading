@@ -286,11 +286,8 @@ const emit = defineEmits<{
   background: color-mix(in srgb, var(--color-warning) 10%, transparent);
 }
 .quick-mark.webhook {
-  color: #0f766e;
-  background: rgba(13, 148, 136, 0.1);
-}
-:root[data-theme='dark'] .quick-mark.webhook {
-  color: #5eead4;
+  color: var(--color-teal);
+  background: color-mix(in srgb, var(--color-teal) 10%, transparent);
 }
 .quick-arrow {
   display: inline-flex;

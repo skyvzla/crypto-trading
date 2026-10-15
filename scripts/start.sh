@@ -15,9 +15,10 @@ start_succeeded=0
 
 usage() {
   cat <<'EOF'
-用法: scripts/start.sh [--build] [SERVICE]
+用法: scripts/start.sh [--build] [--allow-unnotified] [SERVICE]
 
 SERVICE 默认为 spike。此入口只接受策略 service，不接受基础服务。
+  --allow-unnotified  在关键通知路由未配置时允许启动策略（适合初期调试）
 EOF
 }
 
@@ -67,11 +68,12 @@ cleanup_after_failure() {
 }
 
 main() {
-  local build=0 service="spike" service_given=0 arg image release_image=0
+  local build=0 service="spike" service_given=0 arg image release_image=0 allow_unnotified="${START_ALLOW_UNNOTIFIED:-0}"
   while (($#)); do
     arg="$1"
     case "$arg" in
       --build) build=1 ;;
+      --allow-unnotified) allow_unnotified=1 ;;
       --help|-h) usage; return 0 ;;
       --*) usage >&2; ops_die "未知选项: $arg" ;;
       *) ((service_given == 0)) || ops_die "只能指定一个 Compose service"; service="$arg"; service_given=1 ;;
@@ -96,9 +98,15 @@ main() {
   fi
   base_gate
   ops_notification_overview
-  (( OPS_NOTIFICATION_READY == 1 )) || ops_die "关键通知路由未就绪；缺失: ${OPS_CRITICAL_ROUTE_MISSING:-unknown}"
-  printf '关键通知路由门禁通过: critical routes = %s/%s；routable policies（结构指标）= %s（enabled connectors/endpoints/policies = %s/%s/%s）\n' \
-    "$OPS_CRITICAL_ROUTE_COUNT" "$OPS_CRITICAL_ROUTE_TOTAL" "$OPS_ROUTABLE_POLICIES" "$OPS_ENABLED_CONNECTORS" "$OPS_ENABLED_ENDPOINTS" "$OPS_POLICIES"
+  if (( OPS_NOTIFICATION_READY == 1 )); then
+    printf '关键通知路由门禁通过: critical routes = %s/%s；routable policies（结构指标）= %s（enabled connectors/endpoints/policies = %s/%s/%s）\n' \
+      "$OPS_CRITICAL_ROUTE_COUNT" "$OPS_CRITICAL_ROUTE_TOTAL" "$OPS_ROUTABLE_POLICIES" "$OPS_ENABLED_CONNECTORS" "$OPS_ENABLED_ENDPOINTS" "$OPS_POLICIES"
+  elif (( allow_unnotified == 1 )); then
+    printf 'WARNING: 关键通知路由未就绪（缺失: %s），已根据 --allow-unnotified 允许启动策略。\n' \
+      "${OPS_CRITICAL_ROUTE_MISSING:-unknown}"
+  else
+    ops_die "关键通知路由未就绪；缺失: ${OPS_CRITICAL_ROUTE_MISSING:-unknown}（若初期测试无需通知，可通过 --allow-unnotified 或设置 START_ALLOW_UNNOTIFIED=1 跳过）"
+  fi
 
   start_attempted=1
   if (( release_image == 1 )); then
