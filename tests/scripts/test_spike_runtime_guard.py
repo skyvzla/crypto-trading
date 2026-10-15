@@ -42,11 +42,14 @@ def test_preflight_accepts_compose_compatible_testnet_configuration():
     validate_preflight(_environment())
 
 
+def test_preflight_accepts_live_configuration_with_binance_testnet_false():
+    validate_preflight(_environment(BINANCE_TESTNET="false"))
+
+
 @pytest.mark.parametrize(
     ("override", "message"),
     [
         ({"STRATEGY_ACCOUNT_ID": "other"}, "must match"),
-        ({"BINANCE_TESTNET": "false"}, "same environment"),
         ({"BINANCE_API_SECRET": ""}, "credentials"),
         ({"LONG_BREAKOUT_ACCOUNT_ID": "spike_testnet"}, "different account IDs"),
         (

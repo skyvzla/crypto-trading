@@ -1462,7 +1462,11 @@ class SpikeLiveProcess:
                 quality_response = await self.http.get("/quality", params={"consumer_id": self._consumer_id})
                 quality_response.raise_for_status()
                 quality = quality_response.json()
-                expected_testnet = self.settings.mode == "testnet"
+                expected_testnet = (
+                    self.binance.testnet
+                    if isinstance(getattr(self.binance, "testnet", None), bool)
+                    else (self.settings.mode == "testnet")
+                )
                 ready = (
                     health.get("status") == "ready"
                     and health.get("binance_testnet") is expected_testnet
@@ -2083,14 +2087,7 @@ class SpikeLiveProcess:
 
 async def async_main() -> None:
     settings = SpikeLiveSettings()
-    if settings.mode == "testnet":
-        binance = BinanceConfig(
-            testnet=True,
-            base_url="https://demo-fapi.binance.com",
-            ws_base_url="wss://stream.binancefuture.com",
-        )
-    else:
-        binance = BinanceConfig(testnet=False)
+    binance = BinanceConfig()
     if not binance.api_key or not binance.api_secret:
         raise ValueError("Binance API credentials are required")
     strategy_config = StrategyConfig(account_id=settings.account_id)

@@ -70,9 +70,6 @@ def validate_preflight(environ: Mapping[str, str] | None = None) -> None:
     if testnet_raw is None:
         raise ValueError("BINANCE_TESTNET is required")
     testnet = _strict_bool(testnet_raw, name="BINANCE_TESTNET")
-    expected_testnet = settings.mode == "testnet"
-    if testnet is not expected_testnet:
-        raise ValueError("SPIKE_MODE and BINANCE_TESTNET must select the same environment")
     if not env.get("BINANCE_API_KEY", "").strip() or not env.get(
         "BINANCE_API_SECRET", ""
     ).strip():
@@ -155,12 +152,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "preflight":
         validate_preflight()
         return
-    if not args.account_id or args.mode not in {"testnet", "live"}:
+    mode = args.mode or os.getenv("SPIKE_MODE", "")
+    if not mode:
+        is_testnet = _strict_bool(os.getenv("BINANCE_TESTNET", "true"), name="BINANCE_TESTNET")
+        mode = "testnet" if is_testnet else "live"
+    if not args.account_id or mode not in {"testnet", "live"}:
         raise ValueError("SPIKE_ACCOUNT_ID and a valid SPIKE_MODE are required")
     check_runtime_health(
         ledger_url=args.ledger_url,
         account_id=args.account_id,
-        expected_mode=args.mode,
+        expected_mode=mode,
         timeout=args.timeout,
     )
 

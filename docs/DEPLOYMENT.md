@@ -324,3 +324,18 @@ docker compose --profile '*' logs --tail 100 long_breakout
      ```env
      BINANCE_RECV_WINDOW=10000
      ```
+
+### 9.4 切换正式网与测试网（单一开关驱动）
+- **判定基准**：全平台（行情接口、实盘策略、执行器与账本）统一以 `BINANCE_TESTNET` 为唯一权威判定基准，策略判单无需人工额外配置多重环境变量强对齐。
+- **配置示例**：
+  - 测试网模式（默认）：
+    ```env
+    BINANCE_TESTNET=true
+    ```
+  - 正式网实盘模式：
+    ```env
+    BINANCE_TESTNET=false
+    ```
+
+### 9.5 冷启动必要目录自愈
+- **机制**：`data/wal/`、`data/market/campaign_snapshots/` 和 `logs/` 目录均已内建 `.gitignore` 占位，全新服务器 `git clone` 即可自动拉起完整目录结构与当前用户权限。同时 `scripts/start.sh` 和 `scripts/deploy.sh` 内建幂等自愈检查，无需手工执行 `mkdir`。

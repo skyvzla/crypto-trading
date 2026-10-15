@@ -31,7 +31,7 @@ base_gate() {
   [[ "$OPS_EXIT_CODE" == 0 ]] || ops_die "ledger-migrate 退出码不是 0: ${OPS_EXIT_CODE:-unknown}"
   ops_require_state notification-worker running
   ops_require_state symbol-sync running
-  ops_require_paths
+  ops_prepare_paths
 }
 
 cleanup_after_failure() {

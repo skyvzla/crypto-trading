@@ -10,8 +10,13 @@ build/
 dist/
 !web/dist/
 *.egg-info/
-data/
-logs/
+data/*
+!data/wal/
+!data/market/
+data/market/*
+!data/market/campaign_snapshots/
+logs/*
+!logs/.gitignore
 reports/*
 backups/
 !reports/active_alt100_final.csv
